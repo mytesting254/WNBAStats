@@ -1,0 +1,478 @@
+from __future__ import annotations
+
+import math
+import sqlite3
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from .odds import american_to_implied_probability, expected_value
+
+
+MODEL_VERSION = "component-pregame-v2"
+
+MARKET_COLUMNS = {
+    "points": "points",
+    "rebounds": "rebounds",
+    "assists": "assists",
+    "threes": "threes",
+    "points_rebounds_assists": "points + rebounds + assists",
+}
+
+
+@dataclass(frozen=True)
+class PropProjection:
+    prop_line_id: int
+    model_version: str
+    prediction_time: str
+    projection: float
+    recommended_side: str
+    model_probability: float
+    implied_probability: float
+    edge: float
+    expected_value: float
+    confidence: str
+    reason: str
+
+
+def project_player_market(
+    conn: sqlite3.Connection,
+    player_id: int,
+    market: str,
+    game_id: int | None = None,
+) -> tuple[float, str]:
+    rows = conn.execute(
+        """
+        SELECT
+            s.*,
+            g.game_date,
+            g.home_team_id,
+            g.away_team_id,
+            g.rest_days_home,
+            g.rest_days_away,
+            p.team_id,
+            p.rotation_role
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        JOIN players p ON p.id = s.player_id
+        WHERE s.player_id = ?
+        ORDER BY g.game_date DESC
+        LIMIT 10
+        """,
+        (player_id,),
+    ).fetchall()
+    if not rows:
+        return 0.0, "No historical stats found; projection defaults to 0."
+
+    values = [_market_value(row, market) for row in rows]
+    minutes = [float(row["minutes"]) for row in rows]
+    rates = [value / max(minute, 1.0) for value, minute in zip(values, minutes)]
+    last_5 = values[:5]
+    last_10 = values
+    recent_avg = sum(last_5) / len(last_5)
+    last_10_avg = sum(last_10) / len(last_10)
+    weighted_recent = _weighted_average(values)
+    weighted_rate = _weighted_average(rates)
+    avg_minutes = sum(minutes[:5]) / min(len(minutes), 5)
+
+    adjustment = conn.execute(
+        """
+        SELECT projected_minutes, usage_multiplier, note
+        FROM manual_adjustments
+        WHERE player_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (player_id,),
+    ).fetchone()
+
+    projected_minutes = avg_minutes
+    usage_multiplier = 1.0
+    adjustment_note = "no manual adjustment"
+    if adjustment:
+        usage_multiplier = float(adjustment["usage_multiplier"] or 1.0)
+        if adjustment["projected_minutes"]:
+            projected_minutes = float(adjustment["projected_minutes"])
+        adjustment_note = adjustment["note"] or "manual adjustment applied"
+
+    context = _game_context(conn, player_id, game_id) if game_id else None
+    blowout = _blowout_adjustment(conn, context, rows[0]["rotation_role"] if rows else "starter") if context else {
+        "risk": "low",
+        "probability": 0.0,
+        "minutes_delta": 0.0,
+        "factor": 1.0,
+    }
+    projected_minutes = max(projected_minutes + blowout["minutes_delta"], 4.0)
+    rate_projection = weighted_rate * projected_minutes
+    base_projection = (
+        (0.40 * weighted_recent)
+        + (0.25 * recent_avg)
+        + (0.20 * rate_projection)
+        + (0.15 * last_10_avg)
+    )
+
+    pace_factor = _pace_factor(conn, context["team_id"], context["opponent_id"]) if context else 1.0
+    opponent_factor = _opponent_factor(conn, context["opponent_id"], market) if context else 1.0
+    common_opponent_factor = _common_opponent_factor(conn, player_id, market, context) if context else 1.0
+    home_factor = 1.02 if context and context["is_home"] else 0.99 if context else 1.0
+    rest_factor = _rest_factor(context["rest_days"]) if context else 1.0
+
+    projection = (
+        base_projection
+        * pace_factor
+        * opponent_factor
+        * common_opponent_factor
+        * home_factor
+        * rest_factor
+        * usage_multiplier
+    )
+    reason = (
+        f"Weighted recent {weighted_recent:.1f}, last 5 {recent_avg:.1f}, last 10 {last_10_avg:.1f}, "
+        f"rate x minutes {rate_projection:.1f} on {projected_minutes:.1f} projected minutes. "
+        f"Adjustments: pace {pace_factor:.2f}, opponent {opponent_factor:.2f}, "
+        f"common opponents {common_opponent_factor:.2f}, "
+        f"blowout {blowout['risk']} ({blowout['minutes_delta']:+.1f} min), "
+        f"{'home' if context and context['is_home'] else 'away' if context else 'neutral'} {home_factor:.2f}, "
+        f"rest {rest_factor:.2f}, usage {usage_multiplier:.2f}; {adjustment_note}."
+    )
+    return round(projection, 2), reason
+
+
+def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropProjection:
+    prop = conn.execute(
+        """
+        SELECT pl.*, p.full_name, g.start_time
+        FROM prop_lines pl
+        JOIN players p ON p.id = pl.player_id
+        JOIN games g ON g.id = pl.game_id
+        WHERE pl.id = ?
+        """,
+        (prop_line_id,),
+    ).fetchone()
+    if not prop:
+        raise ValueError(f"Prop line {prop_line_id} was not found")
+
+    projection, reason = project_player_market(conn, prop["player_id"], prop["market"], prop["game_id"])
+    line = float(prop["line"])
+    side = "over" if projection > line else "under"
+    stat_sigma = _estimated_sigma(conn, prop["player_id"], prop["market"], projection)
+    over_probability = 1 - _normal_cdf(line, projection, stat_sigma)
+    model_probability = over_probability if side == "over" else 1 - over_probability
+    odds = int(prop["over_odds"] if side == "over" else prop["under_odds"])
+    implied = american_to_implied_probability(odds)
+    edge = model_probability - implied
+    ev = expected_value(model_probability, odds)
+
+    return PropProjection(
+        prop_line_id=prop_line_id,
+        model_version=MODEL_VERSION,
+        prediction_time=datetime.now(timezone.utc).isoformat(),
+        projection=projection,
+        recommended_side=side,
+        model_probability=round(model_probability, 4),
+        implied_probability=round(implied, 4),
+        edge=round(edge, 4),
+        expected_value=round(ev, 4),
+        confidence=_confidence(edge, abs(projection - line)),
+        reason=reason,
+    )
+
+
+def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
+    props = conn.execute("SELECT id FROM prop_lines ORDER BY captured_at DESC").fetchall()
+    projections = [build_prop_projection(conn, int(row["id"])) for row in props]
+    conn.execute("DELETE FROM prop_predictions WHERE model_version = ?", (MODEL_VERSION,))
+    conn.executemany(
+        """
+        INSERT INTO prop_predictions (
+            prop_line_id, model_version, prediction_time, projection, recommended_side,
+            model_probability, implied_probability, edge, expected_value, confidence, reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                p.prop_line_id,
+                p.model_version,
+                p.prediction_time,
+                p.projection,
+                p.recommended_side,
+                p.model_probability,
+                p.implied_probability,
+                p.edge,
+                p.expected_value,
+                p.confidence,
+                p.reason,
+            )
+            for p in projections
+        ],
+    )
+    conn.commit()
+    return projections
+
+
+def _market_value(row: sqlite3.Row, market: str) -> float:
+    if market == "points_rebounds_assists":
+        return float(row["points"] + row["rebounds"] + row["assists"])
+    column = MARKET_COLUMNS.get(market)
+    if not column:
+        raise ValueError(f"Unsupported market: {market}")
+    return float(row[column])
+
+
+def _estimated_sigma(conn: sqlite3.Connection, player_id: int, market: str, projection: float) -> float:
+    rows = conn.execute(
+        """
+        SELECT s.*
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        WHERE s.player_id = ?
+        ORDER BY g.game_date DESC
+        LIMIT 10
+        """,
+        (player_id,),
+    ).fetchall()
+    values = [_market_value(row, market) for row in rows]
+    if len(values) < 2:
+        return 5.0
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    sample_sigma = math.sqrt(variance)
+    floor = max(projection * 0.14, 2.0)
+    return max((0.75 * sample_sigma) + (0.25 * floor), floor)
+
+
+def _weighted_average(values: list[float]) -> float:
+    weights = list(range(len(values), 0, -1))
+    return sum(value * weight for value, weight in zip(values, weights)) / sum(weights)
+
+
+def _game_context(conn: sqlite3.Connection, player_id: int, game_id: int | None) -> dict:
+    row = conn.execute(
+        """
+        SELECT
+            p.team_id,
+            g.home_team_id,
+            g.away_team_id,
+            g.rest_days_home,
+            g.rest_days_away,
+            g.spread_home,
+            g.game_total
+        FROM players p
+        JOIN games g ON g.id = ?
+        WHERE p.id = ?
+        """,
+        (game_id, player_id),
+    ).fetchone()
+    if not row:
+        return {"team_id": 0, "opponent_id": 0, "is_home": False, "rest_days": 2}
+    is_home = int(row["team_id"]) == int(row["home_team_id"])
+    opponent_id = int(row["away_team_id"] if is_home else row["home_team_id"])
+    rest_days = int(row["rest_days_home"] if is_home else row["rest_days_away"] or 2)
+    return {
+        "team_id": int(row["team_id"]),
+        "opponent_id": opponent_id,
+        "is_home": is_home,
+        "rest_days": rest_days,
+        "spread_home": float(row["spread_home"]) if row["spread_home"] is not None else None,
+        "game_total": float(row["game_total"]) if row["game_total"] is not None else None,
+    }
+
+
+def _blowout_adjustment(conn: sqlite3.Connection, context: dict, rotation_role: str | None) -> dict:
+    spread_home = context.get("spread_home")
+    if spread_home is None:
+        return {"risk": "unknown", "probability": 0.0, "minutes_delta": 0.0, "factor": 1.0}
+
+    team_spread = spread_home if context["is_home"] else -spread_home
+    spread_abs = abs(team_spread)
+    probability = _blowout_probability(spread_abs)
+    risk = _blowout_risk_label(probability)
+    role = rotation_role or "starter"
+    role_delta = {
+        "star": -4.0,
+        "starter": -3.0,
+        "rotation": -1.5,
+        "bench": 2.0,
+    }.get(role, -2.0)
+    historical_delta = _historical_blowout_minutes_delta(conn, context["team_id"], role)
+    minutes_delta = probability * ((0.65 * role_delta) + (0.35 * historical_delta))
+    return {
+        "risk": risk,
+        "probability": probability,
+        "minutes_delta": minutes_delta,
+        "factor": 1 + (minutes_delta / 34),
+    }
+
+
+def _blowout_probability(spread_abs: float) -> float:
+    if spread_abs < 4.5:
+        return 0.08
+    if spread_abs < 8.5:
+        return 0.18
+    if spread_abs < 12.5:
+        return 0.34
+    if spread_abs < 16.5:
+        return 0.48
+    return 0.60
+
+
+def _blowout_risk_label(probability: float) -> str:
+    if probability >= 0.45:
+        return "very high"
+    if probability >= 0.30:
+        return "high"
+    if probability >= 0.15:
+        return "medium"
+    return "low"
+
+
+def _historical_blowout_minutes_delta(conn: sqlite3.Connection, team_id: int, role: str | None) -> float:
+    rows = conn.execute(
+        """
+        SELECT
+            s.minutes,
+            ABS(r.points - r.opponent_points) AS margin
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        JOIN team_game_results r ON r.game_id = s.game_id AND r.team_id = p.team_id
+        WHERE p.team_id = ?
+          AND p.rotation_role = ?
+        """,
+        (team_id, role or "starter"),
+    ).fetchall()
+    close_minutes = [float(row["minutes"]) for row in rows if float(row["margin"]) <= 10]
+    blowout_minutes = [float(row["minutes"]) for row in rows if float(row["margin"]) >= 15]
+    if len(close_minutes) < 2 or len(blowout_minutes) < 2:
+        return 2.0 if role == "bench" else -3.0
+    return (sum(blowout_minutes) / len(blowout_minutes)) - (sum(close_minutes) / len(close_minutes))
+
+
+def _pace_factor(conn: sqlite3.Connection, team_id: int, opponent_id: int) -> float:
+    league_pace = _avg_scalar(conn, "SELECT AVG(possessions) FROM team_game_results") or 78.0
+    team_pace = _avg_scalar(conn, "SELECT AVG(possessions) FROM team_game_results WHERE team_id = ?", (team_id,)) or league_pace
+    opponent_pace = _avg_scalar(conn, "SELECT AVG(possessions) FROM team_game_results WHERE team_id = ?", (opponent_id,)) or league_pace
+    expected_pace = (team_pace + opponent_pace) / 2
+    return _clamp(expected_pace / league_pace, 0.94, 1.06)
+
+
+def _opponent_factor(conn: sqlite3.Connection, opponent_id: int, market: str) -> float:
+    opponent_rows = conn.execute(
+        """
+        SELECT s.*
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        JOIN games g ON g.id = s.game_id
+        WHERE CASE
+            WHEN p.team_id = g.home_team_id THEN g.away_team_id
+            ELSE g.home_team_id
+        END = ?
+        """,
+        (opponent_id,),
+    ).fetchall()
+    league_rows = conn.execute("SELECT * FROM player_game_stats").fetchall()
+    if not opponent_rows or not league_rows:
+        return 1.0
+    opponent_allowed = sum(_market_value(row, market) for row in opponent_rows) / len(opponent_rows)
+    league_allowed = sum(_market_value(row, market) for row in league_rows) / len(league_rows)
+    if league_allowed <= 0:
+        return 1.0
+    return _clamp(opponent_allowed / league_allowed, 0.90, 1.10)
+
+
+def _common_opponent_factor(conn: sqlite3.Connection, player_id: int, market: str, context: dict) -> float:
+    common_opponents = _common_opponent_ids(conn, context["team_id"], context["opponent_id"])
+    if not common_opponents:
+        return 1.0
+
+    placeholders = ",".join("?" for _ in common_opponents)
+    player_rows = conn.execute(
+        f"""
+        SELECT s.*
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        JOIN games g ON g.id = s.game_id
+        WHERE s.player_id = ?
+          AND CASE
+            WHEN p.team_id = g.home_team_id THEN g.away_team_id
+            ELSE g.home_team_id
+          END IN ({placeholders})
+        ORDER BY g.game_date DESC
+        LIMIT 10
+        """,
+        (player_id, *common_opponents),
+    ).fetchall()
+    if len(player_rows) < 2:
+        return 1.0
+
+    all_rows = conn.execute(
+        "SELECT s.* FROM player_game_stats s WHERE s.player_id = ? ORDER BY s.game_id DESC LIMIT 10",
+        (player_id,),
+    ).fetchall()
+    if not all_rows:
+        return 1.0
+
+    common_avg = sum(_market_value(row, market) for row in player_rows) / len(player_rows)
+    player_avg = sum(_market_value(row, market) for row in all_rows) / len(all_rows)
+    if player_avg <= 0:
+        return 1.0
+
+    raw_factor = common_avg / player_avg
+    sample_weight = min(len(player_rows) / 5, 1.0)
+    regressed_factor = 1 + ((raw_factor - 1) * sample_weight * 0.5)
+    return _clamp(regressed_factor, 0.94, 1.06)
+
+
+def _common_opponent_ids(conn: sqlite3.Connection, team_id: int, opponent_id: int) -> list[int]:
+    team_opponents = _recent_opponent_ids(conn, team_id)
+    opponent_opponents = _recent_opponent_ids(conn, opponent_id)
+    return sorted(team_opponents.intersection(opponent_opponents))
+
+
+def _recent_opponent_ids(conn: sqlite3.Connection, team_id: int) -> set[int]:
+    rows = conn.execute(
+        """
+        SELECT
+            CASE
+                WHEN g.home_team_id = ? THEN g.away_team_id
+                ELSE g.home_team_id
+            END AS opponent_id
+        FROM team_game_results r
+        JOIN games g ON g.id = r.game_id
+        WHERE r.team_id = ?
+        ORDER BY g.game_date DESC
+        LIMIT 10
+        """,
+        (team_id, team_id),
+    ).fetchall()
+    return {int(row["opponent_id"]) for row in rows if row["opponent_id"] is not None}
+
+
+def _rest_factor(rest_days: int) -> float:
+    if rest_days <= 0:
+        return 0.95
+    if rest_days == 1:
+        return 0.98
+    if rest_days >= 4:
+        return 1.01
+    return 1.0
+
+
+def _avg_scalar(conn: sqlite3.Connection, query: str, params: tuple = ()) -> float | None:
+    value = conn.execute(query, params).fetchone()[0]
+    return float(value) if value is not None else None
+
+
+def _clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
+def _normal_cdf(x: float, mean: float, sigma: float) -> float:
+    z = (x - mean) / (sigma * math.sqrt(2))
+    return 0.5 * (1 + math.erf(z))
+
+
+def _confidence(edge: float, stat_margin: float) -> str:
+    if edge >= 0.08 and stat_margin >= 2.0:
+        return "high"
+    if edge >= 0.04 and stat_margin >= 1.0:
+        return "medium"
+    return "low"

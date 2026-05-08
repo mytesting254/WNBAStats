@@ -1,0 +1,247 @@
+export type ValueProp = {
+  id: number;
+  game_id: number;
+  player: string;
+  team: string;
+  team_logo_url?: string | null;
+  sportsbook: string;
+  market: string;
+  line: number;
+  over_odds: number;
+  under_odds: number;
+  projection: number;
+  recommended_side: "over" | "under";
+  model_probability: number;
+  implied_probability: number;
+  edge: number;
+  expected_value: number;
+  confidence: "low" | "medium" | "high";
+  reason: string;
+  prediction_time: string;
+  start_time: string;
+  rest_days: number;
+  rotation_role: string;
+  spread_home: number | null;
+  game_total: number | null;
+  team_spread: number | null;
+  blowout_risk: string;
+  blowout_probability: number;
+  blowout_minutes_impact: number;
+};
+
+export type SportsbookProp = {
+  id: number;
+  game_id: number | null;
+  provider: string;
+  provider_event_id: string;
+  commence_time: string;
+  home_team: string;
+  away_team: string;
+  sportsbook: string;
+  market: string;
+  player_name: string;
+  side: "over" | "under";
+  line: number;
+  price: number;
+  captured_at: string;
+};
+
+export type LineDiscrepancy = {
+  game_id: number | null;
+  matchup: string;
+  commence_time: string;
+  player_name: string;
+  market: string;
+  side: "over" | "under";
+  books: number;
+  line_gap: number;
+  price_gap: number;
+  best_price: {
+    sportsbook: string;
+    line: number;
+    price: number;
+  };
+  low_line: {
+    sportsbook: string;
+    line: number;
+    price: number;
+  };
+  high_line: {
+    sportsbook: string;
+    line: number;
+    price: number;
+  };
+  book_lines: Array<{
+    sportsbook: string;
+    line: number;
+    price: number;
+  }>;
+};
+
+export type ModelPerformance = {
+  settled: number;
+  wins: number;
+  win_rate: number | null;
+  average_ev: number | null;
+  message?: string;
+};
+
+export type TeamLast10 = {
+  games: number;
+  wins: number;
+  losses: number;
+  home_games: number;
+  away_games: number;
+  ats_wins: number;
+  ats_losses: number;
+  ats_pushes: number;
+  overs: number;
+  unders: number;
+  total_pushes: number;
+  avg_points_for: number;
+  avg_points_against: number;
+  recent_games: Array<{
+    game_date: string;
+    opponent: string;
+    is_home: number;
+    points: number;
+    opponent_points: number;
+    closing_spread: number;
+    closing_total: number;
+    ats_result: "cover" | "no_cover" | "push";
+    total_result: "over" | "under" | "push";
+  }>;
+};
+
+export type Matchup = {
+  id: number;
+  game_date: string;
+  start_time: string;
+  home_team: string;
+  home_team_name: string;
+  home_logo_url?: string | null;
+  home_rest_days: number | null;
+  away_team: string;
+  away_team_name: string;
+  away_logo_url?: string | null;
+  away_rest_days: number | null;
+  spread_home: number | null;
+  game_total: number | null;
+  blowout_risk: string;
+  home_projected_points: number | null;
+  away_projected_points: number | null;
+  projected_margin: number | null;
+  projected_total: number | null;
+  winner_pick: string;
+  ats_pick: string;
+  ats_edge: number | null;
+  total_pick: string;
+  total_edge: number | null;
+  game_confidence: string;
+  game_reason: string;
+  home: TeamLast10;
+  away: TeamLast10;
+  props: ValueProp[];
+  sportsbook_props: SportsbookProp[];
+  line_discrepancies: LineDiscrepancy[];
+};
+
+export type ModelRunMetric = {
+  rows: number;
+  mae: number | null;
+  rmse: number | null;
+  bias: number | null;
+  directional_accuracy: number | null;
+};
+
+export type ModelRun = {
+  id?: number;
+  model_version: string;
+  run_type: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  training_rows: number;
+  markets: string[];
+  metrics: Record<string, ModelRunMetric>;
+  notes?: string | null;
+};
+
+export async function fetchValueBoard(): Promise<ValueProp[]> {
+  const response = await fetch("/api/value-board");
+  if (!response.ok) {
+    throw new Error("Failed to load value board");
+  }
+  return response.json();
+}
+
+export async function fetchPerformance(): Promise<ModelPerformance> {
+  const response = await fetch("/api/model-performance");
+  if (!response.ok) {
+    throw new Error("Failed to load model performance");
+  }
+  return response.json();
+}
+
+export async function fetchMatchups(): Promise<Matchup[]> {
+  const response = await fetch("/api/matchups");
+  if (!response.ok) {
+    throw new Error("Failed to load matchups");
+  }
+  return response.json();
+}
+
+export async function fetchLineDiscrepancies(): Promise<LineDiscrepancy[]> {
+  const response = await fetch("/api/line-discrepancies");
+  if (!response.ok) {
+    throw new Error("Failed to load line discrepancies");
+  }
+  return response.json();
+}
+
+export async function importOdds(forceRefresh = false): Promise<{ status: string; imported: number; message?: string; source?: string }> {
+  const response = await fetch(`/api/odds/import?force_refresh=${forceRefresh ? "true" : "false"}`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to import sportsbook odds");
+  }
+  return response.json();
+}
+
+export async function importEspnHistory(forceRefresh = true): Promise<{ season: number; seasons: number[]; synced_props: number; source: string }> {
+  const response = await fetch(`/api/sportsdataio/import?force_refresh=${forceRefresh ? "true" : "false"}&include_boxscores=true&include_odds=true`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to refresh completed game results");
+  }
+  const result = await response.json();
+  if (result.status === "missing_api_key") {
+    const fallback = await fetch(`/api/history/import/espn?force_refresh=${forceRefresh ? "true" : "false"}&include_player_stats=true&include_previous_season=true`, { method: "POST" });
+    if (!fallback.ok) {
+      throw new Error(result.message ?? "Failed to refresh completed game results");
+    }
+    return fallback.json();
+  }
+  return result;
+}
+
+export async function recalculate(): Promise<void> {
+  const response = await fetch("/api/recalculate", { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to recalculate projections");
+  }
+}
+
+export async function fetchModelRuns(): Promise<{ latest: ModelRun | null; runs: ModelRun[] }> {
+  const response = await fetch("/api/models/runs");
+  if (!response.ok) {
+    throw new Error("Failed to load model runs");
+  }
+  return response.json();
+}
+
+export async function trainModel(): Promise<ModelRun> {
+  const response = await fetch("/api/models/train", { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to train model");
+  }
+  return response.json();
+}
