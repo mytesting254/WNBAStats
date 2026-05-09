@@ -28,7 +28,7 @@ const markets = [
 ];
 
 type DashboardTab = "props" | "matchups" | "parlays" | "discrepancies" | "models" | "data";
-type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "confidence" | "player";
+type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
 
@@ -992,6 +992,7 @@ function MatchupProps({
               <option value="edge">Sort by edge</option>
               <option value="projection">Sort by projection</option>
               <option value="line">Sort by line</option>
+              <option value="projection_gap">Sort by proj gap</option>
               <option value="confidence">Sort by confidence</option>
               <option value="player">Sort by player</option>
             </select>
@@ -1061,6 +1062,7 @@ function MatchupProps({
                 <th>Side</th>
                 <th>Line</th>
                 <th>Proj</th>
+                <th>Diff</th>
                 <th>Edge</th>
                 <th>EV</th>
                 <th>Confidence</th>
@@ -1082,6 +1084,7 @@ function MatchupProps({
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
                   <td>{prop.line.toFixed(1)}</td>
                   <td>{prop.projection.toFixed(1)}</td>
+                  <td>{formatSigned(prop.projection - prop.line)}</td>
                   <td>{formatPercent(prop.edge)}</td>
                   <td>{formatPercent(prop.expected_value)}</td>
                   <td>{prop.confidence}</td>
@@ -1089,7 +1092,7 @@ function MatchupProps({
               ))}
               {!visibleProps.length && (
                 <tr>
-                  <td colSpan={8}>No modeled parlay candidates match these filters.</td>
+                  <td colSpan={9}>No modeled parlay candidates match these filters.</td>
                 </tr>
               )}
             </tbody>
@@ -1335,6 +1338,9 @@ function candidateSortValue(prop: ValueProp, field: CandidateSortField) {
   }
   if (field === "player") {
     return prop.player;
+  }
+  if (field === "projection_gap") {
+    return Math.abs(prop.projection - prop.line);
   }
   return prop[field];
 }
