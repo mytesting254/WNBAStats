@@ -9,8 +9,6 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     away_team_id = int(game["away_team_id"])
     home_history_count = _team_result_count(conn, home_team_id)
     away_history_count = _team_result_count(conn, away_team_id)
-    if min(home_history_count, away_history_count) < 3:
-        return _insufficient_history_payload(game, home_history_count, away_history_count)
 
     home_projection = _project_team_points(
         conn,

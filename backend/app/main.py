@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +18,7 @@ from .training import latest_model_run, list_model_runs, run_walk_forward_traini
 
 
 app = FastAPI(title="WNBA Prop Value API")
+COMPLETED_GAME_GRACE_HOURS = 4
 
 app.add_middleware(
     CORSMiddleware,
@@ -237,6 +238,7 @@ def matchups() -> list[dict]:
             ORDER BY g.start_time
             """
         ).fetchall()
+        games = [game for game in games if _is_active_game_time(game["start_time"])]
         payload = []
         for game in games:
             home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
@@ -325,6 +327,8 @@ def _value_board_payload(conn, game_id: int | None = None) -> list[dict]:
     ).fetchall()
     payload = []
     for row in rows:
+        if game_id is None and not _is_active_game_time(row["start_time"]):
+            continue
         item = dict(row)
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         payload.append(item)
@@ -484,3 +488,16 @@ def _parse_game_date(value: str):
         return datetime.fromisoformat(str(value)[:10]).date()
     except ValueError:
         return None
+
+
+def _is_active_game_time(value: str | None) -> bool:
+    if not value:
+        return False
+    try:
+        start_time = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if start_time.tzinfo is None:
+        start_time = start_time.replace(tzinfo=timezone.utc)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=COMPLETED_GAME_GRACE_HOURS)
+    return start_time.astimezone(timezone.utc) >= cutoff

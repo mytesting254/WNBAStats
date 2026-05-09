@@ -7,3 +7,4 @@ data/*.sqlite
 data/cache/
 .env
 *.pyc
+*.log

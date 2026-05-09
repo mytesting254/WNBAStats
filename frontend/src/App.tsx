@@ -1,4 +1,4 @@
-import { BrainCircuit, CalendarDays, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
+import { BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
   fetchLineDiscrepancies,
@@ -27,6 +27,8 @@ const markets = [
   { id: "threes", label: "3PM" }
 ];
 
+type DashboardTab = "props" | "matchups" | "parlays" | "discrepancies" | "models" | "data";
+
 export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
@@ -37,11 +39,13 @@ export function App() {
   const [training, setTraining] = useState(false);
   const [importingOdds, setImportingOdds] = useState(false);
   const [refreshingResults, setRefreshingResults] = useState(false);
-  const [activeTab, setActiveTab] = useState<"props" | "matchups" | "discrepancies" | "models">("matchups");
+  const [recalculating, setRecalculating] = useState(false);
+  const [activeTab, setActiveTab] = useState<DashboardTab>("matchups");
   const [market, setMarket] = useState("all");
   const [confidence, setConfidence] = useState("all");
   const [selected, setSelected] = useState<ValueProp | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [operationStatus, setOperationStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   async function load() {
@@ -82,8 +86,17 @@ export function App() {
   }, [props, market, confidence]);
 
   async function handleRecalculate() {
-    await recalculate();
-    await load();
+    setRecalculating(true);
+    setOperationStatus(null);
+    try {
+      await recalculate();
+      await load();
+      setOperationStatus("Projection board recalculated from the current prop lines and player history.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to recalculate projections");
+    } finally {
+      setRecalculating(false);
+    }
   }
 
   async function handleTrainModel() {
@@ -104,6 +117,7 @@ export function App() {
   async function handleImportOdds(forceRefresh = false) {
     setImportingOdds(true);
     setError(null);
+    setOperationStatus(null);
     try {
       const result = await importOdds(forceRefresh);
       if (result.status === "missing_api_key") {
@@ -111,6 +125,7 @@ export function App() {
         return;
       }
       await load();
+      setOperationStatus(`${forceRefresh ? "Fresh" : "Saved"} sportsbook odds loaded. Imported ${result.imported ?? 0} sportsbook rows.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to import sportsbook odds");
     } finally {
@@ -118,12 +133,24 @@ export function App() {
     }
   }
 
-  async function handleRefreshResults() {
+  async function handleRefreshResults(forceRefresh = false, includeBoxscores = true, includeOdds = true) {
+    if (forceRefresh) {
+      const confirmed = window.confirm(
+        "Hard refresh will fetch fresh SportsDataIO data and may use API quota. Continue?"
+      );
+      if (!confirmed) {
+        return;
+      }
+    }
     setRefreshingResults(true);
     setError(null);
+    setOperationStatus(null);
     try {
-      await importEspnHistory(true);
+      const result = await importEspnHistory(forceRefresh, includeBoxscores, includeOdds);
       await load();
+      setOperationStatus(
+        `${forceRefresh ? "Fresh" : "Saved"} completed game data loaded for ${result.seasons?.join(", ") ?? result.season}. Synced ${result.synced_props ?? 0} model prop lines.`
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to refresh completed results");
     } finally {
@@ -136,24 +163,12 @@ export function App() {
       <header className="topbar">
         <div>
           <p className="eyebrow">WNBA pregame model</p>
-          <h1>{activeTab === "props" ? "Prop Value Board" : activeTab === "matchups" ? "Pregame Matchups" : activeTab === "discrepancies" ? "Line Discrepancies" : "Model Lab"}</h1>
+          <h1>{tabTitle(activeTab)}</h1>
         </div>
         <div className="topbar-actions">
-          <button className="icon-button text-button" onClick={() => handleImportOdds(false)} disabled={importingOdds} title="Load saved sportsbook odds JSON">
+          <button className="icon-button text-button" onClick={load} disabled={loading} title="Reload dashboard data">
             <RefreshCw size={18} />
-            {importingOdds ? "Loading" : "Load Saved Odds"}
-          </button>
-          <button className="icon-button text-button" onClick={() => handleImportOdds(true)} disabled={importingOdds} title="Fetch fresh sportsbook odds from provider">
-            <RefreshCw size={18} />
-            Refresh Odds
-          </button>
-          <button className="icon-button text-button" onClick={handleRefreshResults} disabled={refreshingResults} title="Fetch completed WNBA games from ESPN">
-            <RefreshCw size={18} />
-            {refreshingResults ? "Refreshing" : "Refresh Results"}
-          </button>
-          <button className="icon-button text-button" onClick={handleRecalculate} title="Recalculate projections">
-            <RefreshCw size={18} />
-            Recalculate
+            {loading ? "Loading" : "Reload"}
           </button>
         </div>
       </header>
@@ -167,6 +182,10 @@ export function App() {
           <CalendarDays size={18} />
           Matchups
         </button>
+        <button className={activeTab === "parlays" ? "active" : ""} onClick={() => setActiveTab("parlays")}>
+          <ListChecks size={18} />
+          Parlays
+        </button>
         <button className={activeTab === "discrepancies" ? "active" : ""} onClick={() => setActiveTab("discrepancies")}>
           <SlidersHorizontal size={18} />
           Discrepancies
@@ -175,16 +194,20 @@ export function App() {
           <BrainCircuit size={18} />
           Models
         </button>
+        <button className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>
+          <Database size={18} />
+          Data
+        </button>
       </nav>
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "matchups" ? "Games" : activeTab === "discrepancies" ? "Line gaps" : "Training rows"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : (latestModelRun?.training_rows ?? 0).toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "models" ? "Training rows" : "Model props"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : props.length.toString()}
         />
         <Metric
-          label={activeTab === "props" ? "Best EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "discrepancies" ? "Books compared" : "Latest MAE"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : formatLatestMae(latestModelRun)}
+          label={activeTab === "props" ? "Best EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={performance?.settled.toString() ?? "0"} />
         <Metric label="Win rate" value={performance?.win_rate == null ? "Pending" : formatPercent(performance.win_rate)} />
@@ -204,12 +227,147 @@ export function App() {
         />
       ) : activeTab === "matchups" ? (
         <MatchupsView matchups={matchups} loading={loading} error={error} />
+      ) : activeTab === "parlays" ? (
+        <ParlayCandidatesView matchups={matchups} loading={loading} error={error} />
       ) : activeTab === "discrepancies" ? (
         <DiscrepanciesView discrepancies={discrepancies} loading={loading} error={error} />
+      ) : activeTab === "data" ? (
+        <DataView
+          loading={loading}
+          error={error}
+          status={operationStatus}
+          importingOdds={importingOdds}
+          refreshingResults={refreshingResults}
+          recalculating={recalculating}
+          propsCount={props.length}
+          matchupsCount={matchups.length}
+          discrepanciesCount={discrepancies.length}
+          onImportOdds={handleImportOdds}
+          onRefreshResults={handleRefreshResults}
+          onRecalculate={handleRecalculate}
+          onReload={load}
+        />
       ) : (
         <ModelsView runs={modelRuns} latest={latestModelRun} loading={loading || training} error={error} onTrain={handleTrainModel} />
       )}
     </main>
+  );
+}
+
+function DataView({
+  loading,
+  error,
+  status,
+  importingOdds,
+  refreshingResults,
+  recalculating,
+  propsCount,
+  matchupsCount,
+  discrepanciesCount,
+  onImportOdds,
+  onRefreshResults,
+  onRecalculate,
+  onReload
+}: {
+  loading: boolean;
+  error: string | null;
+  status: string | null;
+  importingOdds: boolean;
+  refreshingResults: boolean;
+  recalculating: boolean;
+  propsCount: number;
+  matchupsCount: number;
+  discrepanciesCount: number;
+  onImportOdds: (forceRefresh: boolean) => void;
+  onRefreshResults: (forceRefresh: boolean, includeBoxscores?: boolean, includeOdds?: boolean) => void;
+  onRecalculate: () => void;
+  onReload: () => void;
+}) {
+  return (
+    <section className="matchup-list">
+      <div className="board-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Data Operations</h2>
+            <p>{loading ? "Loading data state" : "Refresh inputs, rebuild projections, and reload generated views"}</p>
+          </div>
+          <Database size={20} />
+        </div>
+        {error && <div className="error">{error}</div>}
+        {status && <div className="success">{status}</div>}
+        <div className="data-layout">
+          <OperationCard
+            title="Sportsbook Odds"
+            description="Update prop prices, lines, line discrepancies, and current matchup markets."
+            metrics={`${propsCount} model props | ${discrepanciesCount} line gaps`}
+            primaryLabel={importingOdds ? "Loading" : "Load Saved Odds"}
+            secondaryLabel="Refresh Odds"
+            disabled={importingOdds || refreshingResults || loading}
+            onPrimary={() => onImportOdds(false)}
+            onSecondary={() => onImportOdds(true)}
+          />
+          <OperationCard
+            title="Completed Games"
+            description="Import final scores and player box scores so projections use actual game history."
+            metrics={`${matchupsCount} upcoming games`}
+            primaryLabel={refreshingResults ? "Loading" : "Load Saved Results"}
+            secondaryLabel="Hard Refresh Results"
+            disabled={refreshingResults || importingOdds || loading}
+            onPrimary={() => onRefreshResults(false, true, true)}
+            onSecondary={() => onRefreshResults(true, true, true)}
+          />
+          <OperationCard
+            title="Projection Board"
+            description="Rebuild model projections from the current prop lines and player history."
+            metrics={`${propsCount} current predictions`}
+            primaryLabel={recalculating ? "Recalculating" : "Recalculate"}
+            secondaryLabel="Reload Views"
+            disabled={refreshingResults || importingOdds || loading || recalculating}
+            onPrimary={onRecalculate}
+            onSecondary={onReload}
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function OperationCard({
+  title,
+  description,
+  metrics,
+  primaryLabel,
+  secondaryLabel,
+  disabled,
+  onPrimary,
+  onSecondary
+}: {
+  title: string;
+  description: string;
+  metrics: string;
+  primaryLabel: string;
+  secondaryLabel: string;
+  disabled: boolean;
+  onPrimary: () => void;
+  onSecondary: () => void;
+}) {
+  return (
+    <article className="operation-card">
+      <div>
+        <p className="eyebrow">{metrics}</p>
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </div>
+      <div className="operation-actions">
+        <button className="icon-button text-button dark-button" onClick={onPrimary} disabled={disabled}>
+          <RefreshCw size={18} />
+          {primaryLabel}
+        </button>
+        <button className="secondary-button" onClick={onSecondary} disabled={disabled}>
+          {secondaryLabel}
+        </button>
+      </div>
+    </article>
   );
 }
 
@@ -227,6 +385,7 @@ function ModelsView({
   onTrain: () => void;
 }) {
   const metrics = latest ? Object.entries(latest.metrics) : [];
+  const comparisonRuns = latestRunsByModel(runs);
   return (
     <section className="matchup-list">
       <div className="board-panel">
@@ -290,11 +449,52 @@ function ModelsView({
             </div>
           </div>
           <div className="model-card full">
+            <p className="eyebrow">Model comparison</p>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Model</th>
+                    <th>Type</th>
+                    <th>Rows</th>
+                    <th>Avg MAE</th>
+                    <th>PTS</th>
+                    <th>REB</th>
+                    <th>AST</th>
+                    <th>PRA</th>
+                    <th>Direction</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {comparisonRuns.map((run) => (
+                    <tr key={run.model_version}>
+                      <td>{run.model_version}</td>
+                      <td>{run.run_type}</td>
+                      <td>{run.training_rows}</td>
+                      <td>{formatLatestMae(run)}</td>
+                      <td>{formatMetricMae(run, "points")}</td>
+                      <td>{formatMetricMae(run, "rebounds")}</td>
+                      <td>{formatMetricMae(run, "assists")}</td>
+                      <td>{formatMetricMae(run, "points_rebounds_assists")}</td>
+                      <td>{formatAverageDirection(run)}</td>
+                    </tr>
+                  ))}
+                  {!comparisonRuns.length && (
+                    <tr>
+                      <td colSpan={9}>No model runs saved yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="model-card full">
             <p className="eyebrow">Run history</p>
             <div className="recent-list">
               {runs.map((run) => (
                 <div key={run.id ?? run.started_at}>
                   <span>{formatDate(run.started_at)}</span>
+                  <b>{run.model_version}</b>
                   <strong>{run.training_rows} rows</strong>
                   <em>{run.status}</em>
                 </div>
@@ -620,12 +820,51 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
                 <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
               </div>
               <p className="reason matchup-reason">{selectedMatchup.game_reason}</p>
-              <MatchupProps
-                props={selectedMatchup.props ?? []}
-                sportsbookProps={selectedMatchup.sportsbook_props ?? []}
-                discrepancies={selectedMatchup.line_discrepancies ?? []}
-              />
             </article>
+          ) : (
+            <p className="empty">No scheduled games found.</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[]; loading: boolean; error: string | null }) {
+  const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
+  const selectedMatchup = matchups.find((matchup) => matchup.id === selectedGameId) ?? matchups[0] ?? null;
+
+  return (
+    <section className="matchup-list">
+      <div className="board-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Parlay Candidates</h2>
+            <p>{loading ? "Loading candidate legs" : "Model-ranked legs and sportsbook gaps by matchup"}</p>
+          </div>
+          <ListChecks size={20} />
+        </div>
+        {error && <div className="error">{error}</div>}
+        <div className="game-tabs" aria-label="Parlay candidate matchup tabs">
+          {matchups.map((matchup) => (
+            <button
+              key={matchup.id}
+              className={selectedMatchup?.id === matchup.id ? "active" : ""}
+              onClick={() => setSelectedGameId(matchup.id)}
+            >
+              <span>{formatDate(matchup.start_time)}</span>
+              <strong>{matchup.away_team} at {matchup.home_team}</strong>
+              <em>{availableLabel(matchup)}</em>
+            </button>
+          ))}
+        </div>
+        <div className="parlay-tab-content">
+          {selectedMatchup ? (
+            <MatchupProps
+              props={selectedMatchup.props ?? []}
+              sportsbookProps={selectedMatchup.sportsbook_props ?? []}
+              discrepancies={selectedMatchup.line_discrepancies ?? []}
+            />
           ) : (
             <p className="empty">No scheduled games found.</p>
           )}
@@ -644,11 +883,31 @@ function MatchupProps({
   sportsbookProps: Matchup["sportsbook_props"];
   discrepancies: LineDiscrepancy[];
 }) {
-  const shortlist = props.filter((prop) => prop.expected_value > 0 && prop.edge > 0).slice(0, 5);
-  const discrepancyShortlist = discrepancies
+  const [marketFilter, setMarketFilter] = useState("all");
+  const [sideFilter, setSideFilter] = useState("all");
+  const [confidenceFilter, setConfidenceFilter] = useState("all");
+  const [candidateView, setCandidateView] = useState<"positive" | "all">("positive");
+
+  const filteredProps = props
+    .filter((prop) => {
+      const marketMatch = marketFilter === "all" || prop.market === marketFilter;
+      const sideMatch = sideFilter === "all" || prop.recommended_side === sideFilter;
+      const confidenceMatch = confidenceFilter === "all" || prop.confidence === confidenceFilter;
+      return marketMatch && sideMatch && confidenceMatch;
+    })
+    .sort((a, b) => (b.expected_value - a.expected_value) || (b.edge - a.edge));
+  const positiveProps = filteredProps.filter((prop) => prop.expected_value > 0 && prop.edge > 0);
+  const visibleProps = candidateView === "positive" ? positiveProps : filteredProps;
+  const shortlist = positiveProps.slice(0, 5);
+  const filteredDiscrepancies = discrepancies
+    .filter((item) => {
+      const marketMatch = marketFilter === "all" || item.market === marketFilter;
+      const sideMatch = sideFilter === "all" || item.side === sideFilter;
+      return marketMatch && sideMatch;
+    })
     .slice()
-    .sort((a, b) => (b.line_gap - a.line_gap) || (b.price_gap - a.price_gap))
-    .slice(0, 8);
+    .sort((a, b) => (b.line_gap - a.line_gap) || (b.price_gap - a.price_gap));
+  const discrepancyShortlist = filteredDiscrepancies.slice(0, 8);
   return (
     <div className="matchup-props">
       <div className="panel-header compact">
@@ -656,14 +915,70 @@ function MatchupProps({
           <h3>Parlay Candidates</h3>
           <p>
             {props.length
-              ? "Positive EV legs ranked by model edge for this matchup"
+              ? `${visibleProps.length} legs match the current filters, ranked by model EV and edge`
               : discrepancyShortlist.length
-                ? "Sportsbook line discrepancies for this matchup while player-stat models are unavailable"
+                ? `${discrepancyShortlist.length} sportsbook line gaps match the current filters while models are unavailable`
                 : sportsbookProps.length
                   ? "Sportsbook props are available; real player game logs are needed for model-ranked legs"
                   : "No sportsbook props attached to this game yet"}
           </p>
         </div>
+      </div>
+      <div className="candidate-filters" aria-label="Parlay candidate filters">
+        <div className="segmented candidate-tabs" aria-label="Market filter">
+          {markets.map((item) => (
+            <button
+              key={`candidate-market-${item.id}`}
+              className={marketFilter === item.id ? "active" : ""}
+              type="button"
+              onClick={() => setMarketFilter(item.id)}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <div className="segmented candidate-tabs" aria-label="Side filter">
+          {["all", "over", "under"].map((side) => (
+            <button
+              key={`candidate-side-${side}`}
+              className={sideFilter === side ? "active" : ""}
+              type="button"
+              onClick={() => setSideFilter(side)}
+            >
+              {side === "all" ? "Both" : side.toUpperCase()}
+            </button>
+          ))}
+        </div>
+        {props.length > 0 && (
+          <>
+            <select
+              aria-label="Confidence filter"
+              value={confidenceFilter}
+              onChange={(event) => setConfidenceFilter(event.target.value)}
+            >
+              <option value="all">All confidence</option>
+              <option value="high">High</option>
+              <option value="medium">Medium</option>
+              <option value="low">Low</option>
+            </select>
+            <div className="segmented candidate-tabs" aria-label="Candidate view">
+              <button
+                className={candidateView === "positive" ? "active" : ""}
+                type="button"
+                onClick={() => setCandidateView("positive")}
+              >
+                Best edges
+              </button>
+              <button
+                className={candidateView === "all" ? "active" : ""}
+                type="button"
+                onClick={() => setCandidateView("all")}
+              >
+                All props
+              </button>
+            </div>
+          </>
+        )}
       </div>
       {shortlist.length > 0 && (
         <div className="candidate-strip">
@@ -706,7 +1021,7 @@ function MatchupProps({
               </tr>
             </thead>
             <tbody>
-              {props.map((prop) => (
+              {visibleProps.map((prop) => (
                 <tr key={prop.id}>
                   <td>
                     <div className="player-cell">
@@ -726,6 +1041,11 @@ function MatchupProps({
                   <td>{prop.confidence}</td>
                 </tr>
               ))}
+              {!visibleProps.length && (
+                <tr>
+                  <td colSpan={8}>No modeled parlay candidates match these filters.</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -764,6 +1084,11 @@ function MatchupProps({
                   <td>{item.books}</td>
                 </tr>
               ))}
+              {!discrepancyShortlist.length && (
+                <tr>
+                  <td colSpan={7}>No sportsbook line gaps match these filters.</td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>
@@ -883,6 +1208,45 @@ function formatLatestMae(run: ModelRun | null) {
   return (values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(2);
 }
 
+function latestRunsByModel(runs: ModelRun[]) {
+  const latestByModel = new Map<string, ModelRun>();
+  runs.forEach((run) => {
+    const existing = latestByModel.get(run.model_version);
+    if (!existing || new Date(run.started_at).getTime() > new Date(existing.started_at).getTime()) {
+      latestByModel.set(run.model_version, run);
+    }
+  });
+  return Array.from(latestByModel.values()).sort(
+    (a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime()
+  );
+}
+
+function formatMetricMae(run: ModelRun, market: string) {
+  return formatNumber(run.metrics[market]?.mae ?? null);
+}
+
+function formatAverageDirection(run: ModelRun) {
+  const values = Object.values(run.metrics)
+    .map((metric) => metric.directional_accuracy)
+    .filter((value): value is number => value != null);
+  if (!values.length) {
+    return "N/A";
+  }
+  return formatPercent(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+function tabTitle(tab: DashboardTab) {
+  const titles = {
+    props: "Prop Value Board",
+    matchups: "Pregame Matchups",
+    parlays: "Parlay Candidates",
+    discrepancies: "Line Discrepancies",
+    models: "Model Lab",
+    data: "Data Operations"
+  };
+  return titles[tab];
+}
+
 function marketLabel(market: string) {
   const labels: Record<string, string> = {
     points: "PTS",
@@ -908,6 +1272,17 @@ function availableLabel(matchup: Matchup) {
   const discrepancyCount = matchup.line_discrepancies?.length ?? 0;
   const sportsbookCount = matchup.sportsbook_props?.length ?? 0;
   return `${parlayCount} parlay | ${discrepancyCount} gaps | ${sportsbookCount} book`;
+}
+
+function parlayCandidateCount(matchups: Matchup[]) {
+  return matchups.reduce(
+    (count, matchup) => count + (matchup.props ?? []).filter((prop) => prop.expected_value > 0 && prop.edge > 0).length,
+    0
+  );
+}
+
+function gamesWithParlayCandidates(matchups: Matchup[]) {
+  return matchups.filter((matchup) => (matchup.props ?? []).some((prop) => prop.expected_value > 0 && prop.edge > 0)).length;
 }
 
 function countDiscrepancyBooks(discrepancies: LineDiscrepancy[]) {

@@ -109,6 +109,22 @@ h3 {
   color: #ffffff;
 }
 
+.secondary-button {
+  min-height: 42px;
+  padding: 0 14px;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #184f86;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.secondary-button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
 .summary-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -218,6 +234,43 @@ h3 {
 
 .panel-header.subheader {
   margin-top: 16px;
+}
+
+.data-layout {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  padding: 18px;
+}
+
+.operation-card {
+  display: flex;
+  min-height: 260px;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px;
+  border: 1px solid #eaecf0;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.operation-card h3 {
+  margin-bottom: 8px;
+  color: #184f86;
+  font-size: 20px;
+}
+
+.operation-card p:not(.eyebrow) {
+  margin-bottom: 0;
+  color: #667085;
+  line-height: 1.45;
+}
+
+.operation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .filters {
@@ -559,6 +612,29 @@ tbody tr.selected {
   border-radius: 8px;
 }
 
+.parlay-tab-content .matchup-props {
+  margin: 18px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.candidate-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.candidate-tabs button {
+  min-width: auto;
+  padding: 0 10px;
+}
+
+.candidate-filters select {
+  min-height: 36px;
+}
+
 .candidate-strip {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
@@ -762,6 +838,13 @@ tbody tr.selected {
   color: #1b1f29;
 }
 
+.recent-list b {
+  display: block;
+  margin: 2px 0;
+  color: #344054;
+  font-weight: 800;
+}
+
 .recent-list em {
   color: #2364aa;
   font-style: normal;
@@ -796,6 +879,15 @@ tbody tr.selected {
   color: #b42318;
 }
 
+.success {
+  margin: 18px;
+  padding: 14px;
+  border-radius: 8px;
+  background: #e7f7ef;
+  color: #027a48;
+  font-weight: 700;
+}
+
 @media (max-width: 960px) {
   .app-shell {
     padding: 18px;
@@ -812,6 +904,7 @@ tbody tr.selected {
   .matchup-grid,
   .team-comparison,
   .model-layout,
+  .data-layout,
   .prediction-strip,
   .candidate-strip,
   .discrepancy-grid {
@@ -830,9 +923,20 @@ tbody tr.selected {
 
 @media (max-width: 640px) {
   .topbar,
-  .filters {
+  .filters,
+  .candidate-filters {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .candidate-filters .segmented,
+  .candidate-filters select {
+    width: 100%;
+  }
+
+  .tabs {
+    display: flex;
+    overflow-x: auto;
   }
 
   .summary-grid,

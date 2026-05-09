@@ -6,9 +6,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .odds import american_to_implied_probability, expected_value
+from .player_prop_model import MODEL_VERSION as LEARNED_MODEL_VERSION
+from .player_prop_model import clear_model_cache, predict_player_prop
 
 
-MODEL_VERSION = "component-pregame-v2"
+MODEL_VERSION = LEARNED_MODEL_VERSION
 
 MARKET_COLUMNS = {
     "points": "points",
@@ -16,6 +18,14 @@ MARKET_COLUMNS = {
     "assists": "assists",
     "threes": "threes",
     "points_rebounds_assists": "points + rebounds + assists",
+}
+
+MARKET_SIGMA_FLOORS = {
+    "points": 3.0,
+    "rebounds": 2.2,
+    "assists": 1.8,
+    "threes": 1.1,
+    "points_rebounds_assists": 5.0,
 }
 
 
@@ -151,7 +161,15 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
     if not prop:
         raise ValueError(f"Prop line {prop_line_id} was not found")
 
-    projection, reason = project_player_market(conn, prop["player_id"], prop["market"], prop["game_id"])
+    projection, reason, model_version = predict_player_prop(
+        conn,
+        prop["player_id"],
+        prop["market"],
+        prop["game_id"],
+        line=float(prop["line"]),
+        over_odds=int(prop["over_odds"]),
+        under_odds=int(prop["under_odds"]),
+    )
     line = float(prop["line"])
     side = "over" if projection > line else "under"
     stat_sigma = _estimated_sigma(conn, prop["player_id"], prop["market"], projection)
@@ -164,7 +182,7 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
 
     return PropProjection(
         prop_line_id=prop_line_id,
-        model_version=MODEL_VERSION,
+        model_version=model_version,
         prediction_time=datetime.now(timezone.utc).isoformat(),
         projection=projection,
         recommended_side=side,
@@ -178,6 +196,7 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
 
 
 def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
+    clear_model_cache()
     props = conn.execute("SELECT id FROM prop_lines ORDER BY captured_at DESC").fetchall()
     projections = [build_prop_projection(conn, int(row["id"])) for row in props]
     conn.execute("DELETE FROM prop_predictions WHERE model_version = ?", (MODEL_VERSION,))
@@ -232,17 +251,33 @@ def _estimated_sigma(conn: sqlite3.Connection, player_id: int, market: str, proj
     ).fetchall()
     values = [_market_value(row, market) for row in rows]
     if len(values) < 2:
-        return 5.0
+        return MARKET_SIGMA_FLOORS.get(market, 2.0)
+    ewma_center = _ewma_newest_first(values, alpha=0.42)
+    ewma_sigma = _ewma_sigma_newest_first(values, ewma_center)
     mean = sum(values) / len(values)
-    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
-    sample_sigma = math.sqrt(variance)
-    floor = max(projection * 0.14, 2.0)
-    return max((0.75 * sample_sigma) + (0.25 * floor), floor)
+    sample_sigma = math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
+    floor = max(MARKET_SIGMA_FLOORS.get(market, 2.0), projection * 0.10)
+    return max((0.60 * ewma_sigma) + (0.25 * sample_sigma) + (0.15 * floor), floor)
 
 
 def _weighted_average(values: list[float]) -> float:
     weights = list(range(len(values), 0, -1))
     return sum(value * weight for value, weight in zip(values, weights)) / sum(weights)
+
+
+def _ewma_newest_first(values: list[float], alpha: float) -> float:
+    estimate = values[-1]
+    for value in reversed(values[:-1]):
+        estimate = (alpha * value) + ((1 - alpha) * estimate)
+    return estimate
+
+
+def _ewma_sigma_newest_first(values: list[float], center: float) -> float:
+    alpha = 0.42
+    variance = (values[-1] - center) ** 2
+    for value in reversed(values[:-1]):
+        variance = (alpha * ((value - center) ** 2)) + ((1 - alpha) * variance)
+    return math.sqrt(max(variance, 0.0))
 
 
 def _game_context(conn: sqlite3.Connection, player_id: int, game_id: int | None) -> dict:

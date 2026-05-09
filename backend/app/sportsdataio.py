@@ -12,7 +12,7 @@ from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
 
-from .bootstrap import ensure_team, ensure_teams
+from .bootstrap import ensure_team, ensure_teams, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
 from .odds_import import sync_prop_lines_from_sportsbook
 from .projections import rebuild_predictions
@@ -109,25 +109,30 @@ def import_games(conn: sqlite3.Connection, api_key: str, season: int, force_refr
         status = _status(game)
         if status == "final":
             final_games += 1
-        home_score = _int(game.get("HomeTeamScore") or game.get("HomeScore"))
-        away_score = _int(game.get("AwayTeamScore") or game.get("AwayScore"))
-        game_total = float(home_score + away_score) if home_score is not None and away_score is not None else None
+        home_score = _int(_first(game, "HomeTeamScore", "HomeScore"))
+        away_score = _int(_first(game, "AwayTeamScore", "AwayScore"))
+        spread_home = _float(_first(game, "PointSpread", "HomePointSpread", "HomeTeamPointSpread"))
+        betting_total = _float(_first(game, "OverUnder", "Total", "GameTotal"))
+        actual_total = float(home_score + away_score) if home_score is not None and away_score is not None else None
+        game_total = betting_total if betting_total is not None else actual_total
         conn.execute(
             """
             INSERT INTO games (
                 id, game_date, start_time, home_team_id, away_team_id, status,
                 rest_days_home, rest_days_away, spread_home, game_total
-            ) VALUES (?, ?, ?, ?, ?, ?, 2, 2, NULL, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 2, 2, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 game_date = excluded.game_date,
                 start_time = excluded.start_time,
                 home_team_id = excluded.home_team_id,
                 away_team_id = excluded.away_team_id,
                 status = excluded.status,
+                spread_home = COALESCE(excluded.spread_home, games.spread_home),
                 game_total = COALESCE(excluded.game_total, games.game_total)
             """,
-            (game_id, game_date, start_time, home_team_id, away_team_id, status, game_total),
+            (game_id, game_date, start_time, home_team_id, away_team_id, status, spread_home, game_total),
         )
+        _sync_matching_game_lines(conn, game_date, home_team_id, away_team_id, spread_home, game_total)
         if status == "final" and home_score is not None and away_score is not None:
             _replace_team_results(conn, game_id, home_team_id, away_team_id, home_score, away_score, game_total)
         inserted += 1
@@ -270,6 +275,30 @@ def _fetch_player_props(api_key: str, game_id: int, force_refresh: bool = False)
         except SportsDataIOError:
             continue
     return None
+
+
+def _sync_matching_game_lines(
+    conn: sqlite3.Connection,
+    game_date: str,
+    home_team_id: int,
+    away_team_id: int,
+    spread_home: float | None,
+    game_total: float | None,
+) -> None:
+    if spread_home is None and game_total is None:
+        return
+    conn.execute(
+        """
+        UPDATE games
+        SET
+            spread_home = COALESCE(?, spread_home),
+            game_total = COALESCE(?, game_total)
+        WHERE game_date = ?
+          AND home_team_id = ?
+          AND away_team_id = ?
+        """,
+        (spread_home, game_total, game_date, home_team_id, away_team_id),
+    )
 
 
 def _fetch_cached(api_key: str, product: str, path: str, cache_name: str, force_refresh: bool) -> Any:
@@ -415,7 +444,7 @@ def _player_games(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _team_abbr(game: dict[str, Any], side: str) -> str | None:
     value = game.get(f"{side}Team") or game.get(f"{side}TeamKey") or game.get(f"{side}TeamName")
-    return str(value).upper() if value else None
+    return normalize_team_abbreviation(str(value)) if value else None
 
 
 def _status(game: dict[str, Any]) -> str:
@@ -472,6 +501,14 @@ def _float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _first(source: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = source.get(key)
+        if value is not None and value != "":
+            return value
+    return None
 
 
 def _bool(value: Any) -> bool:

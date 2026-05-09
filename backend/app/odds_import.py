@@ -21,6 +21,7 @@ LOCAL_TZ = timezone(timedelta(hours=-4))
 DEFAULT_REGIONS = "us"
 DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars,espnbet,fanatics,betrivers"
 RAW_CACHE_NAME = "sportsbook_props_raw.json"
+COMPLETED_GAME_GRACE_HOURS = 4
 
 MARKETS = {
     "player_points": "points",
@@ -260,7 +261,14 @@ def list_sportsbook_props(conn: sqlite3.Connection, game_id: int | None = None) 
         """,
         params,
     ).fetchall()
-    return [dict(row) for row in rows]
+    payload = [dict(row) for row in rows]
+    if game_id is not None:
+        return payload
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=COMPLETED_GAME_GRACE_HOURS)
+    return [
+        row for row in payload
+        if row.get("commence_time") and _parse_utc(str(row["commence_time"])) >= cutoff
+    ]
 
 
 def odds_cache_summary() -> dict:

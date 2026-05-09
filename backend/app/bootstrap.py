@@ -30,6 +30,7 @@ TEAM_ALIASES = {
     for team in WNBA_TEAMS
 } | {
     "nyl": "NY",
+    "conn": "CON",
     "lva": "LV",
     "las": "LV",
     "pho": "PHX",

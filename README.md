@@ -2,13 +2,13 @@
 
 Local pregame WNBA prop-value app.
 
-The first version is built around a clear loop:
+The app is built around a provider-backed pregame workflow:
 
 1. Store historical stats, prop lines, model predictions, and settled results in SQLite.
 2. Keep raw/current JSON files as a fast local cache and API audit trail.
-3. Use a transparent baseline model to project pregame player props.
+3. Import completed games and player box scores before projecting new props.
 4. Rank props by expected value and edge.
-5. Settle completed props later so the model can be backtested honestly.
+5. Compare model versions with holdout metrics before trusting a projection change.
 
 ## Stack
 
@@ -59,6 +59,15 @@ POST /api/history/import/espn
 POST /api/models/train
 POST /api/recalculate
 ```
+
+## App Tabs
+
+- `Pregame Props`: ranked prop predictions with projection, line, model probability, edge, EV, and confidence.
+- `Matchups`: active upcoming games only, with projected score, spread edge, total edge, and confidence.
+- `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Completed games are removed from this view after the stale-game grace window.
+- `Discrepancies`: cross-book line gaps and price gaps.
+- `Model Lab`: latest training metrics, market metrics, model comparison, and run history.
+- `Data`: operational controls for saved/fresh odds import, completed-game import, projection rebuilds, and reloads.
 
 ## Sportsbook Odds Import
 
@@ -157,7 +166,9 @@ Refresh them with:
 
 Matchups should be built from real imported games. `scripts\init_db.py` only creates the schema and canonical WNBA teams; it does not seed sample games, player stats, or prop lines.
 
-To clear the old local sample data and rebuild scheduled games from the saved sportsbook odds JSON:
+Seed data has been removed from the app path. `backend.app.seed.seed_sample_data()` now raises intentionally so fake games cannot slip into local projections. Tests use isolated temporary fixture databases instead of the runtime SQLite database.
+
+To clear local runtime data and rebuild scheduled games from the saved sportsbook odds JSON:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\reset_live_db.py
@@ -204,7 +215,7 @@ POST /api/history/import/espn?season=2026&force_refresh=true&include_player_stat
 ```
 
 Completed games are matched to existing sportsbook-derived scheduled games by date/home/away, then marked `final` so they drop out of the upcoming Matchups tab while still contributing to last-10 history.
-When `include_player_stats=true`, ESPN player box scores are imported for the requested season and, by default, the previous season. The app then syncs matching sportsbook prop lines into model prop lines so Parlay Candidates can use real player game logs instead of seed data.
+When `include_player_stats=true`, ESPN player box scores are imported for the requested season and, by default, the previous season. The app then syncs matching sportsbook prop lines into model prop lines so Parlay Candidates use provider-backed player game logs.
 
 ## Local Data And Generated Files
 
@@ -219,6 +230,7 @@ data/*.sqlite
 data/cache/
 __pycache__/
 .pytest_cache/
+*.log
 ```
 
 Keep provider JSON caches locally if you want to avoid repeated API calls. They are intentionally not committed.
@@ -283,12 +295,17 @@ The app should write raw API responses into `data/cache/` or `data/raw/`, then n
 
 ## Model Notes
 
-The current pregame component model combines:
+Player prop projections use the `adaptive-context-v1` model. It starts with a transparent component projection, then uses a local ridge regression model trained from actual player game logs. The final pregame projection can also blend in sportsbook line context and no-vig price lean when a line is available.
+
+Core features include:
 
 - Exponentially weighted recent form
 - Last 5 average
 - Last 10 average
 - Per-minute production multiplied by projected minutes
+- EWMA minutes
+- Minutes trend
+- Player consistency and volatility
 - Game pace adjustment from team possessions
 - Opponent allowance adjustment by market
 - Common-opponent adjustment, regressed and capped so small samples cannot dominate
@@ -296,23 +313,24 @@ The current pregame component model combines:
 - Rest-days adjustment
 - Blowout risk minutes adjustment using game spread and player rotation role
 - Manual usage adjustment
-- American odds implied probability
-- Expected value
+- Sportsbook line
+- No-vig market probability from over/under prices
 
 Projection and value are intentionally separate. The model first estimates the stat outcome, then converts sportsbook odds into implied probability, edge, and expected value. More advanced ML models should be compared against this component model before replacing it.
 
 ## Model Training
 
-The Models tab runs a local walk-forward evaluation:
+The Model Lab tab trains and records two local benchmarks:
 
 ```text
-For each player and market:
-  use only prior games
-  project the next game
-  compare projection vs actual result
+component-pregame-v2
+  walk-forward component benchmark using only prior games
+
+adaptive-context-v1
+  chronological 80/20 holdout for the learned history/context model
 ```
 
-It saves each run to `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. This is a training scaffold; once real settled prop lines are imported, the same model-run workflow can be extended to ROI, CLV, and edge calibration.
+Each training action saves both runs to `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. The comparison table shows the latest run for each model version side by side. Once real settled prop lines are imported, the same model-run workflow can be extended to ROI, CLV, and edge calibration.
 
 ## Matchup Predictions
 
