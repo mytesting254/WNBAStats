@@ -28,6 +28,9 @@ const markets = [
 ];
 
 type DashboardTab = "props" | "matchups" | "parlays" | "discrepancies" | "models" | "data";
+type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "confidence" | "player";
+type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
+type SortDirection = "desc" | "asc";
 
 export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
@@ -887,6 +890,9 @@ function MatchupProps({
   const [sideFilter, setSideFilter] = useState("all");
   const [confidenceFilter, setConfidenceFilter] = useState("all");
   const [candidateView, setCandidateView] = useState<"positive" | "all">("positive");
+  const [candidateSort, setCandidateSort] = useState<CandidateSortField>("expected_value");
+  const [discrepancySort, setDiscrepancySort] = useState<DiscrepancySortField>("line_gap");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
 
   const filteredProps = props
     .filter((prop) => {
@@ -895,7 +901,7 @@ function MatchupProps({
       const confidenceMatch = confidenceFilter === "all" || prop.confidence === confidenceFilter;
       return marketMatch && sideMatch && confidenceMatch;
     })
-    .sort((a, b) => (b.expected_value - a.expected_value) || (b.edge - a.edge));
+    .sort((a, b) => compareCandidateProps(a, b, candidateSort, sortDirection));
   const positiveProps = filteredProps.filter((prop) => prop.expected_value > 0 && prop.edge > 0);
   const visibleProps = candidateView === "positive" ? positiveProps : filteredProps;
   const shortlist = positiveProps.slice(0, 5);
@@ -906,7 +912,7 @@ function MatchupProps({
       return marketMatch && sideMatch;
     })
     .slice()
-    .sort((a, b) => (b.line_gap - a.line_gap) || (b.price_gap - a.price_gap));
+    .sort((a, b) => compareDiscrepancies(a, b, discrepancySort, sortDirection));
   const discrepancyShortlist = filteredDiscrepancies.slice(0, 8);
   return (
     <div className="matchup-props">
@@ -977,8 +983,48 @@ function MatchupProps({
                 All props
               </button>
             </div>
+            <select
+              aria-label="Sort parlay candidates"
+              value={candidateSort}
+              onChange={(event) => setCandidateSort(event.target.value as CandidateSortField)}
+            >
+              <option value="expected_value">Sort by EV</option>
+              <option value="edge">Sort by edge</option>
+              <option value="projection">Sort by projection</option>
+              <option value="line">Sort by line</option>
+              <option value="confidence">Sort by confidence</option>
+              <option value="player">Sort by player</option>
+            </select>
           </>
         )}
+        {!props.length && discrepancyShortlist.length > 0 && (
+          <select
+            aria-label="Sort sportsbook gaps"
+            value={discrepancySort}
+            onChange={(event) => setDiscrepancySort(event.target.value as DiscrepancySortField)}
+          >
+            <option value="line_gap">Sort by line gap</option>
+            <option value="price_gap">Sort by price gap</option>
+            <option value="books">Sort by books</option>
+            <option value="player_name">Sort by player</option>
+          </select>
+        )}
+        <div className="segmented candidate-tabs compact-tabs" aria-label="Sort direction">
+          <button
+            className={sortDirection === "desc" ? "active" : ""}
+            type="button"
+            onClick={() => setSortDirection("desc")}
+          >
+            Desc
+          </button>
+          <button
+            className={sortDirection === "asc" ? "active" : ""}
+            type="button"
+            onClick={() => setSortDirection("asc")}
+          >
+            Asc
+          </button>
+        </div>
       </div>
       {shortlist.length > 0 && (
         <div className="candidate-strip">
@@ -1272,6 +1318,50 @@ function availableLabel(matchup: Matchup) {
   const discrepancyCount = matchup.line_discrepancies?.length ?? 0;
   const sportsbookCount = matchup.sportsbook_props?.length ?? 0;
   return `${parlayCount} parlay | ${discrepancyCount} gaps | ${sportsbookCount} book`;
+}
+
+function compareCandidateProps(a: ValueProp, b: ValueProp, field: CandidateSortField, direction: SortDirection) {
+  const multiplier = direction === "asc" ? 1 : -1;
+  const primary = compareSortable(candidateSortValue(a, field), candidateSortValue(b, field)) * multiplier;
+  if (primary !== 0) {
+    return primary;
+  }
+  return (b.expected_value - a.expected_value) || (b.edge - a.edge) || a.player.localeCompare(b.player);
+}
+
+function candidateSortValue(prop: ValueProp, field: CandidateSortField) {
+  if (field === "confidence") {
+    return confidenceRank(prop.confidence);
+  }
+  if (field === "player") {
+    return prop.player;
+  }
+  return prop[field];
+}
+
+function compareDiscrepancies(a: LineDiscrepancy, b: LineDiscrepancy, field: DiscrepancySortField, direction: SortDirection) {
+  const multiplier = direction === "asc" ? 1 : -1;
+  const primary = compareSortable(discrepancySortValue(a, field), discrepancySortValue(b, field)) * multiplier;
+  if (primary !== 0) {
+    return primary;
+  }
+  return (b.line_gap - a.line_gap) || (b.price_gap - a.price_gap) || a.player_name.localeCompare(b.player_name);
+}
+
+function discrepancySortValue(item: LineDiscrepancy, field: DiscrepancySortField) {
+  return item[field];
+}
+
+function compareSortable(a: string | number, b: string | number) {
+  if (typeof a === "string" || typeof b === "string") {
+    return String(a).localeCompare(String(b));
+  }
+  return a - b;
+}
+
+function confidenceRank(confidence: ValueProp["confidence"]) {
+  const ranks = { low: 1, medium: 2, high: 3 };
+  return ranks[confidence];
 }
 
 function parlayCandidateCount(matchups: Matchup[]) {
