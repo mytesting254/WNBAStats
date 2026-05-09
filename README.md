@@ -332,6 +332,20 @@ adaptive-context-v1
 
 Each training action saves both runs to `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. The comparison table shows the latest run for each model version side by side. Once real settled prop lines are imported, the same model-run workflow can be extended to ROI, CLV, and edge calibration.
 
+## Accuracy Analysis
+
+`backend/app/accuracy_analysis.py` compares saved prop predictions against completed player box scores in `player_game_stats`. It only analyzes prop lines whose game has an actual player stat row, so pregame and future games are ignored.
+
+Run the CLI from the repo root:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\analyze_accuracy.py report --model adaptive-context-v1
+.\.venv\Scripts\python.exe scripts\analyze_accuracy.py best --limit 20 --min-edge 0.04
+.\.venv\Scripts\python.exe scripts\analyze_accuracy.py worst --limit 20
+```
+
+The report includes MAE, RMSE, bias, directional accuracy, confidence calibration, market breakdowns, minutes buckets, and edge-threshold hit rates.
+
 ## Matchup Predictions
 
 The Matchups tab now projects:

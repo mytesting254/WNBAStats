@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backend.app.bootstrap import ensure_teams
+from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
 from backend.app.db import connect, init_db
 from backend.app.game_predictions import project_game
 from backend.app.odds import american_to_implied_probability, expected_value
@@ -179,6 +180,39 @@ def test_walk_forward_training_saves_model_run() -> None:
     assert result["training_rows"] > 0
     assert len(rows) == 2
     assert {row["model_version"] for row in rows} == {"adaptive-context-v1", "component-pregame-v2"}
+
+
+def test_accuracy_analysis_uses_completed_player_stats() -> None:
+    load_test_history()
+    with connect() as conn:
+        captured_at = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9001, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9001, 'adaptive-context-v1', ?, 18.0, 'over', 0.56, 0.52, 0.04, 0.07, 'medium', 'test')
+            """,
+            (captured_at,),
+        )
+        report = build_accuracy_report(conn, "adaptive-context-v1")
+        best = get_best_predictions(conn, model_version="adaptive-context-v1")
+        worst = get_worst_predictions(conn, model_version="adaptive-context-v1")
+
+    assert report.total_predictions == 1
+    assert report.mae == 1.0
+    assert report.market_breakdown["points"]["predictions"] == 1
+    assert best[0].actual_result == 19.0
+    assert best[0].correct_side is False
+    assert worst[0].abs_error == 1.0
 
 
 def test_game_projection_returns_picks() -> None:
