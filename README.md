@@ -18,6 +18,10 @@ The app is built around a provider-backed pregame workflow:
 - JSON/JSONL cache layer
 - pytest and Python Playwright tests
 
+## GitHub Codespaces
+
+For Codespaces setup, see [CODESPACES.md](CODESPACES.md).
+
 ## First Run
 
 From the repo root:
