@@ -17,6 +17,7 @@ def main() -> None:
     parser.add_argument("--seasons", nargs="+", type=int, default=[2025], help="WNBA seasons to import.")
     parser.add_argument("--force-refresh", action="store_true", help="Fetch fresh ESPN data instead of using cache.")
     parser.add_argument("--player-stats", action="store_true", help="Also import ESPN player box scores and rebuild prop predictions.")
+    parser.add_argument("--missing-only", action="store_true", help="Only import ESPN player box scores for games missing player stats.")
     args = parser.parse_args()
 
     init_db()
@@ -31,7 +32,12 @@ def main() -> None:
                 f"{result['inserted_team_game_results']} team result rows"
             )
             if args.player_stats:
-                stats_result = import_espn_player_boxscores(conn, season, force_refresh=args.force_refresh)
+                stats_result = import_espn_player_boxscores(
+                    conn,
+                    season,
+                    force_refresh=args.force_refresh,
+                    missing_only=args.missing_only,
+                )
                 print(
                     f"{season}: imported {stats_result['inserted_player_game_stats']} player game rows, "
                     f"{stats_result['inserted_players']} new players"

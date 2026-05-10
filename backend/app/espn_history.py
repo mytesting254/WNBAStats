@@ -62,18 +62,13 @@ def import_espn_scoreboard(conn: sqlite3.Connection, season: int, force_refresh:
 
     for event in payload.get("events", []):
         competition = _competition(event)
-        if not competition or not _is_completed(competition):
+        if not competition:
             continue
 
         competitors = competition.get("competitors", [])
         home = _competitor(competitors, "home")
         away = _competitor(competitors, "away")
         if not home or not away:
-            continue
-
-        home_score = _parse_score(home)
-        away_score = _parse_score(away)
-        if home_score is None or away_score is None:
             continue
 
         home_team_id = _team_id(conn, home)
@@ -83,40 +78,46 @@ def import_espn_scoreboard(conn: sqlite3.Connection, season: int, force_refresh:
 
         start_time = str(event.get("date") or competition.get("date") or "")
         game_date = start_time[:10]
-        total = float(home_score + away_score)
-        game_id = _local_game_id(conn, game_date, home_team_id, away_team_id) or int(event["id"])
+        espn_event_id = int(event["id"])
+        game_id = _local_game_id(conn, game_date, home_team_id, away_team_id) or espn_event_id
+        status = _status(competition)
+        home_score = _parse_score(home)
+        away_score = _parse_score(away)
+        total = float(home_score + away_score) if home_score is not None and away_score is not None else None
 
-        conn.execute("DELETE FROM team_game_results WHERE game_id = ?", (game_id,))
         conn.execute(
             """
             INSERT INTO games (
                 id, game_date, start_time, home_team_id, away_team_id, status,
-                rest_days_home, rest_days_away, spread_home, game_total
-            ) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, NULL, ?)
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (?, ?, ?, ?, ?, ?, 2, 2, NULL, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 game_date = excluded.game_date,
                 start_time = excluded.start_time,
                 home_team_id = excluded.home_team_id,
                 away_team_id = excluded.away_team_id,
-                status = 'final',
-                game_total = excluded.game_total
+                status = excluded.status,
+                game_total = COALESCE(excluded.game_total, games.game_total),
+                espn_event_id = excluded.espn_event_id
             """,
-            (game_id, game_date, start_time, home_team_id, away_team_id, total),
+            (game_id, game_date, start_time, home_team_id, away_team_id, status, total, espn_event_id),
         )
-        conn.executemany(
-            """
-            INSERT INTO team_game_results (
-                team_id, game_id, is_home, points, opponent_points, possessions,
-                closing_spread, closing_total, ats_result, total_result
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (home_team_id, game_id, 1, home_score, away_score, 78.0, 0.0, total, "push", "push"),
-                (away_team_id, game_id, 0, away_score, home_score, 78.0, 0.0, total, "push", "push"),
-            ],
-        )
+        if status == "final" and home_score is not None and away_score is not None:
+            conn.execute("DELETE FROM team_game_results WHERE game_id = ?", (game_id,))
+            conn.executemany(
+                """
+                INSERT INTO team_game_results (
+                    team_id, game_id, is_home, points, opponent_points, possessions,
+                    closing_spread, closing_total, ats_result, total_result
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (home_team_id, game_id, 1, home_score, away_score, 78.0, 0.0, total, "push", "push"),
+                    (away_team_id, game_id, 0, away_score, home_score, 78.0, 0.0, total, "push", "push"),
+                ],
+            )
+            inserted_results += 2
         inserted_games += 1
-        inserted_results += 2
 
     conn.commit()
     return {
@@ -132,15 +133,29 @@ def import_espn_player_boxscores(
     season: int,
     force_refresh: bool = False,
     max_games: int | None = None,
+    missing_only: bool = False,
 ) -> dict:
     ensure_teams(conn)
-    games = conn.execute(
+    missing_filter = (
         """
+          AND NOT EXISTS (
+              SELECT 1
+              FROM player_game_stats stats
+              WHERE stats.game_id = games.id
+          )
+        """
+        if missing_only
+        else ""
+    )
+    games = conn.execute(
+        f"""
         SELECT id
+             , COALESCE(espn_event_id, id) AS summary_event_id
         FROM games
         WHERE status = 'final'
           AND game_date >= ?
           AND game_date < ?
+          {missing_filter}
         ORDER BY game_date DESC, start_time DESC
         """,
         (f"{season}-01-01", f"{season + 1}-01-01"),
@@ -153,8 +168,9 @@ def import_espn_player_boxscores(
     skipped_games = 0
     for game in games:
         game_id = int(game["id"])
+        summary_event_id = int(game["summary_event_id"])
         try:
-            payload = fetch_summary(game_id, force_refresh=force_refresh)
+            payload = fetch_summary(summary_event_id, force_refresh=force_refresh)
         except Exception:
             skipped_games += 1
             continue
@@ -202,6 +218,7 @@ def import_espn_player_boxscores(
         "skipped_games": skipped_games,
         "inserted_players": inserted_players,
         "inserted_player_game_stats": inserted_stats,
+        "missing_only": missing_only,
         "source": "espn_summary",
     }
 
@@ -214,6 +231,19 @@ def _competition(event: dict[str, Any]) -> dict[str, Any] | None:
 def _is_completed(competition: dict[str, Any]) -> bool:
     status_type = (competition.get("status") or {}).get("type") or {}
     return bool(status_type.get("completed")) or str(status_type.get("name", "")).upper() in {"STATUS_FINAL", "FINAL"}
+
+
+def _status(competition: dict[str, Any]) -> str:
+    status_type = (competition.get("status") or {}).get("type") or {}
+    name = str(status_type.get("name") or "").upper()
+    state = str(status_type.get("state") or "").lower()
+    if bool(status_type.get("completed")) or name in {"STATUS_FINAL", "FINAL"}:
+        return "final"
+    if name in {"STATUS_CANCELED", "STATUS_CANCELLED", "CANCELED", "CANCELLED"}:
+        return "canceled"
+    if state == "in":
+        return "in_progress"
+    return "scheduled"
 
 
 def _competitor(competitors: list[dict[str, Any]], home_away: str) -> dict[str, Any] | None:
@@ -246,6 +276,9 @@ def _local_game_id(conn: sqlite3.Connection, game_date: str, home_team_id: int, 
         WHERE game_date = ?
           AND home_team_id = ?
           AND away_team_id = ?
+        ORDER BY
+          CASE WHEN id >= 400000000 THEN 0 ELSE 1 END,
+          id
         LIMIT 1
         """,
         (game_date, home_team_id, away_team_id),

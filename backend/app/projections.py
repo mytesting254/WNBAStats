@@ -17,6 +17,8 @@ MARKET_COLUMNS = {
     "rebounds": "rebounds",
     "assists": "assists",
     "threes": "threes",
+    "steals": "steals",
+    "blocks": "blocks",
     "points_rebounds_assists": "points + rebounds + assists",
 }
 
@@ -25,6 +27,9 @@ MARKET_SIGMA_FLOORS = {
     "rebounds": 2.2,
     "assists": 1.8,
     "threes": 1.1,
+    "steals": 0.8,
+    "blocks": 0.7,
+    "blocks_steals": 1.1,
     "points_rebounds_assists": 5.0,
 }
 
@@ -231,6 +236,8 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
 def _market_value(row: sqlite3.Row, market: str) -> float:
     if market == "points_rebounds_assists":
         return float(row["points"] + row["rebounds"] + row["assists"])
+    if market == "blocks_steals":
+        return float(row["blocks"] + row["steals"])
     column = MARKET_COLUMNS.get(market)
     if not column:
         raise ValueError(f"Unsupported market: {market}")

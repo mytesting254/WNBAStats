@@ -40,6 +40,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE games ADD COLUMN spread_home REAL")
         if "game_total" not in game_columns:
             conn.execute("ALTER TABLE games ADD COLUMN game_total REAL")
+        if "espn_event_id" not in game_columns:
+            conn.execute("ALTER TABLE games ADD COLUMN espn_event_id INTEGER")
         result_columns = {row["name"] for row in conn.execute("PRAGMA table_info(team_game_results)").fetchall()}
         if result_columns and "possessions" not in result_columns:
             conn.execute("ALTER TABLE team_game_results ADD COLUMN possessions REAL NOT NULL DEFAULT 78.0")
@@ -78,6 +80,68 @@ def init_db() -> None:
             conn.execute("ALTER TABLE sportsbook_prop_lines ADD COLUMN provider_player_id INTEGER")
         if "provider_game_id" not in sportsbook_columns:
             conn.execute("ALTER TABLE sportsbook_prop_lines ADD COLUMN provider_game_id INTEGER")
+        settled_columns = {row["name"] for row in conn.execute("PRAGMA table_info(settled_props)").fetchall()}
+        if "player_minutes" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN player_minutes REAL")
+        if "game_margin" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN game_margin REAL")
+        if "team_margin" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN team_margin REAL")
+        if "team_spread" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN team_spread REAL")
+        if "blowout_result" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN blowout_result TEXT")
+        if "blowout_threshold" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN blowout_threshold REAL DEFAULT 15.0")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS game_predictions (
+                id INTEGER PRIMARY KEY,
+                game_id INTEGER NOT NULL,
+                model_version TEXT NOT NULL,
+                prediction_time TEXT NOT NULL,
+                home_projected_points REAL,
+                away_projected_points REAL,
+                projected_margin REAL,
+                projected_total REAL,
+                winner_pick TEXT NOT NULL,
+                ats_pick TEXT NOT NULL,
+                ats_edge REAL,
+                total_pick TEXT NOT NULL,
+                total_edge REAL,
+                confidence TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                spread_home REAL,
+                game_total REAL,
+                home_rest_days INTEGER,
+                away_rest_days INTEGER,
+                UNIQUE(game_id, model_version),
+                FOREIGN KEY (game_id) REFERENCES games(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS settled_game_predictions (
+                id INTEGER PRIMARY KEY,
+                game_prediction_id INTEGER NOT NULL UNIQUE,
+                game_id INTEGER NOT NULL,
+                home_score INTEGER NOT NULL,
+                away_score INTEGER NOT NULL,
+                actual_winner TEXT NOT NULL,
+                actual_margin REAL NOT NULL,
+                actual_total REAL NOT NULL,
+                actual_ats_pick TEXT,
+                actual_total_result TEXT,
+                winner_correct INTEGER NOT NULL,
+                ats_correct INTEGER,
+                total_correct INTEGER,
+                settled_at TEXT NOT NULL,
+                FOREIGN KEY (game_prediction_id) REFERENCES game_predictions(id),
+                FOREIGN KEY (game_id) REFERENCES games(id)
+            )
+            """
+        )
 
 
 SCHEMA = """
@@ -108,6 +172,7 @@ CREATE TABLE IF NOT EXISTS games (
     rest_days_away INTEGER DEFAULT 2,
     spread_home REAL,
     game_total REAL,
+    espn_event_id INTEGER,
     FOREIGN KEY (home_team_id) REFERENCES teams(id),
     FOREIGN KEY (away_team_id) REFERENCES teams(id)
 );
@@ -199,8 +264,57 @@ CREATE TABLE IF NOT EXISTS settled_props (
     actual_result REAL NOT NULL,
     winning_side TEXT NOT NULL,
     margin REAL NOT NULL,
+    player_minutes REAL,
+    game_margin REAL,
+    team_margin REAL,
+    team_spread REAL,
+    blowout_result TEXT,
+    blowout_threshold REAL DEFAULT 15.0,
     settled_at TEXT NOT NULL,
     FOREIGN KEY (prop_line_id) REFERENCES prop_lines(id)
+);
+
+CREATE TABLE IF NOT EXISTS game_predictions (
+    id INTEGER PRIMARY KEY,
+    game_id INTEGER NOT NULL,
+    model_version TEXT NOT NULL,
+    prediction_time TEXT NOT NULL,
+    home_projected_points REAL,
+    away_projected_points REAL,
+    projected_margin REAL,
+    projected_total REAL,
+    winner_pick TEXT NOT NULL,
+    ats_pick TEXT NOT NULL,
+    ats_edge REAL,
+    total_pick TEXT NOT NULL,
+    total_edge REAL,
+    confidence TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    spread_home REAL,
+    game_total REAL,
+    home_rest_days INTEGER,
+    away_rest_days INTEGER,
+    UNIQUE(game_id, model_version),
+    FOREIGN KEY (game_id) REFERENCES games(id)
+);
+
+CREATE TABLE IF NOT EXISTS settled_game_predictions (
+    id INTEGER PRIMARY KEY,
+    game_prediction_id INTEGER NOT NULL UNIQUE,
+    game_id INTEGER NOT NULL,
+    home_score INTEGER NOT NULL,
+    away_score INTEGER NOT NULL,
+    actual_winner TEXT NOT NULL,
+    actual_margin REAL NOT NULL,
+    actual_total REAL NOT NULL,
+    actual_ats_pick TEXT,
+    actual_total_result TEXT,
+    winner_correct INTEGER NOT NULL,
+    ats_correct INTEGER,
+    total_correct INTEGER,
+    settled_at TEXT NOT NULL,
+    FOREIGN KEY (game_prediction_id) REFERENCES game_predictions(id),
+    FOREIGN KEY (game_id) REFERENCES games(id)
 );
 
 CREATE TABLE IF NOT EXISTS model_runs (
@@ -220,5 +334,7 @@ CREATE INDEX IF NOT EXISTS idx_player_stats_player_game ON player_game_stats(pla
 CREATE INDEX IF NOT EXISTS idx_team_results_team_game ON team_game_results(team_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_prop_lines_game ON prop_lines(game_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_prop ON prop_predictions(prop_line_id);
+CREATE INDEX IF NOT EXISTS idx_game_predictions_game ON game_predictions(game_id);
+CREATE INDEX IF NOT EXISTS idx_settled_game_predictions_game ON settled_game_predictions(game_id);
 CREATE INDEX IF NOT EXISTS idx_model_runs_started ON model_runs(started_at);
 """

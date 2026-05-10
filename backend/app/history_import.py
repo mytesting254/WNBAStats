@@ -63,10 +63,10 @@ def parse_float(value: str | None) -> Optional[float]:
 def determine_ats_result(home_points: int, away_points: int, spread_home: Optional[float]) -> str:
     if spread_home is None:
         spread_home = 0.0
-    margin = home_points - away_points
-    if margin == spread_home:
+    spread_margin = (home_points - away_points) + spread_home
+    if spread_margin == 0:
         return "push"
-    return "cover" if margin > spread_home else "no_cover"
+    return "cover" if spread_margin > 0 else "no_cover"
 
 
 def determine_total_result(home_points: int, away_points: int, game_total: Optional[float]) -> str:

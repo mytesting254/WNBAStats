@@ -6,7 +6,7 @@ import sqlite3
 WNBA_TEAMS = [
     (1, "ATL", "Atlanta Dream", "/team-logos/atl.png"),
     (2, "CHI", "Chicago Sky", "/team-logos/chi.png"),
-    (3, "CON", "Connecticut Sun", "/team-logos/con.png"),
+    (3, "CON", "Connecticut Sun", "/team-logos/conn.png"),
     (4, "DAL", "Dallas Wings", "/team-logos/dal.png"),
     (5, "GS", "Golden State Valkyries", "/team-logos/gs.png"),
     (6, "IND", "Indiana Fever", "/team-logos/ind.png"),

@@ -6,6 +6,7 @@ import {
   fetchModelRuns,
   fetchPerformance,
   fetchValueBoard,
+  importCoversOdds,
   importEspnHistory,
   importOdds,
   recalculate,
@@ -24,7 +25,10 @@ const markets = [
   { id: "rebounds", label: "REB" },
   { id: "assists", label: "AST" },
   { id: "points_rebounds_assists", label: "PRA" },
-  { id: "threes", label: "3PM" }
+  { id: "threes", label: "3PM" },
+  { id: "steals", label: "STL" },
+  { id: "blocks", label: "BLK" },
+  { id: "blocks_steals", label: "STL+BLK" }
 ];
 
 type DashboardTab = "props" | "matchups" | "parlays" | "discrepancies" | "models" | "data";
@@ -41,6 +45,7 @@ export function App() {
   const [latestModelRun, setLatestModelRun] = useState<ModelRun | null>(null);
   const [training, setTraining] = useState(false);
   const [importingOdds, setImportingOdds] = useState(false);
+  const [importingCoversOdds, setImportingCoversOdds] = useState(false);
   const [refreshingResults, setRefreshingResults] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("matchups");
@@ -136,10 +141,25 @@ export function App() {
     }
   }
 
-  async function handleRefreshResults(forceRefresh = false, includeBoxscores = true, includeOdds = true) {
+  async function handleImportCoversOdds(forceRefresh = false) {
+    setImportingCoversOdds(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await importCoversOdds(forceRefresh);
+      await load();
+      setOperationStatus(`${forceRefresh ? "Fresh" : "Saved"} Covers odds loaded. Imported ${result.imported ?? 0} sportsbook rows from ${result.source ?? "covers"}.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to import Covers odds");
+    } finally {
+      setImportingCoversOdds(false);
+    }
+  }
+
+  async function handleRefreshResults(forceRefresh = false, includePlayerStats = true, missingOnly = false) {
     if (forceRefresh) {
       const confirmed = window.confirm(
-        "Hard refresh will fetch fresh SportsDataIO data and may use API quota. Continue?"
+        "Hard refresh will fetch fresh ESPN completed game and box score data. Continue?"
       );
       if (!confirmed) {
         return;
@@ -149,10 +169,10 @@ export function App() {
     setError(null);
     setOperationStatus(null);
     try {
-      const result = await importEspnHistory(forceRefresh, includeBoxscores, includeOdds);
+      const result = await importEspnHistory(forceRefresh, includePlayerStats, missingOnly);
       await load();
       setOperationStatus(
-        `${forceRefresh ? "Fresh" : "Saved"} completed game data loaded for ${result.seasons?.join(", ") ?? result.season}. Synced ${result.synced_props ?? 0} model prop lines.`
+        `${missingOnly ? "Missing" : forceRefresh ? "Fresh" : "Saved"} ESPN completed games and box scores loaded for ${result.seasons?.join(", ") ?? result.season}. Synced ${result.synced_props ?? 0} model prop lines and settled ${result.settlements?.settled ?? 0} props.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to refresh completed results");
@@ -240,12 +260,14 @@ export function App() {
           error={error}
           status={operationStatus}
           importingOdds={importingOdds}
+          importingCoversOdds={importingCoversOdds}
           refreshingResults={refreshingResults}
           recalculating={recalculating}
           propsCount={props.length}
           matchupsCount={matchups.length}
           discrepanciesCount={discrepancies.length}
           onImportOdds={handleImportOdds}
+          onImportCoversOdds={handleImportCoversOdds}
           onRefreshResults={handleRefreshResults}
           onRecalculate={handleRecalculate}
           onReload={load}
@@ -262,12 +284,14 @@ function DataView({
   error,
   status,
   importingOdds,
+  importingCoversOdds,
   refreshingResults,
   recalculating,
   propsCount,
   matchupsCount,
   discrepanciesCount,
   onImportOdds,
+  onImportCoversOdds,
   onRefreshResults,
   onRecalculate,
   onReload
@@ -276,13 +300,15 @@ function DataView({
   error: string | null;
   status: string | null;
   importingOdds: boolean;
+  importingCoversOdds: boolean;
   refreshingResults: boolean;
   recalculating: boolean;
   propsCount: number;
   matchupsCount: number;
   discrepanciesCount: number;
   onImportOdds: (forceRefresh: boolean) => void;
-  onRefreshResults: (forceRefresh: boolean, includeBoxscores?: boolean, includeOdds?: boolean) => void;
+  onImportCoversOdds: (forceRefresh: boolean) => void;
+  onRefreshResults: (forceRefresh: boolean, includePlayerStats?: boolean, missingOnly?: boolean) => void;
   onRecalculate: () => void;
   onReload: () => void;
 }) {
@@ -300,24 +326,34 @@ function DataView({
         {status && <div className="success">{status}</div>}
         <div className="data-layout">
           <OperationCard
-            title="Sportsbook Odds"
-            description="Update prop prices, lines, line discrepancies, and current matchup markets."
+            title="The Odds API"
+            description="Update prop prices, lines, line discrepancies, and current matchup markets from The Odds API."
             metrics={`${propsCount} model props | ${discrepanciesCount} line gaps`}
             primaryLabel={importingOdds ? "Loading" : "Load Saved Odds"}
             secondaryLabel="Refresh Odds"
-            disabled={importingOdds || refreshingResults || loading}
+            disabled={importingOdds || importingCoversOdds || refreshingResults || loading}
             onPrimary={() => onImportOdds(false)}
             onSecondary={() => onImportOdds(true)}
           />
           <OperationCard
-            title="Completed Games"
+            title="Covers Odds"
+            description="Import today's Covers matchup prop tables without using The Odds API credits."
+            metrics={`${propsCount} model props | ${discrepanciesCount} line gaps`}
+            primaryLabel={importingCoversOdds ? "Loading" : "Load Saved Covers"}
+            secondaryLabel="Refresh Covers"
+            disabled={importingOdds || importingCoversOdds || refreshingResults || loading}
+            onPrimary={() => onImportCoversOdds(false)}
+            onSecondary={() => onImportCoversOdds(true)}
+          />
+          <OperationCard
+            title="ESPN Completed Games"
             description="Import final scores and player box scores so projections use actual game history."
             metrics={`${matchupsCount} upcoming games`}
-            primaryLabel={refreshingResults ? "Loading" : "Load Saved Results"}
-            secondaryLabel="Hard Refresh Results"
-            disabled={refreshingResults || importingOdds || loading}
+            primaryLabel={refreshingResults ? "Loading" : "Load Missing ESPN"}
+            secondaryLabel="Refresh ESPN"
+            disabled={refreshingResults || importingOdds || importingCoversOdds || loading}
             onPrimary={() => onRefreshResults(false, true, true)}
-            onSecondary={() => onRefreshResults(true, true, true)}
+            onSecondary={() => onRefreshResults(true, true, false)}
           />
           <OperationCard
             title="Projection Board"
@@ -325,7 +361,7 @@ function DataView({
             metrics={`${propsCount} current predictions`}
             primaryLabel={recalculating ? "Recalculating" : "Recalculate"}
             secondaryLabel="Reload Views"
-            disabled={refreshingResults || importingOdds || loading || recalculating}
+            disabled={refreshingResults || importingOdds || importingCoversOdds || loading || recalculating}
             onPrimary={onRecalculate}
             onSecondary={onReload}
           />
@@ -767,7 +803,7 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
       <div className="board-panel">
         <div className="panel-header">
           <div>
-            <h2>Upcoming Games</h2>
+            <h2>Today's Games</h2>
             <p>{loading ? "Loading matchups" : "Last 10 form, home/away split, ATS, and totals"}</p>
           </div>
           <ShieldCheck size={20} />
@@ -803,7 +839,7 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
                   <span className={`risk-pill ${riskClass(selectedMatchup.blowout_risk)}`}>
                     Blowout {selectedMatchup.blowout_risk}
                   </span>
-                  <span className="rest-pill">Spread {formatSpread(selectedMatchup.spread_home)}</span>
+                  <span className="rest-pill">Line {selectedMatchup.home_team} {formatSpread(selectedMatchup.spread_home)}</span>
                   <span className="rest-pill">Total {selectedMatchup.game_total?.toFixed(1) ?? "N/A"}</span>
                   <span className="rest-pill">{selectedMatchup.away_team} {restLabel(selectedMatchup.away_rest_days)}</span>
                   <span className="rest-pill">{selectedMatchup.home_team} {restLabel(selectedMatchup.home_rest_days)}</span>
@@ -818,8 +854,8 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
                 <MiniStat label="Winner" value={selectedMatchup.winner_pick} />
                 <MiniStat label="ATS" value={selectedMatchup.ats_pick} />
                 <MiniStat label="ATS Edge" value={formatNullableEdge(selectedMatchup.ats_edge)} />
-                <MiniStat label="Total" value={formatProjectedTotal(selectedMatchup)} />
-                <MiniStat label="Total Edge" value={formatNullableEdge(selectedMatchup.total_edge)} />
+                <MiniStat label="Model Total" value={formatProjectedTotal(selectedMatchup)} />
+                <MiniStat label="O/U Edge" value={formatNullableEdge(selectedMatchup.total_edge)} />
                 <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
               </div>
               <p className="reason matchup-reason">{selectedMatchup.game_reason}</p>
@@ -1190,7 +1226,7 @@ function TeamSummary({
           <div key={`${team}-${game.game_date}-${game.opponent}`}>
             <span>{game.is_home ? "vs" : "at"} {game.opponent}</span>
             <strong>{game.points}-{game.opponent_points}</strong>
-            <em>{atsLabel(game.ats_result)} | {game.total_result.toUpperCase()}</em>
+            <em>{atsLabel(game.ats_result)} | {totalLabel(game.total_result)}</em>
           </div>
         ))}
       </div>
@@ -1199,10 +1235,16 @@ function TeamSummary({
 }
 
 function TeamLogo({ src, alt }: { src?: string | null; alt: string }) {
-  if (!src) {
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
+  if (!src || failed) {
     return <div className="team-logo fallback" aria-hidden="true" />;
   }
-  return <img className="team-logo" src={src} alt={alt} loading="lazy" />;
+  return <img className="team-logo" src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} />;
 }
 
 function MiniStat({ label, value }: { label: string; value: string }) {
@@ -1302,6 +1344,9 @@ function marketLabel(market: string) {
     rebounds: "REB",
     assists: "AST",
     threes: "3PM",
+    steals: "STL",
+    blocks: "BLK",
+    blocks_steals: "STL+BLK",
     points_rebounds_assists: "PRA"
   };
   return labels[market] ?? market;
@@ -1388,17 +1433,26 @@ function countDiscrepancyBooks(discrepancies: LineDiscrepancy[]) {
 function groupDiscrepanciesByMatchup(discrepancies: LineDiscrepancy[]) {
   const groups = new Map<string, { key: string; matchup: string; commence_time: string; items: LineDiscrepancy[] }>();
   for (const item of discrepancies) {
-    const key = `${item.commence_time}-${item.matchup}`;
+    const normalizedTime = normalizedDateKey(item.commence_time);
+    const key = `${normalizedTime}-${item.matchup}`;
     const group = groups.get(key) ?? {
       key,
       matchup: item.matchup,
-      commence_time: item.commence_time,
+      commence_time: normalizedTime,
       items: []
     };
     group.items.push(item);
     groups.set(key, group);
   }
   return Array.from(groups.values()).sort((a, b) => new Date(a.commence_time).getTime() - new Date(b.commence_time).getTime());
+}
+
+function normalizedDateKey(value: string) {
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) {
+    return value;
+  }
+  return new Date(time).toISOString();
 }
 
 function atsLabel(value: string) {
@@ -1408,7 +1462,17 @@ function atsLabel(value: string) {
   if (value === "no_cover") {
     return "ATS L";
   }
+  if (value === "unknown") {
+    return "ATS N/A";
+  }
   return "ATS P";
+}
+
+function totalLabel(value: string) {
+  if (value === "unknown") {
+    return "N/A";
+  }
+  return value.toUpperCase();
 }
 
 function restLabel(days: number | null) {

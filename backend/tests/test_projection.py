@@ -6,11 +6,19 @@ import pytest
 
 from backend.app.bootstrap import ensure_teams
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
+from backend.app.covers_import import CoversGame, _event_rows, _metadata_from_page
 from backend.app.db import connect, init_db
+from backend.app.espn_history import import_espn_player_boxscores, import_espn_scoreboard
+from backend.app.game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
 from backend.app.game_predictions import project_game
+from backend.app.history_import import determine_ats_result
+from backend.app.main import app, import_espn_history as import_espn_history_endpoint
 from backend.app.odds import american_to_implied_probability, expected_value
-from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies
+from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies, sync_prop_lines_from_sportsbook
+from backend.app.player_prop_model import _market_value as learned_market_value
+from backend.app.projections import _market_value as component_market_value
 from backend.app.projections import rebuild_predictions
+from backend.app.settlement import settle_completed_props
 from backend.app.training import run_walk_forward_training
 
 
@@ -145,6 +153,43 @@ def test_american_odds_helpers() -> None:
     assert expected_value(0.55, -110) > 0
 
 
+def test_ats_result_uses_home_spread_sign() -> None:
+    assert determine_ats_result(82, 78, -5.5) == "no_cover"
+    assert determine_ats_result(82, 78, -4.0) == "push"
+    assert determine_ats_result(82, 78, -3.5) == "cover"
+    assert determine_ats_result(78, 82, 5.5) == "cover"
+    assert determine_ats_result(78, 82, 3.5) == "no_cover"
+
+
+def test_covers_import_route_is_registered() -> None:
+    methods_by_path = {route.path: getattr(route, "methods", set()) for route in app.routes}
+    assert "POST" in methods_by_path["/api/covers/import"]
+
+
+def test_espn_history_settles_before_rebuilding_prop_lines(monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_scoreboard(conn, season, force_refresh=False):
+        return {"season": season}
+
+    def fake_settle(conn):
+        calls.append("settle")
+        return {"settled": 1}
+
+    def fake_sync(conn):
+        calls.append("sync")
+        return 0
+
+    monkeypatch.setattr("backend.app.main.import_espn_scoreboard", fake_scoreboard)
+    monkeypatch.setattr("backend.app.main.settle_completed_props", fake_settle)
+    monkeypatch.setattr("backend.app.main.sync_prop_lines_from_sportsbook", fake_sync)
+
+    result = import_espn_history_endpoint(season=2026, include_player_stats=False, include_previous_season=False)
+
+    assert calls == ["settle", "sync"]
+    assert result["settlements"] == {"settled": 1}
+
+
 def test_fixture_builds_ranked_predictions() -> None:
     load_test_history()
     with connect() as conn:
@@ -215,6 +260,34 @@ def test_accuracy_analysis_uses_completed_player_stats() -> None:
     assert worst[0].abs_error == 1.0
 
 
+def test_settle_completed_props_writes_actual_results() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9101, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        first = settle_completed_props(conn)
+        second = settle_completed_props(conn)
+        row = conn.execute("SELECT * FROM settled_props WHERE prop_line_id = 9101").fetchone()
+
+    assert first["settled"] == 1
+    assert second["settled"] == 0
+    assert row["actual_result"] == 19.0
+    assert row["winning_side"] == "under"
+    assert row["margin"] == -1.5
+    assert row["player_minutes"] == 32.0
+    assert row["game_margin"] == 6.0
+    assert row["team_margin"] == 6.0
+    assert row["team_spread"] == -4.5
+    assert row["blowout_result"] == "no"
+
+
 def test_game_projection_returns_picks() -> None:
     load_test_history()
     with connect() as conn:
@@ -236,6 +309,51 @@ def test_game_projection_returns_picks() -> None:
     assert result["winner_pick"] in {"NY", "CON"}
     assert result["projected_total"] > 0
     assert result["ats_pick"] != "N/A"
+
+
+def test_game_predictions_are_saved_and_settled() -> None:
+    load_test_history()
+    with connect() as conn:
+        game = conn.execute(
+            """
+            SELECT
+                g.*,
+                home.abbreviation AS home_team,
+                away.abbreviation AS away_team
+            FROM games g
+            JOIN teams home ON home.id = g.home_team_id
+            JOIN teams away ON away.id = g.away_team_id
+            WHERE g.id = 2010
+            """
+        ).fetchone()
+        prediction = project_game(conn, game)
+        prediction_id = save_game_prediction(conn, game, prediction)
+        saved = conn.execute("SELECT * FROM game_predictions WHERE id = ?", (prediction_id,)).fetchone()
+
+        conn.execute("UPDATE games SET status = 'final' WHERE id = 2010")
+        conn.executemany(
+            """
+            INSERT INTO team_game_results (
+                team_id, game_id, is_home, points, opponent_points, possessions,
+                closing_spread, closing_total, ats_result, total_result
+            ) VALUES (?, 2010, ?, ?, ?, 78.0, ?, ?, 'push', 'push')
+            """,
+            [
+                (10, 1, 82, 76, -5.5, 164.5),
+                (3, 0, 76, 82, 5.5, 164.5),
+            ],
+        )
+        result = settle_completed_game_predictions(conn)
+        settled = conn.execute("SELECT * FROM settled_game_predictions WHERE game_prediction_id = ?", (prediction_id,)).fetchone()
+
+    assert saved["winner_pick"] in {"NY", "CON"}
+    assert saved["total_pick"] in {"Over", "Under"}
+    assert result["settled"] == 1
+    assert settled["actual_winner"] == "NY"
+    assert settled["actual_margin"] == 6.0
+    assert settled["actual_total"] == 158.0
+    assert settled["actual_ats_pick"] == "NY"
+    assert settled["actual_total_result"] == "Under"
 
 
 def test_odds_import_requires_api_key(monkeypatch) -> None:
@@ -336,6 +454,52 @@ def test_odds_import_syncs_model_prop_lines_from_sportsbook(monkeypatch) -> None
     assert row["under_odds"] == 114
 
 
+def test_odds_sync_preserves_settled_prop_lines() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9201, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        settlements = settle_completed_props(conn)
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("test", "evt", 100, "2026-04-01", "2026-04-01T19:00:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 20.5, -110, captured_at),
+                ("test", "evt", 100, "2026-04-01", "2026-04-01T19:00:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 20.5, -110, captured_at),
+            ],
+        )
+
+        synced = sync_prop_lines_from_sportsbook(conn)
+        matching_lines = conn.execute(
+            """
+            SELECT pl.id
+            FROM prop_lines pl
+            WHERE pl.game_id = 100
+              AND pl.player_id = 1001
+              AND pl.sportsbook = 'DraftKings'
+              AND pl.market = 'points'
+              AND pl.line = 20.5
+            """
+        ).fetchall()
+        settled = conn.execute("SELECT * FROM settled_props WHERE prop_line_id = 9201").fetchone()
+
+    assert settlements["settled"] >= 1
+    assert synced == 1
+    assert [row["id"] for row in matching_lines] == [9201]
+    assert settled is not None
+
+
 def test_odds_refresh_merges_cached_future_events() -> None:
     cached = [
         {"id": "future-a", "commence_time": "2026-05-10T00:00:00Z", "bookmakers": []},
@@ -349,6 +513,180 @@ def test_odds_refresh_merges_cached_future_events() -> None:
     by_id = {event["id"]: event for event in merged}
     assert set(by_id) == {"future-a", "replace-me", "new-event"}
     assert by_id["replace-me"]["bookmakers"][0]["key"] == "new"
+
+
+def test_covers_parser_extracts_player_prop_rows() -> None:
+    html = """
+    <script type="application/ld+json">
+    {"startDate": "05/10/2026 17:00:00 &#x2B;00:00"}
+    </script>
+    <article id="901">
+      <h2 class="fs-9">Points Scored</h2>
+      <div class="playerContainer">
+        <span class="category fw-bold text-nowrap">Brittney Griner</span>
+      </div>
+      <caption class="visually-hidden">Game Odds Seattle Storm vs. Connecticut Sun</caption>
+      <a data-linkcont="matchup-odds-compare_odds-click-wnba-points_scored-over-bet365">
+        <span class="fw-bold fs-12">o13.5</span>
+        <span class="fw-bold americanOdds fs-13">&#x2B;102</span>
+      </a>
+      <a data-linkcont="matchup-odds-compare_odds-click-wnba-points_scored-under-bet365">
+        <span class="fw-bold fs-12">u13.5</span>
+        <span class="fw-bold americanOdds fs-13">-130</span>
+      </a>
+    </article>
+    """
+    with connect() as conn:
+        metadata = _metadata_from_page(conn, CoversGame("373849", "https://example.test/odds"), html)
+        rows = _event_rows(metadata, html, "2026-05-10T12:00:00+00:00")
+
+    assert metadata.away_team == "Seattle Storm"
+    assert metadata.home_team == "Connecticut Sun"
+    assert metadata.commence_time == "2026-05-10T17:00:00+00:00"
+    assert len(rows) == 2
+    assert rows[0][0] == "covers"
+    assert rows[0][8] == "bet365"
+    assert rows[0][10] == "points"
+    assert rows[0][11] == "Brittney Griner"
+    assert rows[0][12] == "over"
+    assert rows[0][13] == 13.5
+    assert rows[0][14] == 102
+    assert rows[1][12] == "under"
+    assert rows[1][14] == -130
+
+
+def test_covers_parser_extracts_matchup_line_and_total() -> None:
+    html = """
+    <script type="application/ld+json">
+    {"startDate": "05/10/2026 20:30:00 &#x2B;00:00", "name": "Phoenix Mercury vs Golden State Valkyries"}
+    </script>
+    <section>
+      <h2>PHO vs GS Records</h2>
+      <div>Team Spread Total ML</div>
+      <div>PHO +2.5 -105 o158.5 -110 +125</div>
+      <div>GS -2.5 -115 u158.5 -110 -150</div>
+    </section>
+    """
+    with connect() as conn:
+        metadata = _metadata_from_page(conn, CoversGame("373853", "https://example.test/odds"), html)
+        game = conn.execute("SELECT * FROM games WHERE id = ?", (metadata.game_id,)).fetchone()
+
+    assert metadata.spread_home == -2.5
+    assert metadata.game_total == 158.5
+    assert game["spread_home"] == -2.5
+    assert game["game_total"] == 158.5
+
+
+def test_espn_boxscore_missing_only_skips_games_with_stats(monkeypatch) -> None:
+    load_test_history()
+    fetched_game_ids: list[int] = []
+
+    def fake_fetch_summary(game_id: int, force_refresh: bool = False) -> dict:
+        fetched_game_ids.append(game_id)
+        return {"boxscore": {"players": []}}
+
+    monkeypatch.setattr("backend.app.espn_history.fetch_summary", fake_fetch_summary)
+
+    with connect() as conn:
+        result = import_espn_player_boxscores(conn, 2026, missing_only=True)
+
+    assert result["missing_only"] is True
+    assert result["games_checked"] == 0
+    assert fetched_game_ids == []
+
+
+def test_espn_boxscore_uses_mapped_event_id(monkeypatch) -> None:
+    fetched_game_ids: list[int] = []
+
+    def fake_fetch_summary(game_id: int, force_refresh: bool = False) -> dict:
+        fetched_game_ids.append(game_id)
+        return {
+            "boxscore": {
+                "players": [
+                    {
+                        "team": {"abbreviation": "CON"},
+                        "statistics": [
+                            {
+                                "labels": ["MIN", "PTS", "REB", "AST", "3PT", "STL", "BLK", "TO"],
+                                "athletes": [
+                                    {
+                                        "athlete": {
+                                            "id": "3001",
+                                            "displayName": "Mapped Player",
+                                            "position": {"abbreviation": "G"},
+                                        },
+                                        "starter": True,
+                                        "stats": ["31", "18", "5", "4", "2-5", "1", "0", "2"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr("backend.app.espn_history.fetch_summary", fake_fetch_summary)
+
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (2232, '2026-05-10', '2026-05-10T17:00Z', 13, 3, 'final', 2, 2, 1.5, 171.0, 401999999)
+            """
+        )
+        result = import_espn_player_boxscores(conn, 2026, missing_only=True)
+        stat = conn.execute("SELECT * FROM player_game_stats WHERE game_id = 2232 AND player_id = 3001").fetchone()
+
+    assert fetched_game_ids == [401999999]
+    assert result["inserted_player_game_stats"] == 1
+    assert stat["points"] == 18
+
+
+def test_espn_scoreboard_imports_scheduled_games(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.espn_history.fetch_scoreboard",
+        lambda season, force_refresh=False: {
+            "events": [
+                {
+                    "id": "777001",
+                    "date": "2026-06-01T23:00:00Z",
+                    "competitions": [
+                        {
+                            "status": {"type": {"name": "STATUS_SCHEDULED", "state": "pre", "completed": False}},
+                            "competitors": [
+                                {"homeAway": "home", "score": "", "team": {"abbreviation": "NY", "displayName": "New York Liberty"}},
+                                {"homeAway": "away", "score": "", "team": {"abbreviation": "CONN", "displayName": "Connecticut Sun"}},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    with connect() as conn:
+        result = import_espn_scoreboard(conn, 2026)
+        game = conn.execute("SELECT * FROM games WHERE id = 777001").fetchone()
+        result_rows = conn.execute("SELECT * FROM team_game_results WHERE game_id = 777001").fetchall()
+
+    assert result["inserted_games"] == 1
+    assert result["inserted_team_game_results"] == 0
+    assert game["status"] == "scheduled"
+    assert game["espn_event_id"] == 777001
+    assert len(result_rows) == 0
+
+
+def test_defensive_markets_are_projectable() -> None:
+    load_test_history()
+    with connect() as conn:
+        row = conn.execute("SELECT * FROM player_game_stats WHERE player_id = 1001 LIMIT 1").fetchone()
+    assert component_market_value(row, "steals") == 1.0
+    assert component_market_value(row, "blocks") == 1.0
+    assert component_market_value(row, "blocks_steals") == 2.0
+    assert learned_market_value(row, "blocks_steals") == 2.0
 
 
 def test_line_discrepancies_group_books() -> None:

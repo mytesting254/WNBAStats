@@ -199,7 +199,15 @@ export async function fetchLineDiscrepancies(): Promise<LineDiscrepancy[]> {
   return response.json();
 }
 
-export async function importOdds(forceRefresh = false): Promise<{ status: string; imported: number; message?: string; source?: string }> {
+export type OddsImportResult = {
+  status: string;
+  imported?: number;
+  synced_props?: number;
+  message?: string;
+  source?: string;
+};
+
+export async function importOdds(forceRefresh = false): Promise<OddsImportResult> {
   const response = await fetch(`/api/odds/import?force_refresh=${forceRefresh ? "true" : "false"}`, { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to import sportsbook odds");
@@ -207,27 +215,24 @@ export async function importOdds(forceRefresh = false): Promise<{ status: string
   return response.json();
 }
 
+export async function importCoversOdds(forceRefresh = false): Promise<OddsImportResult> {
+  const response = await fetch(`/api/covers/import?force_refresh=${forceRefresh ? "true" : "false"}`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to import Covers odds");
+  }
+  return response.json();
+}
+
 export async function importEspnHistory(
   forceRefresh = true,
-  includeBoxscores = true,
-  includeOdds = true
-): Promise<{ season: number; seasons: number[]; synced_props: number; source: string }> {
-  const response = await fetch(
-    `/api/sportsdataio/import?force_refresh=${forceRefresh ? "true" : "false"}&include_boxscores=${includeBoxscores ? "true" : "false"}&include_odds=${includeOdds ? "true" : "false"}`,
-    { method: "POST" }
-  );
+  includePlayerStats = true,
+  missingOnly = false
+): Promise<{ season: number; seasons: number[]; synced_props: number; source: string; settlements?: { settled: number } }> {
+  const response = await fetch(`/api/history/import/espn?force_refresh=${forceRefresh ? "true" : "false"}&include_player_stats=${includePlayerStats ? "true" : "false"}&include_previous_season=true&missing_only=${missingOnly ? "true" : "false"}`, { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to refresh completed game results");
   }
-  const result = await response.json();
-  if (result.status === "missing_api_key") {
-    const fallback = await fetch(`/api/history/import/espn?force_refresh=${forceRefresh ? "true" : "false"}&include_player_stats=${includeBoxscores ? "true" : "false"}&include_previous_season=true`, { method: "POST" });
-    if (!fallback.ok) {
-      throw new Error(result.message ?? "Failed to refresh completed game results");
-    }
-    return fallback.json();
-  }
-  return result;
+  return response.json();
 }
 
 export async function recalculate(): Promise<void> {

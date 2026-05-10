@@ -29,6 +29,9 @@ MARKETS = {
     "player_assists": "assists",
     "player_threes": "threes",
     "player_points_rebounds_assists": "points_rebounds_assists",
+    "player_steals": "steals",
+    "player_blocks": "blocks",
+    "player_blocks_steals": "blocks_steals",
 }
 
 TEAM_ALIASES = {
@@ -137,27 +140,62 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
         ORDER BY spl.game_id, spl.player_name, spl.market, spl.sportsbook, spl.line
         """
     ).fetchall()
+    settled_keys = {
+        (
+            int(row["game_id"]),
+            int(row["player_id"]),
+            row["sportsbook"],
+            row["market"],
+            float(row["line"]),
+        )
+        for row in conn.execute(
+            """
+            SELECT pl.game_id, pl.player_id, pl.sportsbook, pl.market, pl.line
+            FROM prop_lines pl
+            JOIN settled_props sp ON sp.prop_line_id = pl.id
+            """
+        ).fetchall()
+    }
+    insert_rows = [
+        (
+            row["game_id"],
+            row["player_id"],
+            row["sportsbook"],
+            row["market"],
+            row["line"],
+            int(row["over_odds"]),
+            int(row["under_odds"]),
+            row["captured_at"],
+        )
+        for row in rows
+        if (
+            int(row["game_id"]),
+            int(row["player_id"]),
+            row["sportsbook"],
+            row["market"],
+            float(row["line"]),
+        )
+        not in settled_keys
+    ]
+
     conn.execute("DELETE FROM prop_predictions")
-    conn.execute("DELETE FROM prop_lines")
+    conn.execute(
+        """
+        DELETE FROM prop_lines
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM settled_props sp
+            WHERE sp.prop_line_id = prop_lines.id
+        )
+        """
+    )
     conn.executemany(
         """
         INSERT INTO prop_lines (
             game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        [
-            (
-                row["game_id"],
-                row["player_id"],
-                row["sportsbook"],
-                row["market"],
-                row["line"],
-                int(row["over_odds"]),
-                int(row["under_odds"]),
-                row["captured_at"],
-            )
-            for row in rows
-        ],
+        insert_rows,
     )
     rebuild_predictions(conn)
     return len(rows)
@@ -371,22 +409,23 @@ def _match_or_create_local_game(conn: sqlite3.Connection, event: dict) -> int | 
     away = TEAM_ALIASES.get(str(event.get("away_team", "")).lower())
     if not home or not away:
         return None
-    game_date = _game_date(event["commence_time"])
-    row = conn.execute(
+    commence_time = _parse_utc(str(event["commence_time"]))
+    rows = conn.execute(
         """
-        SELECT g.id
+        SELECT g.id, g.start_time
         FROM games g
         JOIN teams home ON home.id = g.home_team_id
         JOIN teams away ON away.id = g.away_team_id
-        WHERE g.game_date = ?
-          AND home.abbreviation = ?
+        WHERE home.abbreviation = ?
           AND away.abbreviation = ?
-        LIMIT 1
+        ORDER BY g.start_time
         """,
-        (game_date, home, away),
-    ).fetchone()
-    if row:
-        return int(row["id"])
+        (home, away),
+    ).fetchall()
+    for row in rows:
+        existing_start = _parse_game_start(str(row["start_time"]))
+        if existing_start and abs((existing_start - commence_time).total_seconds()) < 60:
+            return int(row["id"])
 
     home_team_id = ensure_team(conn, str(event.get("home_team", "")))
     away_team_id = ensure_team(conn, str(event.get("away_team", "")))
@@ -411,3 +450,13 @@ def _game_date(commence_time: str) -> str:
 
 def _parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _parse_game_start(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=LOCAL_TZ)
+    return parsed.astimezone(timezone.utc)

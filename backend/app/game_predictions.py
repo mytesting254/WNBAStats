@@ -27,7 +27,7 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     projected_margin = home_projection - away_projection
     projected_total = home_projection + away_projection
     spread_home = float(game["spread_home"]) if game["spread_home"] is not None else None
-    game_total = float(game["game_total"]) if game["game_total"] is not None else None
+    game_total = float(game["game_total"]) if game["game_total"] is not None and float(game["game_total"]) > 0 else None
 
     ats_edge = None
     ats_pick = "N/A"

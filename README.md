@@ -53,11 +53,13 @@ GET  /api/odds/cache
 GET  /api/line-discrepancies
 GET  /api/model-performance
 GET  /api/models/runs
+GET  /api/matchups
 POST /api/odds/import
-POST /api/sportsdataio/import
+POST /api/covers/import
 POST /api/history/import/espn
 POST /api/models/train
 POST /api/recalculate
+POST /api/settle-props
 ```
 
 ## App Tabs
@@ -69,7 +71,7 @@ POST /api/recalculate
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history.
 - `Data`: operational controls for saved/fresh odds import, completed-game import, projection rebuilds, and reloads.
 
-## Sportsbook Odds Import
+## Pregame Odds Import
 
 Live sportsbook prop import uses The Odds API from the backend only. Set an API key before starting the API:
 
@@ -114,39 +116,28 @@ player_rebounds
 player_assists
 player_threes
 player_points_rebounds_assists
+player_steals
+player_blocks
+player_blocks_steals
 ```
 
-## SportsDataIO Import
+## Covers Matchup Import
 
-SportsDataIO is the preferred provider when `SPORTSDATAIO_API_KEY` is set in `.env`:
+Covers is used for matchup pages that publish WNBA pregame lines, totals, team records, ATS/O-U records, and player prop tables. The importer reads the Covers matchup pages, stores the raw payload in `data/cache/covers_props_raw.json`, updates matching `games.spread_home` and `games.game_total`, and writes player prop offers into `sportsbook_prop_lines` with provider `covers`.
 
-```powershell
-$env:SPORTSDATAIO_API_KEY="your_key_here"
-```
-
-Or add it to `.env`:
+Refresh from the app or call:
 
 ```text
-SPORTSDATAIO_API_KEY=your_key_here
+POST /api/covers/import?force_refresh=true
 ```
 
-Refresh from the app with `Refresh Results`, or call:
+For a specific date:
 
 ```text
-POST /api/sportsdataio/import?season=2026&force_refresh=true&include_boxscores=true&include_odds=true
+POST /api/covers/import?selected_date=2026-05-10&force_refresh=true
 ```
 
-The SportsDataIO importer loads schedule/results, final player box scores, and sportsbook player props when your key has access to those feeds. If the key is missing, the app falls back to the ESPN history importer for completed games and player box scores.
-
-Use `force_refresh=false` to reuse saved SportsDataIO JSON from `data/cache/` and avoid repeat provider calls.
-
-SportsDataIO cache files:
-
-```text
-data/cache/sportsdataio_games_<season>.json
-data/cache/sportsdataio_boxscore_<game_id>.json
-data/cache/sportsdataio_player_props_<game_id>.json
-```
+Covers supplies pregame market context. ESPN remains the completed-game source for final scores and player box scores.
 
 ## Team Logos
 
@@ -217,6 +208,8 @@ POST /api/history/import/espn?season=2026&force_refresh=true&include_player_stat
 Completed games are matched to existing sportsbook-derived scheduled games by date/home/away, then marked `final` so they drop out of the upcoming Matchups tab while still contributing to last-10 history.
 When `include_player_stats=true`, ESPN player box scores are imported for the requested season and, by default, the previous season. The app then syncs matching sportsbook prop lines into model prop lines so Parlay Candidates use provider-backed player game logs.
 
+After the ESPN sync finishes, the app settles saved player prop predictions and saved game predictions against the imported final scores and box scores.
+
 ## Local Data And Generated Files
 
 The repo ignores local runtime data and generated artifacts:
@@ -270,6 +263,8 @@ manual_adjustments
 prop_lines
 prop_predictions
 settled_props
+game_predictions
+settled_game_predictions
 ```
 
 Every prop prediction is tied to:
@@ -284,12 +279,31 @@ game_start_time
 
 That lets us evaluate only predictions made before tipoff.
 
+Every game prediction is tied to:
+
+```text
+game_id
+model_version
+prediction_time
+spread_home
+game_total
+projected_home_points
+projected_away_points
+winner_pick
+ats_pick
+total_pick
+```
+
+When ESPN later marks the game final, `settled_game_predictions` records the actual score, actual winner, ATS result, total result, and correctness flags for winner, ATS, and over/under.
+
 ## Recommended API Plan
 
 Use separate data providers:
 
-- Stats/history/live box score: BALLDONTLIE WNBA or SportsDataIO
-- Pregame odds/player props: The Odds API or SportsDataIO
+- Stats/history/final scores/player box scores: ESPN
+- Pregame matchup lines/totals/records/player props: Covers
+- Supplemental pregame player props: The Odds API
+- Historical matchup lookup: BALLDONTLIE WNBA
 
 The app should write raw API responses into `data/cache/` or `data/raw/`, then normalize into SQLite. The React UI should read from our FastAPI backend, not directly from external APIs.
 
@@ -361,3 +375,5 @@ confidence
 ```
 
 The game model combines recent scoring, longer team scoring, opponent points allowed, pace, home/away, and rest. It compares projected margin to `spread_home` and projected total to `game_total`.
+
+Matchup predictions are saved when `/api/matchups` is built. Recalculation and ESPN history imports call the game settlement flow, so final ESPN scores can be compared against the model's saved winner, ATS, and over/under predictions.

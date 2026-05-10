@@ -9,7 +9,16 @@ from .odds import american_to_implied_probability
 
 
 MODEL_VERSION = "adaptive-context-v1"
-TRAINING_MARKETS = ["points", "rebounds", "assists", "points_rebounds_assists", "threes"]
+TRAINING_MARKETS = [
+    "points",
+    "rebounds",
+    "assists",
+    "points_rebounds_assists",
+    "threes",
+    "steals",
+    "blocks",
+    "blocks_steals",
+]
 FEATURE_NAMES = [
     "component_projection",
     "weighted_recent",
@@ -36,6 +45,9 @@ MARKET_VOLATILITY_FLOORS = {
     "rebounds": 2.2,
     "assists": 1.8,
     "threes": 1.1,
+    "steals": 0.8,
+    "blocks": 0.7,
+    "blocks_steals": 1.1,
     "points_rebounds_assists": 5.0,
 }
 
@@ -538,6 +550,8 @@ def _player_history(
 def _market_value(row: sqlite3.Row, market: str) -> float:
     if market == "points_rebounds_assists":
         return float(row["points"] + row["rebounds"] + row["assists"])
+    if market == "blocks_steals":
+        return float(row["blocks"] + row["steals"])
     return float(row[market])
 
 
