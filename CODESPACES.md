@@ -57,6 +57,42 @@ The backend API docs are available from the forwarded port `8000` URL:
 /docs
 ```
 
+## Update An Existing Codespace
+
+You do not need to recreate a Codespace after pushing new commits. In the
+Codespace terminal, check for local changes first:
+
+```bash
+git status
+```
+
+If the Codespace working tree is clean, pull the latest `main`:
+
+```bash
+git pull --ff-only origin main
+```
+
+Then restart the backend and frontend terminals so both servers use the new
+code.
+
+Backend:
+
+```bash
+source .venv/bin/activate
+python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Frontend:
+
+```bash
+cd frontend
+npm install
+npm run dev -- --host 0.0.0.0 --port 5174
+```
+
+If `git status` shows uncommitted changes in Codespaces, commit, stash, or
+discard them before pulling.
+
 ## Sync The SQLite Database
 
 The app uses a local SQLite database at `data/wnba.sqlite`. If you do not need
