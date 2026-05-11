@@ -127,16 +127,23 @@ def import_covers(selected_date: str | None = None, force_refresh: bool = False)
 @app.post("/api/history/import/espn")
 def import_espn_history(
     season: int | None = None,
-    force_refresh: bool = True,
+    force_refresh: bool = False,
     include_player_stats: bool = True,
-    include_previous_season: bool = True,
+    include_previous_season: bool = False,
     missing_only: bool = False,
+    selected_date: str | None = None,
 ) -> dict:
     target_season = season or datetime.now().year
     seasons = [target_season - 1, target_season] if include_previous_season else [target_season]
     unique_seasons = sorted(set(seasons))
+    daily_date = selected_date
+    if daily_date is None and not force_refresh and not include_previous_season:
+        daily_date = datetime.now(LOCAL_TZ).date().isoformat()
     with connect() as conn:
-        scoreboards = [import_espn_scoreboard(conn, item, force_refresh=force_refresh) for item in unique_seasons]
+        scoreboards = [
+            import_espn_scoreboard(conn, item, force_refresh=force_refresh, selected_date=daily_date)
+            for item in unique_seasons
+        ]
         player_stats = []
         if include_player_stats:
             player_stats = [
@@ -145,6 +152,7 @@ def import_espn_history(
                     item,
                     force_refresh=force_refresh,
                     missing_only=missing_only,
+                    selected_date=daily_date,
                 )
                 for item in unique_seasons
             ]
@@ -154,6 +162,7 @@ def import_espn_history(
     return {
         "season": target_season,
         "seasons": unique_seasons,
+        "selected_date": daily_date,
         "scoreboards": scoreboards,
         "player_stats": player_stats,
         "synced_props": synced_props,

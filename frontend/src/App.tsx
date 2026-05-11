@@ -156,10 +156,10 @@ export function App() {
     }
   }
 
-  async function handleRefreshResults(forceRefresh = false, includePlayerStats = true, missingOnly = false) {
+  async function handleRefreshResults(forceRefresh = false, includePlayerStats = true, missingOnly = false, includePreviousSeason = false) {
     if (forceRefresh) {
       const confirmed = window.confirm(
-        "Hard refresh will fetch fresh ESPN completed game and box score data. Continue?"
+        "Hard refresh will fetch fresh ESPN completed game and box score data for this season and the previous season. Continue?"
       );
       if (!confirmed) {
         return;
@@ -169,10 +169,11 @@ export function App() {
     setError(null);
     setOperationStatus(null);
     try {
-      const result = await importEspnHistory(forceRefresh, includePlayerStats, missingOnly);
+      const result = await importEspnHistory(forceRefresh, includePlayerStats, missingOnly, includePreviousSeason);
       await load();
+      const scope = result.selected_date ? ` for ${result.selected_date}` : ` for ${result.seasons?.join(", ") ?? result.season}`;
       setOperationStatus(
-        `${missingOnly ? "Missing" : forceRefresh ? "Fresh" : "Saved"} ESPN completed games and box scores loaded for ${result.seasons?.join(", ") ?? result.season}. Synced ${result.synced_props ?? 0} model prop lines and settled ${result.settlements?.settled ?? 0} props.`
+        `${missingOnly ? "Missing" : forceRefresh ? "Fresh" : "Saved"} ESPN completed games and box scores loaded${scope}. Synced ${result.synced_props ?? 0} model prop lines and settled ${result.settlements?.settled ?? 0} props.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to refresh completed results");
@@ -308,7 +309,7 @@ function DataView({
   discrepanciesCount: number;
   onImportOdds: (forceRefresh: boolean) => void;
   onImportCoversOdds: (forceRefresh: boolean) => void;
-  onRefreshResults: (forceRefresh: boolean, includePlayerStats?: boolean, missingOnly?: boolean) => void;
+  onRefreshResults: (forceRefresh: boolean, includePlayerStats?: boolean, missingOnly?: boolean, includePreviousSeason?: boolean) => void;
   onRecalculate: () => void;
   onReload: () => void;
 }) {
@@ -347,13 +348,13 @@ function DataView({
           />
           <OperationCard
             title="ESPN Completed Games"
-            description="Import final scores and player box scores so projections use actual game history."
+            description="Update today's ESPN matchup results and player box scores as the season continues."
             metrics={`${matchupsCount} upcoming games`}
             primaryLabel={refreshingResults ? "Loading" : "Load Missing ESPN"}
             secondaryLabel="Refresh ESPN"
             disabled={refreshingResults || importingOdds || importingCoversOdds || loading}
-            onPrimary={() => onRefreshResults(false, true, true)}
-            onSecondary={() => onRefreshResults(true, true, false)}
+            onPrimary={() => onRefreshResults(false, true, true, false)}
+            onSecondary={() => onRefreshResults(true, true, false, true)}
           />
           <OperationCard
             title="Projection Board"

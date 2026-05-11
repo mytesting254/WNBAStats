@@ -57,6 +57,35 @@ The backend API docs are available from the forwarded port `8000` URL:
 /docs
 ```
 
+## Sync The SQLite Database
+
+The app uses a local SQLite database at `data/wnba.sqlite`. If you do not need
+simultaneous editing between your laptop and Codespaces, sync the database as a
+snapshot file with GitHub CLI.
+
+First, find the Codespace name from your local machine:
+
+```powershell
+gh codespace list
+```
+
+Before working in Codespaces, upload your local database:
+
+```powershell
+gh codespace cp data\wnba.sqlite <codespace-name>:/workspaces/WNBAStats/data/wnba.sqlite
+```
+
+After working in Codespaces, download the updated database back to your local
+machine:
+
+```powershell
+gh codespace cp <codespace-name>:/workspaces/WNBAStats/data/wnba.sqlite data\wnba.sqlite
+```
+
+Stop the backend and any import scripts before copying in either direction.
+SQLite is a single file, so copying while the app is writing can produce an
+incomplete snapshot.
+
 ## Optional API Keys
 
 Live sportsbook odds use The Odds API. Set the key before starting the backend:

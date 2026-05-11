@@ -143,6 +143,16 @@ POST /api/covers/import?selected_date=2026-05-10&force_refresh=true
 
 Covers supplies pregame market context. ESPN remains the completed-game source for final scores and player box scores.
 
+## Daily Matchup Workflow
+
+The Matchups tab reads saved scheduled games from SQLite. It does not call ESPN on page load. `/api/matchups` selects rows from `games` where `status = 'scheduled'`, then shows only games whose `start_time` falls on the current local date. If tomorrow's games are already saved, they appear automatically tomorrow when the dashboard reloads.
+
+Scheduled game rows are usually created before tip by `Load Saved Odds`, `Refresh Odds`, or `Refresh Covers`. Those importers match existing games by teams and start time, create missing scheduled games, and attach sportsbook props, spread, and total context.
+
+Use `Load Missing ESPN` as the normal in-season completed-game operation. It updates today's ESPN scoreboard only, imports player box scores for today's final games that are missing stats, settles saved predictions, and syncs matching sportsbook rows into model prop lines.
+
+Use `Refresh ESPN` only for a larger hard refresh or backfill. That path fetches fresh ESPN data for the current season and previous season.
+
 ## Team Logos
 
 Logo thumbnails are served locally from:
@@ -203,14 +213,26 @@ You can also import completed WNBA games from ESPN scoreboard data:
 
 Omit `--force-refresh` to reuse `data\cache\espn_wnba_scoreboard_<season>.json`.
 
-The same sync is available from the app through `Refresh Results`, or directly:
+The normal app action, `Load Missing ESPN`, is date-scoped. It defaults to today's local date:
+
+```text
+POST /api/history/import/espn
+```
+
+For a specific date:
+
+```text
+POST /api/history/import/espn?selected_date=2026-05-12&include_player_stats=true&missing_only=true
+```
+
+The larger season backfill is available through `Refresh ESPN`, or directly:
 
 ```text
 POST /api/history/import/espn?season=2026&force_refresh=true&include_player_stats=true&include_previous_season=true
 ```
 
 Completed games are matched to existing sportsbook-derived scheduled games by date/home/away, then marked `final` so they drop out of the upcoming Matchups tab while still contributing to last-10 history.
-When `include_player_stats=true`, ESPN player box scores are imported for the requested season and, by default, the previous season. The app then syncs matching sportsbook prop lines into model prop lines so Parlay Candidates use provider-backed player game logs.
+When `include_player_stats=true`, ESPN player box scores are imported for the selected date or requested season. The app then syncs matching sportsbook prop lines into model prop lines so Parlay Candidates use provider-backed player game logs.
 
 After the ESPN sync finishes, the app settles saved player prop predictions and saved game predictions against the imported final scores and box scores.
 

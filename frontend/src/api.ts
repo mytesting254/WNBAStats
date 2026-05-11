@@ -224,11 +224,22 @@ export async function importCoversOdds(forceRefresh = false): Promise<OddsImport
 }
 
 export async function importEspnHistory(
-  forceRefresh = true,
+  forceRefresh = false,
   includePlayerStats = true,
-  missingOnly = false
-): Promise<{ season: number; seasons: number[]; synced_props: number; source: string; settlements?: { settled: number } }> {
-  const response = await fetch(`/api/history/import/espn?force_refresh=${forceRefresh ? "true" : "false"}&include_player_stats=${includePlayerStats ? "true" : "false"}&include_previous_season=true&missing_only=${missingOnly ? "true" : "false"}`, { method: "POST" });
+  missingOnly = false,
+  includePreviousSeason = false,
+  selectedDate?: string
+): Promise<{ season: number; seasons: number[]; selected_date?: string | null; synced_props: number; source: string; settlements?: { settled: number } }> {
+  const params = new URLSearchParams({
+    force_refresh: forceRefresh ? "true" : "false",
+    include_player_stats: includePlayerStats ? "true" : "false",
+    include_previous_season: includePreviousSeason ? "true" : "false",
+    missing_only: missingOnly ? "true" : "false"
+  });
+  if (selectedDate) {
+    params.set("selected_date", selectedDate);
+  }
+  const response = await fetch(`/api/history/import/espn?${params.toString()}`, { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to refresh completed game results");
   }

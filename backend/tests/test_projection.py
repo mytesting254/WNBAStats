@@ -169,7 +169,8 @@ def test_covers_import_route_is_registered() -> None:
 def test_espn_history_settles_before_rebuilding_prop_lines(monkeypatch) -> None:
     calls: list[str] = []
 
-    def fake_scoreboard(conn, season, force_refresh=False):
+    def fake_scoreboard(conn, season, force_refresh=False, selected_date=None):
+        assert selected_date is not None
         return {"season": season}
 
     def fake_settle(conn):
@@ -188,6 +189,7 @@ def test_espn_history_settles_before_rebuilding_prop_lines(monkeypatch) -> None:
 
     assert calls == ["settle", "sync"]
     assert result["settlements"] == {"settled": 1}
+    assert result["selected_date"] is not None
 
 
 def test_fixture_builds_ranked_predictions() -> None:
@@ -648,7 +650,7 @@ def test_espn_boxscore_uses_mapped_event_id(monkeypatch) -> None:
 def test_espn_scoreboard_imports_scheduled_games(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.app.espn_history.fetch_scoreboard",
-        lambda season, force_refresh=False: {
+        lambda season, force_refresh=False, selected_date=None: {
             "events": [
                 {
                     "id": "777001",
