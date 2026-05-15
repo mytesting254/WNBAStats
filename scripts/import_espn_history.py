@@ -23,6 +23,7 @@ def main() -> None:
     parser.add_argument("--end-date", help="Last game date to import in YYYY-MM-DD format.")
     parser.add_argument("--skip-scoreboard", action="store_true", help="Import player box scores from existing games without refreshing scoreboard rows.")
     parser.add_argument("--skip-prop-sync", action="store_true", help="Skip syncing sportsbook props and rebuilding predictions after player stat import.")
+    parser.add_argument("--max-workers", type=int, default=8, help="Concurrent ESPN summary fetches for player box scores.")
     args = parser.parse_args()
 
     init_db()
@@ -62,7 +63,7 @@ def main() -> None:
                             force_refresh=args.force_refresh,
                             missing_only=args.missing_only,
                             selected_date=date_text,
-                            max_workers=1,
+                            max_workers=args.max_workers,
                         )
                         _add_stats_totals(totals, stats_result)
                         print(
@@ -88,6 +89,7 @@ def main() -> None:
                     season,
                     force_refresh=args.force_refresh,
                     missing_only=args.missing_only,
+                    max_workers=args.max_workers,
                 )
                 _add_stats_totals(totals, stats_result)
                 print(

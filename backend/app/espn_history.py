@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .bootstrap import ensure_team, ensure_teams
+from .bootstrap import TEAM_BY_ABBREVIATION, ensure_team, ensure_teams
 from .cache import read_json_cache, write_json_cache
 
 
@@ -202,6 +202,10 @@ def import_espn_player_boxscores(
                 fetched_games.append(future.result())
         fetched_games.sort(key=lambda item: game_order[item[0]])
 
+    players_by_id: dict[int, dict] = {}
+    stat_rows: list[tuple] = []
+    game_ids_to_replace = []
+
     for game_id, _summary_event_id, payload in fetched_games:
         if payload is None:
             skipped_games += 1
@@ -212,10 +216,18 @@ def import_espn_player_boxscores(
             skipped_games += 1
             continue
 
-        conn.execute("DELETE FROM player_game_stats WHERE game_id = ?", (game_id,))
-        new_player_ids = {int(player["id"]) for player in player_rows["players"]} - existing_player_ids
-        inserted_players += len(new_player_ids)
-        existing_player_ids.update(new_player_ids)
+        game_ids_to_replace.append(game_id)
+        for player in player_rows["players"]:
+            players_by_id[int(player["id"])] = player
+        stat_rows.extend(player_rows["stats"])
+
+    if game_ids_to_replace:
+        new_player_ids = set(players_by_id) - existing_player_ids
+        inserted_players = len(new_player_ids)
+        conn.executemany(
+            "DELETE FROM player_game_stats WHERE game_id = ?",
+            [(game_id,) for game_id in game_ids_to_replace],
+        )
         conn.executemany(
             """
             INSERT INTO players (id, full_name, team_id, position, rotation_role)
@@ -228,7 +240,7 @@ def import_espn_player_boxscores(
             """,
             [
                 (player["id"], player["full_name"], player["team_id"], player["position"], player["rotation_role"])
-                for player in player_rows["players"]
+                for player in players_by_id.values()
             ],
         )
         conn.executemany(
@@ -237,9 +249,9 @@ def import_espn_player_boxscores(
                 player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            player_rows["stats"],
+            stat_rows,
         )
-        inserted_stats += len(player_rows["stats"])
+        inserted_stats = len(stat_rows)
 
     conn.commit()
     return {
@@ -328,7 +340,7 @@ def _player_stat_rows(conn: sqlite3.Connection, game_id: int, payload: dict[str,
     players = []
     stats = []
     for team_box in teams:
-        team_id = ensure_team(conn, str((team_box.get("team") or {}).get("abbreviation") or ""))
+        team_id = _boxscore_team_id(conn, team_box)
         if not team_id:
             continue
         for stat_group in team_box.get("statistics", []):
@@ -375,6 +387,15 @@ def _player_stat_rows(conn: sqlite3.Connection, game_id: int, payload: dict[str,
     if not stats:
         return None
     return {"players": players, "stats": stats}
+
+
+def _boxscore_team_id(conn: sqlite3.Connection, team_box: dict[str, Any]) -> int | None:
+    abbreviation = str((team_box.get("team") or {}).get("abbreviation") or "").upper()
+    abbreviation = ESPN_TEAM_ALIASES.get(abbreviation, abbreviation)
+    known_team = TEAM_BY_ABBREVIATION.get(abbreviation)
+    if known_team:
+        return int(known_team[0])
+    return ensure_team(conn, abbreviation)
 
 
 def _stat(raw_stats: list[Any], label_index: dict[str, int], label: str) -> str:
