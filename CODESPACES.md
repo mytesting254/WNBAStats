@@ -25,6 +25,8 @@ From the repository root:
 python -m venv .venv
 source .venv/bin/activate
 pip install -r backend/requirements.txt
+cp .env.example .env
+# Edit .env and set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.
 python scripts/init_db.py
 ```
 
@@ -93,34 +95,22 @@ npm run dev -- --host 0.0.0.0 --port 5174
 If `git status` shows uncommitted changes in Codespaces, commit, stash, or
 discard them before pulling.
 
-## Sync The SQLite Database
+## Shared Turso Database
 
-The app uses a local SQLite database at `data/wnba.sqlite`. If you do not need
-simultaneous editing between your laptop and Codespaces, sync the database as a
-snapshot file with GitHub CLI.
+The app uses Turso Cloud for normal runtime data. Set the same
+`TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in Codespaces that you use locally,
+then both environments read and write the same games, props, predictions, and
+settled results. Do not copy `data/wnba.sqlite` between machines.
 
-First, find the Codespace name from your local machine:
+After a clean reset, only canonical WNBA teams are present. Players are created
+when ESPN player box scores are imported, usually through `Load Missing ESPN`
+after completed games.
 
-```powershell
-gh codespace list
-```
-
-Before working in Codespaces, upload your local database:
-
-```powershell
-gh codespace cp data\wnba.sqlite <codespace-name>:/workspaces/WNBAStats/data/wnba.sqlite
-```
-
-After working in Codespaces, download the updated database back to your local
-machine:
+To reset Turso to a clean slate with only canonical teams:
 
 ```powershell
-gh codespace cp <codespace-name>:/workspaces/WNBAStats/data/wnba.sqlite data\wnba.sqlite
+.\.venv\Scripts\python.exe scripts\clear_runtime_db.py
 ```
-
-Stop the backend and any import scripts before copying in either direction.
-SQLite is a single file, so copying while the app is writing can produce an
-incomplete snapshot.
 
 ## Optional API Keys
 
@@ -148,7 +138,7 @@ cd frontend
 npm run build
 ```
 
-Reset the local SQLite database and rebuild scheduled games from saved odds cache:
+Reset the Turso database and rebuild scheduled games from saved odds cache:
 
 ```bash
 source .venv/bin/activate

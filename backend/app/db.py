@@ -3,7 +3,10 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
+from typing import Any, Iterable, Sequence
 
+import requests
+from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = ROOT_DIR / "data" / "wnba.sqlite"
@@ -13,13 +16,203 @@ def get_db_path() -> Path:
     return Path(os.getenv("WNBA_DB_PATH", DEFAULT_DB_PATH))
 
 
-def connect() -> sqlite3.Connection:
+def get_turso_database_url() -> str | None:
+    load_dotenv(ROOT_DIR / ".env")
+    return os.getenv("TURSO_DATABASE_URL")
+
+
+def using_turso() -> bool:
+    return "WNBA_DB_PATH" not in os.environ
+
+
+def connect() -> Any:
+    if using_turso():
+        database_url = get_turso_database_url()
+        if not database_url:
+            raise RuntimeError("TURSO_DATABASE_URL is required. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in .env.")
+        auth_token = os.getenv("TURSO_AUTH_TOKEN")
+        if not auth_token:
+            raise RuntimeError("TURSO_AUTH_TOKEN is required when TURSO_DATABASE_URL is set.")
+        return TursoHttpConnection(database_url, auth_token)
+
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
+    _configure_connection(conn)
+    return conn
+
+
+def _configure_connection(conn: Any) -> None:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+
+
+class TursoRow:
+    def __init__(self, columns: Sequence[str], values: Sequence[Any]):
+        self._columns = list(columns)
+        self._values = list(values)
+        self._index = {column: index for index, column in enumerate(self._columns)}
+
+    def __getitem__(self, key: str | int) -> Any:
+        if isinstance(key, int):
+            return self._values[key]
+        return self._values[self._index[key]]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def keys(self) -> list[str]:
+        return list(self._columns)
+
+
+class TursoHttpCursor:
+    def __init__(self, columns: Sequence[str], rows: Sequence[TursoRow], lastrowid: int | None = None):
+        self._rows = list(rows)
+        self._index = 0
+        self.lastrowid = lastrowid
+
+    def fetchall(self) -> list[TursoRow]:
+        rows = self._rows[self._index :]
+        self._index = len(self._rows)
+        return rows
+
+    def fetchone(self) -> TursoRow | None:
+        if self._index >= len(self._rows):
+            return None
+        row = self._rows[self._index]
+        self._index += 1
+        return row
+
+    def __iter__(self):
+        return iter(self._rows)
+
+
+class TursoHttpConnection:
+    def __init__(self, database_url: str, auth_token: str):
+        self._pipeline_url = _http_pipeline_url(database_url)
+        self._auth_token = auth_token
+        self.row_factory = None
+
+    def execute(self, sql: str, params: Sequence[Any] = ()) -> TursoHttpCursor:
+        result = self._request([{"type": "execute", "stmt": _stmt(sql, params)}, {"type": "close"}])
+        return _cursor_from_result(result)
+
+    def executemany(self, sql: str, seq_of_params: Iterable[Sequence[Any]]) -> TursoHttpCursor:
+        last_cursor = TursoHttpCursor([], [])
+        for params in seq_of_params:
+            last_cursor = self.execute(sql, params)
+        return last_cursor
+
+    def executescript(self, script: str) -> TursoHttpCursor:
+        last_cursor = TursoHttpCursor([], [])
+        statement = ""
+        for line in script.splitlines():
+            statement += line + "\n"
+            if sqlite3.complete_statement(statement):
+                sql = statement.strip()
+                statement = ""
+                if sql:
+                    last_cursor = self.execute(sql)
+        if statement.strip():
+            last_cursor = self.execute(statement.strip())
+        return last_cursor
+
+    def commit(self) -> None:
+        return None
+
+    def rollback(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
+    def _request(self, requests_payload: list[dict]) -> dict:
+        response = requests.post(
+            self._pipeline_url,
+            headers={
+                "Authorization": f"Bearer {self._auth_token}",
+                "Content-Type": "application/json",
+            },
+            json={"requests": requests_payload},
+            timeout=30,
+        )
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            raise RuntimeError(f"Turso request failed: {response.text}") from exc
+        payload = response.json()
+        result = payload["results"][0]
+        if result.get("type") != "ok":
+            raise RuntimeError(f"Turso query failed: {result}")
+        return result["response"]["result"]
+
+
+def _http_pipeline_url(database_url: str) -> str:
+    base_url = database_url.strip().rstrip("/")
+    if base_url.startswith("libsql://"):
+        base_url = "https://" + base_url.removeprefix("libsql://")
+    if not base_url.startswith("https://"):
+        raise RuntimeError("TURSO_DATABASE_URL must be a libsql:// or https:// Turso database URL.")
+    if base_url.endswith("/v2/pipeline"):
+        return base_url
+    return f"{base_url}/v2/pipeline"
+
+
+def _stmt(sql: str, params: Sequence[Any] = ()) -> dict:
+    statement = {"sql": sql}
+    if params:
+        statement["args"] = [_arg(param) for param in params]
+    return statement
+
+
+def _arg(value: Any) -> dict:
+    if value is None:
+        return {"type": "null"}
+    if isinstance(value, bool):
+        return {"type": "integer", "value": "1" if value else "0"}
+    if isinstance(value, int):
+        return {"type": "integer", "value": str(value)}
+    if isinstance(value, float):
+        return {"type": "float", "value": value}
+    if isinstance(value, bytes):
+        raise TypeError("Blob parameters are not supported by this Turso HTTP adapter.")
+    return {"type": "text", "value": str(value)}
+
+
+def _cursor_from_result(result: dict) -> TursoHttpCursor:
+    columns = [_column_name(column) for column in result.get("cols", [])]
+    rows = [
+        TursoRow(columns, [_value(cell) for cell in row])
+        for row in result.get("rows", [])
+    ]
+    lastrowid = result.get("last_insert_rowid")
+    return TursoHttpCursor(columns, rows, int(lastrowid) if lastrowid is not None else None)
+
+
+def _column_name(column: Any) -> str:
+    if isinstance(column, dict):
+        return str(column.get("name") or column.get("column") or "")
+    return str(column)
+
+
+def _value(cell: Any) -> Any:
+    if not isinstance(cell, dict):
+        return cell
+    cell_type = cell.get("type")
+    if cell_type == "null":
+        return None
+    value = cell.get("value")
+    if cell_type == "integer":
+        return int(value)
+    if cell_type == "float":
+        return float(value)
+    return value
 
 
 def init_db() -> None:

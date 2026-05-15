@@ -45,7 +45,7 @@ def reset_live_database() -> dict:
 
 if __name__ == "__main__":
     result = reset_live_database()
-    print("Reset local DB to live/cache-backed data.")
+    print("Reset runtime DB to live/cache-backed data.")
     for table, count in result["counts"].items():
         print(f"{table}: {count}")
     print(f"odds_status: {result['odds'].get('status')}")

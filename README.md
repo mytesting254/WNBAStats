@@ -1,10 +1,10 @@
 # WNBA Prop Value
 
-Local pregame WNBA prop-value app.
+Pregame WNBA prop-value app backed by Turso Cloud.
 
 The app is built around a provider-backed pregame workflow:
 
-1. Store historical stats, prop lines, model predictions, and settled results in SQLite.
+1. Store historical stats, prop lines, model predictions, and settled results in Turso Cloud.
 2. Keep raw/current JSON files as a fast local cache and API audit trail.
 3. Import completed games and player box scores before projecting new props.
 4. Rank props by expected value and edge.
@@ -14,7 +14,7 @@ The app is built around a provider-backed pregame workflow:
 
 - React + TypeScript + Vite frontend
 - Python + FastAPI backend
-- SQLite app database
+- Turso Cloud database
 - JSON/JSONL cache layer
 - pytest and Python Playwright tests
 
@@ -29,6 +29,7 @@ From the repo root:
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\pip.exe install -r backend\requirements.txt
+Copy .env.example to .env and set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.
 .\.venv\Scripts\python.exe scripts\init_db.py
 .\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload
 ```
@@ -145,13 +146,27 @@ Covers supplies pregame market context. ESPN remains the completed-game source f
 
 ## Daily Matchup Workflow
 
-The Matchups tab reads saved scheduled games from SQLite. It does not call ESPN on page load. `/api/matchups` selects rows from `games` where `status = 'scheduled'`, then shows only games whose `start_time` falls on the current local date. If tomorrow's games are already saved, they appear automatically tomorrow when the dashboard reloads.
+The Matchups tab reads saved scheduled games from Turso. It does not call ESPN on page load. `/api/matchups` selects rows from `games` where `status = 'scheduled'`, then shows only games whose `start_time` falls on the current local date. If tomorrow's games are already saved, they appear automatically tomorrow when the dashboard reloads.
 
 Scheduled game rows are usually created before tip by `Load Saved Odds`, `Refresh Odds`, or `Refresh Covers`. Those importers match existing games by teams and start time, create missing scheduled games, and attach sportsbook props, spread, and total context.
 
 Use `Load Missing ESPN` as the normal in-season completed-game operation. It updates today's ESPN scoreboard only, imports player box scores for today's final games that are missing stats, settles saved predictions, and syncs matching sportsbook rows into model prop lines.
 
 Use `Refresh ESPN` only for a larger hard refresh or backfill. That path fetches fresh ESPN data for the current season and previous season.
+
+## Turso Clean-Slate Tracking
+
+The runtime database starts with only canonical WNBA teams. The `players` table is intentionally empty until ESPN player box scores are imported. Sportsbook odds and Covers imports create games and raw prop offers, but they do not create model-ready players by themselves because player prop predictions require ESPN player IDs and historical player game stats.
+
+Normal clean-slate flow:
+
+```text
+Refresh Odds / Refresh Covers before games
+Load Missing ESPN after games finish
+Recalculate
+```
+
+Raw provider responses and dashboard snapshots still use local JSON cache files under `data/cache/` so repeated loads are faster and avoid unnecessary provider calls. Turso stores the normalized records that must survive across devices: games, players, player stats, prop lines, predictions, settled results, and model runs.
 
 ## Team Logos
 
@@ -171,9 +186,9 @@ Refresh them with:
 
 Matchups should be built from real imported games. `scripts\init_db.py` only creates the schema and canonical WNBA teams; it does not seed sample games, player stats, or prop lines.
 
-Seed data has been removed from the app path. `backend.app.seed.seed_sample_data()` now raises intentionally so fake games cannot slip into local projections. Tests use isolated temporary fixture databases instead of the runtime SQLite database.
+Seed data has been removed from the app path. `backend.app.seed.seed_sample_data()` now raises intentionally so fake games cannot slip into runtime projections. Tests use isolated temporary fixture databases instead of the runtime Turso database.
 
-To clear local runtime data and rebuild scheduled games from the saved sportsbook odds JSON:
+To clear runtime data and rebuild scheduled games from the saved sportsbook odds JSON:
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\reset_live_db.py
@@ -238,14 +253,24 @@ After the ESPN sync finishes, the app settles saved player prop predictions and 
 
 ## Local Data And Generated Files
 
-The repo ignores local runtime data and generated artifacts:
+The runtime database lives in Turso Cloud. The backend requires `TURSO_DATABASE_URL`
+and `TURSO_AUTH_TOKEN` for normal app runs, so every device that uses the same
+credentials reads and writes the same stats and tracking history. Local SQLite is
+only used by tests or one-off commands that explicitly set `WNBA_DB_PATH`.
+
+To reset Turso to a clean slate with only canonical teams:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\clear_runtime_db.py
+```
+
+The repo still ignores local generated artifacts:
 
 ```text
 .env
 .venv/
 frontend/node_modules/
 frontend/dist/
-data/*.sqlite
 data/cache/
 __pycache__/
 .pytest_cache/
@@ -331,7 +356,7 @@ Use separate data providers:
 - Supplemental pregame player props: The Odds API
 - Historical matchup lookup: BALLDONTLIE WNBA
 
-The app should write raw API responses into `data/cache/` or `data/raw/`, then normalize into SQLite. The React UI should read from our FastAPI backend, not directly from external APIs.
+The app should write raw API responses into `data/cache/` or `data/raw/`, then normalize into Turso. The React UI should read from our FastAPI backend, not directly from external APIs.
 
 ## Model Notes
 
