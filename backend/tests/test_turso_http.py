@@ -48,5 +48,5 @@ def test_turso_http_connection_executes_parameterized_query(monkeypatch):
         {"type": "float", "value": -8.0},
     ]
     assert row["id"] == 7
-    assert row[1] == "NY"
+    assert dict(row) == {"id": 7, "name": "NY"}
     assert cursor.lastrowid == 7

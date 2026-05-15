@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -47,7 +48,7 @@ def _configure_connection(conn: Any) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
 
 
-class TursoRow:
+class TursoRow(Mapping):
     def __init__(self, columns: Sequence[str], values: Sequence[Any]):
         self._columns = list(columns)
         self._values = list(values)
@@ -59,7 +60,10 @@ class TursoRow:
         return self._values[self._index[key]]
 
     def __iter__(self):
-        return iter(self._values)
+        return iter(self._columns)
+
+    def __len__(self) -> int:
+        return len(self._columns)
 
     def keys(self) -> list[str]:
         return list(self._columns)
