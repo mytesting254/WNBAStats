@@ -92,20 +92,32 @@ class TursoHttpCursor:
 
 
 class TursoHttpConnection:
+    BATCH_SIZE = 100
+
     def __init__(self, database_url: str, auth_token: str):
         self._pipeline_url = _http_pipeline_url(database_url)
         self._auth_token = auth_token
         self.row_factory = None
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> TursoHttpCursor:
-        result = self._request([{"type": "execute", "stmt": _stmt(sql, params)}, {"type": "close"}])
+        result = self._request([{"type": "execute", "stmt": _stmt(sql, params)}, {"type": "close"}])[0]
         return _cursor_from_result(result)
 
     def executemany(self, sql: str, seq_of_params: Iterable[Sequence[Any]]) -> TursoHttpCursor:
         last_cursor = TursoHttpCursor([], [])
+        batch = []
         for params in seq_of_params:
-            last_cursor = self.execute(sql, params)
+            batch.append({"type": "execute", "stmt": _stmt(sql, params)})
+            if len(batch) >= self.BATCH_SIZE:
+                last_cursor = self._execute_batch(batch)
+                batch = []
+        if batch:
+            last_cursor = self._execute_batch(batch)
         return last_cursor
+
+    def _execute_batch(self, batch: list[dict]) -> TursoHttpCursor:
+        results = self._request([*batch, {"type": "close"}])
+        return _cursor_from_result(results[-1]) if results else TursoHttpCursor([], [])
 
     def executescript(self, script: str) -> TursoHttpCursor:
         last_cursor = TursoHttpCursor([], [])
@@ -136,7 +148,7 @@ class TursoHttpConnection:
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
-    def _request(self, requests_payload: list[dict]) -> dict:
+    def _request(self, requests_payload: list[dict]) -> list[dict]:
         response = requests.post(
             self._pipeline_url,
             headers={
@@ -151,10 +163,14 @@ class TursoHttpConnection:
         except requests.HTTPError as exc:
             raise RuntimeError(f"Turso request failed: {response.text}") from exc
         payload = response.json()
-        result = payload["results"][0]
-        if result.get("type") != "ok":
-            raise RuntimeError(f"Turso query failed: {result}")
-        return result["response"]["result"]
+        results = []
+        for result in payload["results"]:
+            if result.get("type") != "ok":
+                raise RuntimeError(f"Turso query failed: {result}")
+            response = result.get("response", {})
+            if "result" in response:
+                results.append(response["result"])
+        return results
 
 
 def _http_pipeline_url(database_url: str) -> str:

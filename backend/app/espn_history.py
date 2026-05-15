@@ -177,6 +177,10 @@ def import_espn_player_boxscores(
     inserted_stats = 0
     inserted_players = 0
     skipped_games = 0
+    existing_player_ids = {
+        int(row["id"])
+        for row in conn.execute("SELECT id FROM players").fetchall()
+    }
 
     def fetch_game(game) -> tuple[int, int, dict[str, Any] | None]:
         game_id = int(game["id"])
@@ -209,26 +213,24 @@ def import_espn_player_boxscores(
             continue
 
         conn.execute("DELETE FROM player_game_stats WHERE game_id = ?", (game_id,))
-        for player in player_rows["players"]:
-            existing = conn.execute("SELECT id FROM players WHERE id = ?", (player["id"],)).fetchone()
-            if existing:
-                conn.execute(
-                    """
-                    UPDATE players
-                    SET full_name = ?, team_id = ?, position = ?, rotation_role = ?
-                    WHERE id = ?
-                    """,
-                    (player["full_name"], player["team_id"], player["position"], player["rotation_role"], player["id"]),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO players (id, full_name, team_id, position, rotation_role)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (player["id"], player["full_name"], player["team_id"], player["position"], player["rotation_role"]),
-                )
-                inserted_players += 1
+        new_player_ids = {int(player["id"]) for player in player_rows["players"]} - existing_player_ids
+        inserted_players += len(new_player_ids)
+        existing_player_ids.update(new_player_ids)
+        conn.executemany(
+            """
+            INSERT INTO players (id, full_name, team_id, position, rotation_role)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                full_name = excluded.full_name,
+                team_id = excluded.team_id,
+                position = excluded.position,
+                rotation_role = excluded.rotation_role
+            """,
+            [
+                (player["id"], player["full_name"], player["team_id"], player["position"], player["rotation_role"])
+                for player in player_rows["players"]
+            ],
+        )
         conn.executemany(
             """
             INSERT INTO player_game_stats (
