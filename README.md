@@ -142,7 +142,7 @@ For a specific date:
 POST /api/covers/import?selected_date=2026-05-10&force_refresh=true
 ```
 
-Covers supplies pregame market context. ESPN remains the completed-game source for final scores and player box scores.
+Covers supplies pregame market context and is the preferred source for player prop lines. When a game has Covers prop rows in `sportsbook_prop_lines`, the model prop-line sync builds `prop_lines` from Covers rows for that game and ignores overlapping The Odds API rows. Other providers are only used as a fallback for games without Covers props. ESPN remains the completed-game source for final scores and player box scores.
 
 ## Daily Matchup Workflow
 
@@ -152,7 +152,7 @@ Scheduled game rows are usually created before tip by `Load Saved Odds`, `Refres
 
 Use `Load Missing ESPN` as the normal in-season completed-game operation. It updates today's ESPN scoreboard only, imports player box scores for today's final games that are missing stats, settles saved predictions, and syncs matching sportsbook rows into model prop lines.
 
-Use `Refresh ESPN` only for a larger hard refresh or backfill. That path fetches fresh ESPN data for the current season and previous season.
+Use `Refresh ESPN` only for a larger hard refresh or backfill. That path fetches fresh ESPN data for the current season and previous season. Box score imports are idempotent in Turso: `player_game_stats` is unique by `(player_id, game_id)`, player upserts are batched, and stat inserts use `INSERT OR REPLACE`, so repeated missing-only fills can safely repair gaps without duplicating rows.
 
 ## Turso Clean-Slate Tracking
 
@@ -167,6 +167,15 @@ Recalculate
 ```
 
 Raw provider responses and dashboard snapshots still use local JSON cache files under `data/cache/` so repeated loads are faster and avoid unnecessary provider calls. Turso stores the normalized records that must survive across devices: games, players, player stats, prop lines, predictions, settled results, and model runs.
+
+To check whether all final games have player box scores in Turso:
+
+```bash
+.venv/bin/python -c "from backend.app.db import connect; \
+with connect() as conn: \
+    rows=conn.execute(\"select substr(game_date,1,4) season, count(*) final_games, sum(case when exists (select 1 from player_game_stats s where s.game_id=g.id) then 1 else 0 end) with_stats, sum(case when not exists (select 1 from player_game_stats s where s.game_id=g.id) then 1 else 0 end) missing from games g where status='final' group by substr(game_date,1,4) order by season\").fetchall(); \
+print([dict(row) for row in rows])"
+```
 
 ## Team Logos
 
@@ -360,7 +369,7 @@ The app should write raw API responses into `data/cache/` or `data/raw/`, then n
 
 ## Model Notes
 
-Player prop projections use the `adaptive-context-v1` model. It starts with a transparent component projection, then uses a local ridge regression model trained from actual player game logs. The final pregame projection can also blend in sportsbook line context and no-vig price lean when a line is available.
+Player prop projections use the `adaptive-context-v1` model. It starts with a transparent component projection, then uses an in-process ridge regression model trained from actual player game logs in the active runtime database. In normal app runs that database is Turso; local SQLite training is only used by tests or explicit commands that set `WNBA_DB_PATH`. The final pregame projection can also blend in sportsbook line context and no-vig price lean when a line is available.
 
 Core features include:
 
@@ -385,7 +394,7 @@ Projection and value are intentionally separate. The model first estimates the s
 
 ## Model Training
 
-The Model Lab tab trains and records two local benchmarks:
+The Model Lab tab trains against the active Turso database and records two benchmarks:
 
 ```text
 component-pregame-v2
@@ -395,7 +404,7 @@ adaptive-context-v1
   chronological 80/20 holdout for the learned history/context model
 ```
 
-Each training action saves both runs to `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. The comparison table shows the latest run for each model version side by side. Once real settled prop lines are imported, the same model-run workflow can be extended to ROI, CLV, and edge calibration.
+Each training action saves both runs to Turso in `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. The comparison table shows the latest run for each model version side by side. Prediction-time learned models also train from the active connection when the app is using Turso, instead of reopening a local SQLite file. Once real settled prop lines are imported, the same model-run workflow can be extended to ROI, CLV, and edge calibration.
 
 ## Accuracy Analysis
 

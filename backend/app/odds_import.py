@@ -130,6 +130,15 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
             OR lower(p.full_name) = lower(spl.player_name)
         )
         WHERE spl.game_id IS NOT NULL
+          AND (
+              spl.provider = 'covers'
+              OR NOT EXISTS (
+                  SELECT 1
+                  FROM sportsbook_prop_lines covers
+                  WHERE covers.provider = 'covers'
+                    AND covers.game_id = spl.game_id
+              )
+          )
           AND EXISTS (
               SELECT 1
               FROM player_game_stats stats
@@ -140,7 +149,7 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
         ORDER BY spl.game_id, spl.player_name, spl.market, spl.sportsbook, spl.line
         """
     ).fetchall()
-    settled_keys = {
+    tracked_keys = {
         (
             int(row["game_id"]),
             int(row["player_id"]),
@@ -152,7 +161,10 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
             """
             SELECT pl.game_id, pl.player_id, pl.sportsbook, pl.market, pl.line
             FROM prop_lines pl
-            JOIN settled_props sp ON sp.prop_line_id = pl.id
+            JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE sp.id IS NOT NULL
+               OR g.status <> 'scheduled'
             """
         ).fetchall()
     }
@@ -175,17 +187,32 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
             row["market"],
             float(row["line"]),
         )
-        not in settled_keys
+        not in tracked_keys
     ]
 
-    conn.execute("DELETE FROM prop_predictions")
+    conn.execute(
+        """
+        DELETE FROM prop_predictions
+        WHERE prop_line_id IN (
+            SELECT pl.id
+            FROM prop_lines pl
+            JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE sp.id IS NULL
+              AND g.status = 'scheduled'
+        )
+        """
+    )
     conn.execute(
         """
         DELETE FROM prop_lines
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM settled_props sp
-            WHERE sp.prop_line_id = prop_lines.id
+        WHERE id IN (
+            SELECT pl.id
+            FROM prop_lines pl
+            JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE sp.id IS NULL
+              AND g.status = 'scheduled'
         )
         """
     )

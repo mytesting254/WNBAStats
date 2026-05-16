@@ -16,6 +16,7 @@ from backend.app.main import app, import_espn_history as import_espn_history_end
 from backend.app.odds import american_to_implied_probability, expected_value
 from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies, sync_prop_lines_from_sportsbook
 from backend.app.player_prop_model import _market_value as learned_market_value
+from backend.app.player_prop_model import train_market_model
 from backend.app.projections import _market_value as component_market_value
 from backend.app.projections import rebuild_predictions
 from backend.app.settlement import settle_completed_props
@@ -227,6 +228,25 @@ def test_walk_forward_training_saves_model_run() -> None:
     assert result["training_rows"] > 0
     assert len(rows) == 2
     assert {row["model_version"] for row in rows} == {"adaptive-context-v1", "component-pregame-v2"}
+
+
+def test_train_market_model_uses_active_non_sqlite_connection(monkeypatch) -> None:
+    class FakeRemoteConnection:
+        pass
+
+    calls = []
+
+    def fake_uncached(conn, market):
+        calls.append((conn, market))
+        return None
+
+    monkeypatch.setattr("backend.app.player_prop_model._train_market_model_uncached", fake_uncached)
+
+    conn = FakeRemoteConnection()
+    result = train_market_model(conn, "points")
+
+    assert result is None
+    assert calls == [(conn, "points")]
 
 
 def test_accuracy_analysis_uses_completed_player_stats() -> None:
@@ -456,6 +476,46 @@ def test_odds_import_syncs_model_prop_lines_from_sportsbook(monkeypatch) -> None
     assert row["under_odds"] == 114
 
 
+def test_odds_sync_prefers_covers_lines_when_available() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute("DELETE FROM prop_predictions")
+        conn.execute("DELETE FROM prop_lines")
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("the_odds_api", "odds-api-event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "draftkings", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 21.5, -110, captured_at),
+                ("the_odds_api", "odds-api-event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "draftkings", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 21.5, -110, captured_at),
+                ("covers", "covers-event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "draftkings", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 20.5, -105, captured_at),
+                ("covers", "covers-event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "draftkings", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 20.5, -115, captured_at),
+            ],
+        )
+
+        synced = sync_prop_lines_from_sportsbook(conn)
+        rows = conn.execute(
+            """
+            SELECT pl.*
+            FROM prop_lines pl
+            JOIN players p ON p.id = pl.player_id
+            WHERE p.full_name = 'Breanna Stewart'
+              AND pl.market = 'points'
+            ORDER BY pl.line
+            """
+        ).fetchall()
+
+    assert synced == 1
+    assert len(rows) == 1
+    assert rows[0]["line"] == 20.5
+    assert rows[0]["over_odds"] == -105
+    assert rows[0]["under_odds"] == -115
+
+
 def test_odds_sync_preserves_settled_prop_lines() -> None:
     load_test_history()
     captured_at = datetime.now(timezone.utc).isoformat()
@@ -500,6 +560,89 @@ def test_odds_sync_preserves_settled_prop_lines() -> None:
     assert synced == 1
     assert [row["id"] for row in matching_lines] == [9201]
     assert settled is not None
+
+
+def test_odds_sync_preserves_tracking_for_completed_unsettled_props() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9301, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9301, 'adaptive-context-v1', 'pregame', 18.0, 'over', 0.56, 0.52, 0.04, 0.07, 'medium', 'test')
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("test", "evt", 100, "2026-04-01", "2026-04-01T19:00:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 20.5, -110, captured_at),
+                ("test", "evt", 100, "2026-04-01", "2026-04-01T19:00:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 20.5, -110, captured_at),
+            ],
+        )
+
+        sync_prop_lines_from_sportsbook(conn)
+        line = conn.execute("SELECT * FROM prop_lines WHERE id = 9301").fetchone()
+        prediction = conn.execute("SELECT * FROM prop_predictions WHERE prop_line_id = 9301").fetchone()
+        matching_lines = conn.execute(
+            """
+            SELECT id
+            FROM prop_lines
+            WHERE game_id = 100
+              AND player_id = 1001
+              AND sportsbook = 'DraftKings'
+              AND market = 'points'
+              AND line = 20.5
+            ORDER BY id
+            """
+        ).fetchall()
+
+    assert line is not None
+    assert prediction["prediction_time"] == "pregame"
+    assert [row["id"] for row in matching_lines] == [9301]
+
+
+def test_rebuild_predictions_does_not_overwrite_completed_game_tracking() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9401, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9401, 'adaptive-context-v1', 'pregame', 18.0, 'over', 0.56, 0.52, 0.04, 0.07, 'medium', 'test')
+            """
+        )
+
+        projections = rebuild_predictions(conn)
+        prediction = conn.execute("SELECT * FROM prop_predictions WHERE prop_line_id = 9401").fetchone()
+
+    assert len(projections) == 3
+    assert prediction["prediction_time"] == "pregame"
+    assert prediction["projection"] == 18.0
 
 
 def test_odds_refresh_merges_cached_future_events() -> None:

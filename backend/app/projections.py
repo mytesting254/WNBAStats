@@ -202,9 +202,27 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
 
 def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
     clear_model_cache()
-    props = conn.execute("SELECT id FROM prop_lines ORDER BY captured_at DESC").fetchall()
+    props = conn.execute(
+        """
+        SELECT pl.id
+        FROM prop_lines pl
+        JOIN games g ON g.id = pl.game_id
+        WHERE g.status = 'scheduled'
+        ORDER BY pl.captured_at DESC
+        """
+    ).fetchall()
     projections = [build_prop_projection(conn, int(row["id"])) for row in props]
-    conn.execute("DELETE FROM prop_predictions WHERE model_version = ?", (MODEL_VERSION,))
+    prop_ids = [p.prop_line_id for p in projections]
+    if prop_ids:
+        placeholders = ",".join("?" for _ in prop_ids)
+        conn.execute(
+            f"""
+            DELETE FROM prop_predictions
+            WHERE model_version = ?
+              AND prop_line_id IN ({placeholders})
+            """,
+            (MODEL_VERSION, *prop_ids),
+        )
     conn.executemany(
         """
         INSERT INTO prop_predictions (
