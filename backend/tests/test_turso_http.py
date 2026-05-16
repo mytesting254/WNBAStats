@@ -37,11 +37,11 @@ class FakeResponse:
 def test_turso_http_connection_executes_parameterized_query(monkeypatch):
     calls = []
 
-    def fake_post(url, **kwargs):
+    def fake_post(self, url, **kwargs):
         calls.append((url, kwargs))
         return FakeResponse()
 
-    monkeypatch.setattr(db.requests, "post", fake_post)
+    monkeypatch.setattr(db.requests.Session, "post", fake_post)
 
     conn = db.TursoHttpConnection("libsql://wnba-test-org.turso.io", "test-token")
     cursor = conn.execute("SELECT * FROM teams WHERE id = ? AND spread = ?", (7, -8.0))
@@ -60,7 +60,7 @@ def test_turso_http_connection_executes_parameterized_query(monkeypatch):
 def test_turso_http_connection_batches_executemany(monkeypatch):
     calls = []
 
-    def fake_post(url, **kwargs):
+    def fake_post(self, url, **kwargs):
         calls.append((url, kwargs))
         execute_count = sum(1 for request in kwargs["json"]["requests"] if request["type"] == "execute")
         return FakeResponse(
@@ -80,7 +80,7 @@ def test_turso_http_connection_batches_executemany(monkeypatch):
             + [{"type": "ok", "response": {"result": {"cols": [], "rows": []}}}]
         )
 
-    monkeypatch.setattr(db.requests, "post", fake_post)
+    monkeypatch.setattr(db.requests.Session, "post", fake_post)
 
     conn = db.TursoHttpConnection("libsql://wnba-test-org.turso.io", "test-token")
     conn.EXECUTEMANY_BATCH_SIZE = 10

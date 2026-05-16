@@ -46,6 +46,11 @@ def connect() -> Any:
 def _configure_connection(conn: Any) -> None:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA cache_size = -8000")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA busy_timeout = 5000")
 
 
 class TursoRow(Mapping):
@@ -99,6 +104,11 @@ class TursoHttpConnection:
         self._pipeline_url = _http_pipeline_url(database_url)
         self._auth_token = auth_token
         self.row_factory = None
+        self._session = requests.Session()
+        self._session.headers.update({
+            "Authorization": f"Bearer {self._auth_token}",
+            "Content-Type": "application/json",
+        })
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> TursoHttpCursor:
         result = self._request_many([{"type": "execute", "stmt": _stmt(sql, params)}, {"type": "close"}])[0]
@@ -106,22 +116,24 @@ class TursoHttpConnection:
 
     def executemany(self, sql: str, seq_of_params: Iterable[Sequence[Any]]) -> TursoHttpCursor:
         last_cursor = TursoHttpCursor([], [])
-        params_list = list(seq_of_params)
-        for index in range(0, len(params_list), self.EXECUTEMANY_BATCH_SIZE):
-            batch = params_list[index : index + self.EXECUTEMANY_BATCH_SIZE]
-            requests_payload = [
-                {"type": "execute", "stmt": _stmt(sql, params)}
-                for params in batch
-            ]
-            requests_payload.append({"type": "close"})
-            results = self._request_many(requests_payload)
-            if results:
-                last_cursor = _cursor_from_result(results[len(batch) - 1])
+        batch: list[dict] = []
+        for params in seq_of_params:
+            batch.append({"type": "execute", "stmt": _stmt(sql, params)})
+            if len(batch) >= self.EXECUTEMANY_BATCH_SIZE:
+                last_cursor = self._request_batch(batch)
+                batch = []
+        if batch:
+            last_cursor = self._request_batch(batch)
         return last_cursor
 
     def _execute_batch(self, batch: list[dict]) -> TursoHttpCursor:
+        return self._request_batch(batch)
+
+    def _request_batch(self, batch: list[dict]) -> TursoHttpCursor:
         results = self._request_many([*batch, {"type": "close"}])
-        return _cursor_from_result(results[-1]) if results else TursoHttpCursor([], [])
+        if not results:
+            return TursoHttpCursor([], [])
+        return _cursor_from_result(results[len(batch) - 1])
 
     def executescript(self, script: str) -> TursoHttpCursor:
         last_cursor = TursoHttpCursor([], [])
@@ -144,7 +156,7 @@ class TursoHttpConnection:
         return None
 
     def close(self) -> None:
-        return None
+        self._session.close()
 
     def __enter__(self):
         return self
@@ -156,12 +168,8 @@ class TursoHttpConnection:
         return self._request_many(requests_payload)
 
     def _request_many(self, requests_payload: list[dict]) -> list[dict]:
-        response = requests.post(
+        response = self._session.post(
             self._pipeline_url,
-            headers={
-                "Authorization": f"Bearer {self._auth_token}",
-                "Content-Type": "application/json",
-            },
             json={"requests": requests_payload},
             timeout=30,
         )
@@ -366,6 +374,18 @@ def init_db() -> None:
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_player_stats_unique_player_game
             ON player_game_stats(player_id, game_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_player_stats_game
+            ON player_game_stats(game_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_games_status_date
+            ON games(status, game_date)
             """
         )
 

@@ -4,21 +4,113 @@ import sqlite3
 from typing import Any, Mapping
 
 
+class _GamePredictionCache:
+    def __init__(self, conn: sqlite3.Connection, team_ids: tuple[int, ...]):
+        self.conn = conn
+        self._team_summaries: dict[int, dict[str, float]] = {}
+        self._league_possessions: float | None = None
+        self._weighted_recent_cache: dict[tuple[int, str], float] = {}
+        self._prepare_team_summaries(team_ids)
+
+    def _prepare_team_summaries(self, team_ids: tuple[int, ...]) -> None:
+        unique_ids = tuple(dict.fromkeys(team_ids))
+        if not unique_ids:
+            return
+        placeholders = ",".join("?" for _ in unique_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT team_id,
+                   AVG(points) AS avg_points,
+                   AVG(opponent_points) AS avg_opponent_points,
+                   AVG(possessions) AS avg_possessions,
+                   COUNT(*) AS result_count
+            FROM team_game_results
+            WHERE team_id IN ({placeholders})
+            GROUP BY team_id
+            """,
+            unique_ids,
+        ).fetchall()
+        for row in rows:
+            self._team_summaries[int(row["team_id"])] = {
+                "avg_points": float(row["avg_points"]) if row["avg_points"] is not None else None,
+                "avg_opponent_points": float(row["avg_opponent_points"]) if row["avg_opponent_points"] is not None else None,
+                "avg_possessions": float(row["avg_possessions"]) if row["avg_possessions"] is not None else None,
+                "result_count": int(row["result_count"]),
+            }
+
+    def team_summary(self, team_id: int) -> dict[str, float]:
+        return self._team_summaries.get(team_id, {
+            "avg_points": None,
+            "avg_opponent_points": None,
+            "avg_possessions": None,
+            "result_count": 0,
+        })
+
+    def league_possessions(self) -> float:
+        if self._league_possessions is None:
+            value = self.conn.execute("SELECT AVG(possessions) FROM team_game_results").fetchone()[0]
+            self._league_possessions = float(value) if value is not None else 78.0
+        return self._league_possessions
+
+    def weighted_recent(self, team_id: int, column: str) -> float:
+        key = (team_id, column)
+        if key not in self._weighted_recent_cache:
+            rows = self.conn.execute(
+                f"""
+                SELECT {column} AS value
+                FROM team_game_results r
+                JOIN games g ON g.id = r.game_id
+                WHERE r.team_id = ?
+                ORDER BY g.game_date DESC
+                LIMIT 5
+                """,
+                (team_id,),
+            ).fetchall()
+            if not rows:
+                self._weighted_recent_cache[key] = self.team_average(team_id, column)
+            else:
+                values = [float(row["value"]) for row in rows]
+                weights = list(range(len(values), 0, -1))
+                self._weighted_recent_cache[key] = sum(value * weight for value, weight in zip(values, weights)) / sum(weights)
+        return self._weighted_recent_cache[key]
+
+    def team_average(self, team_id: int, column: str) -> float:
+        summary = self.team_summary(team_id)
+        avg_value = summary["avg_points"] if column == "points" else summary["avg_opponent_points"] if column == "opponent_points" else summary["avg_possessions"] if column == "possessions" else None
+        if avg_value is not None:
+            return avg_value
+        return self.league_possessions() if column == "possessions" else self.league_average(column)
+
+    def league_average(self, column: str) -> float:
+        value = self.conn.execute(f"SELECT AVG({column}) FROM team_game_results").fetchone()[0]
+        return float(value) if value is not None else 80.0
+
+    def team_count(self, team_id: int) -> int:
+        return self.team_summary(team_id)["result_count"]
+
+    def pace_factor(self, team_id: int, opponent_id: int) -> float:
+        league = self.league_possessions()
+        team = self.team_summary(team_id)["avg_possessions"] or league
+        opponent = self.team_summary(opponent_id)["avg_possessions"] or league
+        return _clamp(((float(team) + float(opponent)) / 2) / float(league), 0.94, 1.06)
+
+
 def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     home_team_id = int(game["home_team_id"])
     away_team_id = int(game["away_team_id"])
-    home_history_count = _team_result_count(conn, home_team_id)
-    away_history_count = _team_result_count(conn, away_team_id)
+    cache = _GamePredictionCache(conn, (home_team_id, away_team_id))
+    home_history_count = cache.team_count(home_team_id)
+    away_history_count = cache.team_count(away_team_id)
 
     home_projection = _project_team_points(
-        conn,
+        cache,
         team_id=home_team_id,
         opponent_id=away_team_id,
         is_home=True,
         rest_days=int(game["rest_days_home"] or 2),
     )
     away_projection = _project_team_points(
-        conn,
+        cache,
         team_id=away_team_id,
         opponent_id=home_team_id,
         is_home=False,
@@ -91,63 +183,40 @@ def _insufficient_history_payload(game: Mapping[str, Any], home_history_count: i
 
 
 def _project_team_points(
-    conn: sqlite3.Connection,
+    cache: _GamePredictionCache,
     team_id: int,
     opponent_id: int,
     is_home: bool,
     rest_days: int,
 ) -> float:
-    team_recent = _weighted_recent(conn, team_id, "points")
-    team_long = _average(conn, team_id, "points")
-    opponent_allowed = _average(conn, opponent_id, "opponent_points")
-    pace_factor = _pace_factor(conn, team_id, opponent_id)
+    team_recent = cache.weighted_recent(team_id, "points")
+    team_long = cache.team_average(team_id, "points")
+    opponent_allowed = cache.team_average(opponent_id, "opponent_points")
+    pace_factor = cache.pace_factor(team_id, opponent_id)
     home_factor = 1.025 if is_home else 0.985
     rest_factor = _rest_factor(rest_days)
     offense = (0.52 * team_recent) + (0.23 * team_long) + (0.25 * opponent_allowed)
     return offense * pace_factor * home_factor * rest_factor
 
 
-def _weighted_recent(conn: sqlite3.Connection, team_id: int, column: str) -> float:
-    rows = conn.execute(
-        f"""
-        SELECT {column} AS value
-        FROM team_game_results r
-        JOIN games g ON g.id = r.game_id
-        WHERE r.team_id = ?
-        ORDER BY g.game_date DESC
-        LIMIT 5
-        """,
-        (team_id,),
-    ).fetchall()
-    if not rows:
-        return _league_average(conn, column)
-    values = [float(row["value"]) for row in rows]
-    weights = list(range(len(values), 0, -1))
-    return sum(value * weight for value, weight in zip(values, weights)) / sum(weights)
+def _weighted_recent(cache: _GamePredictionCache, team_id: int, column: str) -> float:
+    return cache.weighted_recent(team_id, column)
 
 
-def _average(conn: sqlite3.Connection, team_id: int, column: str) -> float:
-    value = conn.execute(
-        f"SELECT AVG({column}) FROM team_game_results WHERE team_id = ?",
-        (team_id,),
-    ).fetchone()[0]
-    return float(value) if value is not None else _league_average(conn, column)
+def _average(cache: _GamePredictionCache, team_id: int, column: str) -> float:
+    return cache.team_average(team_id, column)
 
 
-def _league_average(conn: sqlite3.Connection, column: str) -> float:
-    value = conn.execute(f"SELECT AVG({column}) FROM team_game_results").fetchone()[0]
-    return float(value) if value is not None else 80.0
+def _league_average(cache: _GamePredictionCache, column: str) -> float:
+    return cache.league_average(column)
 
 
-def _team_result_count(conn: sqlite3.Connection, team_id: int) -> int:
-    return int(conn.execute("SELECT COUNT(*) FROM team_game_results WHERE team_id = ?", (team_id,)).fetchone()[0])
+def _team_result_count(cache: _GamePredictionCache, team_id: int) -> int:
+    return cache.team_count(team_id)
 
 
-def _pace_factor(conn: sqlite3.Connection, team_id: int, opponent_id: int) -> float:
-    league = conn.execute("SELECT AVG(possessions) FROM team_game_results").fetchone()[0] or 78.0
-    team = conn.execute("SELECT AVG(possessions) FROM team_game_results WHERE team_id = ?", (team_id,)).fetchone()[0] or league
-    opponent = conn.execute("SELECT AVG(possessions) FROM team_game_results WHERE team_id = ?", (opponent_id,)).fetchone()[0] or league
-    return _clamp(((float(team) + float(opponent)) / 2) / float(league), 0.94, 1.06)
+def _pace_factor(cache: _GamePredictionCache, team_id: int, opponent_id: int) -> float:
+    return cache.pace_factor(team_id, opponent_id)
 
 
 def _rest_factor(rest_days: int) -> float:
