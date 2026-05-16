@@ -209,29 +209,33 @@ def import_espn_player_boxscores(
             continue
 
         conn.execute("DELETE FROM player_game_stats WHERE game_id = ?", (game_id,))
-        for player in player_rows["players"]:
-            existing = conn.execute("SELECT id FROM players WHERE id = ?", (player["id"],)).fetchone()
-            if existing:
-                conn.execute(
-                    """
-                    UPDATE players
-                    SET full_name = ?, team_id = ?, position = ?, rotation_role = ?
-                    WHERE id = ?
-                    """,
-                    (player["full_name"], player["team_id"], player["position"], player["rotation_role"], player["id"]),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO players (id, full_name, team_id, position, rotation_role)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (player["id"], player["full_name"], player["team_id"], player["position"], player["rotation_role"]),
-                )
-                inserted_players += 1
+        player_ids = [player["id"] for player in player_rows["players"]]
+        existing_player_ids = set()
+        if player_ids:
+            placeholders = ",".join("?" for _ in player_ids)
+            existing_player_ids = {
+                int(row["id"])
+                for row in conn.execute(f"SELECT id FROM players WHERE id IN ({placeholders})", player_ids).fetchall()
+            }
         conn.executemany(
             """
-            INSERT INTO player_game_stats (
+            INSERT INTO players (id, full_name, team_id, position, rotation_role)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                full_name = excluded.full_name,
+                team_id = excluded.team_id,
+                position = excluded.position,
+                rotation_role = excluded.rotation_role
+            """,
+            [
+                (player["id"], player["full_name"], player["team_id"], player["position"], player["rotation_role"])
+                for player in player_rows["players"]
+            ],
+        )
+        inserted_players += sum(1 for player_id in player_ids if int(player_id) not in existing_player_ids)
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO player_game_stats (
                 player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,

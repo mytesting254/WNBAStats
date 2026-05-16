@@ -106,6 +106,29 @@ After a clean reset, only canonical WNBA teams are present. Players are created
 when ESPN player box scores are imported, usually through `Load Missing ESPN`
 after completed games.
 
+Covers is the preferred player-prop source. If Covers rows exist for a game,
+the sync from `sportsbook_prop_lines` to model-ready `prop_lines` uses Covers
+for that game and treats The Odds API rows as fallback-only.
+
+Missing ESPN box score fills write to Turso with batched HTTP pipeline calls.
+The `player_game_stats` table is unique by `(player_id, game_id)`, and imports
+use replace/upsert semantics so repeated missing-only fills repair gaps without
+duplicating player stat rows.
+
+Model Lab training also uses Turso in normal app runs. The training route opens
+the same runtime connection as the rest of the backend, writes metrics to
+`model_runs`, and only uses local SQLite when a test or explicit one-off command
+sets `WNBA_DB_PATH`.
+
+Check final-game box score coverage from the repo root:
+
+```bash
+.venv/bin/python -c "from backend.app.db import connect; \
+with connect() as conn: \
+    rows=conn.execute(\"select substr(game_date,1,4) season, count(*) final_games, sum(case when exists (select 1 from player_game_stats s where s.game_id=g.id) then 1 else 0 end) with_stats, sum(case when not exists (select 1 from player_game_stats s where s.game_id=g.id) then 1 else 0 end) missing from games g where status='final' group by substr(game_date,1,4) order by season\").fetchall(); \
+print([dict(row) for row in rows])"
+```
+
 To reset Turso to a clean slate with only canonical teams:
 
 ```powershell

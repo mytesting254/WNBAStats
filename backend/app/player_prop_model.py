@@ -206,6 +206,8 @@ def _train_market_model_cached(db_path: str, market: str) -> RidgeModel | None:
 
 
 def train_market_model(conn: sqlite3.Connection, market: str) -> RidgeModel | None:
+    if not isinstance(conn, sqlite3.Connection):
+        return _train_market_model_uncached(conn, market)
     db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
     return _train_market_model_cached(db_path, market)
 
