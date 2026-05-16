@@ -10,6 +10,7 @@ import requests
 from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+load_dotenv(ROOT_DIR / ".env")
 DEFAULT_DB_PATH = ROOT_DIR / "data" / "wnba.sqlite"
 
 
@@ -18,12 +19,11 @@ def get_db_path() -> Path:
 
 
 def get_turso_database_url() -> str | None:
-    load_dotenv(ROOT_DIR / ".env")
     return os.getenv("TURSO_DATABASE_URL")
 
 
 def using_turso() -> bool:
-    return "WNBA_DB_PATH" not in os.environ
+    return os.getenv("USE_LOCAL_DB", "").strip().lower() not in {"1", "true", "yes"}
 
 
 def connect() -> Any:

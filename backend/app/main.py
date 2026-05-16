@@ -77,6 +77,10 @@ def value_board() -> list[dict]:
 @app.get("/api/model-performance")
 def model_performance() -> dict:
     with connect() as conn:
+        total_settled_row = conn.execute(
+            "SELECT COUNT(*) AS count FROM settled_props"
+        ).fetchone()
+        total_settled = int(total_settled_row["count"] or 0)
         rows = conn.execute(
             """
             SELECT
@@ -87,7 +91,8 @@ def model_performance() -> dict:
             JOIN settled_props sp ON sp.prop_line_id = pp.prop_line_id
             """
         ).fetchall()
-    if not rows:
+    evaluated = len(rows)
+    if total_settled == 0:
         return {
             "settled": 0,
             "wins": 0,
@@ -95,13 +100,22 @@ def model_performance() -> dict:
             "average_ev": None,
             "message": "No settled props yet. Settle completed games to evaluate the model.",
         }
+    if evaluated == 0:
+        return {
+            "settled": 0,
+            "wins": 0,
+            "win_rate": None,
+            "average_ev": None,
+            "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but none have matching model predictions.",
+        }
     wins = sum(1 for row in rows if row["recommended_side"] == row["winning_side"])
-    avg_ev = sum(float(row["expected_value"]) for row in rows) / len(rows)
+    avg_ev = sum(float(row["expected_value"]) for row in rows) / evaluated
     return {
-        "settled": len(rows),
+        "settled": evaluated,
         "wins": wins,
-        "win_rate": round(wins / len(rows), 4),
+        "win_rate": round(wins / evaluated, 4),
         "average_ev": round(avg_ev, 4),
+        "message": f"Evaluated {evaluated} settled model prediction{'s' if evaluated != 1 else ''}.",
     }
 
 

@@ -12,7 +12,7 @@ from backend.app.espn_history import import_espn_player_boxscores, import_espn_s
 from backend.app.game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
 from backend.app.game_predictions import project_game
 from backend.app.history_import import determine_ats_result
-from backend.app.main import app, import_espn_history as import_espn_history_endpoint
+from backend.app.main import app, import_espn_history as import_espn_history_endpoint, model_performance
 from backend.app.odds import american_to_implied_probability, expected_value
 from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies, sync_prop_lines_from_sportsbook
 from backend.app.player_prop_model import _market_value as learned_market_value
@@ -25,6 +25,7 @@ from backend.app.training import run_walk_forward_training
 
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
+    monkeypatch.setenv("USE_LOCAL_DB", "true")
     monkeypatch.setenv("WNBA_DB_PATH", str(tmp_path / "wnba-test.sqlite"))
     init_db()
     with connect() as conn:
@@ -643,6 +644,38 @@ def test_rebuild_predictions_does_not_overwrite_completed_game_tracking() -> Non
     assert len(projections) == 3
     assert prediction["prediction_time"] == "pregame"
     assert prediction["projection"] == 18.0
+
+
+def test_model_performance_counts_settled_props_without_predictions() -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)"
+            , (2001, "Test Player", 10, "G", "starter")
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)"
+            , (20001, "2026-05-01", "2026-05-01T19:00:00Z", 10, 3, -3.5, 149.5)
+        )
+        conn.execute(
+            "INSERT INTO team_game_results (team_id, game_id, is_home, points, opponent_points, possessions, closing_spread, closing_total, ats_result, total_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            , (10, 20001, 1, 75, 70, 78.0, -3.5, 149.5, "cover", "under")
+        )
+        conn.execute(
+            "INSERT INTO player_game_stats (player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            , (2001, 20001, 34, 24, 6, 5, 1, 2, 0, 1)
+        )
+        conn.execute(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            , (20001, 20001, 2001, 'DraftKings', 'points', 23.5, -110, -110, datetime.now(timezone.utc).isoformat())
+        )
+        settled = settle_completed_props(conn)
+
+    assert settled["settled"] == 1
+    performance = model_performance()
+    assert performance["settled"] == 0
+    assert performance["win_rate"] is None
+    assert performance["average_ev"] is None
+    assert "no matching model predictions" in performance["message"].lower()
 
 
 def test_odds_refresh_merges_cached_future_events() -> None:

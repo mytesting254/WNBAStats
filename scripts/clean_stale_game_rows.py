@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import sqlite3
 import sys
@@ -21,6 +22,8 @@ def is_espn_game_id(game_id: int) -> bool:
 
 
 def clean_stale_game_rows() -> dict:
+    if os.getenv("USE_LOCAL_DB", "").strip().lower() not in {"1", "true", "yes"}:
+        raise RuntimeError("clean_stale_game_rows requires local SQLite override: set USE_LOCAL_DB=true and WNBA_DB_PATH to a local file.")
     init_db()
     db_path = get_db_path()
     backup_path = db_path.with_name(f"{db_path.stem}.backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}{db_path.suffix}")

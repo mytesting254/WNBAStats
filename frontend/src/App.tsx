@@ -236,6 +236,7 @@ export function App() {
         <Metric label="Settled props" value={performance?.settled.toString() ?? "0"} />
         <Metric label="Win rate" value={performance?.win_rate == null ? "Pending" : formatPercent(performance.win_rate)} />
       </section>
+      {performance?.message ? <div className="summary-message">{performance.message}</div> : null}
 
       {activeTab === "props" ? (
         <PropsView

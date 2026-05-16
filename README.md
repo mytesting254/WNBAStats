@@ -265,7 +265,8 @@ After the ESPN sync finishes, the app settles saved player prop predictions and 
 The runtime database lives in Turso Cloud. The backend requires `TURSO_DATABASE_URL`
 and `TURSO_AUTH_TOKEN` for normal app runs, so every device that uses the same
 credentials reads and writes the same stats and tracking history. Local SQLite is
-only used by tests or one-off commands that explicitly set `WNBA_DB_PATH`.
+not used by default; it is only enabled by tests or one-off commands that set
+`USE_LOCAL_DB=true` and `WNBA_DB_PATH`.
 
 To reset Turso to a clean slate with only canonical teams:
 
