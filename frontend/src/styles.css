@@ -506,6 +506,7 @@ tbody tr.selected {
 
 .matchup-card-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 14px;
   padding: 16px;
@@ -590,7 +591,7 @@ tbody tr.selected {
 
 .prediction-strip {
   display: grid;
-  grid-template-columns: repeat(7, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
   gap: 8px;
   padding: 16px;
   border-top: 1px solid #eaecf0;
@@ -616,6 +617,27 @@ tbody tr.selected {
   margin: 18px;
   padding-top: 0;
   border-top: 0;
+}
+
+.parlay-game-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 14px;
+  border: 1px solid #d9e8f7;
+  border-radius: 8px;
+  background: #f7fbff;
+}
+
+.parlay-data-section {
+  margin-top: 14px;
+}
+
+.parlay-data-section h4 {
+  margin: 0 0 8px;
+  color: #1b1f29;
+  font-size: 14px;
 }
 
 .candidate-filters {
@@ -808,6 +830,8 @@ tbody tr.selected {
 
 .mini-stat strong {
   font-size: 18px;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
 }
 
 .points-row,
@@ -861,7 +885,7 @@ tbody tr.selected {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  margin-top: 16px;
+  margin: 16px;
 }
 
 .covers-records-list {
@@ -880,7 +904,7 @@ tbody tr.selected {
 
 .covers-records-list div {
   display: grid;
-  grid-template-columns: 74px 1fr;
+  grid-template-columns: 82px minmax(0, 1fr);
   gap: 2px 8px;
   padding: 7px 0;
   border-top: 1px solid #f0f2f5;
@@ -896,6 +920,7 @@ tbody tr.selected {
 .covers-records-list b,
 .covers-records-list em {
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .covers-records-list span {

@@ -51,6 +51,8 @@ MARKET_VOLATILITY_FLOORS = {
     "points_rebounds_assists": 5.0,
 }
 
+_CONNECTION_MODEL_CACHE: dict[tuple[int, str], RidgeModel | None] = {}
+
 
 @dataclass(frozen=True)
 class FeatureSnapshot:
@@ -207,13 +209,17 @@ def _train_market_model_cached(db_path: str, market: str) -> RidgeModel | None:
 
 def train_market_model(conn: sqlite3.Connection, market: str) -> RidgeModel | None:
     if not isinstance(conn, sqlite3.Connection):
-        return _train_market_model_uncached(conn, market)
+        key = (id(conn), market)
+        if key not in _CONNECTION_MODEL_CACHE:
+            _CONNECTION_MODEL_CACHE[key] = _train_market_model_uncached(conn, market)
+        return _CONNECTION_MODEL_CACHE[key]
     db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
     return _train_market_model_cached(db_path, market)
 
 
 def clear_model_cache() -> None:
     _train_market_model_cached.cache_clear()
+    _CONNECTION_MODEL_CACHE.clear()
 
 
 def _train_market_model_uncached(conn: sqlite3.Connection, market: str) -> RidgeModel | None:

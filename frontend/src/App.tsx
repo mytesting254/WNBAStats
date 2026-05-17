@@ -959,6 +959,7 @@ function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[
         <div className="parlay-tab-content">
           {selectedMatchup ? (
             <MatchupProps
+              matchup={selectedMatchup}
               props={selectedMatchup.props ?? []}
               sportsbookProps={selectedMatchup.sportsbook_props ?? []}
               discrepancies={selectedMatchup.line_discrepancies ?? []}
@@ -973,10 +974,12 @@ function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[
 }
 
 function MatchupProps({
+  matchup,
   props,
   sportsbookProps,
   discrepancies
 }: {
+  matchup: Matchup;
   props: ValueProp[];
   sportsbookProps: Matchup["sportsbook_props"];
   discrepancies: LineDiscrepancy[];
@@ -1030,6 +1033,15 @@ function MatchupProps({
   const visibleSportsbookProps = filteredSportsbookProps.slice(0, 80);
   return (
     <div className="matchup-props">
+      <div className="parlay-game-summary" aria-label="Game model prediction">
+        <MiniStat label="Projected Score" value={formatProjectedScore(matchup)} />
+        <MiniStat label="Winner" value={matchup.winner_pick} />
+        <MiniStat label="ATS" value={matchup.ats_pick} />
+        <MiniStat label="ATS Edge" value={formatNullableEdge(matchup.ats_edge)} />
+        <MiniStat label="Model Total" value={formatProjectedTotal(matchup)} />
+        <MiniStat label="O/U Edge" value={formatNullableEdge(matchup.total_edge)} />
+        <MiniStat label="Confidence" value={matchup.game_confidence} />
+      </div>
       <div className="panel-header compact">
         <div>
           <h3>Parlay Candidates</h3>
@@ -1212,49 +1224,15 @@ function MatchupProps({
             </tbody>
           </table>
         </div>
-      ) : discrepancyShortlist.length ? (
-        <>
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Player</th>
-                  <th>Market</th>
-                  <th>Side</th>
-                  <th>Best</th>
-                  <th>Low</th>
-                  <th>High</th>
-                  <th>Books</th>
-                </tr>
-              </thead>
-              <tbody>
-                {discrepancyShortlist.map((item) => (
-                  <tr key={`candidate-row-${item.player_name}-${item.market}-${item.side}-${item.line_gap}-${item.price_gap}`}>
-                    <td>{item.player_name}</td>
-                    <td>{marketLabel(item.market)}</td>
-                    <td><span className={`side ${item.side}`}>{item.side}</span></td>
-                    <td>
-                      <strong>{item.best_price.sportsbook}</strong>
-                      <span>{item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}</span>
-                    </td>
-                    <td>
-                      <strong>{item.low_line.sportsbook}</strong>
-                      <span>{item.low_line.line.toFixed(1)} {formatAmerican(item.low_line.price)}</span>
-                    </td>
-                    <td>
-                      <strong>{item.high_line.sportsbook}</strong>
-                      <span>{item.high_line.line.toFixed(1)} {formatAmerican(item.high_line.price)}</span>
-                    </td>
-                    <td>{item.books}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <SportsbookLinesTable lines={visibleSportsbookProps} total={filteredSportsbookProps.length} />
-        </>
       ) : filteredSportsbookProps.length ? (
-        <SportsbookLinesTable lines={visibleSportsbookProps} total={filteredSportsbookProps.length} />
+        <>
+          <SportsbookLinesTable lines={visibleSportsbookProps} total={filteredSportsbookProps.length} />
+          {discrepancyShortlist.length > 0 && (
+            <LineGapsTable discrepancies={discrepancyShortlist} />
+          )}
+        </>
+      ) : discrepancyShortlist.length ? (
+        <LineGapsTable discrepancies={discrepancyShortlist} />
       ) : (
         <p className="empty">
           {sportsbookProps.length
@@ -1266,38 +1244,86 @@ function MatchupProps({
   );
 }
 
+function LineGapsTable({ discrepancies }: { discrepancies: LineDiscrepancy[] }) {
+  return (
+    <div className="parlay-data-section">
+      <h4>Sportsbook Line Gaps</h4>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Player</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Best</th>
+              <th>Low</th>
+              <th>High</th>
+              <th>Books</th>
+            </tr>
+          </thead>
+          <tbody>
+            {discrepancies.map((item) => (
+              <tr key={`candidate-row-${item.player_name}-${item.market}-${item.side}-${item.line_gap}-${item.price_gap}`}>
+                <td>{item.player_name}</td>
+                <td>{marketLabel(item.market)}</td>
+                <td><span className={`side ${item.side}`}>{item.side}</span></td>
+                <td>
+                  <strong>{item.best_price.sportsbook}</strong>
+                  <span>{item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}</span>
+                </td>
+                <td>
+                  <strong>{item.low_line.sportsbook}</strong>
+                  <span>{item.low_line.line.toFixed(1)} {formatAmerican(item.low_line.price)}</span>
+                </td>
+                <td>
+                  <strong>{item.high_line.sportsbook}</strong>
+                  <span>{item.high_line.line.toFixed(1)} {formatAmerican(item.high_line.price)}</span>
+                </td>
+                <td>{item.books}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function SportsbookLinesTable({ lines, total }: { lines: Matchup["sportsbook_props"]; total: number }) {
   return (
-    <div className="table-wrap sportsbook-lines-table">
-      <table>
-        <thead>
-          <tr>
-            <th>Player</th>
-            <th>Market</th>
-            <th>Side</th>
-            <th>Line</th>
-            <th>Odds</th>
-            <th>Book</th>
-          </tr>
-        </thead>
-        <tbody>
-          {lines.map((item) => (
-            <tr key={`book-row-${item.id}-${item.player_name}-${item.market}-${item.side}`}>
-              <td>{item.player_name}</td>
-              <td>{marketLabel(item.market)}</td>
-              <td><span className={`side ${item.side}`}>{item.side}</span></td>
-              <td>{item.line.toFixed(1)}</td>
-              <td>{formatAmerican(item.price)}</td>
-              <td>{item.sportsbook}</td>
-            </tr>
-          ))}
-          {total > lines.length && (
+    <div className="parlay-data-section">
+      <h4>Sportsbook Lines</h4>
+      <div className="table-wrap sportsbook-lines-table">
+        <table>
+          <thead>
             <tr>
-              <td colSpan={6}>Showing first {lines.length} of {total} sportsbook lines. Use filters to narrow the list.</td>
+              <th>Player</th>
+              <th>Market</th>
+              <th>Side</th>
+              <th>Line</th>
+              <th>Odds</th>
+              <th>Book</th>
             </tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {lines.map((item) => (
+              <tr key={`book-row-${item.id}-${item.player_name}-${item.market}-${item.side}`}>
+                <td>{item.player_name}</td>
+                <td>{marketLabel(item.market)}</td>
+                <td><span className={`side ${item.side}`}>{item.side}</span></td>
+                <td>{item.line.toFixed(1)}</td>
+                <td>{formatAmerican(item.price)}</td>
+                <td>{item.sportsbook}</td>
+              </tr>
+            ))}
+            {total > lines.length && (
+              <tr>
+                <td colSpan={6}>Showing first {lines.length} of {total} sportsbook lines. Use filters to narrow the list.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
