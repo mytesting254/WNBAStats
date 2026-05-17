@@ -694,6 +694,12 @@ tbody tr.selected {
   border-radius: 8px;
 }
 
+.sportsbook-lines-table {
+  margin-top: 14px;
+  border: 1px solid #eaecf0;
+  border-radius: 8px;
+}
+
 .book-line-list {
   display: flex;
   flex-wrap: wrap;
@@ -851,6 +857,65 @@ tbody tr.selected {
   font-weight: 800;
 }
 
+.covers-records-panel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.covers-records-list {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #eaecf0;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.covers-records-list h4 {
+  margin: 0 0 8px;
+  color: #1b1f29;
+  font-size: 13px;
+}
+
+.covers-records-list div {
+  display: grid;
+  grid-template-columns: 74px 1fr;
+  gap: 2px 8px;
+  padding: 7px 0;
+  border-top: 1px solid #f0f2f5;
+  font-size: 12px;
+}
+
+.covers-records-list div:first-of-type {
+  border-top: 0;
+}
+
+.covers-records-list span,
+.covers-records-list strong,
+.covers-records-list b,
+.covers-records-list em {
+  min-width: 0;
+}
+
+.covers-records-list span {
+  color: #667085;
+}
+
+.covers-records-list strong {
+  color: #344054;
+}
+
+.covers-records-list b {
+  color: #1b1f29;
+}
+
+.covers-records-list em {
+  color: #2364aa;
+  font-style: normal;
+  font-weight: 800;
+}
+
 .model-layout {
   display: grid;
   grid-template-columns: minmax(280px, 0.8fr) minmax(360px, 1.2fr);
@@ -906,6 +971,7 @@ tbody tr.selected {
   .model-layout,
   .data-layout,
   .prediction-strip,
+  .covers-records-panel,
   .candidate-strip,
   .discrepancy-grid {
     grid-template-columns: 1fr;

@@ -90,7 +90,11 @@ def import_espn_scoreboard(
         status = _status(competition)
         home_score = _parse_score(home)
         away_score = _parse_score(away)
-        total = float(home_score + away_score) if home_score is not None and away_score is not None else None
+        total = (
+            float(home_score + away_score)
+            if status == "final" and home_score is not None and away_score is not None
+            else None
+        )
 
         conn.execute(
             """
@@ -104,7 +108,10 @@ def import_espn_scoreboard(
                 home_team_id = excluded.home_team_id,
                 away_team_id = excluded.away_team_id,
                 status = excluded.status,
-                game_total = COALESCE(excluded.game_total, games.game_total),
+                game_total = CASE
+                    WHEN excluded.game_total IS NOT NULL AND excluded.game_total > 0 THEN excluded.game_total
+                    ELSE games.game_total
+                END,
                 espn_event_id = excluded.espn_event_id
             """,
             (game_id, game_date, start_time, home_team_id, away_team_id, status, total, espn_event_id),

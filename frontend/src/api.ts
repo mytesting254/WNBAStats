@@ -113,6 +113,24 @@ export type TeamLast10 = {
   }>;
 };
 
+export type CoversRecordRow = {
+  date: string;
+  home?: string;
+  winner?: string | null;
+  opponent?: string;
+  location?: "home" | "away";
+  result?: string | null;
+  score: string;
+  ats: string;
+  total: string;
+};
+
+export type CoversRecords = {
+  head_to_head: CoversRecordRow[];
+  away_last_10: CoversRecordRow[];
+  home_last_10: CoversRecordRow[];
+};
+
 export type Matchup = {
   id: number;
   game_date: string;
@@ -141,6 +159,7 @@ export type Matchup = {
   game_reason: string;
   home: TeamLast10;
   away: TeamLast10;
+  covers_records?: CoversRecords | null;
   props: ValueProp[];
   sportsbook_props: SportsbookProp[];
   line_discrepancies: LineDiscrepancy[];
@@ -205,6 +224,7 @@ export type OddsImportResult = {
   synced_props?: number;
   message?: string;
   source?: string;
+  errors?: Array<{ event_id?: string; error: string }>;
 };
 
 export async function importOdds(forceRefresh = false): Promise<OddsImportResult> {

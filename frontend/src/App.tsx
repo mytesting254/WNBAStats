@@ -11,6 +11,7 @@ import {
   importOdds,
   recalculate,
   trainModel,
+  type CoversRecordRow,
   type LineDiscrepancy,
   type Matchup,
   type ModelPerformance,
@@ -147,8 +148,12 @@ export function App() {
     setOperationStatus(null);
     try {
       const result = await importCoversOdds(forceRefresh);
+      if (result.status === "failed") {
+        setError(result.message ?? "Unable to import Covers odds");
+        return;
+      }
       await load();
-      setOperationStatus(`${forceRefresh ? "Fresh" : "Saved"} Covers odds loaded. Imported ${result.imported ?? 0} sportsbook rows from ${result.source ?? "covers"}.`);
+      setOperationStatus(result.message ?? `${forceRefresh ? "Fresh" : "Saved"} Covers odds loaded. Imported ${result.imported ?? 0} sportsbook rows from ${result.source ?? "covers"}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to import Covers odds");
     } finally {
@@ -860,6 +865,7 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
                 <MiniStat label="O/U Edge" value={formatNullableEdge(selectedMatchup.total_edge)} />
                 <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
               </div>
+              <CoversRecordsPanel matchup={selectedMatchup} />
               <p className="reason matchup-reason">{selectedMatchup.game_reason}</p>
             </article>
           ) : (
@@ -869,6 +875,57 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
       </div>
     </section>
   );
+}
+
+function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
+  const records = matchup.covers_records;
+  if (!records || (!records.head_to_head.length && !records.away_last_10.length && !records.home_last_10.length)) {
+    return null;
+  }
+
+  return (
+    <div className="covers-records-panel">
+      <CoversRecordList title="H2H Last 10" rows={records.head_to_head.slice(0, 5)} mode="h2h" />
+      <CoversRecordList title={`${matchup.away_team} Last 10`} rows={records.away_last_10.slice(0, 5)} mode="team" />
+      <CoversRecordList title={`${matchup.home_team} Last 10`} rows={records.home_last_10.slice(0, 5)} mode="team" />
+    </div>
+  );
+}
+
+function CoversRecordList({
+  title,
+  rows,
+  mode
+}: {
+  title: string;
+  rows: CoversRecordRow[];
+  mode: "h2h" | "team";
+}) {
+  if (!rows.length) {
+    return null;
+  }
+
+  return (
+    <div className="covers-records-list">
+      <h4>{title}</h4>
+      {rows.map((row) => (
+        <div key={`${title}-${row.date}-${row.score}-${row.opponent ?? row.home ?? ""}`}>
+          <span>{row.date}</span>
+          <strong>{coversRecordOpponent(row, mode)}</strong>
+          <b>{row.result ? `${row.result} ` : ""}{row.score}</b>
+          <em>{row.ats} | {row.total}</em>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function coversRecordOpponent(row: CoversRecordRow, mode: "h2h" | "team") {
+  if (mode === "h2h") {
+    return `Home ${row.home ?? "N/A"}`;
+  }
+  const prefix = row.location === "away" ? "at" : "vs";
+  return `${prefix} ${row.opponent ?? "N/A"}`;
 }
 
 function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[]; loading: boolean; error: string | null }) {
@@ -952,6 +1009,25 @@ function MatchupProps({
     .slice()
     .sort((a, b) => compareDiscrepancies(a, b, discrepancySort, sortDirection));
   const discrepancyShortlist = filteredDiscrepancies.slice(0, 8);
+  const filteredSportsbookProps = sportsbookProps
+    .filter((item) => {
+      const marketMatch = marketFilter === "all" || item.market === marketFilter;
+      const sideMatch = sideFilter === "all" || item.side === sideFilter;
+      return marketMatch && sideMatch;
+    })
+    .slice()
+    .sort((a, b) => {
+      const playerCompare = a.player_name.localeCompare(b.player_name);
+      if (playerCompare !== 0) {
+        return playerCompare;
+      }
+      const marketCompare = a.market.localeCompare(b.market);
+      if (marketCompare !== 0) {
+        return marketCompare;
+      }
+      return a.sportsbook.localeCompare(b.sportsbook);
+    });
+  const visibleSportsbookProps = filteredSportsbookProps.slice(0, 80);
   return (
     <div className="matchup-props">
       <div className="panel-header compact">
@@ -962,8 +1038,8 @@ function MatchupProps({
               ? `${visibleProps.length} legs match the current filters, ranked by model EV and edge`
               : discrepancyShortlist.length
                 ? `${discrepancyShortlist.length} sportsbook line gaps match the current filters while models are unavailable`
-                : sportsbookProps.length
-                  ? "Sportsbook props are available; real player game logs are needed for model-ranked legs"
+                : filteredSportsbookProps.length
+                  ? `${filteredSportsbookProps.length} sportsbook prop lines match the current filters`
                   : "No sportsbook props attached to this game yet"}
           </p>
         </div>
@@ -1137,55 +1213,91 @@ function MatchupProps({
           </table>
         </div>
       ) : discrepancyShortlist.length ? (
-        <div className="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Player</th>
-                <th>Market</th>
-                <th>Side</th>
-                <th>Best</th>
-                <th>Low</th>
-                <th>High</th>
-                <th>Books</th>
-              </tr>
-            </thead>
-            <tbody>
-              {discrepancyShortlist.map((item) => (
-                <tr key={`candidate-row-${item.player_name}-${item.market}-${item.side}-${item.line_gap}-${item.price_gap}`}>
-                  <td>{item.player_name}</td>
-                  <td>{marketLabel(item.market)}</td>
-                  <td><span className={`side ${item.side}`}>{item.side}</span></td>
-                  <td>
-                    <strong>{item.best_price.sportsbook}</strong>
-                    <span>{item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}</span>
-                  </td>
-                  <td>
-                    <strong>{item.low_line.sportsbook}</strong>
-                    <span>{item.low_line.line.toFixed(1)} {formatAmerican(item.low_line.price)}</span>
-                  </td>
-                  <td>
-                    <strong>{item.high_line.sportsbook}</strong>
-                    <span>{item.high_line.line.toFixed(1)} {formatAmerican(item.high_line.price)}</span>
-                  </td>
-                  <td>{item.books}</td>
-                </tr>
-              ))}
-              {!discrepancyShortlist.length && (
+        <>
+          <div className="table-wrap">
+            <table>
+              <thead>
                 <tr>
-                  <td colSpan={7}>No sportsbook line gaps match these filters.</td>
+                  <th>Player</th>
+                  <th>Market</th>
+                  <th>Side</th>
+                  <th>Best</th>
+                  <th>Low</th>
+                  <th>High</th>
+                  <th>Books</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {discrepancyShortlist.map((item) => (
+                  <tr key={`candidate-row-${item.player_name}-${item.market}-${item.side}-${item.line_gap}-${item.price_gap}`}>
+                    <td>{item.player_name}</td>
+                    <td>{marketLabel(item.market)}</td>
+                    <td><span className={`side ${item.side}`}>{item.side}</span></td>
+                    <td>
+                      <strong>{item.best_price.sportsbook}</strong>
+                      <span>{item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}</span>
+                    </td>
+                    <td>
+                      <strong>{item.low_line.sportsbook}</strong>
+                      <span>{item.low_line.line.toFixed(1)} {formatAmerican(item.low_line.price)}</span>
+                    </td>
+                    <td>
+                      <strong>{item.high_line.sportsbook}</strong>
+                      <span>{item.high_line.line.toFixed(1)} {formatAmerican(item.high_line.price)}</span>
+                    </td>
+                    <td>{item.books}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <SportsbookLinesTable lines={visibleSportsbookProps} total={filteredSportsbookProps.length} />
+        </>
+      ) : filteredSportsbookProps.length ? (
+        <SportsbookLinesTable lines={visibleSportsbookProps} total={filteredSportsbookProps.length} />
       ) : (
         <p className="empty">
           {sportsbookProps.length
-            ? `${sportsbookProps.length} sportsbook prop rows are loaded for this game, but real player box scores are needed before model-ranked parlay candidates can be calculated.`
+            ? "No sportsbook prop rows match the current filters."
             : "Import sportsbook prop lines for this game, then refresh this matchup."}
         </p>
       )}
+    </div>
+  );
+}
+
+function SportsbookLinesTable({ lines, total }: { lines: Matchup["sportsbook_props"]; total: number }) {
+  return (
+    <div className="table-wrap sportsbook-lines-table">
+      <table>
+        <thead>
+          <tr>
+            <th>Player</th>
+            <th>Market</th>
+            <th>Side</th>
+            <th>Line</th>
+            <th>Odds</th>
+            <th>Book</th>
+          </tr>
+        </thead>
+        <tbody>
+          {lines.map((item) => (
+            <tr key={`book-row-${item.id}-${item.player_name}-${item.market}-${item.side}`}>
+              <td>{item.player_name}</td>
+              <td>{marketLabel(item.market)}</td>
+              <td><span className={`side ${item.side}`}>{item.side}</span></td>
+              <td>{item.line.toFixed(1)}</td>
+              <td>{formatAmerican(item.price)}</td>
+              <td>{item.sportsbook}</td>
+            </tr>
+          ))}
+          {total > lines.length && (
+            <tr>
+              <td colSpan={6}>Showing first {lines.length} of {total} sportsbook lines. Use filters to narrow the list.</td>
+            </tr>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }

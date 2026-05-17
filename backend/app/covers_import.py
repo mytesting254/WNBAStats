@@ -3,9 +3,11 @@ from __future__ import annotations
 import html
 import re
 import sqlite3
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
+from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from .bootstrap import ensure_team, normalize_team_abbreviation
@@ -18,9 +20,13 @@ RAW_CACHE_NAME = "covers_props_raw.json"
 COVERS_BASE_URL = "https://www.covers.com"
 COVERS_MATCHUPS_URL = f"{COVERS_BASE_URL}/sports/wnba/matchups"
 LOCAL_TZ = timezone(timedelta(hours=-4))
+FETCH_TIMEOUT_SECONDS = 12
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection": "close",
 }
 
 MARKET_SLUGS = {
@@ -82,6 +88,7 @@ class CoversMetadata:
     away_team: str
     spread_home: float | None = None
     game_total: float | None = None
+    records: dict | None = None
 
 
 def import_covers_props(
@@ -102,19 +109,67 @@ def import_covers_props(
             "message": "Loaded Covers props from saved JSON. Use Refresh Covers for a fresh scrape.",
         }
 
-    games = covers_matchup_links(selected_date)
+    try:
+        games = covers_matchup_links(selected_date)
+    except Exception as exc:
+        if isinstance(cached_payload, dict) and cached_payload.get("rows"):
+            result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
+            synced = sync_prop_lines_from_sportsbook(conn)
+            return {
+                **result,
+                "synced_props": synced,
+                "status": "loaded_from_cache",
+                "source": "cache",
+                "message": f"Fresh Covers scrape failed while loading matchups; kept saved Covers data. {exc}",
+            }
+        return {
+            "events": 0,
+            "imported": 0,
+            "captured_at": None,
+            "synced_props": 0,
+            "status": "failed",
+            "source": PROVIDER,
+            "message": f"Fresh Covers scrape failed while loading matchups. {exc}",
+        }
     imported_rows = []
     metadata_rows: list[CoversMetadata] = []
+    errors = []
     for game in games:
-        matchup_page = _fetch_text(game.matchup_url or game.odds_url.removesuffix("/odds"))
-        odds_page = _fetch_text(game.odds_url)
-        metadata = _metadata_from_page(conn, game, matchup_page, fallback_page=odds_page)
-        metadata_rows.append(metadata)
-        market_html = odds_page + "".join(_fetch_market_fragments(odds_page))
-        imported_rows.extend(_event_rows(metadata, market_html, captured_at))
+        try:
+            matchup_page = _fetch_text(game.matchup_url or game.odds_url.removesuffix("/odds"))
+            odds_page = _fetch_text(game.odds_url)
+            metadata = _metadata_from_page(conn, game, matchup_page, fallback_page=odds_page)
+            metadata_rows.append(metadata)
+            market_html = odds_page + "".join(_fetch_market_fragments(odds_page))
+            imported_rows.extend(_event_rows(metadata, market_html, captured_at))
+        except Exception as exc:
+            errors.append({"event_id": game.event_id, "error": str(exc)})
+            continue
 
     row_payload = [_tuple_to_row(row) for row in imported_rows]
     game_payload = [_metadata_to_row(row) for row in metadata_rows]
+    if not row_payload:
+        if isinstance(cached_payload, dict) and cached_payload.get("rows"):
+            result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
+            synced = sync_prop_lines_from_sportsbook(conn)
+            return {
+                **result,
+                "synced_props": synced,
+                "status": "loaded_from_cache",
+                "source": "cache",
+                "message": "Fresh Covers scrape returned no prop rows; kept saved Covers data.",
+                "errors": errors,
+            }
+        return {
+            "events": len(games),
+            "imported": 0,
+            "captured_at": None,
+            "synced_props": 0,
+            "status": "failed",
+            "source": PROVIDER,
+            "message": "Fresh Covers scrape returned no prop rows.",
+            "errors": errors,
+        }
     write_json_cache(
         RAW_CACHE_NAME,
         {
@@ -135,6 +190,7 @@ def import_covers_props(
         "status": "imported",
         "source": PROVIDER,
         "captured_at": captured_at,
+        "errors": errors,
     }
 
 
@@ -197,8 +253,10 @@ def _metadata_from_page(conn: sqlite3.Connection, game: CoversGame, page: str, f
     commence_time = _parse_covers_start(start_match.group("start"))
     game_date = commence_time[:10]
     market = _game_market_from_page(page, home_team, away_team)
-    if market["spread_home"] is None and fallback_page:
-        market = _game_market_from_page(fallback_page, home_team, away_team)
+    if fallback_page:
+        fallback_market = _game_market_from_page(fallback_page, home_team, away_team)
+        if fallback_market["spread_home"] is not None or fallback_market["game_total"] is not None:
+            market = fallback_market
     game_id = _match_or_create_local_game(
         conn,
         home_team,
@@ -217,6 +275,7 @@ def _metadata_from_page(conn: sqlite3.Connection, game: CoversGame, page: str, f
         away_team=away_team,
         spread_home=market.get("spread_home"),
         game_total=market.get("game_total"),
+        records=_records_from_page(page),
     )
 
 
@@ -226,7 +285,10 @@ def _fetch_market_fragments(page: str) -> list[str]:
         market = _market_from_title(match.group("title"))
         if not market or market not in MARKET_SLUGS:
             continue
-        fragments.append(_fetch_text(urljoin(COVERS_BASE_URL, html.unescape(match.group("url")))))
+        try:
+            fragments.append(_fetch_text(urljoin(COVERS_BASE_URL, html.unescape(match.group("url")))))
+        except Exception:
+            continue
     return fragments
 
 
@@ -358,6 +420,106 @@ def _game_market_from_page(page: str, home_team: str, away_team: str) -> dict[st
         "spread_home": _parse_float(match.group("home_spread")),
         "game_total": game_total,
     }
+
+
+def _records_from_page(page: str) -> dict:
+    return {
+        "head_to_head": _parse_h2h_rows(_table_by_caption(page, "Head-To-Head")),
+        "away_last_10": _parse_team_rows(_team_last_10_table(page, "away")),
+        "home_last_10": _parse_team_rows(_team_last_10_table(page, "home")),
+    }
+
+
+def _table_by_caption(page: str, caption: str) -> str | None:
+    pattern = re.compile(
+        rf"<table[^>]*>\s*<caption[^>]*>\s*{re.escape(caption)}\s*</caption>.*?</table>",
+        re.I | re.S,
+    )
+    match = pattern.search(page)
+    return match.group(0) if match else None
+
+
+def _team_last_10_table(page: str, side: str) -> str | None:
+    section = re.search(rf'<section class="{side}-team-section"[\s\S]*?</section>', page, re.I)
+    return _table_by_caption(section.group(0), "Team - Last 10") if section else None
+
+
+def _parse_h2h_rows(table: str | None) -> list[dict]:
+    rows = []
+    for cells in _table_cells(table):
+        if len(cells) < 5:
+            continue
+        score = _score_from_cell(cells[2])
+        if not score:
+            continue
+        rows.append(
+            {
+                "date": _clean_cell(cells[0]),
+                "home": _clean_cell(cells[1]),
+                "winner": _winner_from_cell(cells[2]),
+                "score": score,
+                "ats": _clean_cell(cells[3]),
+                "total": _clean_cell(cells[4]),
+            }
+        )
+    return rows[:10]
+
+
+def _parse_team_rows(table: str | None) -> list[dict]:
+    rows = []
+    for cells in _table_cells(table):
+        if len(cells) < 5:
+            continue
+        score = _score_from_cell(cells[2])
+        if not score:
+            continue
+        rows.append(
+            {
+                "date": _clean_cell(cells[0]),
+                "opponent": _opponent_from_cell(cells[1]),
+                "location": "away" if re.search(r">\s*@\s*<", cells[1]) else "home",
+                "result": _result_from_cell(cells[2]),
+                "score": score,
+                "ats": _clean_cell(cells[3]),
+                "total": _clean_cell(cells[4]),
+            }
+        )
+    return rows[:10]
+
+
+def _table_cells(table: str | None) -> list[list[str]]:
+    if not table:
+        return []
+    rows = []
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", table, re.I | re.S):
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.I | re.S)
+        if cells:
+            rows.append(cells)
+    return rows
+
+
+def _winner_from_cell(value: str) -> str | None:
+    match = re.search(r"alt=\"(?P<winner>[^\"]+) logo\"", value, re.I)
+    return _clean_text(match.group("winner")) if match else None
+
+
+def _opponent_from_cell(value: str) -> str:
+    match = re.search(r"<a[^>]*>(?P<opponent>[^<]+)</a>", value, re.I | re.S)
+    return _clean_text(match.group("opponent")) if match else _clean_cell(value).replace("@", "").strip()
+
+
+def _result_from_cell(value: str) -> str | None:
+    match = re.search(r"<b>\s*(?P<result>[WLT])\s*</b>", value, re.I)
+    return match.group("result").upper() if match else None
+
+
+def _score_from_cell(value: str) -> str | None:
+    match = re.search(r"(?P<score>\d+\s*-\s*\d+)", _clean_cell(value))
+    return re.sub(r"\s+", " ", match.group("score")).strip() if match else None
+
+
+def _clean_cell(value: str) -> str:
+    return _clean_text(re.sub(r"<[^>]+>", " ", html.unescape(value)))
 
 
 def _covers_abbreviation(team_name: str) -> str | None:
@@ -506,6 +668,7 @@ def _metadata_to_row(row: CoversMetadata) -> dict:
         "away_team": row.away_team,
         "spread_home": row.spread_home,
         "game_total": row.game_total,
+        "records": row.records,
     }
 
 
@@ -515,8 +678,35 @@ def _today_local() -> str:
 
 def _fetch_text(url: str) -> str:
     request = Request(url, headers=REQUEST_HEADERS)
-    with urlopen(request, timeout=30) as response:
-        return response.read().decode("utf-8", errors="replace")
+    try:
+        with urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except (TimeoutError, URLError, OSError) as exc:
+        return _fetch_text_with_curl(url, exc)
+
+
+def _fetch_text_with_curl(url: str, original_error: Exception) -> str:
+    command = [
+        "curl",
+        "-L",
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        str(FETCH_TIMEOUT_SECONDS),
+        "-H",
+        f"User-Agent: {REQUEST_HEADERS['User-Agent']}",
+        "-H",
+        f"Accept: {REQUEST_HEADERS['Accept']}",
+        "-H",
+        f"Accept-Language: {REQUEST_HEADERS['Accept-Language']}",
+        url,
+    ]
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=FETCH_TIMEOUT_SECONDS + 2)
+        return result.stdout
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as curl_error:
+        raise RuntimeError(f"Unable to fetch {url}: {original_error}; curl fallback failed: {curl_error}") from curl_error
 
 
 def _clean_text(value: str) -> str:

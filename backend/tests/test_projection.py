@@ -4,9 +4,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from backend.app import covers_import as covers_import_module
 from backend.app.bootstrap import ensure_teams
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
-from backend.app.covers_import import CoversGame, _event_rows, _metadata_from_page
+from backend.app.covers_import import CoversGame, _event_rows, _metadata_from_page, _records_from_page
 from backend.app.db import connect, init_db
 from backend.app.espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from backend.app.game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
@@ -755,6 +756,142 @@ def test_covers_parser_extracts_matchup_line_and_total() -> None:
     assert game["game_total"] == 158.5
 
 
+def test_covers_metadata_prefers_odds_page_market_over_matchup_page_noise() -> None:
+    matchup_html = """
+    <script type="application/ld+json">
+    {"startDate": "05/17/2026 17:30:00 &#x2B;00:00", "name": "Las Vegas Aces vs Atlanta Dream"}
+    </script>
+    <section>
+      <div>LV o14.5 -160</div>
+      <div>ATL u15.5 -105</div>
+    </section>
+    """
+    odds_html = """
+    <script type="application/ld+json">
+    {"startDate": "05/17/2026 17:30:00 &#x2B;00:00", "name": "Las Vegas Aces vs Atlanta Dream"}
+    </script>
+    <section>
+      <h2>LV vs ATL Game Odds</h2>
+      <div>Team Spread Total ML</div>
+      <div>LV -2.5 -110 o172.5 -110 -155</div>
+      <div>ATL +2.5 -110 u172.5 -110 +130</div>
+    </section>
+    """
+    with connect() as conn:
+        metadata = _metadata_from_page(
+            conn,
+            CoversGame("373868", "https://example.test/odds"),
+            matchup_html,
+            fallback_page=odds_html,
+        )
+
+    assert metadata.spread_home == 2.5
+    assert metadata.game_total == 172.5
+
+
+def test_covers_records_parser_extracts_h2h_and_team_last_10() -> None:
+    html = """
+    <section class="both-team-section">
+      <table class="last-10-table">
+        <caption>Head-To-Head</caption>
+        <tbody>
+          <tr>
+            <td>Aug 27, &#x27;25</td>
+            <td>ATL</td>
+            <td><img alt="Las Vegas logo" /> <a>81 - 75</a></td>
+            <td><b>LV</b> 3.5</td>
+            <td>u162.5</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+    <section class="away-team-section">
+      <table class="last-10-table">
+        <caption>Team - Last 10</caption>
+        <tbody>
+          <tr>
+            <td>May 15, &#x27;26</td>
+            <td><span class="last-10-team"><span>@</span><a>CON</a></span></td>
+            <td><b>W </b><a>101 - 94</a></td>
+            <td><b>L</b> -14.5</td>
+            <td>o172.5</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+    <section class="home-team-section">
+      <table class="last-10-table">
+        <caption>Team - Last 10</caption>
+        <tbody>
+          <tr>
+            <td>May 12, &#x27;26</td>
+            <td><span class="last-10-team"><span></span><a>DAL</a></span></td>
+            <td><b>W </b><a>77 - 72</a></td>
+            <td><b>W</b> -1.5</td>
+            <td>u180.5</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+    """
+
+    records = _records_from_page(html)
+
+    assert records["head_to_head"][0] == {
+        "date": "Aug 27, '25",
+        "home": "ATL",
+        "winner": "Las Vegas",
+        "score": "81 - 75",
+        "ats": "LV 3.5",
+        "total": "u162.5",
+    }
+    assert records["away_last_10"][0] == {
+        "date": "May 15, '26",
+        "opponent": "CON",
+        "location": "away",
+        "result": "W",
+        "score": "101 - 94",
+        "ats": "L -14.5",
+        "total": "o172.5",
+    }
+    assert records["home_last_10"][0]["location"] == "home"
+
+
+def test_covers_import_keeps_cached_rows_when_fresh_scrape_returns_no_rows(monkeypatch) -> None:
+    cached_payload = {
+        "provider": "covers",
+        "rows": [{"provider_event_id": "saved-row"}],
+        "games": [{"game_id": 1, "records": {"head_to_head": [], "away_last_10": [], "home_last_10": []}}],
+    }
+
+    monkeypatch.setattr(covers_import_module, "read_json_cache", lambda name: cached_payload)
+    monkeypatch.setattr(
+        covers_import_module,
+        "covers_matchup_links",
+        lambda selected_date=None: [CoversGame("373868", "https://example.test/odds", "https://example.test/matchup")],
+    )
+
+    def raise_timeout(url: str) -> str:
+        raise TimeoutError("slow covers response")
+
+    monkeypatch.setattr(covers_import_module, "_fetch_text", raise_timeout)
+    monkeypatch.setattr(
+        covers_import_module,
+        "_replace_covers_rows",
+        lambda conn, rows, games=None: {"events": 1, "imported": len(rows), "captured_at": "saved"},
+    )
+    monkeypatch.setattr(covers_import_module, "sync_prop_lines_from_sportsbook", lambda conn: 4)
+
+    with connect() as conn:
+        result = covers_import_module.import_covers_props(conn, force_refresh=True)
+
+    assert result["status"] == "loaded_from_cache"
+    assert result["source"] == "cache"
+    assert result["imported"] == 1
+    assert result["synced_props"] == 4
+    assert result["errors"][0]["event_id"] == "373868"
+
+
 def test_espn_boxscore_missing_only_skips_games_with_stats(monkeypatch) -> None:
     load_test_history()
     fetched_game_ids: list[int] = []
@@ -855,6 +992,44 @@ def test_espn_scoreboard_imports_scheduled_games(monkeypatch) -> None:
     assert game["status"] == "scheduled"
     assert game["espn_event_id"] == 777001
     assert len(result_rows) == 0
+
+
+def test_espn_scoreboard_preserves_covers_total_for_scheduled_zero_score(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.espn_history.fetch_scoreboard",
+        lambda season, force_refresh=False, selected_date=None: {
+            "events": [
+                {
+                    "id": "777002",
+                    "date": "2026-06-01T23:00:00Z",
+                    "competitions": [
+                        {
+                            "status": {"type": {"name": "STATUS_SCHEDULED", "state": "pre", "completed": False}},
+                            "competitors": [
+                                {"homeAway": "home", "score": "0", "team": {"abbreviation": "NY", "displayName": "New York Liberty"}},
+                                {"homeAway": "away", "score": "0", "team": {"abbreviation": "CONN", "displayName": "Connecticut Sun"}},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (777002, '2026-06-01', '2026-06-01T23:00:00Z', 10, 3, 'scheduled', 2, 2, -4.5, 166.5)
+            """
+        )
+        import_espn_scoreboard(conn, 2026)
+        game = conn.execute("SELECT * FROM games WHERE id = 777002").fetchone()
+
+    assert game["status"] == "scheduled"
+    assert game["game_total"] == 166.5
 
 
 def test_defensive_markets_are_projectable() -> None:

@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .ball_dont_lie import fetch_team_history
 from .bootstrap import ensure_teams
-from .cache import write_json_cache
+from .cache import read_json_cache, write_json_cache
 from .covers_import import import_covers_props
 from .db import connect, init_db
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
@@ -274,6 +274,7 @@ def matchups() -> list[dict]:
         ).fetchall()
         games = [game for game in games if _is_today_active_game_time(game["start_time"])]
         game_groups = _coalesce_matchup_games(games)
+        covers_records = _covers_records_by_game()
         payload = []
         for game, game_ids in game_groups:
             home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
@@ -306,6 +307,7 @@ def matchups() -> list[dict]:
                     **prediction,
                     "home": home_summary,
                     "away": away_summary,
+                    "covers_records": covers_records.get(game_id),
                     "props": _value_board_payload_for_games(conn, game_ids),
                     "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
                     "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
@@ -313,6 +315,20 @@ def matchups() -> list[dict]:
             )
     write_json_cache("current_matchups.json", payload)
     return payload
+
+
+def _covers_records_by_game() -> dict[int, dict]:
+    payload = read_json_cache("covers_props_raw.json")
+    if not isinstance(payload, dict):
+        return {}
+    records_by_game = {}
+    for item in payload.get("games", []):
+        if not isinstance(item, dict) or item.get("game_id") is None:
+            continue
+        records = item.get("records")
+        if isinstance(records, dict):
+            records_by_game[int(item["game_id"])] = records
+    return records_by_game
 
 
 def _coalesce_matchup_games(games) -> list[tuple[dict, list[int]]]:
