@@ -273,6 +273,40 @@ h3 {
   gap: 10px;
 }
 
+.operation-fields {
+  display: grid;
+  gap: 12px;
+}
+
+.operation-fields label {
+  display: grid;
+  gap: 6px;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.operation-fields input,
+.operation-fields textarea {
+  width: 100%;
+  border: 1px solid #d0d5dd;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #101828;
+  font: inherit;
+}
+
+.operation-fields input {
+  min-height: 38px;
+  padding: 0 10px;
+}
+
+.operation-fields textarea {
+  min-height: 78px;
+  resize: vertical;
+  padding: 10px;
+}
+
 .filters {
   justify-content: space-between;
   gap: 12px;

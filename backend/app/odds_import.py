@@ -118,7 +118,10 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
             spl.game_id,
             spl.player_name,
             p.id AS player_id,
-            spl.sportsbook,
+            CASE
+                WHEN COUNT(DISTINCT spl.sportsbook) = 1 THEN MAX(spl.sportsbook)
+                ELSE 'Best Available'
+            END AS sportsbook,
             spl.market,
             spl.line,
             MAX(CASE WHEN spl.side = 'over' THEN spl.price END) AS over_odds,
@@ -144,22 +147,21 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
               FROM player_game_stats stats
               WHERE stats.player_id = p.id
           )
-        GROUP BY spl.game_id, spl.player_name, p.id, spl.sportsbook, spl.market, spl.line
+        GROUP BY spl.game_id, spl.player_name, p.id, spl.market, spl.line
         HAVING over_odds IS NOT NULL AND under_odds IS NOT NULL
-        ORDER BY spl.game_id, spl.player_name, spl.market, spl.sportsbook, spl.line
+        ORDER BY spl.game_id, spl.player_name, spl.market, spl.line
         """
     ).fetchall()
     tracked_keys = {
         (
             int(row["game_id"]),
             int(row["player_id"]),
-            row["sportsbook"],
             row["market"],
             float(row["line"]),
         )
         for row in conn.execute(
             """
-            SELECT pl.game_id, pl.player_id, pl.sportsbook, pl.market, pl.line
+            SELECT pl.game_id, pl.player_id, pl.market, pl.line
             FROM prop_lines pl
             JOIN games g ON g.id = pl.game_id
             LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
@@ -183,7 +185,6 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
         if (
             int(row["game_id"]),
             int(row["player_id"]),
-            row["sportsbook"],
             row["market"],
             float(row["line"]),
         )
