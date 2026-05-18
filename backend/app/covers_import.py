@@ -48,6 +48,7 @@ BOOK_NAMES = {
 
 COVERS_TEAM_ABBREVIATIONS = {
     "PHX": "PHO",
+    "POR": "PDX",
     "WSH": "WAS",
 }
 
