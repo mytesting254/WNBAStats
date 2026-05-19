@@ -3,7 +3,8 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackendPython = Join-Path $Root ".venv\Scripts\python.exe"
 $FrontendDir = Join-Path $Root "frontend"
-$FrontendPort = "5174"
+$BackendPort = if ($env:BACKEND_PORT) { $env:BACKEND_PORT } else { "8010" }
+$FrontendPort = if ($env:FRONTEND_PORT) { $env:FRONTEND_PORT } else { "5184" }
 
 if (-not (Test-Path $BackendPython)) {
     Write-Error "Missing Python virtual environment. Run: python3.14.exe -m venv .venv; & '.\.venv\Scripts\pip.exe' install -r backend\requirements.txt"
@@ -19,15 +20,16 @@ Write-Host "Initializing database..."
 $Processes = @()
 
 try {
-    Write-Host "Starting FastAPI backend on http://127.0.0.1:8000"
+    Write-Host "Starting FastAPI backend on http://127.0.0.1:$BackendPort"
     $BackendProcess = Start-Process -FilePath $BackendPython -ArgumentList @(
         "-m", "uvicorn", "backend.app.main:app",
         "--host", "127.0.0.1",
-        "--port", "8000"
+        "--port", $BackendPort
     ) -WorkingDirectory $Root -NoNewWindow -PassThru
     $Processes += $BackendProcess
 
     Write-Host "Starting React frontend on http://127.0.0.1:$FrontendPort"
+    $env:VITE_BACKEND_URL = "http://127.0.0.1:$BackendPort"
     $FrontendProcess = Start-Process -FilePath "npm.cmd" -ArgumentList @(
         "run", "dev", "--", "--host", "127.0.0.1", "--port", $FrontendPort
     ) -WorkingDirectory $FrontendDir -NoNewWindow -PassThru
@@ -35,7 +37,7 @@ try {
 
     Write-Host ""
     Write-Host "Open http://127.0.0.1:$FrontendPort"
-    Write-Host "API docs: http://127.0.0.1:8000/docs"
+    Write-Host "API docs: http://127.0.0.1:$BackendPort/docs"
     Write-Host "Press Ctrl+C in this terminal to stop both servers."
     Write-Host ""
 

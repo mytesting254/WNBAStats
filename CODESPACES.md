@@ -2,8 +2,8 @@
 
 This project runs in Codespaces with two processes:
 
-- FastAPI backend on port `8000`
-- Vite React frontend on port `5174`
+- FastAPI backend on port `8010`
+- Vite React frontend on port `5184`
 
 Codespaces needs both servers to bind to `0.0.0.0` so GitHub can forward the ports.
 
@@ -36,7 +36,7 @@ In the first terminal:
 
 ```bash
 source .venv/bin/activate
-python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8010 --reload
 ```
 
 ## 4. Start The Frontend
@@ -46,14 +46,14 @@ Open a second terminal in Codespaces, then run:
 ```bash
 cd frontend
 npm install
-npm run dev -- --host 0.0.0.0 --port 5174
+npm run dev -- --host 0.0.0.0 --port 5184
 ```
 
 ## 5. Open The App
 
-Open the Codespaces `Ports` tab and click the forwarded URL for port `5174`.
+Open the Codespaces `Ports` tab and click the forwarded URL for port `5184`.
 
-The backend API docs are available from the forwarded port `8000` URL:
+The backend API docs are available from the forwarded port `8010` URL:
 
 ```text
 /docs
@@ -81,7 +81,7 @@ Backend:
 
 ```bash
 source .venv/bin/activate
-python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8000 --reload
+python -m uvicorn backend.app.main:app --host 0.0.0.0 --port 8010 --reload
 ```
 
 Frontend:
@@ -89,7 +89,7 @@ Frontend:
 ```bash
 cd frontend
 npm install
-npm run dev -- --host 0.0.0.0 --port 5174
+npm run dev -- --host 0.0.0.0 --port 5184
 ```
 
 If `git status` shows uncommitted changes in Codespaces, commit, stash, or
@@ -170,7 +170,7 @@ python scripts/reset_live_db.py
 
 ## Troubleshooting
 
-- If the frontend opens but API calls fail, confirm the backend is running on port `8000`.
-- If a port is not visible, open the `Ports` tab and manually forward `5174` or `8000`.
-- If the frontend server prints a localhost URL, still open the Codespaces forwarded `5174` URL.
+- If the frontend opens but API calls fail, confirm the backend is running on port `8010`.
+- If a port is not visible, open the `Ports` tab and manually forward `5184` or `8010`.
+- If the frontend server prints a localhost URL, still open the Codespaces forwarded `5184` URL.
 - If dependencies are missing after rebuilding the Codespace, rerun the install commands above.

@@ -31,7 +31,7 @@ python -m venv .venv
 .\.venv\Scripts\pip.exe install -r backend\requirements.txt
 Copy .env.example to .env and set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.
 .\.venv\Scripts\python.exe scripts\init_db.py
-.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --port 8010 --reload
 ```
 
 In a second terminal:
@@ -45,7 +45,7 @@ npm run dev
 Open:
 
 ```text
-http://127.0.0.1:5174
+http://127.0.0.1:5184
 ```
 
 ## API Endpoints
