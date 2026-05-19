@@ -9,7 +9,7 @@ from playwright.sync_api import Page, expect
     reason="Set RUN_PLAYWRIGHT=1 with backend and frontend servers running.",
 )
 def test_dashboard_loads_value_board(page: Page) -> None:
-    page.goto(os.getenv("APP_URL", "http://127.0.0.1:5174"))
+    page.goto(os.getenv("APP_URL", "http://127.0.0.1:5184"))
     expect(page.get_by_role("heading", name="Prop Value Board")).to_be_visible()
     expect(page.get_by_text("Pregame Props")).to_be_visible()
     expect(page.get_by_role("row", name="A'ja Wilson LV | DraftKings")).to_be_visible()

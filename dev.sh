@@ -4,10 +4,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="$ROOT/.venv/bin/python"
 FRONTEND_DIR="$ROOT/frontend"
-FRONTEND_PORT=5174
+BACKEND_PORT="${BACKEND_PORT:-8010}"
+FRONTEND_PORT="${FRONTEND_PORT:-5184}"
 BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
 FRONTEND_HOST="${FRONTEND_HOST:-0.0.0.0}"
-LOCAL_BACKEND_URL="http://127.0.0.1:8000"
+LOCAL_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
+export BACKEND_PORT
 
 if [[ ! -x "$PYTHON" ]]; then
   echo "Missing Python virtual environment."
@@ -38,16 +40,17 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting FastAPI backend on http://$BACKEND_HOST:8000"
+echo "Starting FastAPI backend on http://$BACKEND_HOST:$BACKEND_PORT"
 cd "$ROOT"
-"$PYTHON" -m uvicorn backend.app.main:app --host "$BACKEND_HOST" --port 8000 &
+"$PYTHON" -m uvicorn backend.app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
 echo "Waiting for backend health..."
 for _ in {1..60}; do
   if "$PYTHON" - <<'PY' >/dev/null 2>&1
 from urllib.request import urlopen
-urlopen("http://127.0.0.1:8000/api/health", timeout=1).read()
+import os
+urlopen(f"http://127.0.0.1:{os.environ['BACKEND_PORT']}/api/health", timeout=1).read()
 PY
   then
     break
@@ -61,16 +64,17 @@ done
 
 if ! "$PYTHON" - <<'PY' >/dev/null 2>&1
 from urllib.request import urlopen
-urlopen("http://127.0.0.1:8000/api/health", timeout=1).read()
+import os
+urlopen(f"http://127.0.0.1:{os.environ['BACKEND_PORT']}/api/health", timeout=1).read()
 PY
 then
-  echo "Backend did not become healthy at http://127.0.0.1:8000/api/health."
+  echo "Backend did not become healthy at http://127.0.0.1:$BACKEND_PORT/api/health."
   exit 1
 fi
 
 echo "Starting React frontend on http://$FRONTEND_HOST:$FRONTEND_PORT"
 cd "$FRONTEND_DIR"
-npm run dev -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" &
+VITE_BACKEND_URL="$LOCAL_BACKEND_URL" npm run dev -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" &
 FRONTEND_PID=$!
 
 echo

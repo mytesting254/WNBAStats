@@ -31,7 +31,7 @@ python -m venv .venv
 .\.venv\Scripts\pip.exe install -r backend\requirements.txt
 Copy .env.example to .env and set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN.
 .\.venv\Scripts\python.exe scripts\init_db.py
-.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --reload
+.\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --port 8010 --reload
 ```
 
 In a second terminal:
@@ -45,7 +45,7 @@ npm run dev
 Open:
 
 ```text
-http://127.0.0.1:5174
+http://127.0.0.1:5184
 ```
 
 ## API Endpoints
@@ -144,6 +144,7 @@ POST /api/covers/import?selected_date=2026-05-10&force_refresh=true
 
 Covers supplies pregame market context and is the preferred source for player prop lines. When a game has Covers prop rows in `sportsbook_prop_lines`, the model prop-line sync builds `prop_lines` from Covers rows for that game and ignores overlapping The Odds API rows. Other providers are only used as a fallback for games without Covers props. ESPN remains the completed-game source for final scores and player box scores.
 
+Covers team abbreviations can differ from the app's canonical team codes. The importer normalizes those provider-only codes before reading game lines, including Phoenix `PHO`, Portland `PDX`, and Washington `WAS`.
 Model-ready `prop_lines` are one row per exact `game_id + player_id + market + line`. If multiple sportsbooks publish the same line, the sync keeps one row with the best available over price and best available under price across those books. Distinct lines, such as 12.5 and 13.5, remain separate model rows.
 
 ## Daily Matchup Workflow

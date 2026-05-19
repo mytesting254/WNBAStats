@@ -11,7 +11,7 @@ foreach ($Name in $JobNames) {
     }
 }
 
-$Ports = @(8000, 5173)
+$Ports = @(8010, 5184)
 foreach ($Port in $Ports) {
     $Connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
     foreach ($Connection in $Connections) {

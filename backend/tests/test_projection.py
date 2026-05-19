@@ -838,6 +838,28 @@ def test_covers_parser_extracts_matchup_line_and_total() -> None:
     assert game["game_total"] == 158.5
 
 
+def test_covers_parser_handles_portland_fire_pdx_game_lines() -> None:
+    html = """
+    <script type="application/ld+json">
+    {"startDate": "05/19/2026 02:00:00 &#x2B;00:00", "name": "Connecticut Sun vs Portland Fire"}
+    </script>
+    <section>
+      <h2>CON vs PDX Game Odds</h2>
+      <div>Team Spread Total ML</div>
+      <div>CON +4.5 -115 o173.5 -108 +155</div>
+      <div>PDX -4.5 -105 u174.5 -120 -175</div>
+    </section>
+    """
+    with connect() as conn:
+        metadata = _metadata_from_page(conn, CoversGame("373872", "https://example.test/odds"), html)
+        game = conn.execute("SELECT * FROM games WHERE id = ?", (metadata.game_id,)).fetchone()
+
+    assert metadata.spread_home == -4.5
+    assert metadata.game_total == 173.5
+    assert game["spread_home"] == -4.5
+    assert game["game_total"] == 173.5
+
+
 def test_covers_metadata_prefers_odds_page_market_over_matchup_page_noise() -> None:
     matchup_html = """
     <script type="application/ld+json">
