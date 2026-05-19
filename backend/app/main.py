@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .ball_dont_lie import fetch_team_history
@@ -108,7 +109,7 @@ def model_performance() -> dict:
             "wins": 0,
             "win_rate": None,
             "average_ev": None,
-            "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but none have matching model predictions.",
+            "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but there are no matching model predictions.",
         }
     wins = sum(1 for row in rows if row["recommended_side"] == row["winning_side"])
     avg_ev = sum(float(row["expected_value"]) for row in rows) / evaluated
@@ -148,45 +149,94 @@ def import_espn_history(
     include_previous_season: bool = False,
     missing_only: bool = False,
     selected_date: str | None = None,
+    selected_dates: Annotated[list[str] | None, Query()] = None,
 ) -> dict:
     target_season = season or datetime.now().year
     seasons = [target_season - 1, target_season] if include_previous_season else [target_season]
     unique_seasons = sorted(set(seasons))
-    daily_date = selected_date
-    if daily_date is None and not force_refresh and not include_previous_season:
-        daily_date = datetime.now(LOCAL_TZ).date().isoformat()
+    daily_dates = _selected_espn_dates(selected_date, selected_dates)
+    if not daily_dates and not force_refresh and not include_previous_season:
+        daily_dates = [datetime.now(LOCAL_TZ).date().isoformat()]
+
     with connect() as conn:
-        scoreboards = [
-            import_espn_scoreboard(conn, item, force_refresh=force_refresh, selected_date=daily_date)
-            for item in unique_seasons
-        ]
-        player_stats = []
-        if include_player_stats:
-            player_stats = [
-                import_espn_player_boxscores(
-                    conn,
-                    item,
-                    force_refresh=force_refresh,
-                    missing_only=missing_only,
-                    selected_date=daily_date,
-                )
+        scoreboards = []
+        if daily_dates:
+            scoreboards = [
+                import_espn_scoreboard(conn, _season_for_date(item), force_refresh=force_refresh, selected_date=item)
+                for item in daily_dates
+            ]
+        else:
+            scoreboards = [
+                import_espn_scoreboard(conn, item, force_refresh=force_refresh)
                 for item in unique_seasons
             ]
+        player_stats = []
+        if include_player_stats:
+            if daily_dates:
+                player_stats = [
+                    import_espn_player_boxscores(
+                        conn,
+                        _season_for_date(item),
+                        force_refresh=force_refresh,
+                        missing_only=missing_only,
+                        selected_date=item,
+                    )
+                    for item in daily_dates
+                ]
+            else:
+                player_stats = [
+                    import_espn_player_boxscores(
+                        conn,
+                        item,
+                        force_refresh=force_refresh,
+                        missing_only=missing_only,
+                    )
+                    for item in unique_seasons
+                ]
         settlements = settle_completed_props(conn)
         game_settlements = settle_completed_game_predictions(conn)
         synced_props = sync_prop_lines_from_sportsbook(conn)
+        projections = rebuild_predictions(conn)
     return {
         "season": target_season,
         "seasons": unique_seasons,
-        "selected_date": daily_date,
+        "selected_date": daily_dates[0] if len(daily_dates) == 1 else None,
+        "selected_dates": daily_dates,
         "scoreboards": scoreboards,
         "player_stats": player_stats,
         "synced_props": synced_props,
         "settlements": settlements,
         "game_settlements": game_settlements,
+        "predictions": len(projections),
         "missing_only": missing_only,
         "source": "espn",
     }
+
+
+def _selected_espn_dates(selected_date: str | None, selected_dates: list[str] | None) -> list[str]:
+    values = [selected_date] if selected_date else []
+    values.extend(selected_dates or [])
+    dates = []
+    seen = set()
+    for value in values:
+        if not value:
+            continue
+        for item in str(value).split(","):
+            date_text = item.strip()
+            if not date_text:
+                continue
+            try:
+                parsed = datetime.strptime(date_text, "%Y-%m-%d").date().isoformat()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid selected date: {date_text}") from exc
+            if parsed not in seen:
+                dates.append(parsed)
+                seen.add(parsed)
+    return dates
+
+
+def _season_for_date(value: str) -> int:
+    return datetime.strptime(value, "%Y-%m-%d").year
 
 
 @app.get("/api/sportsbook-props")

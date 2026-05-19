@@ -161,10 +161,17 @@ export function App() {
     }
   }
 
-  async function handleRefreshResults(forceRefresh = false, includePlayerStats = true, missingOnly = false, includePreviousSeason = false) {
+  async function handleRefreshResults(
+    forceRefresh = false,
+    includePlayerStats = true,
+    missingOnly = false,
+    includePreviousSeason = false,
+    selectedDates?: string[]
+  ) {
     if (forceRefresh) {
+      const dateScope = selectedDates?.length ? ` for ${selectedDates.join(", ")}` : " for this season and the previous season";
       const confirmed = window.confirm(
-        "Hard refresh will fetch fresh ESPN completed game and box score data for this season and the previous season. Continue?"
+        `Hard refresh will fetch fresh ESPN completed game and box score data${dateScope}. Continue?`
       );
       if (!confirmed) {
         return;
@@ -174,11 +181,12 @@ export function App() {
     setError(null);
     setOperationStatus(null);
     try {
-      const result = await importEspnHistory(forceRefresh, includePlayerStats, missingOnly, includePreviousSeason);
+      const result = await importEspnHistory(forceRefresh, includePlayerStats, missingOnly, includePreviousSeason, undefined, selectedDates);
       await load();
-      const scope = result.selected_date ? ` for ${result.selected_date}` : ` for ${result.seasons?.join(", ") ?? result.season}`;
+      const resultDates = result.selected_dates?.length ? result.selected_dates : result.selected_date ? [result.selected_date] : [];
+      const scope = resultDates.length ? ` for ${resultDates.join(", ")}` : ` for ${result.seasons?.join(", ") ?? result.season}`;
       setOperationStatus(
-        `${missingOnly ? "Missing" : forceRefresh ? "Fresh" : "Saved"} ESPN completed games and box scores loaded${scope}. Synced ${result.synced_props ?? 0} model prop lines and settled ${result.settlements?.settled ?? 0} props.`
+        `${missingOnly ? "Missing" : forceRefresh ? "Fresh" : "Saved"} ESPN completed games and box scores loaded${scope}. Synced ${result.synced_props ?? 0} model prop lines, rebuilt ${result.predictions ?? 0} predictions, and settled ${result.settlements?.settled ?? 0} props.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to refresh completed results");
@@ -315,10 +323,21 @@ function DataView({
   discrepanciesCount: number;
   onImportOdds: (forceRefresh: boolean) => void;
   onImportCoversOdds: (forceRefresh: boolean) => void;
-  onRefreshResults: (forceRefresh: boolean, includePlayerStats?: boolean, missingOnly?: boolean, includePreviousSeason?: boolean) => void;
+  onRefreshResults: (
+    forceRefresh: boolean,
+    includePlayerStats?: boolean,
+    missingOnly?: boolean,
+    includePreviousSeason?: boolean,
+    selectedDates?: string[]
+  ) => void;
   onRecalculate: () => void;
   onReload: () => void;
 }) {
+  const [resultDate, setResultDate] = useState(todayInputValue());
+  const [batchDates, setBatchDates] = useState("");
+  const parsedBatchDates = parseDateList(batchDates);
+  const busy = refreshingResults || importingOdds || importingCoversOdds || loading;
+
   return (
     <section className="matchup-list">
       <div className="board-panel">
@@ -358,10 +377,49 @@ function DataView({
             metrics={`${matchupsCount} upcoming games`}
             primaryLabel={refreshingResults ? "Loading" : "Load Missing ESPN"}
             secondaryLabel="Refresh ESPN"
-            disabled={refreshingResults || importingOdds || importingCoversOdds || loading}
+            disabled={busy}
             onPrimary={() => onRefreshResults(false, true, true, false)}
             onSecondary={() => onRefreshResults(true, true, false, true)}
           />
+          <article className="operation-card">
+            <div>
+              <p className="eyebrow">fast ESPN results</p>
+              <h3>Date Results</h3>
+              <p>Fetch completed scores and box scores for selected game dates, settle outcomes, and rebuild predictions.</p>
+            </div>
+            <div className="operation-fields">
+              <label>
+                Game date
+                <input type="date" value={resultDate} onChange={(event) => setResultDate(event.target.value)} />
+              </label>
+              <label>
+                Batch dates
+                <textarea
+                  value={batchDates}
+                  onChange={(event) => setBatchDates(event.target.value)}
+                  placeholder="2026-05-16, 2026-05-17"
+                  rows={3}
+                />
+              </label>
+            </div>
+            <div className="operation-actions">
+              <button
+                className="icon-button text-button dark-button"
+                onClick={() => onRefreshResults(true, true, false, false, [resultDate])}
+                disabled={busy || !resultDate}
+              >
+                <RefreshCw size={18} />
+                {refreshingResults ? "Loading" : "Refresh Date"}
+              </button>
+              <button
+                className="secondary-button"
+                onClick={() => onRefreshResults(true, true, false, false, parsedBatchDates)}
+                disabled={busy || parsedBatchDates.length === 0}
+              >
+                Refresh Batch
+              </button>
+            </div>
+          </article>
           <OperationCard
             title="Projection Board"
             description="Rebuild model projections from the current prop lines and player history."
@@ -1499,6 +1557,22 @@ function formatDate(value: string) {
     hour: "numeric",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function todayInputValue() {
+  const date = new Date();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+function parseDateList(value: string) {
+  const dates = value
+    .split(/[\s,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item));
+  return Array.from(new Set(dates));
 }
 
 function availableLabel(matchup: Matchup) {

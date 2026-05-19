@@ -248,8 +248,19 @@ export async function importEspnHistory(
   includePlayerStats = true,
   missingOnly = false,
   includePreviousSeason = false,
-  selectedDate?: string
-): Promise<{ season: number; seasons: number[]; selected_date?: string | null; synced_props: number; source: string; settlements?: { settled: number } }> {
+  selectedDate?: string,
+  selectedDates?: string[]
+): Promise<{
+  season: number;
+  seasons: number[];
+  selected_date?: string | null;
+  selected_dates?: string[];
+  synced_props: number;
+  predictions?: number;
+  source: string;
+  settlements?: { settled: number };
+  game_settlements?: { settled: number };
+}> {
   const params = new URLSearchParams({
     force_refresh: forceRefresh ? "true" : "false",
     include_player_stats: includePlayerStats ? "true" : "false",
@@ -259,6 +270,11 @@ export async function importEspnHistory(
   if (selectedDate) {
     params.set("selected_date", selectedDate);
   }
+  selectedDates?.forEach((date) => {
+    if (date) {
+      params.append("selected_dates", date);
+    }
+  });
   const response = await fetch(`/api/history/import/espn?${params.toString()}`, { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to refresh completed game results");

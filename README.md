@@ -145,6 +145,7 @@ POST /api/covers/import?selected_date=2026-05-10&force_refresh=true
 Covers supplies pregame market context and is the preferred source for player prop lines. When a game has Covers prop rows in `sportsbook_prop_lines`, the model prop-line sync builds `prop_lines` from Covers rows for that game and ignores overlapping The Odds API rows. Other providers are only used as a fallback for games without Covers props. ESPN remains the completed-game source for final scores and player box scores.
 
 Covers team abbreviations can differ from the app's canonical team codes. The importer normalizes those provider-only codes before reading game lines, including Phoenix `PHO`, Portland `PDX`, and Washington `WAS`.
+Model-ready `prop_lines` are one row per exact `game_id + player_id + market + line`. If multiple sportsbooks publish the same line, the sync keeps one row with the best available over price and best available under price across those books. Distinct lines, such as 12.5 and 13.5, remain separate model rows.
 
 ## Daily Matchup Workflow
 
@@ -153,6 +154,8 @@ The Matchups tab reads saved scheduled games from Turso. It does not call ESPN o
 Scheduled game rows are usually created before tip by `Load Saved Odds`, `Refresh Odds`, or `Refresh Covers`. Those importers match existing games by teams and start time, create missing scheduled games, and attach sportsbook props, spread, and total context.
 
 Use `Load Missing ESPN` as the normal in-season completed-game operation. It updates today's ESPN scoreboard only, imports player box scores for today's final games that are missing stats, settles saved predictions, and syncs matching sportsbook rows into model prop lines.
+
+Use the `Date Results` operation when only one completed date, or a small batch of completed dates, needs to be repaired quickly. It fetches ESPN scoreboard and box score data only for the selected dates, settles saved player and game predictions, syncs model prop lines, and rebuilds current predictions.
 
 Use `Refresh ESPN` only for a larger hard refresh or backfill. That path fetches fresh ESPN data for the current season and previous season. Box score imports are idempotent in Turso: `player_game_stats` is unique by `(player_id, game_id)`, player upserts are batched, and stat inserts use `INSERT OR REPLACE`, so repeated missing-only fills can safely repair gaps without duplicating rows.
 
@@ -251,6 +254,13 @@ For a specific date:
 POST /api/history/import/espn?selected_date=2026-05-12&include_player_stats=true&missing_only=true
 ```
 
+For a small batch of dates, pass repeated `selected_dates` values or a comma-separated value:
+
+```text
+POST /api/history/import/espn?selected_dates=2026-05-15&selected_dates=2026-05-16&include_player_stats=true&force_refresh=true
+POST /api/history/import/espn?selected_dates=2026-05-15,2026-05-16&include_player_stats=true&force_refresh=true
+```
+
 The larger season backfill is available through `Refresh ESPN`, or directly:
 
 ```text
@@ -258,9 +268,9 @@ POST /api/history/import/espn?season=2026&force_refresh=true&include_player_stat
 ```
 
 Completed games are matched to existing sportsbook-derived scheduled games by date/home/away, then marked `final` so they drop out of the upcoming Matchups tab while still contributing to last-10 history.
-When `include_player_stats=true`, ESPN player box scores are imported for the selected date or requested season. The app then syncs matching sportsbook prop lines into model prop lines so Parlay Candidates use provider-backed player game logs.
+When `include_player_stats=true`, ESPN player box scores are imported for the selected date, selected date batch, or requested season. The app then syncs matching sportsbook prop lines into deduped model prop lines so Parlay Candidates use provider-backed player game logs without counting identical sportsbook lines multiple times.
 
-After the ESPN sync finishes, the app settles saved player prop predictions and saved game predictions against the imported final scores and box scores.
+After the ESPN sync finishes, the app settles saved player prop predictions and saved game predictions against the imported final scores and box scores, then rebuilds current predictions from the updated player history.
 
 ## Local Data And Generated Files
 

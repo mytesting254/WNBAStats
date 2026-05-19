@@ -109,11 +109,17 @@ after completed games.
 Covers is the preferred player-prop source. If Covers rows exist for a game,
 the sync from `sportsbook_prop_lines` to model-ready `prop_lines` uses Covers
 for that game and treats The Odds API rows as fallback-only.
+The model sync dedupes exact lines by `game_id + player_id + market + line`;
+when multiple books have the same line, one model row is kept with the best
+available over and under prices. Different lines remain separate.
 
 Missing ESPN box score fills write to Turso with batched HTTP pipeline calls.
 The `player_game_stats` table is unique by `(player_id, game_id)`, and imports
 use replace/upsert semantics so repeated missing-only fills repair gaps without
 duplicating player stat rows.
+Use the app's `Date Results` control, or repeated `selected_dates` query
+parameters on `/api/history/import/espn`, for quick single-date or small-batch
+completed-game repairs without a full season refresh.
 
 Model Lab training also uses Turso in normal app runs. The training route opens
 the same runtime connection as the rest of the backend, writes metrics to

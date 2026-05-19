@@ -184,15 +184,52 @@ def test_espn_history_settles_before_rebuilding_prop_lines(monkeypatch) -> None:
         calls.append("sync")
         return 0
 
+    def fake_rebuild(conn):
+        calls.append("rebuild")
+        return [object()]
+
     monkeypatch.setattr("backend.app.main.import_espn_scoreboard", fake_scoreboard)
     monkeypatch.setattr("backend.app.main.settle_completed_props", fake_settle)
     monkeypatch.setattr("backend.app.main.sync_prop_lines_from_sportsbook", fake_sync)
+    monkeypatch.setattr("backend.app.main.rebuild_predictions", fake_rebuild)
 
     result = import_espn_history_endpoint(season=2026, include_player_stats=False, include_previous_season=False)
 
-    assert calls == ["settle", "sync"]
+    assert calls == ["settle", "sync", "rebuild"]
     assert result["settlements"] == {"settled": 1}
+    assert result["predictions"] == 1
     assert result["selected_date"] is not None
+
+
+def test_espn_history_accepts_batch_dates(monkeypatch) -> None:
+    scoreboard_dates: list[tuple[int, str | None]] = []
+    boxscore_dates: list[tuple[int, str | None]] = []
+
+    def fake_scoreboard(conn, season, force_refresh=False, selected_date=None):
+        scoreboard_dates.append((season, selected_date))
+        return {"season": season, "selected_date": selected_date}
+
+    def fake_boxscores(conn, season, force_refresh=False, missing_only=False, selected_date=None):
+        boxscore_dates.append((season, selected_date))
+        return {"season": season, "selected_date": selected_date}
+
+    monkeypatch.setattr("backend.app.main.import_espn_scoreboard", fake_scoreboard)
+    monkeypatch.setattr("backend.app.main.import_espn_player_boxscores", fake_boxscores)
+    monkeypatch.setattr("backend.app.main.settle_completed_props", lambda conn: {"settled": 0})
+    monkeypatch.setattr("backend.app.main.settle_completed_game_predictions", lambda conn: {"settled": 0})
+    monkeypatch.setattr("backend.app.main.sync_prop_lines_from_sportsbook", lambda conn: 0)
+    monkeypatch.setattr("backend.app.main.rebuild_predictions", lambda conn: [])
+
+    result = import_espn_history_endpoint(
+        season=2026,
+        force_refresh=True,
+        selected_dates=["2026-05-14", "2026-05-15, 2026-05-14"],
+    )
+
+    assert result["selected_date"] is None
+    assert result["selected_dates"] == ["2026-05-14", "2026-05-15"]
+    assert scoreboard_dates == [(2026, "2026-05-14"), (2026, "2026-05-15")]
+    assert boxscore_dates == [(2026, "2026-05-14"), (2026, "2026-05-15")]
 
 
 def test_fixture_builds_ranked_predictions() -> None:
@@ -516,6 +553,51 @@ def test_odds_sync_prefers_covers_lines_when_available() -> None:
     assert rows[0]["line"] == 20.5
     assert rows[0]["over_odds"] == -105
     assert rows[0]["under_odds"] == -115
+
+
+def test_odds_sync_keeps_one_model_line_with_best_available_odds() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute("DELETE FROM prop_predictions")
+        conn.execute("DELETE FROM prop_lines")
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("the_odds_api", "event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "draftkings", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 21.5, -115, captured_at),
+                ("the_odds_api", "event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "draftkings", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 21.5, -105, captured_at),
+                ("the_odds_api", "event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "fanduel", "FanDuel", "player_points", "points", "Breanna Stewart", "over", 21.5, +100, captured_at),
+                ("the_odds_api", "event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "fanduel", "FanDuel", "player_points", "points", "Breanna Stewart", "under", 21.5, -120, captured_at),
+                ("the_odds_api", "event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "caesars", "Caesars", "player_points", "points", "Breanna Stewart", "over", 22.5, +110, captured_at),
+                ("the_odds_api", "event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "caesars", "Caesars", "player_points", "points", "Breanna Stewart", "under", 22.5, -130, captured_at),
+            ],
+        )
+
+        synced = sync_prop_lines_from_sportsbook(conn)
+        rows = conn.execute(
+            """
+            SELECT pl.*
+            FROM prop_lines pl
+            JOIN players p ON p.id = pl.player_id
+            WHERE p.full_name = 'Breanna Stewart'
+              AND pl.market = 'points'
+            ORDER BY pl.line
+            """
+        ).fetchall()
+
+    assert synced == 2
+    assert len(rows) == 2
+    assert rows[0]["sportsbook"] == "Best Available"
+    assert rows[0]["line"] == 21.5
+    assert rows[0]["over_odds"] == 100
+    assert rows[0]["under_odds"] == -105
+    assert rows[1]["sportsbook"] == "Caesars"
+    assert rows[1]["line"] == 22.5
 
 
 def test_odds_sync_preserves_settled_prop_lines() -> None:
