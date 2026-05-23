@@ -57,10 +57,13 @@ GET  /api/sportsbook-props
 GET  /api/odds/cache
 GET  /api/line-discrepancies
 GET  /api/model-performance
+GET  /api/model-diagnostics
+GET  /api/model-loss-breakdown
 GET  /api/models/runs
 GET  /api/matchups
 POST /api/odds/import
 POST /api/covers/import
+POST /api/injuries/import/rotowire
 POST /api/history/import/espn
 POST /api/models/train
 POST /api/recalculate
@@ -75,6 +78,8 @@ POST /api/settle-props
 - `Discrepancies`: cross-book line gaps and price gaps.
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history.
 - `Data`: operational controls for saved/fresh odds import, completed-game import, projection rebuilds, and reloads.
+
+`Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.12`.
 
 ## Pregame Odds Import
 
@@ -158,6 +163,31 @@ Use `Load Missing ESPN` as the normal in-season completed-game operation. It upd
 Use the `Date Results` operation when only one completed date, or a small batch of completed dates, needs to be repaired quickly. It fetches ESPN scoreboard and box score data only for the selected dates, settles saved player and game predictions, syncs model prop lines, and rebuilds current predictions.
 
 Use `Refresh ESPN` only for a larger hard refresh or backfill. That path fetches fresh ESPN data for the current season and previous season. Box score imports are idempotent in Turso: `player_game_stats` is unique by `(player_id, game_id)`, player upserts are batched, and stat inserts use `INSERT OR REPLACE`, so repeated missing-only fills can safely repair gaps without duplicating rows.
+
+Injury context is refreshed from RotoWire lineups via:
+
+```text
+POST /api/injuries/import/rotowire
+POST /api/injuries/import/rotowire?force_refresh=true
+```
+
+`/api/matchups` also performs a cache-aware RotoWire refresh to keep injury-adjusted projections current without forcing repeated fetches.
+
+## Model Diagnostics Endpoints
+
+Rolling diagnostics from settled props:
+
+```text
+GET /api/model-diagnostics
+GET /api/model-diagnostics?model_version=adaptive-context-v1&windows=7,14,30
+```
+
+Loss concentration breakdowns from settled props:
+
+```text
+GET /api/model-loss-breakdown
+GET /api/model-loss-breakdown?model_version=adaptive-context-v1&top_n_players=20
+```
 
 ## Turso Clean-Slate Tracking
 

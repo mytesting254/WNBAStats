@@ -10,6 +10,7 @@ class _GamePredictionCache:
         self._team_summaries: dict[int, dict[str, float]] = {}
         self._league_possessions: float | None = None
         self._weighted_recent_cache: dict[tuple[int, str], float] = {}
+        self._injury_factor_cache: dict[int, dict[str, float | int | str]] = {}
         self._prepare_team_summaries(team_ids)
 
     def _prepare_team_summaries(self, team_ids: tuple[int, ...]) -> None:
@@ -94,6 +95,13 @@ class _GamePredictionCache:
         opponent = self.team_summary(opponent_id)["avg_possessions"] or league
         return _clamp(((float(team) + float(opponent)) / 2) / float(league), 0.94, 1.06)
 
+    def injury_impact(self, team_id: int) -> dict[str, float | int | str]:
+        if team_id in self._injury_factor_cache:
+            return self._injury_factor_cache[team_id]
+        impact = _team_injury_impact(self.conn, team_id)
+        self._injury_factor_cache[team_id] = impact
+        return impact
+
 
 def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     home_team_id = int(game["home_team_id"])
@@ -102,12 +110,15 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     home_history_count = cache.team_count(home_team_id)
     away_history_count = cache.team_count(away_team_id)
 
+    home_injury = cache.injury_impact(home_team_id)
+    away_injury = cache.injury_impact(away_team_id)
     home_projection = _project_team_points(
         cache,
         team_id=home_team_id,
         opponent_id=away_team_id,
         is_home=True,
         rest_days=int(game["rest_days_home"] or 2),
+        injury_factor=float(home_injury["factor"]),
     )
     away_projection = _project_team_points(
         cache,
@@ -115,6 +126,7 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
         opponent_id=home_team_id,
         is_home=False,
         rest_days=int(game["rest_days_away"] or 2),
+        injury_factor=float(away_injury["factor"]),
     )
     projected_margin = home_projection - away_projection
     projected_total = home_projection + away_projection
@@ -154,6 +166,10 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
             projected_total,
             home_history_count,
             away_history_count,
+            game["home_team"],
+            game["away_team"],
+            home_injury,
+            away_injury,
         ),
     }
 
@@ -188,6 +204,7 @@ def _project_team_points(
     opponent_id: int,
     is_home: bool,
     rest_days: int,
+    injury_factor: float = 1.0,
 ) -> float:
     team_recent = cache.weighted_recent(team_id, "points")
     team_long = cache.team_average(team_id, "points")
@@ -196,7 +213,7 @@ def _project_team_points(
     home_factor = 1.025 if is_home else 0.985
     rest_factor = _rest_factor(rest_days)
     offense = (0.52 * team_recent) + (0.23 * team_long) + (0.25 * opponent_allowed)
-    return offense * pace_factor * home_factor * rest_factor
+    return offense * pace_factor * home_factor * rest_factor * injury_factor
 
 
 def _weighted_recent(cache: _GamePredictionCache, team_id: int, column: str) -> float:
@@ -245,18 +262,120 @@ def _reason(
     total: float,
     home_history_count: int,
     away_history_count: int,
+    home_team: str,
+    away_team: str,
+    home_injury: Mapping[str, float | int | str],
+    away_injury: Mapping[str, float | int | str],
 ) -> str:
+    injury_detail = _injury_reason_detail(home_team, away_team, home_injury, away_injury)
     if min(home_history_count, away_history_count) < 3:
         return (
             f"Projected score {home_projection:.1f}-{away_projection:.1f}; margin {margin:.1f}, total {total:.1f}. "
             f"Limited imported history for this matchup ({home_history_count} home-team rows, "
             f"{away_history_count} away-team rows), so treat this as a market/context view, not a model edge."
+            f"{injury_detail}"
         )
     return (
         f"Projected score {home_projection:.1f}-{away_projection:.1f}; "
         f"margin {margin:.1f}, total {total:.1f}. Built from recent scoring, season scoring, "
-        "opponent points allowed, pace, home/away, and rest."
+        f"opponent points allowed, pace, home/away, rest, and injury availability.{injury_detail}"
     )
+
+
+def _team_injury_impact(conn: sqlite3.Connection, team_id: int) -> dict[str, float | int | str]:
+    rows = conn.execute(
+        """
+        SELECT
+            p.id AS player_id,
+            lower(trim(i.status)) AS status,
+            p.rotation_role,
+            COALESCE(
+                (
+                    SELECT AVG(sample.contrib)
+                    FROM (
+                        SELECT
+                            (s.points + (0.70 * s.rebounds) + (0.70 * s.assists)) AS contrib
+                        FROM player_game_stats s
+                        JOIN games g ON g.id = s.game_id
+                        WHERE s.player_id = p.id
+                        ORDER BY g.game_date DESC
+                        LIMIT 10
+                    ) sample
+                ),
+                0.0
+            ) AS contribution
+        FROM injuries i
+        JOIN players p ON p.id = i.player_id
+        WHERE p.team_id = ?
+          AND i.captured_at = (
+              SELECT MAX(i2.captured_at)
+              FROM injuries i2
+              WHERE i2.player_id = i.player_id
+          )
+        """,
+        (team_id,),
+    ).fetchall()
+    if not rows:
+        return {"factor": 1.0, "missing_key_players": 0, "penalty_points": 0.0}
+
+    status_weight = {
+        "out": 1.0,
+        "inactive": 1.0,
+        "suspended": 1.0,
+        "unavailable": 1.0,
+        "doubtful": 0.75,
+        "questionable": 0.35,
+        "probable": 0.10,
+    }
+    role_weight = {
+        "star": 1.25,
+        "starter": 1.0,
+        "rotation": 0.75,
+        "bench": 0.5,
+    }
+
+    penalty_points = 0.0
+    missing_key_players = 0
+    for row in rows:
+        status = str(row["status"] or "").strip()
+        status_factor = status_weight.get(status)
+        if status_factor is None:
+            continue
+        contribution = float(row["contribution"] or 0.0)
+        if contribution <= 0:
+            continue
+        role_factor = role_weight.get(str(row["rotation_role"] or "starter").strip().lower(), 0.9)
+        weighted_impact = contribution * status_factor * role_factor
+        penalty_points += weighted_impact
+        if status_factor >= 0.75 and role_factor >= 1.0:
+            missing_key_players += 1
+
+    # Translate contribution penalty into a bounded offense multiplier.
+    # About 18 contribution points roughly maps to ~8% team offense impact.
+    penalty_ratio = _clamp(penalty_points / 18.0, 0.0, 0.18)
+    return {
+        "factor": _clamp(1.0 - penalty_ratio, 0.82, 1.0),
+        "missing_key_players": missing_key_players,
+        "penalty_points": round(penalty_points, 2),
+    }
+
+
+def _injury_reason_detail(
+    home_team: str,
+    away_team: str,
+    home_injury: Mapping[str, float | int | str],
+    away_injury: Mapping[str, float | int | str],
+) -> str:
+    details = []
+    home_missing = int(home_injury.get("missing_key_players", 0) or 0)
+    away_missing = int(away_injury.get("missing_key_players", 0) or 0)
+    if home_missing > 0:
+        details.append(f"{home_team} missing key contributors: {home_missing}")
+    if away_missing > 0:
+        details.append(f"{away_team} missing key contributors: {away_missing}")
+    if not details:
+        return " Injury adjustment: no major absences detected."
+    return " Injury adjustment: " + "; ".join(details) + "."
 
 
 def _clamp(value: float, low: float, high: float) -> float:

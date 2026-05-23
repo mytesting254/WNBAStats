@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from collections import Counter
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from .ball_dont_lie import fetch_team_history
+from .accuracy_analysis import build_accuracy_report, build_accuracy_report_for_days
 from .bootstrap import ensure_teams
 from .cache import read_json_cache, write_json_cache
 from .covers_import import import_covers_props
@@ -16,6 +18,7 @@ from .game_prediction_tracking import save_game_prediction, settle_completed_gam
 from .game_predictions import project_game
 from .odds_import import import_the_odds_api_props, line_discrepancies, list_sportsbook_props, odds_cache_summary, sync_prop_lines_from_sportsbook
 from .projections import rebuild_predictions
+from .rotowire_import import import_rotowire_lineups
 from .settlement import settle_completed_props
 from .training import latest_model_run, list_model_runs, run_walk_forward_training
 
@@ -23,6 +26,7 @@ from .training import latest_model_run, list_model_runs, run_walk_forward_traini
 app = FastAPI(title="WNBA Prop Value API")
 COMPLETED_GAME_GRACE_HOURS = 4
 LOCAL_TZ = timezone(timedelta(hours=-4))
+LOW_CONFIDENCE_EDGE_MIN = 0.12
 
 app.add_middleware(
     CORSMiddleware,
@@ -122,6 +126,130 @@ def model_performance() -> dict:
     }
 
 
+@app.get("/api/model-diagnostics")
+def model_diagnostics(model_version: str = "adaptive-context-v1", windows: str = "7,14,30") -> dict:
+    parsed_windows = []
+    for item in windows.split(","):
+        token = item.strip()
+        if not token:
+            continue
+        try:
+            days = int(token)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid window value: {token}") from exc
+        if days > 0 and days not in parsed_windows:
+            parsed_windows.append(days)
+    if not parsed_windows:
+        parsed_windows = [7, 14, 30]
+
+    with connect() as conn:
+        overall = build_accuracy_report(conn, model_version=model_version)
+        by_window = {
+            f"{days}d": build_accuracy_report_for_days(conn, days, model_version=model_version)
+            for days in parsed_windows
+        }
+    return {
+        "model_version": model_version,
+        "overall": {
+            "total_predictions": overall.total_predictions,
+            "mae": overall.mae,
+            "rmse": overall.rmse,
+            "bias": overall.bias,
+            "directional_accuracy": overall.directional_accuracy,
+            "market_breakdown": overall.market_breakdown,
+        },
+        "windows": {
+            key: {
+                "total_predictions": report.total_predictions,
+                "mae": report.mae,
+                "rmse": report.rmse,
+                "bias": report.bias,
+                "directional_accuracy": report.directional_accuracy,
+                "market_breakdown": report.market_breakdown,
+            }
+            for key, report in by_window.items()
+        },
+    }
+
+
+@app.get("/api/model-loss-breakdown")
+def model_loss_breakdown(model_version: str = "adaptive-context-v1", top_n_players: int = 15) -> dict:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+              SELECT
+                pp.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY pp.prop_line_id
+                  ORDER BY pp.prediction_time DESC, pp.id DESC
+                ) AS rn
+              FROM prop_predictions pp
+              WHERE pp.model_version = ?
+            )
+            SELECT
+              pl.market,
+              r.confidence,
+              r.recommended_side,
+              sp.winning_side,
+              p.full_name,
+              t.abbreviation AS team,
+              g.spread_home,
+              sp.player_minutes
+            FROM settled_props sp
+            JOIN ranked r ON r.prop_line_id = sp.prop_line_id AND r.rn = 1
+            JOIN prop_lines pl ON pl.id = sp.prop_line_id
+            JOIN players p ON p.id = pl.player_id
+            JOIN teams t ON t.id = p.team_id
+            JOIN games g ON g.id = pl.game_id
+            """
+            ,
+            (model_version,),
+        ).fetchall()
+
+    total = len(rows)
+    losses = [row for row in rows if row["recommended_side"] != row["winning_side"]]
+    wins = total - len(losses)
+
+    def spread_bucket(value) -> str:
+        if value is None:
+            return "none"
+        absolute = abs(float(value))
+        if absolute < 4.5:
+            return "<4.5"
+        if absolute < 8.5:
+            return "4.5-8.4"
+        if absolute < 12.5:
+            return "8.5-12.4"
+        return "12.5+"
+
+    def minutes_bucket(value) -> str:
+        if value is None:
+            return "unknown"
+        minutes = float(value)
+        if minutes < 10:
+            return "0-9"
+        if minutes < 20:
+            return "10-19"
+        if minutes < 30:
+            return "20-29"
+        return "30+"
+
+    return {
+        "model_version": model_version,
+        "total_settled": total,
+        "wins": wins,
+        "losses": len(losses),
+        "win_rate": round((wins / total), 4) if total else None,
+        "losses_by_market": Counter(row["market"] for row in losses).most_common(),
+        "losses_by_confidence": Counter(row["confidence"] for row in losses).most_common(),
+        "losses_by_spread_bucket": Counter(spread_bucket(row["spread_home"]) for row in losses).most_common(),
+        "losses_by_minutes_bucket": Counter(minutes_bucket(row["player_minutes"]) for row in losses).most_common(),
+        "top_players_by_losses": Counter(row["full_name"] for row in losses).most_common(top_n_players),
+        "teams_by_losses": Counter(row["team"] for row in losses).most_common(),
+    }
+
+
 @app.post("/api/models/train")
 def train_model() -> dict:
     with connect() as conn:
@@ -139,6 +267,15 @@ def import_odds(force_refresh: bool = False) -> dict:
 def import_covers(selected_date: str | None = None, force_refresh: bool = False) -> dict:
     with connect() as conn:
         return import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh)
+
+
+@app.post("/api/injuries/import/rotowire")
+def import_rotowire_injuries(force_refresh: bool = False) -> dict:
+    with connect() as conn:
+        result = import_rotowire_lineups(conn, force_refresh=force_refresh)
+        projections = rebuild_predictions(conn)
+    result["predictions"] = len(projections)
+    return result
 
 
 @app.post("/api/history/import/espn")
@@ -299,6 +436,7 @@ def ball_dont_lie_history(
 @app.get("/api/matchups")
 def matchups() -> list[dict]:
     with connect() as conn:
+        injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
         games = conn.execute(
             """
             SELECT
@@ -363,6 +501,9 @@ def matchups() -> list[dict]:
                     "props": _value_board_payload_for_games(conn, game_ids),
                     "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
                     "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
+                    "injury_source": injury_refresh.get("source"),
+                    "injury_captured_at": injury_refresh.get("captured_at"),
+                    "injury_from_cache": injury_refresh.get("from_cache"),
                 }
             )
     write_json_cache("current_matchups.json", payload)
@@ -555,9 +696,21 @@ def _value_board_payload(conn, game_id: int | None = None) -> list[dict]:
         if game_id is None and not _is_active_game_time(row["start_time"]):
             continue
         item = dict(row)
+        if not _include_value_board_pick(item):
+            continue
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         payload.append(item)
     return payload
+
+
+def _include_value_board_pick(item: dict) -> bool:
+    confidence = str(item.get("confidence") or "").strip().lower()
+    if confidence != "low":
+        return True
+    try:
+        return float(item.get("edge") or 0.0) >= LOW_CONFIDENCE_EDGE_MIN
+    except (TypeError, ValueError):
+        return False
 
 
 def _blowout_display(team_spread, role: str | None) -> dict:

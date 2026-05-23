@@ -9,6 +9,7 @@ import sqlite3
 import math
 from dataclasses import dataclass
 from typing import Optional
+from datetime import datetime, timedelta, timezone
 
 
 @dataclass
@@ -175,6 +176,159 @@ def build_accuracy_report(conn: sqlite3.Connection, model_version: Optional[str]
                 "avg_edge": sum(a.edge for a in filtered_accs) / len(filtered_accs),
             }
     
+    return AccuracyMetrics(
+        total_predictions=n,
+        mae=round(mae, 3),
+        rmse=round(rmse, 3),
+        bias=round(bias, 3),
+        directional_accuracy=round(directional_acc, 3),
+        confidence_calibration=calibration,
+        market_breakdown=market_stats,
+        error_by_minutes_played=error_by_mins,
+        performance_by_edge=edge_performance,
+    )
+
+
+def build_accuracy_report_for_days(
+    conn: sqlite3.Connection,
+    days: int,
+    model_version: Optional[str] = None,
+) -> AccuracyMetrics:
+    if days <= 0:
+        return AccuracyMetrics(
+            total_predictions=0,
+            mae=0.0,
+            rmse=0.0,
+            bias=0.0,
+            directional_accuracy=0.0,
+            confidence_calibration={},
+            market_breakdown={},
+            error_by_minutes_played={},
+            performance_by_edge={},
+        )
+    cutoff_date = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+    return _build_accuracy_report_with_cutoff(conn, cutoff_date, model_version)
+
+
+def _build_accuracy_report_with_cutoff(
+    conn: sqlite3.Connection,
+    cutoff_date: str | None,
+    model_version: Optional[str],
+) -> AccuracyMetrics:
+    query, params = _accuracy_query()
+    if cutoff_date:
+        query += " AND g.game_date >= ?"
+        params.append(cutoff_date)
+    if model_version:
+        query += " AND pp.model_version = ?"
+        params.append(model_version)
+    query += " ORDER BY g.game_date, p.full_name"
+    rows = conn.execute(query, params).fetchall()
+    if not rows:
+        return AccuracyMetrics(
+            total_predictions=0,
+            mae=0.0,
+            rmse=0.0,
+            bias=0.0,
+            directional_accuracy=0.0,
+            confidence_calibration={},
+            market_breakdown={},
+            error_by_minutes_played={},
+            performance_by_edge={},
+        )
+    accuracies = [_accuracy_from_row(row) for row in rows]
+    errors = [accuracy.error for accuracy in accuracies]
+    abs_errors = [accuracy.abs_error for accuracy in accuracies]
+    direction_hits = sum(1 for accuracy in accuracies if accuracy.directional_hit)
+
+    confidence_by_level = {"high": [], "medium": [], "low": []}
+    errors_by_market = {}
+    abs_errors_by_market = {}
+    direction_hits_by_market = {}
+    total_by_market = {}
+
+    for accuracy in accuracies:
+        market = accuracy.market
+        error = accuracy.error
+        abs_error = accuracy.abs_error
+
+        conf_level = accuracy.confidence
+        if conf_level in confidence_by_level:
+            confidence_by_level[conf_level].append(accuracy)
+
+        if market not in errors_by_market:
+            errors_by_market[market] = []
+            abs_errors_by_market[market] = []
+            direction_hits_by_market[market] = 0
+            total_by_market[market] = 0
+
+        errors_by_market[market].append(error)
+        abs_errors_by_market[market].append(abs_error)
+        if accuracy.directional_hit:
+            direction_hits_by_market[market] += 1
+        total_by_market[market] += 1
+
+    n = len(errors)
+    mae = sum(abs_errors) / n
+    rmse = math.sqrt(sum(e ** 2 for e in errors) / n)
+    bias = sum(errors) / n
+    directional_acc = direction_hits / n if n > 0 else 0.0
+
+    calibration = {}
+    for conf_level, conf_accuracies in confidence_by_level.items():
+        if conf_accuracies:
+            errs = [accuracy.error for accuracy in conf_accuracies]
+            calibration[conf_level] = {
+                "count": len(errs),
+                "mae": sum(abs(e) for e in errs) / len(errs),
+                "bias": sum(errs) / len(errs),
+                "directional_accuracy": sum(1 for accuracy in conf_accuracies if accuracy.directional_hit) / len(conf_accuracies),
+            }
+
+    market_stats = {}
+    for market in errors_by_market:
+        errs = errors_by_market[market]
+        abs_errs = abs_errors_by_market[market]
+        hits = direction_hits_by_market[market]
+        total = total_by_market[market]
+        market_stats[market] = {
+            "predictions": total,
+            "mae": sum(abs_errs) / total,
+            "rmse": math.sqrt(sum(e ** 2 for e in errs) / total),
+            "bias": sum(errs) / total,
+            "directional_accuracy": hits / total,
+        }
+
+    min_buckets = {"0-10": [], "10-20": [], "20-30": [], "30+": []}
+    for acc in accuracies:
+        if acc.minutes < 10:
+            bucket = "0-10"
+        elif acc.minutes < 20:
+            bucket = "10-20"
+        elif acc.minutes < 30:
+            bucket = "20-30"
+        else:
+            bucket = "30+"
+        min_buckets[bucket].append(acc.abs_error)
+
+    error_by_mins = {
+        bucket: sum(errs) / len(errs) if errs else 0.0
+        for bucket, errs in min_buckets.items() if errs
+    }
+
+    edge_thresholds = [0.02, 0.04, 0.06, 0.08, 0.10]
+    edge_performance = {}
+    for threshold in edge_thresholds:
+        filtered_accs = [a for a in accuracies if abs(a.edge) >= threshold]
+        if filtered_accs:
+            correct = sum(1 for a in filtered_accs if a.correct_side)
+            edge_performance[f"edge>={threshold}"] = {
+                "predictions": len(filtered_accs),
+                "correct_picks": correct,
+                "accuracy": correct / len(filtered_accs),
+                "avg_edge": sum(a.edge for a in filtered_accs) / len(filtered_accs),
+            }
+
     return AccuracyMetrics(
         total_predictions=n,
         mae=round(mae, 3),

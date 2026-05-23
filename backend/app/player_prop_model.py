@@ -81,6 +81,7 @@ def predict_player_prop(
     under_odds: int | None = None,
 ) -> tuple[float, str, str]:
     snapshot = feature_snapshot(conn, player_id, market, game_id)
+    sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
     model = train_market_model(conn, market)
     if not model:
         return snapshot.component_projection, snapshot.reason, "component"
@@ -92,13 +93,17 @@ def predict_player_prop(
 
     if line is not None:
         market_weight = _market_weight(model.rows)
+        market_weight = max(market_weight, _player_market_weight(sample_count, avg_minutes))
         projection = ((1 - market_weight) * learned) + (market_weight * float(line))
         if over_odds is not None and under_odds is not None:
             over_implied = american_to_implied_probability(int(over_odds))
             under_implied = american_to_implied_probability(int(under_odds))
             no_vig_mid = (over_implied / max(over_implied + under_implied, 0.01)) - 0.5
             projection += no_vig_mid * _market_price_nudge(market)
-        market_note = f"sportsbook line blend {market_weight:.0%} at {float(line):.1f}"
+        market_note = (
+            f"sportsbook line blend {market_weight:.0%} at {float(line):.1f} "
+            f"(player sample {sample_count} games, {avg_minutes:.1f} avg minutes)"
+        )
 
     reason = (
         f"{snapshot.reason} Learned model {MODEL_VERSION} projected {learned:.1f} from "
@@ -447,6 +452,38 @@ def _market_weight(rows: int) -> float:
     if rows >= 150:
         return 0.18
     return 0.12
+
+
+def _player_market_weight(sample_count: int, avg_minutes: float) -> float:
+    if sample_count < 4:
+        return 0.70
+    if sample_count < 7:
+        return 0.55
+    if avg_minutes < 16:
+        return 0.48
+    if sample_count < 10:
+        return 0.38
+    return 0.25
+
+
+def _player_sample_quality(conn: sqlite3.Connection, player_id: int, game_id: int) -> tuple[int, float]:
+    rows = conn.execute(
+        """
+        SELECT s.minutes
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        JOIN games target ON target.id = ?
+        WHERE s.player_id = ?
+          AND (g.game_date < target.game_date OR (g.game_date = target.game_date AND s.game_id < target.id))
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT 10
+        """,
+        (game_id, player_id),
+    ).fetchall()
+    if not rows:
+        return 0, 0.0
+    minutes = [float(row["minutes"]) for row in rows]
+    return len(minutes), (sum(minutes) / len(minutes))
 
 
 def _market_price_nudge(market: str) -> float:

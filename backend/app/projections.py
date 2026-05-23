@@ -177,7 +177,7 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
     )
     line = float(prop["line"])
     side = "over" if projection > line else "under"
-    stat_sigma = _estimated_sigma(conn, prop["player_id"], prop["market"], projection)
+    stat_sigma = _estimated_sigma(conn, prop["player_id"], prop["market"], projection, prop["game_id"])
     over_probability = 1 - _normal_cdf(line, projection, stat_sigma)
     model_probability = over_probability if side == "over" else 1 - over_probability
     odds = int(prop["over_odds"] if side == "over" else prop["under_odds"])
@@ -195,7 +195,7 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
         implied_probability=round(implied, 4),
         edge=round(edge, 4),
         expected_value=round(ev, 4),
-        confidence=_confidence(edge, abs(projection - line)),
+        confidence=_confidence(edge, abs(projection - line), stat_sigma, prop["player_id"], prop["game_id"], conn),
         reason=reason,
     )
 
@@ -262,7 +262,7 @@ def _market_value(row: sqlite3.Row, market: str) -> float:
     return float(row[column])
 
 
-def _estimated_sigma(conn: sqlite3.Connection, player_id: int, market: str, projection: float) -> float:
+def _estimated_sigma(conn: sqlite3.Connection, player_id: int, market: str, projection: float, game_id: int | None = None) -> float:
     rows = conn.execute(
         """
         SELECT s.*
@@ -282,7 +282,16 @@ def _estimated_sigma(conn: sqlite3.Connection, player_id: int, market: str, proj
     mean = sum(values) / len(values)
     sample_sigma = math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
     floor = max(MARKET_SIGMA_FLOORS.get(market, 2.0), projection * 0.10)
-    return max((0.60 * ewma_sigma) + (0.25 * sample_sigma) + (0.15 * floor), floor)
+    base_sigma = max((0.60 * ewma_sigma) + (0.25 * sample_sigma) + (0.15 * floor), floor)
+    sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
+    uncertainty_multiplier = 1.0
+    if sample_count < 4:
+        uncertainty_multiplier = 1.75
+    elif sample_count < 7:
+        uncertainty_multiplier = 1.45
+    elif avg_minutes < 16:
+        uncertainty_multiplier = 1.25
+    return base_sigma * uncertainty_multiplier
 
 
 def _weighted_average(values: list[float]) -> float:
@@ -530,9 +539,54 @@ def _normal_cdf(x: float, mean: float, sigma: float) -> float:
     return 0.5 * (1 + math.erf(z))
 
 
-def _confidence(edge: float, stat_margin: float) -> str:
-    if edge >= 0.08 and stat_margin >= 2.0:
+def _confidence(
+    edge: float,
+    stat_margin: float,
+    sigma: float,
+    player_id: int,
+    game_id: int,
+    conn: sqlite3.Connection,
+) -> str:
+    sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
+    normalized_margin = stat_margin / max(sigma, 1.0)
+    if sample_count < 7 or avg_minutes < 16:
+        if edge >= 0.10 and normalized_margin >= 1.15:
+            return "medium"
+        return "low"
+    if edge >= 0.08 and normalized_margin >= 1.0:
         return "high"
-    if edge >= 0.04 and stat_margin >= 1.0:
+    if edge >= 0.04 and normalized_margin >= 0.65:
         return "medium"
     return "low"
+
+
+def _player_sample_quality(conn: sqlite3.Connection, player_id: int, game_id: int | None) -> tuple[int, float]:
+    if game_id is None:
+        rows = conn.execute(
+            """
+            SELECT s.minutes
+            FROM player_game_stats s
+            WHERE s.player_id = ?
+            ORDER BY s.game_id DESC
+            LIMIT 10
+            """,
+            (player_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT s.minutes
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN games target ON target.id = ?
+            WHERE s.player_id = ?
+              AND (g.game_date < target.game_date OR (g.game_date = target.game_date AND s.game_id < target.id))
+            ORDER BY g.game_date DESC, s.game_id DESC
+            LIMIT 10
+            """,
+            (game_id, player_id),
+        ).fetchall()
+    if not rows:
+        return 0, 0.0
+    minutes = [float(row["minutes"]) for row in rows]
+    return len(minutes), (sum(minutes) / len(minutes))

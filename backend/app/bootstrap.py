@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 
 
@@ -39,6 +40,10 @@ TEAM_ALIASES = {
     "val": "GS",
     "por": "POR",
 }
+TEAM_NAME_BY_NORMALIZED_KEY = {
+    re.sub(r"[^a-z0-9]+", " ", team[2].lower()).strip(): team[1]
+    for team in WNBA_TEAMS
+}
 
 
 def ensure_teams(conn: sqlite3.Connection) -> None:
@@ -70,10 +75,29 @@ def ensure_teams(conn: sqlite3.Connection) -> None:
 def normalize_team_abbreviation(team_name: str | None) -> str | None:
     if not team_name:
         return None
-    key = team_name.strip().lower()
+    raw = team_name.strip()
+    key = raw.lower()
     if not key:
         return None
-    return TEAM_ALIASES.get(key, team_name.strip().upper() if len(team_name.strip()) <= 3 else None)
+    if key in TEAM_ALIASES:
+        return TEAM_ALIASES[key]
+
+    # Covers/feeds sometimes include ranking, record, or parenthetical suffixes.
+    key = re.sub(r"\([^)]*\)", " ", key)
+    key = re.sub(r"^no\.?\s*\d+\s+", "", key)
+    key = re.sub(r"[^a-z0-9]+", " ", key).strip()
+    if not key:
+        return None
+
+    if key in TEAM_ALIASES:
+        return TEAM_ALIASES[key]
+    if key in TEAM_NAME_BY_NORMALIZED_KEY:
+        return TEAM_NAME_BY_NORMALIZED_KEY[key]
+
+    compact = key.replace(" ", "")
+    if compact in TEAM_ALIASES:
+        return TEAM_ALIASES[compact]
+    return raw.upper() if len(raw) <= 3 else None
 
 
 def ensure_team(conn: sqlite3.Connection, team_name: str) -> int | None:

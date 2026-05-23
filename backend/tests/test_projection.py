@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from backend.app import covers_import as covers_import_module
-from backend.app.bootstrap import ensure_teams
+from backend.app import rotowire_import as rotowire_import_module
+from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
 from backend.app.covers_import import CoversGame, _event_rows, _metadata_from_page, _records_from_page
 from backend.app.db import connect, init_db
@@ -14,12 +15,14 @@ from backend.app.game_prediction_tracking import save_game_prediction, settle_co
 from backend.app.game_predictions import project_game
 from backend.app.history_import import determine_ats_result
 from backend.app.main import app, import_espn_history as import_espn_history_endpoint, model_performance
+from backend.app import main as main_module
 from backend.app.odds import american_to_implied_probability, expected_value
 from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies, sync_prop_lines_from_sportsbook
 from backend.app.player_prop_model import _market_value as learned_market_value
 from backend.app.player_prop_model import train_market_model
 from backend.app.projections import _market_value as component_market_value
 from backend.app.projections import rebuild_predictions
+from backend.app.rotowire_import import _parse_lineup_injuries
 from backend.app.settlement import settle_completed_props
 from backend.app.training import run_walk_forward_training
 
@@ -154,6 +157,13 @@ def test_american_odds_helpers() -> None:
     assert round(american_to_implied_probability(-110), 4) == 0.5238
     assert round(american_to_implied_probability(150), 4) == 0.4
     assert expected_value(0.55, -110) > 0
+
+
+def test_normalize_team_abbreviation_handles_covers_name_variants() -> None:
+    assert normalize_team_abbreviation("No. 1 Phoenix Mercury") == "PHX"
+    assert normalize_team_abbreviation("Washington Mystics (W)") == "WSH"
+    assert normalize_team_abbreviation("Connecticut Sun (10-4)") == "CON"
+    assert normalize_team_abbreviation("P.H.O.") == "PHX"
 
 
 def test_ats_result_uses_home_spread_sign() -> None:
@@ -370,6 +380,33 @@ def test_game_projection_returns_picks() -> None:
     assert result["winner_pick"] in {"NY", "CON"}
     assert result["projected_total"] > 0
     assert result["ats_pick"] != "N/A"
+
+
+def test_game_projection_applies_injury_penalty_for_key_starter() -> None:
+    load_test_history()
+    with connect() as conn:
+        game = conn.execute(
+            """
+            SELECT
+                g.*,
+                home.abbreviation AS home_team,
+                away.abbreviation AS away_team
+            FROM games g
+            JOIN teams home ON home.id = g.home_team_id
+            JOIN teams away ON away.id = g.away_team_id
+            WHERE g.id = 2010
+            """
+        ).fetchone()
+        baseline = project_game(conn, game)
+        conn.execute(
+            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
+            (1001, "out", "test", datetime.now(timezone.utc).isoformat()),
+        )
+        adjusted = project_game(conn, game)
+
+    assert adjusted["home_projected_points"] < baseline["home_projected_points"]
+    assert adjusted["projected_margin"] < baseline["projected_margin"]
+    assert "injury adjustment" in adjusted["game_reason"].lower()
 
 
 def test_game_predictions_are_saved_and_settled() -> None:
@@ -996,6 +1033,68 @@ def test_covers_import_keeps_cached_rows_when_fresh_scrape_returns_no_rows(monke
     assert result["errors"][0]["event_id"] == "373868"
 
 
+def test_rotowire_lineup_parser_extracts_may_not_play_by_team() -> None:
+    html = """
+    <section>
+      <div>7:30 PM ET</div>
+      <div><a>GSV</a> <a>IND</a></div>
+      <ul>
+        <li>Confirmed Lineup</li>
+        <li>MAY NOT PLAY</li>
+        <li>Juste Jocyte GTD</li>
+        <li>C. Zandalasini OUT</li>
+      </ul>
+      <ul>
+        <li>Confirmed Lineup</li>
+        <li>MAY NOT PLAY</li>
+        <li>Caitlin Clark GTD</li>
+      </ul>
+    </section>
+    """
+
+    rows = _parse_lineup_injuries(html)
+
+    assert rows == [
+        {"team": "GSV", "player_name": "Juste Jocyte", "status": "GTD"},
+        {"team": "GSV", "player_name": "C. Zandalasini", "status": "OUT"},
+        {"team": "IND", "player_name": "Caitlin Clark", "status": "GTD"},
+    ]
+
+
+def test_rotowire_import_uses_cache_when_fresh(monkeypatch) -> None:
+    cached_payload = {
+        "captured_at": "2026-05-22T20:00:00+00:00",
+        "rows": [
+            {"team": "IND", "player_name": "Caitlin Clark", "status": "GTD"},
+        ],
+    }
+    monkeypatch.setattr(rotowire_import_module, "read_json_cache", lambda _: cached_payload)
+    monkeypatch.setattr(rotowire_import_module, "_cache_is_current", lambda conn, payload: True)
+    monkeypatch.setattr(rotowire_import_module, "_fetch_text", lambda _: (_ for _ in ()).throw(AssertionError("should not fetch")))
+
+    with connect() as conn:
+        result = rotowire_import_module.import_rotowire_lineups(conn, force_refresh=False)
+
+    assert result["from_cache"] is True
+    assert result["source"] == "cache"
+
+
+def test_rotowire_import_force_refresh_fetches(monkeypatch) -> None:
+    monkeypatch.setattr(rotowire_import_module, "read_json_cache", lambda _: {"captured_at": "2026-05-22T20:00:00+00:00", "rows": []})
+    monkeypatch.setattr(
+        rotowire_import_module,
+        "_fetch_text",
+        lambda _: "<section><div>GSV IND</div><li>Confirmed Lineup</li><li>MAY NOT PLAY</li><li>Caitlin Clark GTD</li></section>",
+    )
+    monkeypatch.setattr(rotowire_import_module, "write_json_cache", lambda *args, **kwargs: None)
+
+    with connect() as conn:
+        result = rotowire_import_module.import_rotowire_lineups(conn, force_refresh=True)
+
+    assert result["from_cache"] is False
+    assert result["source"] == "rotowire"
+
+
 def test_espn_boxscore_missing_only_skips_games_with_stats(monkeypatch) -> None:
     load_test_history()
     fetched_game_ids: list[int] = []
@@ -1165,3 +1264,57 @@ def test_line_discrepancies_group_books() -> None:
     assert rows[0]["player_name"] == "Test Player"
     assert rows[0]["line_gap"] == 1.0
     assert rows[0]["best_price"]["sportsbook"] == "FanDuel"
+
+
+def test_value_board_filters_low_confidence_unless_edge_is_high() -> None:
+    load_test_history()
+    with connect() as conn:
+        start_time = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (9910, '2026-05-23', ?, 10, 3, 'scheduled', 2, 2, -2.5, 161.5)
+            """,
+            (start_time,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9911, 9910, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9912, 9910, 1002, 'DraftKings', 'assists', 3.5, -110, -110, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9911, 'adaptive-context-v1', ?, 23.0, 'over', 0.55, 0.52, 0.08, 0.03, 'low', 'test')
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9912, 'adaptive-context-v1', ?, 5.0, 'over', 0.61, 0.52, 0.14, 0.07, 'low', 'test')
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        rows = main_module._value_board_payload(conn, 9910)
+
+    player_market = {(str(row["player"]), str(row["market"])) for row in rows}
+    assert ("Breanna Stewart", "points") not in player_market
+    assert ("Sonia Citron", "assists") in player_market
