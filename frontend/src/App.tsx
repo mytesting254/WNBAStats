@@ -1226,7 +1226,7 @@ function MatchupProps({
   const [marketFilter, setMarketFilter] = useState("all");
   const [sideFilter, setSideFilter] = useState("all");
   const [confidenceFilter, setConfidenceFilter] = useState("all");
-  const [candidateView, setCandidateView] = useState<"positive" | "all">("positive");
+  const [candidateView, setCandidateView] = useState<"positive" | "all">("all");
   const [candidateSort, setCandidateSort] = useState<CandidateSortField>("expected_value");
   const [discrepancySort, setDiscrepancySort] = useState<DiscrepancySortField>("line_gap");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -1293,6 +1293,11 @@ function MatchupProps({
                   ? `${filteredSportsbookProps.length} sportsbook prop lines match the current filters`
                   : "No sportsbook props attached to this game yet"}
           </p>
+          {props.length > 0 && (
+            <p>
+              {`${props.length} total model props | ${filteredProps.length} after filters | ${positiveProps.length} with positive edge`}
+            </p>
+          )}
         </div>
       </div>
       <div className="candidate-filters" aria-label="Parlay candidate filters">

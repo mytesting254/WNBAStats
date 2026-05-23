@@ -17,6 +17,7 @@ from .odds_import import sync_prop_lines_from_sportsbook
 
 PROVIDER = "covers"
 RAW_CACHE_NAME = "covers_props_raw.json"
+RAW_PAGE_CACHE_NAME = "covers_pages_raw.json"
 COVERS_BASE_URL = "https://www.covers.com"
 COVERS_MATCHUPS_URL = f"{COVERS_BASE_URL}/sports/wnba/matchups"
 LOCAL_TZ = timezone(timedelta(hours=-4))
@@ -113,7 +114,7 @@ def import_covers_props(
     try:
         games = covers_matchup_links(selected_date)
     except Exception as exc:
-        if not force_refresh and isinstance(cached_payload, dict) and cached_payload.get("rows"):
+        if isinstance(cached_payload, dict) and cached_payload.get("rows"):
             result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
             synced = sync_prop_lines_from_sportsbook(conn)
             return {
@@ -135,22 +136,47 @@ def import_covers_props(
     imported_rows = []
     metadata_rows: list[CoversMetadata] = []
     errors = []
+    raw_games: list[dict] = []
     for game in games:
         try:
             matchup_page = _fetch_text(game.matchup_url or game.odds_url.removesuffix("/odds"))
             odds_page = _fetch_text(game.odds_url)
+            fragments = _fetch_market_fragments(odds_page)
+            raw_games.append(
+                {
+                    "event_id": game.event_id,
+                    "odds_url": game.odds_url,
+                    "matchup_url": game.matchup_url,
+                    "matchup_page": matchup_page,
+                    "odds_page": odds_page,
+                    "market_fragments": fragments,
+                }
+            )
             metadata = _metadata_from_page(conn, game, matchup_page, fallback_page=odds_page)
             metadata_rows.append(metadata)
-            market_html = odds_page + "".join(_fetch_market_fragments(odds_page))
+            market_html = odds_page + "".join(fragments)
             imported_rows.extend(_event_rows(metadata, market_html, captured_at))
         except Exception as exc:
             errors.append({"event_id": game.event_id, "error": str(exc)})
             continue
 
+    if raw_games:
+        write_json_cache(
+            RAW_PAGE_CACHE_NAME,
+            {
+                "provider": PROVIDER,
+                "selected_date": selected_date,
+                "cache_date": _today_local(),
+                "captured_at": captured_at,
+                "events": len(raw_games),
+                "games": raw_games,
+            },
+        )
+
     row_payload = [_tuple_to_row(row) for row in imported_rows]
     game_payload = [_metadata_to_row(row) for row in metadata_rows]
     if not row_payload:
-        if not force_refresh and isinstance(cached_payload, dict) and cached_payload.get("rows"):
+        if isinstance(cached_payload, dict) and cached_payload.get("rows"):
             result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
             synced = sync_prop_lines_from_sportsbook(conn)
             return {
@@ -397,9 +423,11 @@ def _odds_from_player(player_html: str, market_key: str) -> list[tuple[str, floa
     pattern = re.compile(
         r'data-linkcont="matchup-odds-(?:best_odds|compare_odds)-click-wnba-'
         + re.escape(market_key)
-        + r'-(?P<side>over|under)-(?P<book>[^"]+)">[\s\S]*?'
-        r'<span class="fw-bold fs-12">(?P<line>[ou][0-9]+(?:\.[0-9]+)?)</span>\s*'
-        r'<span class="fw-bold americanOdds fs-13">(?P<price>[^<]+)</span>'
+        + r'-(?P<side>over|under)-(?P<book>[^"]+)"[^>]*>[\s\S]*?'
+        r'<span class="[^"]*fs-12[^"]*">(?P<line>[ou][0-9]+(?:\.[0-9]+)?)</span>[\s\S]*?'
+        r'<span class="[^"]*americanOdds[^"]*">(?P<price>[^<]+)</span>'
+        ,
+        re.I,
     )
     for match in pattern.finditer(player_html):
         line = float(match.group("line")[1:])

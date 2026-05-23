@@ -1036,7 +1036,7 @@ def test_covers_market_title_aliases() -> None:
     assert _market_from_title("Total Points + Rebounds + Assists") == "total_points_rebounds_and_assists"
 
 
-def test_covers_import_force_refresh_fails_when_fresh_scrape_returns_no_rows(monkeypatch) -> None:
+def test_covers_import_force_refresh_uses_cache_when_fresh_scrape_returns_no_rows(monkeypatch) -> None:
     cached_payload = {
         "provider": "covers",
         "rows": [{"provider_event_id": "saved-row"}],
@@ -1054,12 +1054,18 @@ def test_covers_import_force_refresh_fails_when_fresh_scrape_returns_no_rows(mon
         raise TimeoutError("slow covers response")
 
     monkeypatch.setattr(covers_import_module, "_fetch_text", raise_timeout)
+    monkeypatch.setattr(
+        covers_import_module,
+        "_replace_covers_rows",
+        lambda conn, rows, games=None: {"events": 1, "imported": 1, "captured_at": "2026-05-22T20:00:00+00:00"},
+    )
+    monkeypatch.setattr(covers_import_module, "sync_prop_lines_from_sportsbook", lambda conn: 0)
     with connect() as conn:
         result = covers_import_module.import_covers_props(conn, force_refresh=True)
 
-    assert result["status"] == "failed"
-    assert result["source"] == "covers"
-    assert result["imported"] == 0
+    assert result["status"] == "loaded_from_cache"
+    assert result["source"] == "cache"
+    assert result["imported"] == 1
 
 
 def test_rotowire_lineup_parser_extracts_may_not_play_by_team() -> None:
