@@ -76,6 +76,7 @@ POST /api/settle-props
 - `Matchups`: active upcoming games only, with projected score, spread edge, total edge, and confidence.
 - `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Completed games are removed from this view after the stale-game grace window.
 - `Discrepancies`: cross-book line gaps and price gaps.
+- `Roster`: Rotowire lineup statuses grouped by team, with a manual `Refresh Roster` pull.
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history.
 - `Data`: operational controls for saved/fresh odds import, completed-game import, projection rebuilds, and reloads.
 
@@ -172,6 +173,28 @@ POST /api/injuries/import/rotowire?force_refresh=true
 ```
 
 `/api/matchups` also performs a cache-aware RotoWire refresh to keep injury-adjusted projections current without forcing repeated fetches.
+
+The roster API is Rotowire-driven (not ESPN-player-table driven):
+
+```text
+GET /api/roster
+```
+
+`/api/roster` reads the Rotowire lineup pull/cache rows and returns `team`, `player_name`, `status`, and `captured_at` so team tabs can render current lineup status even when ESPN player IDs are not yet present.
+
+Each Rotowire pull also writes a normalized roster snapshot cache:
+
+```text
+data/cache/rotowire_roster_snapshot.json
+```
+
+The snapshot includes both `captured_at` and `changed_at`, and only advances `changed_at` when the normalized lineup/status rows actually change.
+
+Prop projections now use injury status context:
+
+- Player marked `OUT`/`inactive`/`suspended`/`unavailable`: projection hard-capped to zero.
+- `GTD`/`questionable`/`doubtful`/`probable`: availability dampening applied.
+- Teammate absences: role-weighted usage and minute bump for active players.
 
 ## Model Diagnostics Endpoints
 

@@ -5,10 +5,12 @@ import {
   fetchMatchups,
   fetchModelRuns,
   fetchPerformance,
+  fetchRoster,
   fetchValueBoard,
   importCoversOdds,
   importEspnHistory,
   importOdds,
+  importRotowireInjuries,
   recalculate,
   trainModel,
   type CoversRecordRow,
@@ -16,6 +18,7 @@ import {
   type Matchup,
   type ModelPerformance,
   type ModelRun,
+  type RosterPlayer,
   type TeamLast10,
   type ValueProp
 } from "./api";
@@ -32,7 +35,7 @@ const markets = [
   { id: "blocks_steals", label: "STL+BLK" }
 ];
 
-type DashboardTab = "props" | "matchups" | "parlays" | "discrepancies" | "models" | "data";
+type DashboardTab = "props" | "matchups" | "parlays" | "discrepancies" | "roster" | "models" | "data";
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
@@ -41,6 +44,7 @@ export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
   const [discrepancies, setDiscrepancies] = useState<LineDiscrepancy[]>([]);
+  const [roster, setRoster] = useState<RosterPlayer[]>([]);
   const [performance, setPerformance] = useState<ModelPerformance | null>(null);
   const [modelRuns, setModelRuns] = useState<ModelRun[]>([]);
   const [latestModelRun, setLatestModelRun] = useState<ModelRun | null>(null);
@@ -48,6 +52,7 @@ export function App() {
   const [importingOdds, setImportingOdds] = useState(false);
   const [importingCoversOdds, setImportingCoversOdds] = useState(false);
   const [refreshingResults, setRefreshingResults] = useState(false);
+  const [refreshingRoster, setRefreshingRoster] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("matchups");
   const [market, setMarket] = useState("all");
@@ -65,13 +70,15 @@ export function App() {
       performanceResult,
       matchupsResult,
       discrepanciesResult,
-      modelRunsResult
+      modelRunsResult,
+      rosterResult
     ] = await Promise.allSettled([
       fetchValueBoard(),
       fetchPerformance(),
       fetchMatchups(),
       fetchLineDiscrepancies(),
-      fetchModelRuns()
+      fetchModelRuns(),
+      fetchRoster()
     ]);
 
     const failures: string[] = [];
@@ -113,6 +120,13 @@ export function App() {
       failures.push("model runs");
       setModelRuns([]);
       setLatestModelRun(null);
+    }
+
+    if (rosterResult.status === "fulfilled") {
+      setRoster(rosterResult.value);
+    } else {
+      failures.push("roster");
+      setRoster([]);
     }
 
     if (failures.length > 0) {
@@ -235,6 +249,23 @@ export function App() {
     }
   }
 
+  async function handleRefreshRoster(forceRefresh = true) {
+    setRefreshingRoster(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await importRotowireInjuries(forceRefresh);
+      await load();
+      setOperationStatus(
+        `${forceRefresh ? "Fresh" : "Cached"} Rotowire lineup pull complete. Parsed ${result.parsed_rows ?? 0} rows${result.captured_at ? ` (${result.captured_at})` : ""}.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to refresh Rotowire lineup status");
+    } finally {
+      setRefreshingRoster(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -271,6 +302,10 @@ export function App() {
           <BrainCircuit size={18} />
           Models
         </button>
+        <button className={activeTab === "roster" ? "active" : ""} onClick={() => setActiveTab("roster")}>
+          <ShieldCheck size={18} />
+          Roster
+        </button>
         <button className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>
           <Database size={18} />
           Data
@@ -279,12 +314,12 @@ export function App() {
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "models" ? "Training rows" : "Model props"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : props.length.toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Model props"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : props.length.toString()}
         />
         <Metric
-          label={activeTab === "props" ? "Best EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          label={activeTab === "props" ? "Best EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={performance?.settled.toString() ?? "0"} />
         <Metric label="Win rate" value={performance?.win_rate == null ? "Pending" : formatPercent(performance.win_rate)} />
@@ -326,6 +361,15 @@ export function App() {
           onRefreshResults={handleRefreshResults}
           onRecalculate={handleRecalculate}
           onReload={load}
+        />
+      ) : activeTab === "roster" ? (
+        <RosterView
+          roster={roster}
+          loading={loading}
+          error={error}
+          status={operationStatus}
+          refreshing={refreshingRoster}
+          onRefresh={() => handleRefreshRoster(true)}
         />
       ) : (
         <ModelsView runs={modelRuns} latest={latestModelRun} loading={loading || training} error={error} onTrain={handleTrainModel} />
@@ -374,8 +418,9 @@ function DataView({
   onReload: () => void;
 }) {
   const [resultDate, setResultDate] = useState(todayInputValue());
-  const [batchDates, setBatchDates] = useState("");
-  const parsedBatchDates = parseDateList(batchDates);
+  const [batchStartDate, setBatchStartDate] = useState(todayInputValue());
+  const [batchEndDate, setBatchEndDate] = useState(todayInputValue());
+  const parsedBatchDates = dateRangeValues(batchStartDate, batchEndDate);
   const busy = refreshingResults || importingOdds || importingCoversOdds || loading;
 
   return (
@@ -433,13 +478,12 @@ function DataView({
                 <input type="date" value={resultDate} onChange={(event) => setResultDate(event.target.value)} />
               </label>
               <label>
-                Batch dates
-                <textarea
-                  value={batchDates}
-                  onChange={(event) => setBatchDates(event.target.value)}
-                  placeholder="2026-05-16, 2026-05-17"
-                  rows={3}
-                />
+                Batch start date
+                <input type="date" value={batchStartDate} onChange={(event) => setBatchStartDate(event.target.value)} />
+              </label>
+              <label>
+                Batch end date
+                <input type="date" value={batchEndDate} min={batchStartDate || undefined} onChange={(event) => setBatchEndDate(event.target.value)} />
               </label>
             </div>
             <div className="operation-actions">
@@ -474,6 +518,103 @@ function DataView({
       </div>
     </section>
   );
+}
+
+function RosterView({
+  roster,
+  loading,
+  error,
+  status,
+  refreshing,
+  onRefresh
+}: {
+  roster: RosterPlayer[];
+  loading: boolean;
+  error: string | null;
+  status: string | null;
+  refreshing: boolean;
+  onRefresh: () => void;
+}) {
+  const teams = useMemo(() => Array.from(new Set(roster.map((item) => item.team))).sort(), [roster]);
+  const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
+  useEffect(() => {
+    if (!teams.length) {
+      setSelectedTeam(null);
+      return;
+    }
+    if (!selectedTeam || !teams.includes(selectedTeam)) {
+      setSelectedTeam(teams[0]);
+    }
+  }, [teams, selectedTeam]);
+  const visibleRows = selectedTeam ? roster.filter((item) => item.team === selectedTeam) : roster;
+
+  return (
+    <section className="matchup-list">
+      <div className="board-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Team Roster Status</h2>
+            <p>{loading ? "Loading lineup status" : "Rotowire lineup statuses grouped by team"}</p>
+          </div>
+          <ShieldCheck size={20} />
+        </div>
+        <div className="operation-actions">
+          <button className="icon-button text-button dark-button" onClick={onRefresh} disabled={loading || refreshing}>
+            <RefreshCw size={18} />
+            {refreshing ? "Refreshing" : "Refresh Roster"}
+          </button>
+        </div>
+        {error && <div className="error">{error}</div>}
+        {status && <div className="success">{status}</div>}
+        <div className="game-tabs" aria-label="Roster team tabs">
+          {teams.map((team) => (
+            <button key={team} className={selectedTeam === team ? "active" : ""} onClick={() => setSelectedTeam(team)}>
+              <strong>{team}</strong>
+              <em>{roster.filter((item) => item.team === team).length} players</em>
+            </button>
+          ))}
+        </div>
+        <div className="props-table-wrapper">
+          <table className="props-table">
+            <thead>
+              <tr>
+                <th>Team</th>
+                <th>Player</th>
+                <th>Status</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleRows.map((item) => (
+                <tr key={`${item.team}-${item.player_name}-${item.status}`}>
+                  <td>{item.team}</td>
+                  <td>{item.player_name}</td>
+                  <td><span className={`status-pill ${statusClass(item.status)}`}>{item.status}</span></td>
+                  <td>{item.captured_at ? formatDate(item.captured_at) : "N/A"}</td>
+                </tr>
+              ))}
+              {!visibleRows.length && (
+                <tr>
+                  <td colSpan={4}>No Rotowire lineup rows available yet. Run injury import or reload matchups to refresh lineups.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function statusClass(status: string) {
+  const value = status.trim().toUpperCase();
+  if (value === "OUT") {
+    return "out";
+  }
+  if (value === "GTD" || value === "QUESTIONABLE" || value === "DOUBTFUL") {
+    return "gtd";
+  }
+  return "confirmed";
 }
 
 function OperationCard({
@@ -1570,6 +1711,7 @@ function tabTitle(tab: DashboardTab) {
     matchups: "Pregame Matchups",
     parlays: "Parlay Candidates",
     discrepancies: "Line Discrepancies",
+    roster: "Roster Status",
     models: "Model Lab",
     data: "Data Operations"
   };
@@ -1606,13 +1748,22 @@ function todayInputValue() {
   return `${date.getFullYear()}-${month}-${day}`;
 }
 
-function parseDateList(value: string) {
-  const dates = value
-    .split(/[\s,]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item));
-  return Array.from(new Set(dates));
+function dateRangeValues(startDate: string, endDate: string) {
+  if (!startDate || !endDate) {
+    return [];
+  }
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end.getTime() < start.getTime()) {
+    return [];
+  }
+  const dates: string[] = [];
+  const cursor = new Date(start);
+  while (cursor.getTime() <= end.getTime()) {
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
 }
 
 function availableLabel(matchup: Matchup) {

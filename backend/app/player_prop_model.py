@@ -59,6 +59,8 @@ class FeatureSnapshot:
     values: list[float]
     component_projection: float
     reason: str
+    injury_status: str = "available"
+    hard_cap_zero: bool = False
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,10 @@ def predict_player_prop(
             f"(player sample {sample_count} games, {avg_minutes:.1f} avg minutes)"
         )
 
+    if snapshot.hard_cap_zero:
+        projection = 0.0
+        market_note = f"{market_note}; player marked OUT"
+
     reason = (
         f"{snapshot.reason} Learned model {MODEL_VERSION} projected {learned:.1f} from "
         f"{model.rows} historical rows; {market_note}. Final projection {projection:.1f}."
@@ -141,6 +147,8 @@ def feature_snapshot(
     context = _game_context(conn, player_id, game_id)
     blowout = _blowout_adjustment(conn, context, history[0]["rotation_role"] if history else "starter")
     projected_minutes = max(ewma_minutes + (0.35 * minutes_trend) + blowout["minutes_delta"], 4.0)
+    injury = _injury_adjustment_for_prop(conn, player_id, context["team_id"], history[0]["rotation_role"] if history else "starter")
+    projected_minutes = max(projected_minutes + injury["minutes_delta"], 0.0)
     rate_projection = weighted_rate * projected_minutes
     component_base = _adaptive_component_projection(
         weighted_recent=weighted_recent,
@@ -157,6 +165,7 @@ def feature_snapshot(
     home_factor = 1.02 if context and context["is_home"] else 0.99
     rest_factor = _rest_factor(context["rest_days"]) if context else 1.0
     usage_multiplier, adjustment_note = _manual_adjustment(conn, player_id)
+    usage_multiplier *= injury["usage_multiplier"]
 
     component_projection = (
         component_base
@@ -166,6 +175,7 @@ def feature_snapshot(
         * home_factor
         * rest_factor
         * usage_multiplier
+        * injury["availability_factor"]
     )
     spread_abs = abs(context["team_spread"]) if context and context["team_spread"] is not None else 0.0
     game_total = context["game_total"] if context and context["game_total"] is not None else 0.0
@@ -197,9 +207,17 @@ def feature_snapshot(
         f"common opponents {common_opponent_factor:.2f}, blowout {blowout['risk']} "
         f"({blowout['minutes_delta']:+.1f} min), "
         f"{'home' if context and context['is_home'] else 'away'} {home_factor:.2f}, "
-        f"rest {rest_factor:.2f}, usage {usage_multiplier:.2f}; {adjustment_note}."
+        f"rest {rest_factor:.2f}, usage {usage_multiplier:.2f}; "
+        f"injury {injury['status']} (avail {injury['availability_factor']:.2f}, "
+        f"team usage {injury['usage_multiplier']:.2f}, min {injury['minutes_delta']:+.1f}); {adjustment_note}."
     )
-    return FeatureSnapshot(features, component_projection, reason)
+    return FeatureSnapshot(
+        features,
+        component_projection,
+        reason,
+        injury_status=str(injury["status"]),
+        hard_cap_zero=bool(injury["hard_cap_zero"]),
+    )
 
 
 @lru_cache(maxsize=32)
@@ -651,6 +669,122 @@ def _manual_adjustment(conn: sqlite3.Connection, player_id: int) -> tuple[float,
     if not row:
         return 1.0, "no manual adjustment"
     return float(row["usage_multiplier"] or 1.0), row["note"] or "manual adjustment applied"
+
+
+def _injury_adjustment_for_prop(
+    conn: sqlite3.Connection,
+    player_id: int,
+    team_id: int,
+    rotation_role: str | None,
+) -> dict[str, float | str | bool]:
+    status = _latest_player_injury_status(conn, player_id)
+    status_weight = {
+        "out": 0.0,
+        "inactive": 0.0,
+        "suspended": 0.0,
+        "unavailable": 0.0,
+        "doubtful": 0.55,
+        "questionable": 0.82,
+        "gtd": 0.82,
+        "probable": 0.96,
+    }
+    availability_factor = status_weight.get(status, 1.0)
+    hard_cap_zero = availability_factor == 0.0
+
+    teammate_rows = conn.execute(
+        """
+        SELECT
+            p.id AS player_id,
+            lower(trim(i.status)) AS status,
+            p.rotation_role,
+            COALESCE(
+                (
+                    SELECT AVG(sample.contrib)
+                    FROM (
+                        SELECT
+                            (s.points + (0.70 * s.rebounds) + (0.70 * s.assists)) AS contrib
+                        FROM player_game_stats s
+                        JOIN games g ON g.id = s.game_id
+                        WHERE s.player_id = p.id
+                        ORDER BY g.game_date DESC
+                        LIMIT 10
+                    ) sample
+                ),
+                0.0
+            ) AS contribution
+        FROM injuries i
+        JOIN players p ON p.id = i.player_id
+        WHERE p.team_id = ?
+          AND p.id != ?
+          AND i.captured_at = (
+              SELECT MAX(i2.captured_at)
+              FROM injuries i2
+              WHERE i2.player_id = i.player_id
+          )
+        """,
+        (team_id, player_id),
+    ).fetchall()
+    miss_weight = {
+        "out": 1.0,
+        "inactive": 1.0,
+        "suspended": 1.0,
+        "unavailable": 1.0,
+        "doubtful": 0.75,
+        "questionable": 0.35,
+        "gtd": 0.35,
+    }
+    role_weight = {"star": 1.25, "starter": 1.0, "rotation": 0.75, "bench": 0.5}
+    teammate_penalty = 0.0
+    missing_key = 0
+    for row in teammate_rows:
+        s = str(row["status"] or "").strip()
+        s_weight = miss_weight.get(s)
+        if s_weight is None:
+            continue
+        contribution = float(row["contribution"] or 0.0)
+        if contribution <= 0:
+            continue
+        r_weight = role_weight.get(str(row["rotation_role"] or "starter").strip().lower(), 0.9)
+        teammate_penalty += contribution * s_weight * r_weight
+        if s_weight >= 0.75 and r_weight >= 1.0:
+            missing_key += 1
+
+    if hard_cap_zero:
+        return {
+            "status": status,
+            "availability_factor": 0.0,
+            "usage_multiplier": 1.0,
+            "minutes_delta": -40.0,
+            "hard_cap_zero": True,
+        }
+
+    usage_boost = _clamp(teammate_penalty / 120.0, 0.0, 0.12)
+    base_minutes_by_role = {"star": 1.0, "starter": 0.8, "rotation": 0.5, "bench": 0.25}
+    role_minutes = base_minutes_by_role.get((rotation_role or "starter").lower(), 0.6)
+    minutes_delta = min(missing_key * role_minutes, 3.0)
+    return {
+        "status": status,
+        "availability_factor": availability_factor,
+        "usage_multiplier": 1.0 + usage_boost,
+        "minutes_delta": minutes_delta,
+        "hard_cap_zero": False,
+    }
+
+
+def _latest_player_injury_status(conn: sqlite3.Connection, player_id: int) -> str:
+    row = conn.execute(
+        """
+        SELECT lower(trim(status)) AS status
+        FROM injuries
+        WHERE player_id = ?
+        ORDER BY captured_at DESC
+        LIMIT 1
+        """,
+        (player_id,),
+    ).fetchone()
+    if not row or not row["status"]:
+        return "available"
+    return str(row["status"])
 
 
 def _pace_factor(conn: sqlite3.Connection, team_id: int, opponent_id: int) -> float:

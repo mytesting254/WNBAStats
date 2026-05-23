@@ -18,7 +18,7 @@ from .game_prediction_tracking import save_game_prediction, settle_completed_gam
 from .game_predictions import project_game
 from .odds_import import import_the_odds_api_props, line_discrepancies, list_sportsbook_props, odds_cache_summary, sync_prop_lines_from_sportsbook
 from .projections import rebuild_predictions
-from .rotowire_import import import_rotowire_lineups
+from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
 from .training import latest_model_run, list_model_runs, run_walk_forward_training
 
@@ -297,39 +297,78 @@ def import_espn_history(
 
     with connect() as conn:
         scoreboards = []
+        errors = []
         if daily_dates:
-            scoreboards = [
-                import_espn_scoreboard(conn, _season_for_date(item), force_refresh=force_refresh, selected_date=item)
-                for item in daily_dates
-            ]
+            for item in daily_dates:
+                try:
+                    scoreboards.append(
+                        import_espn_scoreboard(conn, _season_for_date(item), force_refresh=force_refresh, selected_date=item)
+                    )
+                except Exception as exc:
+                    errors.append(
+                        {
+                            "stage": "scoreboard",
+                            "selected_date": item,
+                            "season": _season_for_date(item),
+                            "error": str(exc),
+                        }
+                    )
         else:
-            scoreboards = [
-                import_espn_scoreboard(conn, item, force_refresh=force_refresh)
-                for item in unique_seasons
-            ]
+            for item in unique_seasons:
+                try:
+                    scoreboards.append(import_espn_scoreboard(conn, item, force_refresh=force_refresh))
+                except Exception as exc:
+                    errors.append(
+                        {
+                            "stage": "scoreboard",
+                            "selected_date": None,
+                            "season": item,
+                            "error": str(exc),
+                        }
+                    )
         player_stats = []
         if include_player_stats:
             if daily_dates:
-                player_stats = [
-                    import_espn_player_boxscores(
-                        conn,
-                        _season_for_date(item),
-                        force_refresh=force_refresh,
-                        missing_only=missing_only,
-                        selected_date=item,
-                    )
-                    for item in daily_dates
-                ]
+                for item in daily_dates:
+                    try:
+                        player_stats.append(
+                            import_espn_player_boxscores(
+                                conn,
+                                _season_for_date(item),
+                                force_refresh=force_refresh,
+                                missing_only=missing_only,
+                                selected_date=item,
+                            )
+                        )
+                    except Exception as exc:
+                        errors.append(
+                            {
+                                "stage": "boxscore",
+                                "selected_date": item,
+                                "season": _season_for_date(item),
+                                "error": str(exc),
+                            }
+                        )
             else:
-                player_stats = [
-                    import_espn_player_boxscores(
-                        conn,
-                        item,
-                        force_refresh=force_refresh,
-                        missing_only=missing_only,
-                    )
-                    for item in unique_seasons
-                ]
+                for item in unique_seasons:
+                    try:
+                        player_stats.append(
+                            import_espn_player_boxscores(
+                                conn,
+                                item,
+                                force_refresh=force_refresh,
+                                missing_only=missing_only,
+                            )
+                        )
+                    except Exception as exc:
+                        errors.append(
+                            {
+                                "stage": "boxscore",
+                                "selected_date": None,
+                                "season": item,
+                                "error": str(exc),
+                            }
+                        )
         settlements = settle_completed_props(conn)
         game_settlements = settle_completed_game_predictions(conn)
         synced_props = sync_prop_lines_from_sportsbook(conn)
@@ -347,6 +386,7 @@ def import_espn_history(
         "predictions": len(projections),
         "missing_only": missing_only,
         "source": "espn",
+        "errors": errors,
     }
 
 
@@ -395,6 +435,37 @@ def discrepancies(game_id: int | None = None) -> list[dict]:
         payload = line_discrepancies(conn, game_id)
     write_json_cache("line_discrepancies.json", payload)
     return payload
+
+
+@app.get("/api/roster")
+def roster() -> list[dict]:
+    with connect() as conn:
+        try:
+            import_rotowire_lineups(conn, force_refresh=False)
+        except Exception:
+            # Keep roster endpoint non-fatal so dashboard loads even if live Rotowire fetch fails.
+            pass
+    payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
+    rows = payload.get("rows", []) if isinstance(payload, dict) else []
+    captured_at = payload.get("captured_at") if isinstance(payload, dict) else None
+    normalized = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        team = str(row.get("team") or "").strip().upper()
+        player_name = str(row.get("player_name") or "").strip()
+        status = str(row.get("status") or "").strip().upper()
+        if not team or not player_name or not status:
+            continue
+        normalized.append(
+            {
+                "team": team,
+                "player_name": player_name,
+                "status": status,
+                "captured_at": captured_at,
+            }
+        )
+    return sorted(normalized, key=lambda item: (item["team"], item["player_name"]))
 
 
 @app.get("/api/models/runs")

@@ -8,7 +8,15 @@ from backend.app import covers_import as covers_import_module
 from backend.app import rotowire_import as rotowire_import_module
 from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
-from backend.app.covers_import import CoversGame, _event_rows, _metadata_from_page, _records_from_page
+from backend.app.covers_import import (
+    CoversGame,
+    _covers_matchup_hrefs,
+    _event_rows,
+    _market_from_title,
+    _metadata_from_page,
+    _records_from_page,
+    covers_matchup_links,
+)
 from backend.app.db import connect, init_db
 from backend.app.espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from backend.app.game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
@@ -853,6 +861,30 @@ def test_covers_parser_extracts_player_prop_rows() -> None:
     assert rows[1][14] == -130
 
 
+def test_covers_matchup_links_accepts_sport_and_sports_paths(monkeypatch) -> None:
+    html = """
+    <a href="/sport/basketball/wnba/matchup/373849/odds">A</a>
+    <a href='/sports/basketball/wnba/matchup/373850'>B</a>
+    """
+    monkeypatch.setattr(covers_import_module, "_fetch_text", lambda url: html)
+    games = covers_matchup_links()
+
+    assert [game.event_id for game in games] == ["373849", "373850"]
+    assert games[0].odds_url.endswith("/sport/basketball/wnba/matchup/373849/odds")
+    assert games[1].odds_url.endswith("/sports/basketball/wnba/matchup/373850/odds")
+
+
+def test_covers_matchup_href_parser_reads_single_and_double_quotes() -> None:
+    html = """
+    <a href="/sport/basketball/wnba/matchup/1/odds"></a>
+    <a href='/sports/basketball/wnba/matchup/2'></a>
+    """
+    assert _covers_matchup_hrefs(html) == [
+        ("/sport/basketball/wnba/matchup/1/odds", "1"),
+        ("/sports/basketball/wnba/matchup/2", "2"),
+    ]
+
+
 def test_covers_parser_extracts_matchup_line_and_total() -> None:
     html = """
     <script type="application/ld+json">
@@ -998,6 +1030,12 @@ def test_covers_records_parser_extracts_h2h_and_team_last_10() -> None:
     assert records["home_last_10"][0]["location"] == "home"
 
 
+def test_covers_market_title_aliases() -> None:
+    assert _market_from_title("3 Pointers Made") == "3-pointers_made"
+    assert _market_from_title("Total Points + Rebounds") == "total_points_and_rebounds"
+    assert _market_from_title("Total Points + Rebounds + Assists") == "total_points_rebounds_and_assists"
+
+
 def test_covers_import_force_refresh_fails_when_fresh_scrape_returns_no_rows(monkeypatch) -> None:
     cached_payload = {
         "provider": "covers",
@@ -1049,6 +1087,41 @@ def test_rotowire_lineup_parser_extracts_may_not_play_by_team() -> None:
         {"team": "GSV", "player_name": "Juste Jocyte", "status": "GTD"},
         {"team": "GSV", "player_name": "C. Zandalasini", "status": "OUT"},
         {"team": "IND", "player_name": "Caitlin Clark", "status": "GTD"},
+    ]
+
+
+def test_rotowire_lineup_parser_extracts_split_position_player_status_rows() -> None:
+    html = """
+    <section>
+      <div>1:00 PM ET</div>
+      <div><a>MIN</a></div>
+      <div><a>CHI</a></div>
+      <ul>
+        <li>Expected Lineup</li>
+        <li>MAY NOT PLAY</li>
+        <li>F</li>
+        <li>N. Collier</li>
+        <li>OUT</li>
+        <li>F</li>
+        <li>Dorka Juhasz</li>
+        <li>OUT</li>
+      </ul>
+      <ul>
+        <li>Expected Lineup</li>
+        <li>MAY NOT PLAY</li>
+        <li>F</li>
+        <li>Azura Stevens</li>
+        <li>GTD</li>
+      </ul>
+    </section>
+    """
+
+    rows = _parse_lineup_injuries(html)
+
+    assert rows == [
+        {"team": "MIN", "player_name": "N. Collier", "status": "OUT"},
+        {"team": "MIN", "player_name": "Dorka Juhasz", "status": "OUT"},
+        {"team": "CHI", "player_name": "Azura Stevens", "status": "GTD"},
     ]
 
 

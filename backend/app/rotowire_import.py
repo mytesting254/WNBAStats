@@ -6,12 +6,13 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from urllib.request import Request, urlopen
 
-from .bootstrap import normalize_team_abbreviation
+from .bootstrap import ensure_team, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
 
 
 ROTOWIRE_LINEUPS_URL = "https://www.rotowire.com/wnba/lineups.php"
 RAW_CACHE_NAME = "rotowire_lineups_raw.json"
+ROSTER_SNAPSHOT_CACHE_NAME = "rotowire_roster_snapshot.json"
 FETCH_TIMEOUT_SECONDS = 12
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -46,6 +47,8 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
         )
         source = "rotowire"
 
+    _update_roster_snapshot_cache(rows, captured_at, source)
+
     inserted = 0
     unresolved = 0
     unresolved_names: list[str] = []
@@ -60,9 +63,11 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
             continue
         player_id = _resolve_player_id(conn, team_abbr, row["player_name"])
         if not player_id:
-            unresolved += 1
-            unresolved_names.append(f"{team_abbr}:{row['player_name']}")
-            continue
+            player_id = _ensure_rotowire_player(conn, team_abbr, row["player_name"])
+            if not player_id:
+                unresolved += 1
+                unresolved_names.append(f"{team_abbr}:{row['player_name']}")
+                continue
         latest = conn.execute(
             "SELECT captured_at FROM injuries WHERE player_id = ? ORDER BY captured_at DESC LIMIT 1",
             (player_id,),
@@ -92,6 +97,42 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
     }
 
 
+def _update_roster_snapshot_cache(rows: list[dict[str, str]], captured_at: str, source: str) -> None:
+    normalized_rows = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        team = str(row.get("team") or "").strip().upper()
+        player_name = str(row.get("player_name") or "").strip()
+        status = str(row.get("status") or "").strip().upper()
+        if not team or not player_name or not status:
+            continue
+        normalized_rows.append({
+            "team": team,
+            "player_name": player_name,
+            "status": status,
+        })
+    normalized_rows.sort(key=lambda item: (item["team"], item["player_name"], item["status"]))
+
+    previous = read_json_cache(ROSTER_SNAPSHOT_CACHE_NAME)
+    previous_rows = previous.get("rows", []) if isinstance(previous, dict) else []
+    previous_changed_at = previous.get("changed_at") if isinstance(previous, dict) else None
+    changed = normalized_rows != previous_rows
+    changed_at = captured_at if changed else (previous_changed_at or captured_at)
+
+    write_json_cache(
+        ROSTER_SNAPSHOT_CACHE_NAME,
+        {
+            "provider": "rotowire",
+            "source": source,
+            "captured_at": captured_at,
+            "changed_at": changed_at,
+            "changed": changed,
+            "rows": normalized_rows,
+        },
+    )
+
+
 def _parse_lineup_injuries(page: str) -> list[dict[str, str]]:
     lines = _lineup_text_lines(page)
     rows: list[dict[str, str]] = []
@@ -103,6 +144,12 @@ def _parse_lineup_injuries(page: str) -> list[dict[str, str]]:
     while i < len(lines):
         line = lines[i]
         matchup = _matchup_pair(line)
+        if not matchup and i + 1 < len(lines):
+            maybe_away = line.strip().upper()
+            maybe_home = lines[i + 1].strip().upper()
+            if _is_team_code(maybe_away) and _is_team_code(maybe_home):
+                matchup = (maybe_away, maybe_home)
+                i += 1
         if matchup:
             current_teams = matchup
             lineup_section_index = 0
@@ -136,12 +183,30 @@ def _parse_lineup_injuries(page: str) -> list[dict[str, str]]:
                         "status": injury_match.group("status").upper(),
                     }
                 )
+                i += 1
+                continue
+            # Rotowire now often renders MAY NOT PLAY rows as three lines:
+            # position (G/F/C), then player name, then status.
+            if re.fullmatch(r"[A-Z]{1,3}", line):
+                player_line = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                status_line = lines[i + 2].strip().upper() if i + 2 < len(lines) else ""
+                if player_line and status_line in UNAVAILABLE_STATUSES and active_team:
+                    rows.append(
+                        {
+                            "team": active_team,
+                            "player_name": player_line,
+                            "status": status_line,
+                        }
+                    )
+                    i += 3
+                    continue
         i += 1
     return rows
 
 
 def _lineup_text_lines(page: str) -> list[str]:
-    text = html.unescape(page)
+    lineups_section = _lineups_section_html(page)
+    text = html.unescape(lineups_section)
     text = re.sub(r"(?i)</(li|div|p|section|article|tr|td|h1|h2|h3|h4|h5|h6|caption)>", "\n", text)
     text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"<[^>]+>", " ", text)
@@ -150,11 +215,25 @@ def _lineup_text_lines(page: str) -> list[str]:
     return [line.strip() for line in text.split("\n") if line.strip()]
 
 
+def _lineups_section_html(page: str) -> str:
+    start = re.search(r'<div class="lineups"[^>]*>', page, re.I)
+    if not start:
+        return page
+    end = re.search(r"</main>", page[start.start():], re.I)
+    if not end:
+        return page[start.start():]
+    return page[start.start(): start.start() + end.end()]
+
+
 def _matchup_pair(line: str) -> tuple[str, str] | None:
     match = re.match(r"^([A-Z]{2,3})\s+([A-Z]{2,3})$", line)
     if not match:
         return None
     return match.group(1), match.group(2)
+
+
+def _is_team_code(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z]{2,3}", value))
 
 
 def _is_time_line(line: str) -> bool:
@@ -193,6 +272,34 @@ def _resolve_player_id(conn: sqlite3.Connection, team_abbreviation: str, player_
         if row:
             return int(row["id"])
     return None
+
+
+def _ensure_rotowire_player(conn: sqlite3.Connection, team_abbreviation: str, player_name: str) -> int | None:
+    team_id = ensure_team(conn, team_abbreviation)
+    if not team_id:
+        return None
+    existing = conn.execute(
+        """
+        SELECT id
+        FROM players
+        WHERE lower(full_name) = lower(?)
+          AND team_id = ?
+        LIMIT 1
+        """,
+        (player_name, team_id),
+    ).fetchone()
+    if existing:
+        return int(existing["id"])
+    next_id_row = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM players").fetchone()
+    next_id = int(next_id_row["next_id"] if next_id_row and next_id_row["next_id"] is not None else 1)
+    conn.execute(
+        """
+        INSERT INTO players (id, full_name, team_id, position, rotation_role)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (next_id, player_name.strip(), team_id, "", "rotation"),
+    )
+    return next_id
 
 
 def _fetch_text(url: str) -> str:

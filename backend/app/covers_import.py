@@ -223,14 +223,26 @@ def covers_matchup_links(selected_date: str | None = None) -> list[CoversGame]:
     page = _fetch_text(url)
     seen = set()
     games = []
-    for match in re.finditer(r'href="(?P<href>/sport/basketball/wnba/matchup/(?P<id>\d+)/odds)"', page):
-        event_id = match.group("id")
+    for href, event_id in _covers_matchup_hrefs(page):
         if event_id in seen:
             continue
         seen.add(event_id)
-        odds_url = urljoin(COVERS_BASE_URL, match.group("href"))
+        odds_url = urljoin(COVERS_BASE_URL, href)
+        if not odds_url.endswith("/odds"):
+            odds_url = odds_url.rstrip("/") + "/odds"
         games.append(CoversGame(event_id=event_id, odds_url=odds_url, matchup_url=odds_url.removesuffix("/odds")))
     return games
+
+
+def _covers_matchup_hrefs(page: str) -> list[tuple[str, str]]:
+    matches: list[tuple[str, str]] = []
+    for match in re.finditer(
+        r'href=(?:"|\')(?P<href>/sports?/basketball/wnba/matchup/(?P<id>\d+)(?:/odds)?)(?:"|\')',
+        page,
+        re.I,
+    ):
+        matches.append((match.group("href"), match.group("id")))
+    return matches
 
 
 def _metadata_from_page(conn: sqlite3.Connection, game: CoversGame, page: str, fallback_page: str | None = None) -> CoversMetadata:
@@ -367,8 +379,11 @@ def _market_from_title(title: str) -> str | None:
         "total rebounds": "total_rebounds",
         "total assists": "total_assists",
         "3-pointers made": "3-pointers_made",
+        "3 pointers made": "3-pointers_made",
         "total points and rebounds": "total_points_and_rebounds",
+        "total points + rebounds": "total_points_and_rebounds",
         "total points rebounds and assists": "total_points_rebounds_and_assists",
+        "total points + rebounds + assists": "total_points_rebounds_and_assists",
     }.get(normalized)
 
 

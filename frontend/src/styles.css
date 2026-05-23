@@ -618,6 +618,31 @@ tbody tr.selected {
   color: #027a48;
 }
 
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.status-pill.confirmed {
+  background: #e7f7ef;
+  color: #027a48;
+}
+
+.status-pill.gtd {
+  background: #fff6e5;
+  color: #b54708;
+}
+
+.status-pill.out {
+  background: #fff1f0;
+  color: #b42318;
+}
+
 .team-comparison {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

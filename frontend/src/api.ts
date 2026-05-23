@@ -165,6 +165,13 @@ export type Matchup = {
   line_discrepancies: LineDiscrepancy[];
 };
 
+export type RosterPlayer = {
+  team: string;
+  player_name: string;
+  status: string;
+  captured_at?: string | null;
+};
+
 export type ModelRunMetric = {
   rows: number;
   mae: number | null;
@@ -218,6 +225,14 @@ export async function fetchLineDiscrepancies(): Promise<LineDiscrepancy[]> {
   return response.json();
 }
 
+export async function fetchRoster(): Promise<RosterPlayer[]> {
+  const response = await fetch("/api/roster");
+  if (!response.ok) {
+    throw new Error("Failed to load roster");
+  }
+  return response.json();
+}
+
 export type OddsImportResult = {
   status: string;
   imported?: number;
@@ -239,6 +254,20 @@ export async function importCoversOdds(forceRefresh = false): Promise<OddsImport
   const response = await fetch(`/api/covers/import?force_refresh=${forceRefresh ? "true" : "false"}`, { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to import Covers odds");
+  }
+  return response.json();
+}
+
+export async function importRotowireInjuries(forceRefresh = false): Promise<{
+  source: string;
+  captured_at: string;
+  parsed_rows: number;
+  inserted: number;
+  from_cache: boolean;
+}> {
+  const response = await fetch(`/api/injuries/import/rotowire?force_refresh=${forceRefresh ? "true" : "false"}`, { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to import Rotowire lineups");
   }
   return response.json();
 }
