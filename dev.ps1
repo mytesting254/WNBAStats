@@ -6,8 +6,11 @@ $FrontendDir = Join-Path $Root "frontend"
 $BackendPort = if ($env:BACKEND_PORT) { $env:BACKEND_PORT } else { "8010" }
 $FrontendPort = if ($env:FRONTEND_PORT) { $env:FRONTEND_PORT } else { "5184" }
 
-# Force local SQLite for dev startup to avoid remote Turso dependency.
-$env:USE_LOCAL_DB = "1"
+# Enforce Turso in dev startup (ignore any stale shell-level local DB overrides).
+$env:USE_LOCAL_DB = "0"
+if (Test-Path Env:WNBA_DB_PATH) {
+    Remove-Item Env:WNBA_DB_PATH
+}
 
 if (-not (Test-Path $BackendPython)) {
     Write-Error "Missing Python virtual environment. Run: python3.14.exe -m venv .venv; & '.\.venv\Scripts\pip.exe' install -r backend\requirements.txt"

@@ -60,26 +60,66 @@ export function App() {
   async function load() {
     setLoading(true);
     setError(null);
-    try {
-      const [board, modelPerformance, matchupBoard, discrepancyBoard, modelRunBoard] = await Promise.all([
-        fetchValueBoard(),
-        fetchPerformance(),
-        fetchMatchups(),
-        fetchLineDiscrepancies(),
-        fetchModelRuns()
-      ]);
-      setProps(board);
-      setPerformance(modelPerformance);
-      setMatchups(matchupBoard);
-      setDiscrepancies(discrepancyBoard);
-      setModelRuns(modelRunBoard.runs);
-      setLatestModelRun(modelRunBoard.latest);
-      setSelected(board[0] ?? null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load dashboard");
-    } finally {
-      setLoading(false);
+    const [
+      boardResult,
+      performanceResult,
+      matchupsResult,
+      discrepanciesResult,
+      modelRunsResult
+    ] = await Promise.allSettled([
+      fetchValueBoard(),
+      fetchPerformance(),
+      fetchMatchups(),
+      fetchLineDiscrepancies(),
+      fetchModelRuns()
+    ]);
+
+    const failures: string[] = [];
+
+    if (boardResult.status === "fulfilled") {
+      setProps(boardResult.value);
+      setSelected((current) => current ?? boardResult.value[0] ?? null);
+    } else {
+      failures.push("value board");
+      setProps([]);
+      setSelected(null);
     }
+
+    if (performanceResult.status === "fulfilled") {
+      setPerformance(performanceResult.value);
+    } else {
+      failures.push("model performance");
+      setPerformance(null);
+    }
+
+    if (matchupsResult.status === "fulfilled") {
+      setMatchups(matchupsResult.value);
+    } else {
+      failures.push("matchups");
+      setMatchups([]);
+    }
+
+    if (discrepanciesResult.status === "fulfilled") {
+      setDiscrepancies(discrepanciesResult.value);
+    } else {
+      failures.push("line discrepancies");
+      setDiscrepancies([]);
+    }
+
+    if (modelRunsResult.status === "fulfilled") {
+      setModelRuns(modelRunsResult.value.runs);
+      setLatestModelRun(modelRunsResult.value.latest);
+    } else {
+      failures.push("model runs");
+      setModelRuns([]);
+      setLatestModelRun(null);
+    }
+
+    if (failures.length > 0) {
+      setError(`Some dashboard data failed to load: ${failures.join(", ")}.`);
+    }
+
+    setLoading(false);
   }
 
   useEffect(() => {

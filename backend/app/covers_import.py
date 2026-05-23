@@ -113,7 +113,7 @@ def import_covers_props(
     try:
         games = covers_matchup_links(selected_date)
     except Exception as exc:
-        if isinstance(cached_payload, dict) and cached_payload.get("rows"):
+        if not force_refresh and isinstance(cached_payload, dict) and cached_payload.get("rows"):
             result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
             synced = sync_prop_lines_from_sportsbook(conn)
             return {
@@ -150,7 +150,7 @@ def import_covers_props(
     row_payload = [_tuple_to_row(row) for row in imported_rows]
     game_payload = [_metadata_to_row(row) for row in metadata_rows]
     if not row_payload:
-        if isinstance(cached_payload, dict) and cached_payload.get("rows"):
+        if not force_refresh and isinstance(cached_payload, dict) and cached_payload.get("rows"):
             result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
             synced = sync_prop_lines_from_sportsbook(conn)
             return {
