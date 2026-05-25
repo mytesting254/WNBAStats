@@ -1,6 +1,7 @@
 import { BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import {
+  fetchMissingEspnScores,
   fetchLineDiscrepancies,
   fetchMatchups,
   fetchModelRuns,
@@ -9,6 +10,7 @@ import {
   fetchValueBoard,
   importCoversOdds,
   importEspnHistory,
+  importMissingEspnScores,
   importOdds,
   importRotowireInjuries,
   recalculate,
@@ -16,6 +18,7 @@ import {
   type CoversRecordRow,
   type LineDiscrepancy,
   type Matchup,
+  type MissingEspnGame,
   type ModelPerformance,
   type ModelRun,
   type RosterPlayer,
@@ -52,14 +55,18 @@ export function App() {
   const [importingOdds, setImportingOdds] = useState(false);
   const [importingCoversOdds, setImportingCoversOdds] = useState(false);
   const [refreshingResults, setRefreshingResults] = useState(false);
+  const [refreshingMissingScores, setRefreshingMissingScores] = useState(false);
   const [refreshingRoster, setRefreshingRoster] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("matchups");
   const [market, setMarket] = useState("all");
   const [confidence, setConfidence] = useState("all");
+  const [modelProbabilityOrder, setModelProbabilityOrder] = useState<SortDirection>("desc");
   const [selected, setSelected] = useState<ValueProp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [operationStatus, setOperationStatus] = useState<string | null>(null);
+  const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
+  const [missingEspnGames, setMissingEspnGames] = useState<MissingEspnGame[]>([]);
   const [loading, setLoading] = useState(true);
 
   async function load() {
@@ -141,12 +148,18 @@ export function App() {
   }, []);
 
   const filtered = useMemo(() => {
-    return props.filter((prop) => {
-      const marketMatch = market === "all" || prop.market === market;
-      const confidenceMatch = confidence === "all" || prop.confidence === confidence;
-      return marketMatch && confidenceMatch;
-    });
-  }, [props, market, confidence]);
+    return props
+      .filter((prop) => {
+        const marketMatch = market === "all" || prop.market === market;
+        const confidenceMatch = confidence === "all" || prop.confidence === confidence;
+        return marketMatch && confidenceMatch;
+      })
+      .sort((a, b) =>
+        modelProbabilityOrder === "asc"
+          ? a.model_probability - b.model_probability
+          : b.model_probability - a.model_probability
+      );
+  }, [props, market, confidence, modelProbabilityOrder]);
 
   async function handleRecalculate() {
     setRecalculating(true);
@@ -266,6 +279,51 @@ export function App() {
     }
   }
 
+  async function handleScanMissingScores() {
+    setRefreshingMissingScores(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await fetchMissingEspnScores(30);
+      setMissingEspnDates(result.dates ?? []);
+      setMissingEspnGames(result.games ?? []);
+      setOperationStatus(
+        result.count
+          ? `Found ${result.count} missing completed ESPN game score rows across ${result.dates.length} date(s).`
+          : "No missing completed ESPN game scores found."
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to scan missing ESPN scores");
+    } finally {
+      setRefreshingMissingScores(false);
+    }
+  }
+
+  async function handleImportMissingScores() {
+    setRefreshingMissingScores(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await importMissingEspnScores(true, true, true, 30);
+      const usedDates = result.missing_dates?.length ? result.missing_dates : result.selected_dates ?? [];
+      await load();
+      const latest = await fetchMissingEspnScores(30);
+      setMissingEspnDates(latest.dates ?? []);
+      setMissingEspnGames(latest.games ?? []);
+      if (result.message) {
+        setOperationStatus(result.message);
+      } else {
+        setOperationStatus(
+          `Imported missing ESPN scores for ${usedDates.length} date(s). Synced ${result.synced_props ?? 0} model prop lines, rebuilt ${result.predictions ?? 0} predictions, and settled ${result.settlements?.settled ?? 0} props.`
+        );
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to import missing ESPN scores");
+    } finally {
+      setRefreshingMissingScores(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -333,9 +391,11 @@ export function App() {
           error={error}
           market={market}
           confidence={confidence}
+          modelProbabilityOrder={modelProbabilityOrder}
           selected={selected}
           setMarket={setMarket}
           setConfidence={setConfidence}
+          setModelProbabilityOrder={setModelProbabilityOrder}
           setSelected={setSelected}
         />
       ) : activeTab === "matchups" ? (
@@ -352,13 +412,18 @@ export function App() {
           importingOdds={importingOdds}
           importingCoversOdds={importingCoversOdds}
           refreshingResults={refreshingResults}
+          refreshingMissingScores={refreshingMissingScores}
           recalculating={recalculating}
           propsCount={props.length}
           matchupsCount={matchups.length}
           discrepanciesCount={discrepancies.length}
+          missingEspnDates={missingEspnDates}
+          missingEspnGames={missingEspnGames}
           onImportOdds={handleImportOdds}
           onImportCoversOdds={handleImportCoversOdds}
           onRefreshResults={handleRefreshResults}
+          onScanMissingScores={handleScanMissingScores}
+          onImportMissingScores={handleImportMissingScores}
           onRecalculate={handleRecalculate}
           onReload={load}
         />
@@ -385,13 +450,18 @@ function DataView({
   importingOdds,
   importingCoversOdds,
   refreshingResults,
+  refreshingMissingScores,
   recalculating,
   propsCount,
   matchupsCount,
   discrepanciesCount,
+  missingEspnDates,
+  missingEspnGames,
   onImportOdds,
   onImportCoversOdds,
   onRefreshResults,
+  onScanMissingScores,
+  onImportMissingScores,
   onRecalculate,
   onReload
 }: {
@@ -401,10 +471,13 @@ function DataView({
   importingOdds: boolean;
   importingCoversOdds: boolean;
   refreshingResults: boolean;
+  refreshingMissingScores: boolean;
   recalculating: boolean;
   propsCount: number;
   matchupsCount: number;
   discrepanciesCount: number;
+  missingEspnDates: string[];
+  missingEspnGames: MissingEspnGame[];
   onImportOdds: (forceRefresh: boolean) => void;
   onImportCoversOdds: (forceRefresh: boolean) => void;
   onRefreshResults: (
@@ -414,6 +487,8 @@ function DataView({
     includePreviousSeason?: boolean,
     selectedDates?: string[]
   ) => void;
+  onScanMissingScores: () => void;
+  onImportMissingScores: () => void;
   onRecalculate: () => void;
   onReload: () => void;
 }) {
@@ -421,7 +496,7 @@ function DataView({
   const [batchStartDate, setBatchStartDate] = useState(todayInputValue());
   const [batchEndDate, setBatchEndDate] = useState(todayInputValue());
   const parsedBatchDates = dateRangeValues(batchStartDate, batchEndDate);
-  const busy = refreshingResults || importingOdds || importingCoversOdds || loading;
+  const busy = refreshingResults || refreshingMissingScores || importingOdds || importingCoversOdds || loading;
 
   return (
     <section className="matchup-list">
@@ -501,6 +576,27 @@ function DataView({
                 disabled={busy || parsedBatchDates.length === 0}
               >
                 Refresh Batch
+              </button>
+            </div>
+          </article>
+          <article className="operation-card">
+            <div>
+              <p className="eyebrow">targeted ESPN repair</p>
+              <h3>Missing Scores</h3>
+              <p>Find completed games with missing final score rows, then import only those dates instead of refreshing full seasons.</p>
+              <p className="reason">
+                {missingEspnGames.length
+                  ? `Missing: ${missingEspnGames.length} games on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`
+                  : "No missing-score scan loaded yet."}
+              </p>
+            </div>
+            <div className="operation-actions">
+              <button className="icon-button text-button dark-button" onClick={onScanMissingScores} disabled={busy}>
+                <RefreshCw size={18} />
+                {refreshingMissingScores ? "Loading" : "Scan Missing"}
+              </button>
+              <button className="secondary-button" onClick={onImportMissingScores} disabled={busy || missingEspnDates.length === 0}>
+                Import Missing
               </button>
             </div>
           </article>
@@ -799,9 +895,11 @@ function PropsView({
   error,
   market,
   confidence,
+  modelProbabilityOrder,
   selected,
   setMarket,
   setConfidence,
+  setModelProbabilityOrder,
   setSelected
 }: {
   filtered: ValueProp[];
@@ -809,9 +907,11 @@ function PropsView({
   error: string | null;
   market: string;
   confidence: string;
+  modelProbabilityOrder: SortDirection;
   selected: ValueProp | null;
   setMarket: (market: string) => void;
   setConfidence: (confidence: string) => void;
+  setModelProbabilityOrder: (order: SortDirection) => void;
   setSelected: (prop: ValueProp) => void;
 }) {
   return (
@@ -838,6 +938,14 @@ function PropsView({
             <option value="high">High</option>
             <option value="medium">Medium</option>
             <option value="low">Low</option>
+          </select>
+          <select
+            value={modelProbabilityOrder}
+            onChange={(event) => setModelProbabilityOrder(event.target.value as SortDirection)}
+            aria-label="Model probability sort order"
+          >
+            <option value="desc">Model prob: Descending</option>
+            <option value="asc">Model prob: Ascending</option>
           </select>
         </div>
 
@@ -1433,6 +1541,7 @@ function MatchupProps({
                 <th>Line</th>
                 <th>Proj</th>
                 <th>Diff</th>
+                <th>Model Prob</th>
                 <th>Edge</th>
                 <th>EV</th>
                 <th>Confidence</th>
@@ -1455,6 +1564,7 @@ function MatchupProps({
                   <td>{prop.line.toFixed(1)}</td>
                   <td>{prop.projection.toFixed(1)}</td>
                   <td>{formatSigned(prop.projection - prop.line)}</td>
+                  <td>{formatPercent(prop.model_probability)}</td>
                   <td>{formatPercent(prop.edge)}</td>
                   <td>{formatPercent(prop.expected_value)}</td>
                   <td>{prop.confidence}</td>
@@ -1462,7 +1572,7 @@ function MatchupProps({
               ))}
               {!visibleProps.length && (
                 <tr>
-                  <td colSpan={9}>No modeled parlay candidates match these filters.</td>
+                  <td colSpan={10}>No modeled parlay candidates match these filters.</td>
                 </tr>
               )}
             </tbody>

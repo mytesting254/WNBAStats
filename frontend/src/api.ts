@@ -306,7 +306,73 @@ export async function importEspnHistory(
   });
   const response = await fetch(`/api/history/import/espn?${params.toString()}`, { method: "POST" });
   if (!response.ok) {
-    throw new Error("Failed to refresh completed game results");
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "Failed to refresh completed game results");
+  }
+  return response.json();
+}
+
+export type MissingEspnGame = {
+  id: number;
+  game_date: string;
+  start_time: string;
+  status: string;
+  home_team: string;
+  away_team: string;
+  espn_event_id?: number | null;
+  has_team_results: boolean;
+};
+
+export async function fetchMissingEspnScores(limit = 30): Promise<{
+  dates: string[];
+  games: MissingEspnGame[];
+  count: number;
+  source: string;
+}> {
+  const response = await fetch(`/api/history/missing/espn?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error("Failed to load missing ESPN scores");
+  }
+  return response.json();
+}
+
+export async function importMissingEspnScores(
+  forceRefresh = true,
+  includePlayerStats = true,
+  missingOnly = true,
+  limit = 30
+): Promise<{
+  selected_dates?: string[];
+  missing_dates?: string[];
+  missing_count?: number;
+  synced_props?: number;
+  predictions?: number;
+  settlements?: { settled: number };
+  source: string;
+  message?: string;
+}> {
+  const params = new URLSearchParams({
+    force_refresh: forceRefresh ? "true" : "false",
+    include_player_stats: includePlayerStats ? "true" : "false",
+    missing_only: missingOnly ? "true" : "false",
+    limit: String(limit)
+  });
+  const response = await fetch(`/api/history/import/espn-missing?${params.toString()}`, { method: "POST" });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "Failed to import missing ESPN scores");
   }
   return response.json();
 }

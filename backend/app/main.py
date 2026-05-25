@@ -295,55 +295,20 @@ def import_espn_history(
     if not daily_dates and not force_refresh and not include_previous_season:
         daily_dates = [datetime.now(LOCAL_TZ).date().isoformat()]
 
-    with connect() as conn:
-        scoreboards = []
-        errors = []
-        if daily_dates:
-            for item in daily_dates:
-                try:
-                    scoreboards.append(
-                        import_espn_scoreboard(conn, _season_for_date(item), force_refresh=force_refresh, selected_date=item)
-                    )
-                except Exception as exc:
-                    errors.append(
-                        {
-                            "stage": "scoreboard",
-                            "selected_date": item,
-                            "season": _season_for_date(item),
-                            "error": str(exc),
-                        }
-                    )
-        else:
-            for item in unique_seasons:
-                try:
-                    scoreboards.append(import_espn_scoreboard(conn, item, force_refresh=force_refresh))
-                except Exception as exc:
-                    errors.append(
-                        {
-                            "stage": "scoreboard",
-                            "selected_date": None,
-                            "season": item,
-                            "error": str(exc),
-                        }
-                    )
-        player_stats = []
-        if include_player_stats:
+    try:
+        with connect() as conn:
+            scoreboards = []
+            errors = []
             if daily_dates:
                 for item in daily_dates:
                     try:
-                        player_stats.append(
-                            import_espn_player_boxscores(
-                                conn,
-                                _season_for_date(item),
-                                force_refresh=force_refresh,
-                                missing_only=missing_only,
-                                selected_date=item,
-                            )
+                        scoreboards.append(
+                            import_espn_scoreboard(conn, _season_for_date(item), force_refresh=force_refresh, selected_date=item)
                         )
                     except Exception as exc:
                         errors.append(
                             {
-                                "stage": "boxscore",
+                                "stage": "scoreboard",
                                 "selected_date": item,
                                 "season": _season_for_date(item),
                                 "error": str(exc),
@@ -352,27 +317,74 @@ def import_espn_history(
             else:
                 for item in unique_seasons:
                     try:
-                        player_stats.append(
-                            import_espn_player_boxscores(
-                                conn,
-                                item,
-                                force_refresh=force_refresh,
-                                missing_only=missing_only,
-                            )
-                        )
+                        scoreboards.append(import_espn_scoreboard(conn, item, force_refresh=force_refresh))
                     except Exception as exc:
                         errors.append(
                             {
-                                "stage": "boxscore",
+                                "stage": "scoreboard",
                                 "selected_date": None,
                                 "season": item,
                                 "error": str(exc),
                             }
                         )
-        settlements = settle_completed_props(conn)
-        game_settlements = settle_completed_game_predictions(conn)
-        synced_props = sync_prop_lines_from_sportsbook(conn)
-        projections = rebuild_predictions(conn)
+            player_stats = []
+            if include_player_stats:
+                if daily_dates:
+                    for item in daily_dates:
+                        try:
+                            player_stats.append(
+                                import_espn_player_boxscores(
+                                    conn,
+                                    _season_for_date(item),
+                                    force_refresh=force_refresh,
+                                    missing_only=missing_only,
+                                    selected_date=item,
+                                )
+                            )
+                        except Exception as exc:
+                            errors.append(
+                                {
+                                    "stage": "boxscore",
+                                    "selected_date": item,
+                                    "season": _season_for_date(item),
+                                    "error": str(exc),
+                                }
+                            )
+                else:
+                    for item in unique_seasons:
+                        try:
+                            player_stats.append(
+                                import_espn_player_boxscores(
+                                    conn,
+                                    item,
+                                    force_refresh=force_refresh,
+                                    missing_only=missing_only,
+                                )
+                            )
+                        except Exception as exc:
+                            errors.append(
+                                {
+                                    "stage": "boxscore",
+                                    "selected_date": None,
+                                    "season": item,
+                                    "error": str(exc),
+                                }
+                            )
+            settlements = settle_completed_props(conn)
+            game_settlements = settle_completed_game_predictions(conn)
+            synced_props = sync_prop_lines_from_sportsbook(conn)
+            projections = rebuild_predictions(conn)
+    except Exception as exc:
+        message = str(exc)
+        if "turso" in message.lower() or "httpsconnectionpool" in message.lower() or "nameresolutionerror" in message.lower():
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Unable to connect to Turso while refreshing ESPN history. "
+                    "Check TURSO_DATABASE_URL/TURSO_AUTH_TOKEN and network/DNS access, or set USE_LOCAL_DB=true."
+                ),
+            ) from exc
+        raise
     return {
         "season": target_season,
         "seasons": unique_seasons,
@@ -388,6 +400,43 @@ def import_espn_history(
         "source": "espn",
         "errors": errors,
     }
+
+
+@app.get("/api/history/missing/espn")
+def missing_espn_history_dates(limit: int = 30) -> dict:
+    with connect() as conn:
+        payload = _missing_espn_scores_payload(conn, limit=max(1, min(limit, 180)))
+    return payload
+
+
+@app.post("/api/history/import/espn-missing")
+def import_missing_espn_history(
+    force_refresh: bool = True,
+    include_player_stats: bool = True,
+    missing_only: bool = True,
+    limit: int = 30,
+) -> dict:
+    with connect() as conn:
+        payload = _missing_espn_scores_payload(conn, limit=max(1, min(limit, 180)))
+    selected_dates = payload.get("dates", [])
+    if not selected_dates:
+        return {
+            "selected_dates": [],
+            "missing_games": [],
+            "missing_count": 0,
+            "source": "espn",
+            "message": "No missing completed ESPN scores found.",
+        }
+    result = import_espn_history(
+        force_refresh=force_refresh,
+        include_player_stats=include_player_stats,
+        include_previous_season=False,
+        missing_only=missing_only,
+        selected_dates=selected_dates,
+    )
+    result["missing_dates"] = selected_dates
+    result["missing_count"] = len(payload.get("games", []))
+    return result
 
 
 def _selected_espn_dates(selected_date: str | None, selected_dates: list[str] | None) -> list[str]:
@@ -414,6 +463,79 @@ def _selected_espn_dates(selected_date: str | None, selected_dates: list[str] | 
 
 def _season_for_date(value: str) -> int:
     return datetime.strptime(value, "%Y-%m-%d").year
+
+
+def _missing_espn_scores_payload(conn, limit: int = 30) -> dict:
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=COMPLETED_GAME_GRACE_HOURS)
+    rows = conn.execute(
+        """
+        SELECT
+            g.id,
+            g.game_date,
+            g.start_time,
+            g.status,
+            g.espn_event_id,
+            home.abbreviation AS home_team,
+            away.abbreviation AS away_team,
+            EXISTS(SELECT 1 FROM team_game_results r WHERE r.game_id = g.id) AS has_team_results
+        FROM games g
+        JOIN teams home ON home.id = g.home_team_id
+        JOIN teams away ON away.id = g.away_team_id
+        WHERE g.game_date IS NOT NULL
+        ORDER BY g.game_date DESC, g.start_time DESC
+        """,
+    ).fetchall()
+    missing_games = []
+    for row in rows:
+        if not _is_missing_completed_score(row, cutoff):
+            continue
+        missing_games.append(
+            {
+                "id": int(row["id"]),
+                "game_date": row["game_date"],
+                "start_time": row["start_time"],
+                "status": row["status"],
+                "home_team": row["home_team"],
+                "away_team": row["away_team"],
+                "espn_event_id": row["espn_event_id"],
+                "has_team_results": bool(row["has_team_results"]),
+            }
+        )
+    dates = []
+    seen = set()
+    for item in missing_games:
+        value = str(item["game_date"])
+        if value in seen:
+            continue
+        seen.add(value)
+        dates.append(value)
+        if len(dates) >= limit:
+            break
+    filtered_games = [item for item in missing_games if item["game_date"] in set(dates)]
+    return {
+        "dates": sorted(dates),
+        "games": filtered_games,
+        "count": len(filtered_games),
+        "source": "espn",
+    }
+
+
+def _is_missing_completed_score(row, cutoff: datetime) -> bool:
+    start = _parse_game_start(row["start_time"])
+    if start is None:
+        game_day = _parse_game_date(row["game_date"])
+        if game_day is None:
+            return False
+        return game_day < datetime.now(LOCAL_TZ).date()
+    if start >= cutoff:
+        return False
+    status = str(row["status"] or "").lower()
+    has_team_results = bool(row["has_team_results"])
+    if status == "final" and not has_team_results:
+        return True
+    if status == "scheduled":
+        return True
+    return False
 
 
 @app.get("/api/sportsbook-props")
@@ -541,8 +663,8 @@ def matchups() -> list[dict]:
             home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
             away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
             game_id = int(game["id"])
-            home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"])
-            away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"])
+            home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
+            away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
             game_context = dict(game)
             game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
             game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
@@ -936,14 +1058,18 @@ def _game_total_result(row) -> str:
     return "over" if total_score > float(game_total) else "under"
 
 
-def _rest_days_before_game(conn, team_id: int, start_time: str) -> int | None:
-    current_start = _parse_game_start(start_time)
-    if current_start is None:
-        return None
-    current_local_date = current_start.astimezone(LOCAL_TZ).date()
+def _rest_days_before_game(conn, team_id: int, start_time: str, game_date: str | None = None) -> int | None:
+    current_date = _parse_game_date(game_date) if game_date else None
+    if current_date is None:
+        current_start = _parse_game_start(start_time)
+        if current_start is None:
+            return None
+        current_date = current_start.astimezone(LOCAL_TZ).date()
+    else:
+        current_start = _parse_game_start(start_time)
     rows = conn.execute(
         """
-        SELECT g.start_time
+        SELECT g.start_time, g.game_date
         FROM team_game_results r
         JOIN games g ON g.id = r.game_id
         WHERE r.team_id = ?
@@ -955,14 +1081,16 @@ def _rest_days_before_game(conn, team_id: int, start_time: str) -> int | None:
     previous_dates = []
     for row in rows:
         previous_start = _parse_game_start(row["start_time"])
-        if previous_start is None or previous_start >= current_start:
+        if current_start is not None and (previous_start is None or previous_start >= current_start):
             continue
-        previous_local_date = previous_start.astimezone(LOCAL_TZ).date()
-        if previous_local_date < current_local_date:
-            previous_dates.append(previous_local_date)
+        previous_date = _parse_game_date(row["game_date"])
+        if previous_date is None and previous_start is not None:
+            previous_date = previous_start.astimezone(LOCAL_TZ).date()
+        if previous_date and previous_date < current_date:
+            previous_dates.append(previous_date)
     if not previous_dates:
         return None
-    rest_days = max((current_local_date - max(previous_dates)).days - 1, 0)
+    rest_days = max((current_date - max(previous_dates)).days - 1, 0)
     if rest_days > 14:
         return None
     return rest_days
