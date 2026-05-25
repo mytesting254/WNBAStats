@@ -3,8 +3,45 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackendPython = Join-Path $Root ".venv\Scripts\python.exe"
 $FrontendDir = Join-Path $Root "frontend"
-$BackendPort = if ($env:BACKEND_PORT) { $env:BACKEND_PORT } else { "8010" }
-$FrontendPort = if ($env:FRONTEND_PORT) { $env:FRONTEND_PORT } else { "5184" }
+$BackendPort = if ($env:BACKEND_PORT) { [int]$env:BACKEND_PORT } else { 8010 }
+$FrontendPort = if ($env:FRONTEND_PORT) { [int]$env:FRONTEND_PORT } else { 5184 }
+
+function Test-PortAvailable {
+    param([int]$Port)
+    $Listener = $null
+    try {
+        $Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+        $Listener.Start()
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        if ($Listener) {
+            $Listener.Stop()
+        }
+    }
+}
+
+function Resolve-FreePort {
+    param(
+        [int]$PreferredPort,
+        [int[]]$ReservedPorts = @()
+    )
+    $Port = $PreferredPort
+    while ($Port -le 65535) {
+        if ($ReservedPorts -contains $Port) {
+            $Port++
+            continue
+        }
+        if (Test-PortAvailable -Port $Port) {
+            return $Port
+        }
+        $Port++
+    }
+    throw "No available port found from $PreferredPort to 65535."
+}
 
 # Enforce Turso in dev startup (ignore any stale shell-level local DB overrides).
 $env:USE_LOCAL_DB = "0"
@@ -24,26 +61,35 @@ Write-Host "Initializing database..."
 & $BackendPython (Join-Path $Root "scripts\init_db.py")
 
 $Processes = @()
+$ResolvedBackendPort = Resolve-FreePort -PreferredPort $BackendPort
+$ResolvedFrontendPort = Resolve-FreePort -PreferredPort $FrontendPort -ReservedPorts @($ResolvedBackendPort)
 
 try {
-    Write-Host "Starting FastAPI backend on http://127.0.0.1:$BackendPort"
+    if ($ResolvedBackendPort -ne $BackendPort) {
+        Write-Host "Backend port $BackendPort is busy. Using $ResolvedBackendPort."
+    }
+    if ($ResolvedFrontendPort -ne $FrontendPort) {
+        Write-Host "Frontend port $FrontendPort is busy. Using $ResolvedFrontendPort."
+    }
+
+    Write-Host "Starting FastAPI backend on http://127.0.0.1:$ResolvedBackendPort"
     $BackendProcess = Start-Process -FilePath $BackendPython -ArgumentList @(
         "-m", "uvicorn", "backend.app.main:app",
         "--host", "127.0.0.1",
-        "--port", $BackendPort
+        "--port", $ResolvedBackendPort
     ) -WorkingDirectory $Root -NoNewWindow -PassThru
     $Processes += $BackendProcess
 
-    Write-Host "Starting React frontend on http://127.0.0.1:$FrontendPort"
-    $env:VITE_BACKEND_URL = "http://127.0.0.1:$BackendPort"
+    Write-Host "Starting React frontend on http://127.0.0.1:$ResolvedFrontendPort"
+    $env:VITE_BACKEND_URL = "http://127.0.0.1:$ResolvedBackendPort"
     $FrontendProcess = Start-Process -FilePath "npm.cmd" -ArgumentList @(
-        "run", "dev", "--", "--host", "127.0.0.1", "--port", $FrontendPort
+        "run", "dev", "--", "--host", "127.0.0.1", "--port", $ResolvedFrontendPort
     ) -WorkingDirectory $FrontendDir -NoNewWindow -PassThru
     $Processes += $FrontendProcess
 
     Write-Host ""
-    Write-Host "Open http://127.0.0.1:$FrontendPort"
-    Write-Host "API docs: http://127.0.0.1:$BackendPort/docs"
+    Write-Host "Open http://127.0.0.1:$ResolvedFrontendPort"
+    Write-Host "API docs: http://127.0.0.1:$ResolvedBackendPort/docs"
     Write-Host "Press Ctrl+C in this terminal to stop both servers."
     Write-Host ""
 

@@ -6,7 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from urllib.request import Request, urlopen
 
-from .bootstrap import ensure_team, normalize_team_abbreviation
+from .bootstrap import normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
 
 
@@ -63,11 +63,9 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
             continue
         player_id = _resolve_player_id(conn, team_abbr, row["player_name"])
         if not player_id:
-            player_id = _ensure_rotowire_player(conn, team_abbr, row["player_name"])
-            if not player_id:
-                unresolved += 1
-                unresolved_names.append(f"{team_abbr}:{row['player_name']}")
-                continue
+            unresolved += 1
+            unresolved_names.append(f"{team_abbr}:{row['player_name']}")
+            continue
         latest = conn.execute(
             "SELECT captured_at FROM injuries WHERE player_id = ? ORDER BY captured_at DESC LIMIT 1",
             (player_id,),
@@ -272,34 +270,6 @@ def _resolve_player_id(conn: sqlite3.Connection, team_abbreviation: str, player_
         if row:
             return int(row["id"])
     return None
-
-
-def _ensure_rotowire_player(conn: sqlite3.Connection, team_abbreviation: str, player_name: str) -> int | None:
-    team_id = ensure_team(conn, team_abbreviation)
-    if not team_id:
-        return None
-    existing = conn.execute(
-        """
-        SELECT id
-        FROM players
-        WHERE lower(full_name) = lower(?)
-          AND team_id = ?
-        LIMIT 1
-        """,
-        (player_name, team_id),
-    ).fetchone()
-    if existing:
-        return int(existing["id"])
-    next_id_row = conn.execute("SELECT COALESCE(MAX(id), 0) + 1 AS next_id FROM players").fetchone()
-    next_id = int(next_id_row["next_id"] if next_id_row and next_id_row["next_id"] is not None else 1)
-    conn.execute(
-        """
-        INSERT INTO players (id, full_name, team_id, position, rotation_role)
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (next_id, player_name.strip(), team_id, "", "rotation"),
-    )
-    return next_id
 
 
 def _fetch_text(url: str) -> str:
