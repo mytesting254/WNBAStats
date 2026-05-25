@@ -2,15 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from collections import Counter
+from typing import Any, Callable
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .ball_dont_lie import fetch_team_history
 from .accuracy_analysis import build_accuracy_report, build_accuracy_report_for_days
 from .bootstrap import ensure_teams
-from .cache import read_json_cache, write_json_cache
+from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import import_covers_props
 from .db import connect, init_db
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
@@ -27,6 +28,13 @@ app = FastAPI(title="WNBA Prop Value API")
 COMPLETED_GAME_GRACE_HOURS = 4
 LOCAL_TZ = timezone(timedelta(hours=-4))
 LOW_CONFIDENCE_EDGE_MIN = 0.12
+VALUE_BOARD_CACHE_NAME = "current_value_board.json"
+MATCHUPS_CACHE_NAME = "current_matchups.json"
+LINE_DISCREPANCIES_CACHE_NAME = "line_discrepancies.json"
+READ_CACHE_VERSION = 1
+VALUE_BOARD_TTL_SECONDS = 45
+LINE_DISCREPANCIES_TTL_SECONDS = 45
+MATCHUPS_TTL_SECONDS = 60
 
 app.add_middleware(
     CORSMiddleware,
@@ -56,12 +64,77 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _cache_envelope(payload: Any, ttl_seconds: int) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {
+        "cache_key_version": READ_CACHE_VERSION,
+        "cached_at": now.isoformat(),
+        "ttl_seconds": ttl_seconds,
+        "source": "api_read_cache",
+        "payload": payload,
+    }
+
+
+def _read_cached_payload(cache_name: str) -> Any | None:
+    cached = read_json_cache(cache_name)
+    if not isinstance(cached, dict):
+        return None
+    if cached.get("cache_key_version") != READ_CACHE_VERSION:
+        return None
+    cached_at_raw = cached.get("cached_at")
+    ttl_seconds = cached.get("ttl_seconds")
+    if not isinstance(cached_at_raw, str) or not isinstance(ttl_seconds, int):
+        return None
+    try:
+        cached_at = datetime.fromisoformat(cached_at_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if cached_at.tzinfo is None:
+        cached_at = cached_at.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) - cached_at > timedelta(seconds=ttl_seconds):
+        return None
+    return cached.get("payload")
+
+
+def _read_through_cache(cache_name: str, ttl_seconds: int, compute: Callable[[], Any]) -> Any:
+    cached_payload = _read_cached_payload(cache_name)
+    if cached_payload is not None:
+        return cached_payload
+    payload = compute()
+    write_json_cache(cache_name, _cache_envelope(payload, ttl_seconds))
+    return payload
+
+
+def _read_through_cache_with_meta(cache_name: str, ttl_seconds: int, compute: Callable[[], Any]) -> tuple[Any, str, float]:
+    cached_payload = _read_cached_payload(cache_name)
+    if cached_payload is not None:
+        return cached_payload, "HIT", 0.0
+    started = datetime.now(timezone.utc)
+    payload = compute()
+    compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+    write_json_cache(cache_name, _cache_envelope(payload, ttl_seconds))
+    return payload, "MISS", round(compute_ms, 2)
+
+
+def _invalidate_read_caches() -> None:
+    for name in (VALUE_BOARD_CACHE_NAME, LINE_DISCREPANCIES_CACHE_NAME, MATCHUPS_CACHE_NAME):
+        delete_json_cache(name)
+
+
+def _set_observability_headers(response: Response, cache_name: str, cache_status: str, compute_ms: float) -> None:
+    response.headers["X-Cache"] = cache_status
+    response.headers["X-Cache-Key"] = f"{cache_name}:v{READ_CACHE_VERSION}"
+    response.headers["X-Compute-Ms"] = f"{compute_ms:.2f}"
+    print(f"[cache] {cache_name} status={cache_status} compute_ms={compute_ms:.2f}")
+
+
 @app.post("/api/recalculate")
 def recalculate() -> dict[str, int]:
     with connect() as conn:
         projections = rebuild_predictions(conn)
         settlements = settle_completed_props(conn)
         game_settlements = settle_completed_game_predictions(conn)
+    _invalidate_read_caches()
     return {"predictions": len(projections), "settled": settlements["settled"], "game_settled": game_settlements["settled"]}
 
 
@@ -70,14 +143,29 @@ def settle_props() -> dict:
     with connect() as conn:
         props = settle_completed_props(conn)
         games = settle_completed_game_predictions(conn)
+    _invalidate_read_caches()
     return {"props": props, "games": games}
 
 
 @app.get("/api/value-board")
-def value_board() -> list[dict]:
-    with connect() as conn:
-        payload = _value_board_payload(conn)
-    write_json_cache("current_value_board.json", payload)
+def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
+    if force_refresh:
+        started = datetime.now(timezone.utc)
+        with connect() as conn:
+            payload = _value_board_payload(conn)
+        compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+        write_json_cache(VALUE_BOARD_CACHE_NAME, _cache_envelope(payload, VALUE_BOARD_TTL_SECONDS))
+        _set_observability_headers(response, VALUE_BOARD_CACHE_NAME, "BYPASS", round(compute_ms, 2))
+        return payload
+    def compute() -> list[dict]:
+        with connect() as conn:
+            return _value_board_payload(conn)
+    payload, status, compute_ms = _read_through_cache_with_meta(
+        VALUE_BOARD_CACHE_NAME,
+        VALUE_BOARD_TTL_SECONDS,
+        compute,
+    )
+    _set_observability_headers(response, VALUE_BOARD_CACHE_NAME, status, compute_ms)
     return payload
 
 
@@ -260,13 +348,16 @@ def train_model() -> dict:
 def import_odds(force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_the_odds_api_props(conn, force_refresh=force_refresh)
+    _invalidate_read_caches()
     return result
 
 
 @app.post("/api/covers/import")
 def import_covers(selected_date: str | None = None, force_refresh: bool = False) -> dict:
     with connect() as conn:
-        return import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh)
+        result = import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh)
+    _invalidate_read_caches()
+    return result
 
 
 @app.post("/api/injuries/import/rotowire")
@@ -275,6 +366,7 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
         result = import_rotowire_lineups(conn, force_refresh=force_refresh)
         projections = rebuild_predictions(conn)
     result["predictions"] = len(projections)
+    _invalidate_read_caches()
     return result
 
 
@@ -552,10 +644,31 @@ def odds_cache() -> dict:
 
 
 @app.get("/api/line-discrepancies")
-def discrepancies(game_id: int | None = None) -> list[dict]:
-    with connect() as conn:
-        payload = line_discrepancies(conn, game_id)
-    write_json_cache("line_discrepancies.json", payload)
+def discrepancies(response: Response, game_id: int | None = None, force_refresh: bool = False) -> list[dict]:
+    if game_id is not None:
+        started = datetime.now(timezone.utc)
+        with connect() as conn:
+            payload = line_discrepancies(conn, game_id)
+        compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+        _set_observability_headers(response, f"{LINE_DISCREPANCIES_CACHE_NAME}:game_id={game_id}", "BYPASS", round(compute_ms, 2))
+        return payload
+    if force_refresh:
+        started = datetime.now(timezone.utc)
+        with connect() as conn:
+            payload = line_discrepancies(conn, None)
+        compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+        write_json_cache(LINE_DISCREPANCIES_CACHE_NAME, _cache_envelope(payload, LINE_DISCREPANCIES_TTL_SECONDS))
+        _set_observability_headers(response, LINE_DISCREPANCIES_CACHE_NAME, "BYPASS", round(compute_ms, 2))
+        return payload
+    def compute() -> list[dict]:
+        with connect() as conn:
+            return line_discrepancies(conn, None)
+    payload, status, compute_ms = _read_through_cache_with_meta(
+        LINE_DISCREPANCIES_CACHE_NAME,
+        LINE_DISCREPANCIES_TTL_SECONDS,
+        compute,
+    )
+    _set_observability_headers(response, LINE_DISCREPANCIES_CACHE_NAME, status, compute_ms)
     return payload
 
 
@@ -627,8 +740,15 @@ def ball_dont_lie_history(
 
 
 @app.get("/api/matchups")
-def matchups() -> list[dict]:
+def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
+    if not force_refresh:
+        started = datetime.now(timezone.utc)
+        cached = _read_cached_payload(MATCHUPS_CACHE_NAME)
+        if cached is not None:
+            _set_observability_headers(response, MATCHUPS_CACHE_NAME, "HIT", 0.0)
+            return cached
     with connect() as conn:
+        started = datetime.now(timezone.utc)
         injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
         games = conn.execute(
             """
@@ -699,7 +819,9 @@ def matchups() -> list[dict]:
                     "injury_from_cache": injury_refresh.get("from_cache"),
                 }
             )
-    write_json_cache("current_matchups.json", payload)
+    write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(payload, MATCHUPS_TTL_SECONDS))
+    compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+    _set_observability_headers(response, MATCHUPS_CACHE_NAME, "BYPASS" if force_refresh else "MISS", round(compute_ms, 2))
     return payload
 
 
@@ -783,9 +905,9 @@ def _normalized_start_key(value: str | None) -> str | None:
 
 
 def _value_board_payload_for_games(conn, game_ids: list[int]) -> list[dict]:
-    payload = []
-    for game_id in game_ids:
-        payload.extend(_value_board_payload(conn, game_id))
+    if not game_ids:
+        return []
+    payload = _value_board_payload(conn, game_ids=game_ids)
     best_by_leg = {}
     for item in payload:
         key = (
@@ -823,9 +945,17 @@ def _line_discrepancies_for_games(conn, game_ids: list[int]) -> list[dict]:
     return sorted(payload, key=lambda item: (item["line_gap"], item["price_gap"]), reverse=True)
 
 
-def _value_board_payload(conn, game_id: int | None = None) -> list[dict]:
-    game_filter = "WHERE pl.game_id = ?" if game_id is not None else ""
-    params = (game_id,) if game_id is not None else ()
+def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] | None = None) -> list[dict]:
+    if game_ids:
+        placeholders = ",".join("?" for _ in game_ids)
+        game_filter = f"WHERE pl.game_id IN ({placeholders})"
+        params = tuple(game_ids)
+    elif game_id is not None:
+        game_filter = "WHERE pl.game_id = ?"
+        params = (game_id,)
+    else:
+        game_filter = ""
+        params = ()
     rows = conn.execute(
         f"""
         WITH ranked_props AS (

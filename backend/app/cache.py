@@ -21,3 +21,11 @@ def read_json_cache(name: str) -> Any | None:
     if not path.exists():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def delete_json_cache(name: str) -> bool:
+    path = CACHE_DIR / name
+    if not path.exists():
+        return False
+    path.unlink()
+    return True
