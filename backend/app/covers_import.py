@@ -468,10 +468,42 @@ def _game_market_from_page(page: str, home_team: str, away_team: str) -> dict[st
 
 def _records_from_page(page: str) -> dict:
     return {
+        "team_table": _parse_team_table(page),
         "head_to_head": _parse_h2h_rows(_table_by_caption(page, "Head-To-Head")),
         "away_last_10": _parse_team_rows(_team_last_10_table(page, "away")),
         "home_last_10": _parse_team_rows(_team_last_10_table(page, "home")),
     }
+
+
+def _parse_team_table(page: str) -> list[dict]:
+    text = _visible_text(page)
+    pattern = re.compile(
+        r"Team\s+Table\s+Team\s+Record\s+ATS\s+O/U\s+Away\s+Home\s+"
+        r"(?P<t1>[A-Z]{2,5})\s+(?P<r1>\d+-\d+)\s+(?P<ats1>\d+-\d+-\d+)\s+(?P<ou1>\d+-\d+-\d+)\s+(?P<a1>\d+-\d+)\s+(?P<h1>\d+-\d+)\s+"
+        r"(?P<t2>[A-Z]{2,5})\s+(?P<r2>\d+-\d+)\s+(?P<ats2>\d+-\d+-\d+)\s+(?P<ou2>\d+-\d+-\d+)\s+(?P<a2>\d+-\d+)\s+(?P<h2>\d+-\d+)",
+        re.I,
+    )
+    match = pattern.search(text)
+    if not match:
+        return []
+    return [
+        {
+            "team": match.group("t1").upper(),
+            "record": match.group("r1"),
+            "ats": match.group("ats1"),
+            "ou": match.group("ou1"),
+            "away": match.group("a1"),
+            "home": match.group("h1"),
+        },
+        {
+            "team": match.group("t2").upper(),
+            "record": match.group("r2"),
+            "ats": match.group("ats2"),
+            "ou": match.group("ou2"),
+            "away": match.group("a2"),
+            "home": match.group("h2"),
+        },
+    ]
 
 
 def _table_by_caption(page: str, caption: str) -> str | None:

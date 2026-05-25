@@ -38,8 +38,27 @@ const markets = [
   { id: "blocks_steals", label: "STL+BLK" }
 ];
 
+const WNBA_TEAM_LOGOS: Record<string, string> = {
+  ATL: "/team-logos/atl.png",
+  CHI: "/team-logos/chi.png",
+  CON: "/team-logos/conn.png",
+  DAL: "/team-logos/dal.png",
+  GS: "/team-logos/gs.png",
+  IND: "/team-logos/ind.png",
+  LV: "/team-logos/lv.png",
+  LA: "/team-logos/la.png",
+  MIN: "/team-logos/min.png",
+  NY: "/team-logos/ny.png",
+  PHX: "/team-logos/phx.png",
+  SEA: "/team-logos/sea.png",
+  TOR: "/team-logos/tor.png",
+  WSH: "/team-logos/wsh.png",
+  POR: "/team-logos/por.png",
+  PDX: "/team-logos/por.png"
+};
+
 type DashboardTab = "props" | "matchups" | "parlays" | "discrepancies" | "roster" | "models" | "data";
-type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "confidence" | "player";
+type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
 
@@ -1200,8 +1219,28 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
                 </div>
               </div>
               <div className="team-comparison">
-                <TeamSummary label="Away" team={selectedMatchup.away_team_name} logoUrl={selectedMatchup.away_logo_url} restDays={selectedMatchup.away_rest_days} summary={selectedMatchup.away} />
-                <TeamSummary label="Home" team={selectedMatchup.home_team_name} logoUrl={selectedMatchup.home_logo_url} restDays={selectedMatchup.home_rest_days} summary={selectedMatchup.home} />
+                <TeamSummary
+                  label="Away"
+                  team={selectedMatchup.away_team_name}
+                  teamCode={selectedMatchup.away_team}
+                  logoUrl={selectedMatchup.away_logo_url}
+                  restDays={selectedMatchup.away_rest_days}
+                  summary={selectedMatchup.away}
+                  context="away"
+                  coversTeamRow={selectedMatchup.covers_records?.team_table?.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.away_team))}
+                  coversLast10Rows={selectedMatchup.covers_records?.away_last_10}
+                />
+                <TeamSummary
+                  label="Home"
+                  team={selectedMatchup.home_team_name}
+                  teamCode={selectedMatchup.home_team}
+                  logoUrl={selectedMatchup.home_logo_url}
+                  restDays={selectedMatchup.home_rest_days}
+                  summary={selectedMatchup.home}
+                  context="home"
+                  coversTeamRow={selectedMatchup.covers_records?.team_table?.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.home_team))}
+                  coversLast10Rows={selectedMatchup.covers_records?.home_last_10}
+                />
               </div>
               <div className="prediction-strip">
                 <MiniStat label="Projected Score" value={formatProjectedScore(selectedMatchup)} />
@@ -1226,53 +1265,260 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
 
 function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
   const records = matchup.covers_records;
-  if (!records || (!records.head_to_head.length && !records.away_last_10.length && !records.home_last_10.length)) {
+  const hasCovers = Boolean(records && (records.head_to_head.length || records.away_last_10.length || records.home_last_10.length));
+  const h2hRows = hasCovers ? records?.head_to_head.slice(0, 10) ?? [] : [];
+  const awayRows = hasCovers
+    ? records?.away_last_10.slice(0, 10) ?? []
+    : matchup.away.recent_games.slice(0, 10).map((game) => ({
+        date: formatGameDateShort(game.game_date),
+        opponent: game.opponent,
+        location: (game.is_home ? "home" : "away") as "home" | "away",
+        result: null,
+        score: `${game.points} - ${game.opponent_points}`,
+        ats: atsLabel(game.ats_result).replace("ATS ", ""),
+        total: totalLabel(game.total_result)
+      }));
+  const homeRows = hasCovers
+    ? records?.home_last_10.slice(0, 10) ?? []
+    : matchup.home.recent_games.slice(0, 10).map((game) => ({
+        date: formatGameDateShort(game.game_date),
+        opponent: game.opponent,
+        location: (game.is_home ? "home" : "away") as "home" | "away",
+        result: null,
+        score: `${game.points} - ${game.opponent_points}`,
+        ats: atsLabel(game.ats_result).replace("ATS ", ""),
+        total: totalLabel(game.total_result)
+      }));
+  if (!h2hRows.length && !awayRows.length && !homeRows.length) {
     return null;
   }
 
   return (
     <div className="covers-records-panel">
-      <CoversRecordList title="H2H Last 10" rows={records.head_to_head.slice(0, 5)} mode="h2h" />
-      <CoversRecordList title={`${matchup.away_team} Last 10`} rows={records.away_last_10.slice(0, 5)} mode="team" />
-      <CoversRecordList title={`${matchup.home_team} Last 10`} rows={records.home_last_10.slice(0, 5)} mode="team" />
-    </div>
-  );
-}
-
-function CoversRecordList({
-  title,
-  rows,
-  mode
-}: {
-  title: string;
-  rows: CoversRecordRow[];
-  mode: "h2h" | "team";
-}) {
-  if (!rows.length) {
-    return null;
-  }
-
-  return (
-    <div className="covers-records-list">
-      <h4>{title}</h4>
-      {rows.map((row) => (
-        <div key={`${title}-${row.date}-${row.score}-${row.opponent ?? row.home ?? ""}`}>
-          <span>{row.date}</span>
-          <strong>{coversRecordOpponent(row, mode)}</strong>
-          <b>{row.result ? `${row.result} ` : ""}{row.score}</b>
-          <em>{row.ats} | {row.total}</em>
+      <div className="covers-records-list">
+        <h4>H2H Last 10</h4>
+        <div className="table-wrap covers-records-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Home</th>
+                <th>Result</th>
+                <th>ATS</th>
+                <th>O/U</th>
+              </tr>
+            </thead>
+            <tbody>
+              {h2hRows.map((row) => (
+                <tr key={`h2h-${row.date}-${row.score}-${row.home ?? ""}`}>
+                  <td>{row.date}</td>
+                  <td>{coversRecordOpponent(row, "h2h", matchup)}</td>
+                  <td>
+                    <RecordResultCell row={row} matchup={matchup} />
+                  </td>
+                  <td>{row.ats}</td>
+                  <td>{row.total}</td>
+                </tr>
+              ))}
+              {!h2hRows.length && (
+                <tr>
+                  <td colSpan={5}>No head-to-head recent games available.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
-      ))}
+      </div>
+      <div className="covers-records-list">
+        <h4>{matchup.away_team} Last 10</h4>
+        <div className="table-wrap covers-records-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>vs</th>
+                <th>Result</th>
+                <th>ATS</th>
+                <th>O/U</th>
+              </tr>
+            </thead>
+            <tbody>
+              {awayRows.slice(0, 10).map((row) => (
+                <tr key={`away-${row.date}-${row.score}-${row.opponent ?? ""}`}>
+                  <td>{row.date}</td>
+                  <td>{coversRecordOpponent(row, "team", matchup)}</td>
+                  <td>
+                    <RecordResultCell row={row} matchup={matchup} />
+                  </td>
+                  <td>{row.ats}</td>
+                  <td>{row.total}</td>
+                </tr>
+              ))}
+              {!awayRows.length && (
+                <tr>
+                  <td colSpan={5}>No away recent games available.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="covers-records-list">
+        <h4>{matchup.home_team} Last 10</h4>
+        <div className="table-wrap covers-records-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>vs</th>
+                <th>Result</th>
+                <th>ATS</th>
+                <th>O/U</th>
+              </tr>
+            </thead>
+            <tbody>
+              {homeRows.slice(0, 10).map((row) => (
+                <tr key={`home-${row.date}-${row.score}-${row.opponent ?? ""}`}>
+                  <td>{row.date}</td>
+                  <td>{coversRecordOpponent(row, "team", matchup)}</td>
+                  <td>
+                    <RecordResultCell row={row} matchup={matchup} />
+                  </td>
+                  <td>{row.ats}</td>
+                  <td>{row.total}</td>
+                </tr>
+              ))}
+              {!homeRows.length && (
+                <tr>
+                  <td colSpan={5}>No home recent games available.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 }
 
-function coversRecordOpponent(row: CoversRecordRow, mode: "h2h" | "team") {
+function coversRecordOpponent(row: CoversRecordRow, mode: "h2h" | "team", matchup?: Matchup) {
   if (mode === "h2h") {
-    return `Home ${row.home ?? "N/A"}`;
+    return (
+      <RecordTeamCell
+        prefix="Home"
+        teamCode={row.home ?? "N/A"}
+        logoUrl={logoForTeamCode(row.home, matchup)}
+      />
+    );
   }
   const prefix = row.location === "away" ? "at" : "vs";
-  return `${prefix} ${row.opponent ?? "N/A"}`;
+  return (
+    <RecordTeamCell
+      prefix={prefix}
+      teamCode={row.opponent ?? "N/A"}
+      logoUrl={logoForTeamCode(row.opponent, matchup)}
+    />
+  );
+}
+
+function RecordTeamCell({ prefix, teamCode, logoUrl }: { prefix: string; teamCode: string; logoUrl?: string | null }) {
+  return (
+    <span className="record-team-cell">
+      <span>{prefix}</span>
+      <TeamLogo src={logoUrl} alt={`${teamCode} logo`} />
+      <strong>{teamCode}</strong>
+    </span>
+  );
+}
+
+function RecordResultCell({ row, matchup }: { row: CoversRecordRow; matchup: Matchup }) {
+  const winnerLogo = logoForTeamCode(row.winner, matchup);
+  return (
+    <span className="record-team-cell">
+      {winnerLogo ? <TeamLogo src={winnerLogo} alt={`${row.winner ?? "Winner"} logo`} /> : null}
+      <strong>{row.result ? `${row.result} ${row.score}` : row.score}</strong>
+    </span>
+  );
+}
+
+function logoForTeamCode(value: string | null | undefined, matchup?: Matchup) {
+  const normalized = normalizeTeamCode(value);
+  if (!normalized) {
+    return null;
+  }
+  if (matchup && normalized === normalizeTeamCode(matchup.home_team)) {
+    return matchup.home_logo_url ?? WNBA_TEAM_LOGOS[normalized] ?? null;
+  }
+  if (matchup && normalized === normalizeTeamCode(matchup.away_team)) {
+    return matchup.away_logo_url ?? WNBA_TEAM_LOGOS[normalized] ?? null;
+  }
+  return WNBA_TEAM_LOGOS[normalized] ?? null;
+}
+
+function normalizeTeamCode(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+  const cleaned = value.toUpperCase().replace(/[^A-Z]/g, "");
+  const aliases: Record<string, string> = {
+    CONN: "CON",
+    WAS: "WSH",
+    PHO: "PHX",
+    LAS: "LA",
+    PDX: "POR"
+  };
+  return aliases[cleaned] ?? cleaned;
+}
+
+function summarizeCoversTeamRows(rows: CoversRecordRow[] | undefined) {
+  if (!rows?.length) {
+    return null;
+  }
+  let wins = 0;
+  let losses = 0;
+  let atsWins = 0;
+  let atsLosses = 0;
+  let atsPushes = 0;
+  let overs = 0;
+  let unders = 0;
+  let ouPushes = 0;
+  for (const row of rows) {
+    const result = (row.result ?? "").toUpperCase();
+    if (result === "W") wins += 1;
+    else if (result === "L") losses += 1;
+
+    const atsToken = (row.ats ?? "").trim().charAt(0).toUpperCase();
+    if (atsToken === "W") atsWins += 1;
+    else if (atsToken === "L") atsLosses += 1;
+    else if (atsToken === "P") atsPushes += 1;
+
+    const ouToken = (row.total ?? "").trim().charAt(0).toLowerCase();
+    if (ouToken === "o") overs += 1;
+    else if (ouToken === "u") unders += 1;
+    else if (ouToken === "p") ouPushes += 1;
+  }
+  return {
+    record: `${wins}-${losses}`,
+    ats: `${atsWins}-${atsLosses}-${atsPushes}`,
+    ou: `${overs}-${unders}-${ouPushes}`
+  };
+}
+
+function summarizeCoversContextRecord(rows: CoversRecordRow[] | undefined, context: "home" | "away") {
+  if (!rows?.length) {
+    return null;
+  }
+  let wins = 0;
+  let losses = 0;
+  for (const row of rows) {
+    if (row.location !== context) {
+      continue;
+    }
+    const result = (row.result ?? "").toUpperCase();
+    if (result === "W") wins += 1;
+    else if (result === "L") losses += 1;
+  }
+  return `${wins}-${losses}`;
 }
 
 function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[]; loading: boolean; error: string | null }) {
@@ -1471,6 +1717,7 @@ function MatchupProps({
               <option value="projection">Sort by projection</option>
               <option value="line">Sort by line</option>
               <option value="projection_gap">Sort by proj gap</option>
+              <option value="model_probability">Sort by model probability</option>
               <option value="confidence">Sort by confidence</option>
               <option value="player">Sort by player</option>
             </select>
@@ -1685,16 +1932,32 @@ function SportsbookLinesTable({ lines, total }: { lines: Matchup["sportsbook_pro
 function TeamSummary({
   label,
   team,
+  teamCode,
   logoUrl,
   restDays,
-  summary
+  summary,
+  context,
+  coversTeamRow,
+  coversLast10Rows
 }: {
   label: string;
   team: string;
+  teamCode: string;
   logoUrl?: string | null;
   restDays: number | null;
   summary: TeamLast10;
+  context: "home" | "away";
+  coversTeamRow?: { team: string; record: string; ats: string; ou: string; away: string; home: string };
+  coversLast10Rows?: CoversRecordRow[];
 }) {
+  const coversDerived = summarizeCoversTeamRows(coversLast10Rows);
+  const winsLosses = coversTeamRow?.record ?? coversDerived?.record ?? `${summary.wins}-${summary.losses}`;
+  const ats = coversTeamRow?.ats ?? coversDerived?.ats ?? `${summary.ats_wins}-${summary.ats_losses}-${summary.ats_pushes}`;
+  const ou = coversTeamRow?.ou ?? coversDerived?.ou ?? `${summary.overs}-${summary.unders}-${summary.total_pushes}`;
+  const contextDerived = summarizeCoversContextRecord(coversLast10Rows, context);
+  const contextRecord = coversTeamRow
+    ? (context === "home" ? coversTeamRow.home : coversTeamRow.away)
+    : contextDerived ?? (context === "home" ? `${summary.home_games}` : `${summary.away_games}`);
   return (
     <div className="team-summary">
       <div className="team-title">
@@ -1702,27 +1965,19 @@ function TeamSummary({
         <div>
           <span>{label}</span>
           <strong>{team}</strong>
+          {coversTeamRow?.team && coversTeamRow.team !== teamCode && <em>{coversTeamRow.team}</em>}
         </div>
       </div>
       <div className="stat-strip">
-        <MiniStat label="W-L" value={`${summary.wins}-${summary.losses}`} />
+        <MiniStat label="W-L" value={winsLosses} />
         <MiniStat label="Rest" value={restLabel(restDays)} />
-        <MiniStat label="Home/Away" value={`${summary.home_games}/${summary.away_games}`} />
-        <MiniStat label="ATS" value={`${summary.ats_wins}-${summary.ats_losses}-${summary.ats_pushes}`} />
-        <MiniStat label="O/U" value={`${summary.overs}-${summary.unders}-${summary.total_pushes}`} />
+        <MiniStat label={context === "home" ? "Home Rec" : "Away Rec"} value={contextRecord} />
+        <MiniStat label="ATS" value={ats} />
+        <MiniStat label="O/U" value={ou} />
       </div>
       <div className="points-row">
         <span>PF {summary.avg_points_for.toFixed(1)}</span>
         <span>PA {summary.avg_points_against.toFixed(1)}</span>
-      </div>
-      <div className="recent-list">
-        {summary.recent_games.slice(0, 5).map((game) => (
-          <div key={`${team}-${game.game_date}-${game.opponent}`}>
-            <span>{game.is_home ? "vs" : "at"} {game.opponent}</span>
-            <strong>{game.points}-{game.opponent_points}</strong>
-            <em>{atsLabel(game.ats_result)} | {totalLabel(game.total_result)}</em>
-          </div>
-        ))}
       </div>
     </div>
   );
@@ -1854,6 +2109,18 @@ function formatDate(value: string) {
     hour: "numeric",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function formatGameDateShort(value: string) {
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) {
+    return value;
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "2-digit"
+  }).format(new Date(time));
 }
 
 function todayInputValue() {

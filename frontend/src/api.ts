@@ -126,6 +126,14 @@ export type CoversRecordRow = {
 };
 
 export type CoversRecords = {
+  team_table?: Array<{
+    team: string;
+    record: string;
+    ats: string;
+    ou: string;
+    away: string;
+    home: string;
+  }>;
   head_to_head: CoversRecordRow[];
   away_last_10: CoversRecordRow[];
   home_last_10: CoversRecordRow[];

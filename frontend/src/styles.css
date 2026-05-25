@@ -956,48 +956,41 @@ tbody tr.selected {
 }
 
 .covers-records-list h4 {
-  margin: 0 0 8px;
+  margin: 0;
   color: #1b1f29;
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 800;
+  text-transform: uppercase;
+  margin-bottom: 8px;
 }
 
-.covers-records-list div {
-  display: grid;
-  grid-template-columns: 82px minmax(0, 1fr);
-  gap: 2px 8px;
-  padding: 7px 0;
-  border-top: 1px solid #f0f2f5;
+.covers-records-table-wrap {
+  margin-top: 0;
+}
+
+.record-team-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.record-team-cell > span {
+  margin-top: 0;
+  color: #667085;
   font-size: 12px;
 }
 
-.covers-records-list div:first-of-type {
-  border-top: 0;
-}
-
-.covers-records-list span,
-.covers-records-list strong,
-.covers-records-list b,
-.covers-records-list em {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.covers-records-list span {
-  color: #667085;
-}
-
-.covers-records-list strong {
-  color: #344054;
-}
-
-.covers-records-list b {
+.record-team-cell > strong {
   color: #1b1f29;
+  font-size: 13px;
+  font-weight: 800;
 }
 
-.covers-records-list em {
-  color: #2364aa;
-  font-style: normal;
-  font-weight: 800;
+.record-team-cell .team-logo {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  border-radius: 0;
 }
 
 .model-layout {
