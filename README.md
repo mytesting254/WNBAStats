@@ -70,6 +70,33 @@ POST /api/recalculate
 POST /api/settle-props
 ```
 
+## API Security
+
+Mutating endpoints are protected by a shared API key when `API_KEY` is configured.
+
+- Send `X-API-Key: <API_KEY>` (or `Authorization: Bearer <API_KEY>`) for:
+  - `POST /api/recalculate`
+  - `POST /api/settle-props`
+  - `POST /api/models/train`
+  - `POST /api/odds/import`
+  - `POST /api/covers/import`
+  - `POST /api/injuries/import/rotowire`
+  - `POST /api/history/import/espn`
+  - `POST /api/history/import/espn-missing`
+
+`force_refresh=true` on these read endpoints also requires the API key:
+
+- `GET /api/value-board?force_refresh=true`
+- `GET /api/line-discrepancies?force_refresh=true`
+- `GET /api/matchups?force_refresh=true`
+
+Environment behavior:
+
+- `ENV=dev|local|test` with no `API_KEY`: requests are allowed (dev convenience).
+- non-dev `ENV` with no `API_KEY`: API startup fails.
+
+Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed in API responses.
+
 ## App Tabs
 
 - `Pregame Props`: ranked prop predictions with projection, line, model probability, edge, EV, and confidence.

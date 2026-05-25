@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from collections import Counter
+import os
+import threading
+import time
 from typing import Any, Callable
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from .ball_dont_lie import fetch_team_history
@@ -35,6 +38,12 @@ READ_CACHE_VERSION = 1
 VALUE_BOARD_TTL_SECONDS = 45
 LINE_DISCREPANCIES_TTL_SECONDS = 45
 MATCHUPS_TTL_SECONDS = 60
+RATE_LIMIT_MUTATION_CAPACITY = float(os.getenv("RATE_LIMIT_MUTATION_CAPACITY", "10"))
+RATE_LIMIT_MUTATION_REFILL_PER_SEC = float(os.getenv("RATE_LIMIT_MUTATION_REFILL_PER_SEC", "0.5"))
+RATE_LIMIT_REFRESH_CAPACITY = float(os.getenv("RATE_LIMIT_REFRESH_CAPACITY", "6"))
+RATE_LIMIT_REFRESH_REFILL_PER_SEC = float(os.getenv("RATE_LIMIT_REFRESH_REFILL_PER_SEC", "0.33"))
+_RATE_BUCKETS: dict[tuple[str, str], tuple[float, float]] = {}
+_RATE_LOCK = threading.Lock()
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,6 +63,10 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
+    if not _is_dev_env() and not _configured_api_key():
+        raise RuntimeError("API_KEY is required when ENV is not dev/local/test.")
+    if _is_dev_env() and not _configured_api_key():
+        print("[security] API_KEY not set; mutating endpoints are open in dev/test mode.")
     init_db()
     with connect() as conn:
         ensure_teams(conn)
@@ -62,6 +75,77 @@ def on_startup() -> None:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def _is_dev_env() -> bool:
+    return os.getenv("ENV", "dev").strip().lower() in {"dev", "local", "test"}
+
+
+def _configured_api_key() -> str | None:
+    value = os.getenv("API_KEY")
+    if not value:
+        return None
+    return value.strip() or None
+
+
+def _presented_api_key(x_api_key: str | None, authorization: str | None) -> str | None:
+    if x_api_key and x_api_key.strip():
+        return x_api_key.strip()
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        return token or None
+    return None
+
+
+def _enforce_api_key(x_api_key: str | None, authorization: str | None) -> None:
+    configured = _configured_api_key()
+    if configured is None:
+        if _is_dev_env():
+            return
+        raise HTTPException(status_code=500, detail="API key authentication is not configured.")
+    presented = _presented_api_key(x_api_key, authorization)
+    if presented != configured:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _consume_rate_limit(client_key: str, scope: str, capacity: float, refill_per_sec: float) -> None:
+    now = time.monotonic()
+    bucket_key = (client_key, scope)
+    with _RATE_LOCK:
+        tokens, last = _RATE_BUCKETS.get(bucket_key, (capacity, now))
+        elapsed = max(0.0, now - last)
+        tokens = min(capacity, tokens + elapsed * refill_per_sec)
+        if tokens < 1.0:
+            retry_after = max(1, int((1.0 - tokens) / max(refill_per_sec, 0.001)))
+            raise HTTPException(status_code=429, detail="Rate limit exceeded", headers={"Retry-After": str(retry_after)})
+        _RATE_BUCKETS[bucket_key] = (tokens - 1.0, now)
+
+
+def _client_key(request: Request) -> str:
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"
+
+
+def _protect_mutation(
+    request: Request,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    _consume_rate_limit(_client_key(request), "mutation", RATE_LIMIT_MUTATION_CAPACITY, RATE_LIMIT_MUTATION_REFILL_PER_SEC)
+    _enforce_api_key(x_api_key, authorization)
+
+
+def _protect_force_refresh(
+    request: Request,
+    force_refresh: bool = False,
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    authorization: Annotated[str | None, Header()] = None,
+) -> None:
+    if not force_refresh:
+        return
+    _consume_rate_limit(_client_key(request), "refresh", RATE_LIMIT_REFRESH_CAPACITY, RATE_LIMIT_REFRESH_REFILL_PER_SEC)
+    _enforce_api_key(x_api_key, authorization)
 
 
 def _cache_envelope(payload: Any, ttl_seconds: int) -> dict[str, Any]:
@@ -122,13 +206,15 @@ def _invalidate_read_caches() -> None:
 
 
 def _set_observability_headers(response: Response, cache_name: str, cache_status: str, compute_ms: float) -> None:
+    if os.getenv("EXPOSE_DEBUG_HEADERS", "").strip().lower() not in {"1", "true", "yes"}:
+        return
     response.headers["X-Cache"] = cache_status
     response.headers["X-Cache-Key"] = f"{cache_name}:v{READ_CACHE_VERSION}"
     response.headers["X-Compute-Ms"] = f"{compute_ms:.2f}"
     print(f"[cache] {cache_name} status={cache_status} compute_ms={compute_ms:.2f}")
 
 
-@app.post("/api/recalculate")
+@app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
 def recalculate() -> dict[str, int]:
     with connect() as conn:
         projections = rebuild_predictions(conn)
@@ -138,7 +224,7 @@ def recalculate() -> dict[str, int]:
     return {"predictions": len(projections), "settled": settlements["settled"], "game_settled": game_settlements["settled"]}
 
 
-@app.post("/api/settle-props")
+@app.post("/api/settle-props", dependencies=[Depends(_protect_mutation)])
 def settle_props() -> dict:
     with connect() as conn:
         props = settle_completed_props(conn)
@@ -147,7 +233,7 @@ def settle_props() -> dict:
     return {"props": props, "games": games}
 
 
-@app.get("/api/value-board")
+@app.get("/api/value-board", dependencies=[Depends(_protect_force_refresh)])
 def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
     if force_refresh:
         started = datetime.now(timezone.utc)
@@ -338,13 +424,13 @@ def model_loss_breakdown(model_version: str = "adaptive-context-v1", top_n_playe
     }
 
 
-@app.post("/api/models/train")
+@app.post("/api/models/train", dependencies=[Depends(_protect_mutation)])
 def train_model() -> dict:
     with connect() as conn:
         return run_walk_forward_training(conn)
 
 
-@app.post("/api/odds/import")
+@app.post("/api/odds/import", dependencies=[Depends(_protect_mutation)])
 def import_odds(force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_the_odds_api_props(conn, force_refresh=force_refresh)
@@ -352,7 +438,7 @@ def import_odds(force_refresh: bool = False) -> dict:
     return result
 
 
-@app.post("/api/covers/import")
+@app.post("/api/covers/import", dependencies=[Depends(_protect_mutation)])
 def import_covers(selected_date: str | None = None, force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh)
@@ -360,7 +446,7 @@ def import_covers(selected_date: str | None = None, force_refresh: bool = False)
     return result
 
 
-@app.post("/api/injuries/import/rotowire")
+@app.post("/api/injuries/import/rotowire", dependencies=[Depends(_protect_mutation)])
 def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_rotowire_lineups(conn, force_refresh=force_refresh)
@@ -370,7 +456,7 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     return result
 
 
-@app.post("/api/history/import/espn")
+@app.post("/api/history/import/espn", dependencies=[Depends(_protect_mutation)])
 def import_espn_history(
     season: int | None = None,
     force_refresh: bool = False,
@@ -501,7 +587,7 @@ def missing_espn_history_dates(limit: int = 30) -> dict:
     return payload
 
 
-@app.post("/api/history/import/espn-missing")
+@app.post("/api/history/import/espn-missing", dependencies=[Depends(_protect_mutation)])
 def import_missing_espn_history(
     force_refresh: bool = True,
     include_player_stats: bool = True,
@@ -643,7 +729,7 @@ def odds_cache() -> dict:
     return odds_cache_summary()
 
 
-@app.get("/api/line-discrepancies")
+@app.get("/api/line-discrepancies", dependencies=[Depends(_protect_force_refresh)])
 def discrepancies(response: Response, game_id: int | None = None, force_refresh: bool = False) -> list[dict]:
     if game_id is not None:
         started = datetime.now(timezone.utc)
@@ -739,7 +825,7 @@ def ball_dont_lie_history(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-@app.get("/api/matchups")
+@app.get("/api/matchups", dependencies=[Depends(_protect_force_refresh)])
 def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
     if not force_refresh:
         started = datetime.now(timezone.utc)
