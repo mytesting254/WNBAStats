@@ -33,6 +33,10 @@ MARKET_SIGMA_FLOORS = {
     "points_rebounds_assists": 5.0,
 }
 
+CALIBRATION_MIN_SAMPLES = 120
+CALIBRATION_BIN_WIDTH = 0.05
+CALIBRATION_SHRINKAGE_K = 20.0
+
 
 @dataclass(frozen=True)
 class PropProjection:
@@ -179,7 +183,13 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
     side = "over" if projection > line else "under"
     stat_sigma = _estimated_sigma(conn, prop["player_id"], prop["market"], projection, prop["game_id"])
     over_probability = 1 - _normal_cdf(line, projection, stat_sigma)
-    model_probability = over_probability if side == "over" else 1 - over_probability
+    raw_model_probability = over_probability if side == "over" else 1 - over_probability
+    model_probability = _calibrated_probability(
+        conn,
+        raw_model_probability,
+        prop["market"],
+        model_version,
+    )
     odds = int(prop["over_odds"] if side == "over" else prop["under_odds"])
     implied = american_to_implied_probability(odds)
     edge = model_probability - implied
@@ -284,6 +294,9 @@ def _estimated_sigma(conn: sqlite3.Connection, player_id: int, market: str, proj
     floor = max(MARKET_SIGMA_FLOORS.get(market, 2.0), projection * 0.10)
     base_sigma = max((0.60 * ewma_sigma) + (0.25 * sample_sigma) + (0.15 * floor), floor)
     sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
+    minute_volatility = _player_minute_volatility(conn, player_id, game_id)
+    context = _game_context(conn, player_id, game_id) if game_id else None
+    blowout_probability = _blowout_probability(abs(float(context["spread_home"]))) if context and context.get("spread_home") is not None else 0.0
     uncertainty_multiplier = 1.0
     if sample_count < 4:
         uncertainty_multiplier = 1.75
@@ -291,6 +304,16 @@ def _estimated_sigma(conn: sqlite3.Connection, player_id: int, market: str, proj
         uncertainty_multiplier = 1.45
     elif avg_minutes < 16:
         uncertainty_multiplier = 1.25
+    if minute_volatility >= 10:
+        uncertainty_multiplier *= 1.18
+    elif minute_volatility >= 7:
+        uncertainty_multiplier *= 1.11
+    elif minute_volatility >= 5:
+        uncertainty_multiplier *= 1.06
+    if blowout_probability >= 0.45:
+        uncertainty_multiplier *= 1.10
+    elif blowout_probability >= 0.30:
+        uncertainty_multiplier *= 1.06
     return base_sigma * uncertainty_multiplier
 
 
@@ -590,3 +613,105 @@ def _player_sample_quality(conn: sqlite3.Connection, player_id: int, game_id: in
         return 0, 0.0
     minutes = [float(row["minutes"]) for row in rows]
     return len(minutes), (sum(minutes) / len(minutes))
+
+
+def _player_minute_volatility(conn: sqlite3.Connection, player_id: int, game_id: int | None) -> float:
+    if game_id is None:
+        rows = conn.execute(
+            """
+            SELECT s.minutes
+            FROM player_game_stats s
+            WHERE s.player_id = ?
+            ORDER BY s.game_id DESC
+            LIMIT 10
+            """,
+            (player_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT s.minutes
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN games target ON target.id = ?
+            WHERE s.player_id = ?
+              AND (g.game_date < target.game_date OR (g.game_date = target.game_date AND s.game_id < target.id))
+            ORDER BY g.game_date DESC, s.game_id DESC
+            LIMIT 10
+            """,
+            (game_id, player_id),
+        ).fetchall()
+    if len(rows) < 2:
+        return 0.0
+    minutes = [float(row["minutes"]) for row in rows]
+    mean = sum(minutes) / len(minutes)
+    variance = sum((value - mean) ** 2 for value in minutes) / (len(minutes) - 1)
+    return math.sqrt(max(variance, 0.0))
+
+
+def _calibrated_probability(conn: sqlite3.Connection, raw_probability: float, market: str, model_version: str) -> float:
+    # Use empirical hit rates by market/probability bin with Bayesian shrinkage.
+    calibration = _market_calibration(conn, market, model_version)
+    if not calibration:
+        return _clamp(raw_probability, 0.05, 0.95)
+    bin_key = _probability_bin(raw_probability)
+    global_hit = float(calibration["global_hit"])
+    bucket = calibration["bins"].get(bin_key)
+    if not bucket:
+        return _clamp((0.65 * raw_probability) + (0.35 * global_hit), 0.05, 0.95)
+    bucket_hits = float(bucket["hits"])
+    bucket_total = float(bucket["total"])
+    posterior = (bucket_hits + (CALIBRATION_SHRINKAGE_K * global_hit)) / (bucket_total + CALIBRATION_SHRINKAGE_K)
+    calibrated = (0.50 * raw_probability) + (0.50 * posterior)
+    return _clamp(calibrated, 0.05, 0.95)
+
+
+def _market_calibration(conn: sqlite3.Connection, market: str, model_version: str) -> dict | None:
+    rows = conn.execute(
+        """
+        WITH ranked AS (
+          SELECT
+            pp.prop_line_id,
+            pp.model_probability,
+            pp.recommended_side,
+            pl.market,
+            ROW_NUMBER() OVER (
+              PARTITION BY pp.prop_line_id
+              ORDER BY pp.prediction_time DESC, pp.id DESC
+            ) AS rn
+          FROM prop_predictions pp
+          JOIN prop_lines pl ON pl.id = pp.prop_line_id
+          WHERE pp.model_version = ?
+        )
+        SELECT
+          r.model_probability,
+          r.recommended_side,
+          sp.winning_side
+        FROM ranked r
+        JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+        WHERE r.rn = 1
+          AND r.market = ?
+          AND r.model_probability IS NOT NULL
+        """,
+        (model_version, market),
+    ).fetchall()
+    if len(rows) < CALIBRATION_MIN_SAMPLES:
+        return None
+    hits = 0
+    bins: dict[str, dict[str, float]] = {}
+    for row in rows:
+        p = float(row["model_probability"])
+        win = 1.0 if str(row["recommended_side"]) == str(row["winning_side"]) else 0.0
+        hits += int(win)
+        key = _probability_bin(p)
+        bucket = bins.setdefault(key, {"hits": 0.0, "total": 0.0})
+        bucket["hits"] += win
+        bucket["total"] += 1.0
+    return {"global_hit": (hits / len(rows)), "bins": bins}
+
+
+def _probability_bin(probability: float) -> str:
+    bounded = _clamp(probability, 0.0, 0.9999)
+    lower = math.floor(bounded / CALIBRATION_BIN_WIDTH) * CALIBRATION_BIN_WIDTH
+    upper = lower + CALIBRATION_BIN_WIDTH
+    return f"{lower:.2f}-{upper:.2f}"

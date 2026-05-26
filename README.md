@@ -483,6 +483,14 @@ Core features include:
 - Sportsbook line
 - No-vig market probability from over/under prices
 
+Probability conversion and uncertainty controls:
+
+- Market-specific sigma floors to avoid overconfident tails on low-variance histories
+- Dynamic sigma multipliers based on sample depth, average minutes, minutes volatility, and spread-based blowout risk
+- Post-projection probability calibration by market (`points`, `rebounds`, `threes`, etc.) using settled prop outcomes
+- Bin-based empirical calibration with Bayesian shrinkage to market-level hit rate so thin bins do not overfit
+- Clamped calibrated probabilities before EV/edge ranking to reduce systematic overestimation
+
 Projection and value are intentionally separate. The model first estimates the stat outcome, then converts sportsbook odds into implied probability, edge, and expected value. More advanced ML models should be compared against this component model before replacing it.
 
 ## Model Training
