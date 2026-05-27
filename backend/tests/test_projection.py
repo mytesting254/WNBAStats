@@ -356,7 +356,33 @@ def test_rest_days_uses_game_date_boundary_not_utc_rollover() -> None:
             (team_id, 900001),
         )
         rest_days = main_module._rest_days_before_game(conn, team_id, "2026-05-24T19:00Z", "2026-05-24")
-    assert rest_days == 7
+    assert rest_days == 8
+
+
+def test_rest_days_counts_yesterday_as_one_day() -> None:
+    with connect() as conn:
+        team_id = int(conn.execute("SELECT id FROM teams WHERE abbreviation = 'NY'").fetchone()["id"])
+        opp_id = int(conn.execute("SELECT id FROM teams WHERE abbreviation = 'LV'").fetchone()["id"])
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, NULL, NULL)
+            """,
+            (900002, "2026-05-26", "2026-05-26T23:00:00Z", team_id, opp_id),
+        )
+        conn.execute(
+            """
+            INSERT INTO team_game_results (
+                team_id, game_id, is_home, points, opponent_points, possessions,
+                closing_spread, closing_total, ats_result, total_result
+            ) VALUES (?, ?, 1, 82, 79, 79.0, 0.0, 161.0, 'push', 'push')
+            """,
+            (team_id, 900002),
+        )
+        rest_days = main_module._rest_days_before_game(conn, team_id, "2026-05-27T23:00:00Z", "2026-05-27")
+    assert rest_days == 1
 
 
 def test_missing_espn_scores_payload_returns_past_scheduled_game() -> None:

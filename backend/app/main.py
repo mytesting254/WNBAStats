@@ -1347,7 +1347,7 @@ def _rest_days_before_game(conn, team_id: int, start_time: str, game_date: str |
             previous_dates.append(previous_date)
     if not previous_dates:
         return None
-    rest_days = max((current_date - max(previous_dates)).days - 1, 0)
+    rest_days = max((current_date - max(previous_dates)).days, 0)
     if rest_days > 14:
         return None
     return rest_days
