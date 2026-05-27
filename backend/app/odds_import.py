@@ -131,6 +131,43 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
         JOIN players p ON (
             (spl.provider_player_id IS NOT NULL AND p.id = spl.provider_player_id)
             OR lower(p.full_name) = lower(spl.player_name)
+            OR lower(
+                replace(
+                    replace(
+                        replace(
+                            replace(
+                                replace(p.full_name, ' ', ''),
+                                '''',
+                                ''
+                            ),
+                            '.',
+                            ''
+                        ),
+                        '-',
+                        ''
+                    ),
+                    '’',
+                    ''
+                )
+            ) = lower(
+                replace(
+                    replace(
+                        replace(
+                            replace(
+                                replace(spl.player_name, ' ', ''),
+                                '''',
+                                ''
+                            ),
+                            '.',
+                            ''
+                        ),
+                        '-',
+                        ''
+                    ),
+                    '’',
+                    ''
+                )
+            )
         )
         WHERE spl.game_id IS NOT NULL
           AND (

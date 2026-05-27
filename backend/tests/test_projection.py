@@ -772,6 +772,53 @@ def test_odds_sync_keeps_one_model_line_with_best_available_odds() -> None:
     assert rows[1]["line"] == 22.5
 
 
+def test_odds_sync_matches_player_name_without_punctuation() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute("DELETE FROM prop_predictions")
+        conn.execute("DELETE FROM prop_lines")
+        conn.execute(
+            """
+            INSERT INTO players (id, full_name, team_id, position, rotation_role)
+            VALUES (2001, 'A''ja Wilson', 10, 'F', 'star')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO player_game_stats (
+                player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers
+            ) VALUES (2001, 100, 30, 24, 10, 3, 1, 1, 2, 2)
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("covers", "covers-event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "draftkings", "DraftKings", "player_points", "points", "Aja Wilson", "over", 20.5, -110, captured_at),
+                ("covers", "covers-event", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "draftkings", "DraftKings", "player_points", "points", "Aja Wilson", "under", 20.5, -110, captured_at),
+            ],
+        )
+
+        synced = sync_prop_lines_from_sportsbook(conn)
+        row = conn.execute(
+            """
+            SELECT pl.*
+            FROM prop_lines pl
+            WHERE pl.player_id = 2001
+              AND pl.market = 'points'
+            """
+        ).fetchone()
+
+    assert synced == 1
+    assert row is not None
+    assert row["line"] == 20.5
+
+
 def test_odds_sync_preserves_settled_prop_lines() -> None:
     load_test_history()
     captured_at = datetime.now(timezone.utc).isoformat()

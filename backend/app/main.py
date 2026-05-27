@@ -30,7 +30,7 @@ from .training import latest_model_run, list_model_runs, run_walk_forward_traini
 app = FastAPI(title="WNBA Prop Value API")
 COMPLETED_GAME_GRACE_HOURS = 4
 LOCAL_TZ = timezone(timedelta(hours=-4))
-LOW_CONFIDENCE_EDGE_MIN = 0.12
+LOW_CONFIDENCE_EDGE_MIN = float(os.getenv("LOW_CONFIDENCE_EDGE_MIN", "0.05"))
 VALUE_BOARD_CACHE_NAME = "current_value_board.json"
 MATCHUPS_CACHE_NAME = "current_matchups.json"
 LINE_DISCREPANCIES_CACHE_NAME = "line_discrepancies.json"

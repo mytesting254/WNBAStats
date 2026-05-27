@@ -381,6 +381,53 @@ __pycache__/
 
 Keep provider JSON caches locally if you want to avoid repeated API calls. They are intentionally not committed.
 
+## Local SQLite Snapshot Workflow
+
+If you run local-first (`USE_LOCAL_DB=true`) and want cross-device continuity, use snapshots as explicit checkpoints.
+
+One-command startup (restore latest snapshot, then run dev servers):
+
+```bash
+./snapshot.sh
+```
+
+Create a snapshot:
+
+```bash
+./snapshot.sh create --label daily
+```
+
+Restore a snapshot:
+
+```bash
+./snapshot.sh restore wnba-daily-20260527T120000Z.sqlite
+```
+
+List snapshots:
+
+```bash
+./snapshot.sh list
+```
+
+Latest snapshot path:
+
+```bash
+./snapshot.sh latest
+```
+
+What the scripts do:
+
+- `snapshot.sh`: single command wrapper around create/restore/list/latest operations.
+- `snapshot.sh` with no args (or `auto`/`start`): restore latest snapshot if one exists, then run `dev.sh`.
+- `snapshot_create.py`: checkpoints WAL, copies the SQLite file, and writes a JSON manifest with `created_at`, `schema_version`, `app_commit_sha`, `row_counts`, `source_device`, and `sha256`.
+- `snapshot_restore.py`: validates checksum + schema version, creates a timestamped backup of the current DB, removes stale `-wal/-shm`, then atomically replaces the DB file.
+
+Safety:
+
+- Restore fails on schema mismatch unless `--force` is set.
+- Restore fails on checksum mismatch.
+- No auto-merge is performed between snapshots.
+
 ## BallDontLie historical matchup API
 
 The app can now fetch historical WNBA game results from BallDontLie.
