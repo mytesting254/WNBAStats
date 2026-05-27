@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import Response
 
 from backend.app import covers_import as covers_import_module
 from backend.app import rotowire_import as rotowire_import_module
@@ -217,6 +218,88 @@ def test_espn_history_settles_before_rebuilding_prop_lines(monkeypatch) -> None:
     assert result["settlements"] == {"settled": 1}
     assert result["predictions"] == 1
     assert result["selected_date"] is not None
+
+
+def test_model_runs_endpoint_uses_read_cache(monkeypatch) -> None:
+    cache_store: dict[str, object] = {}
+    calls = {"latest": 0, "runs": 0}
+
+    monkeypatch.setattr(main_module, "read_json_cache", lambda name: cache_store.get(name))
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: cache_store.__setitem__(name, payload))
+    monkeypatch.setattr(main_module, "delete_json_cache", lambda name: bool(cache_store.pop(name, None)))
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+
+    def fake_latest(_conn):
+        calls["latest"] += 1
+        return {"id": calls["latest"]}
+
+    def fake_runs(_conn):
+        calls["runs"] += 1
+        return [{"id": calls["runs"]}]
+
+    monkeypatch.setattr(main_module, "latest_model_run", fake_latest)
+    monkeypatch.setattr(main_module, "list_model_runs", fake_runs)
+
+    first = main_module.model_runs(Response())
+    second = main_module.model_runs(Response())
+
+    assert first == second
+    assert calls == {"latest": 1, "runs": 1}
+
+
+def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
+    cache_store: dict[str, object] = {}
+    calls = {"import": 0}
+
+    monkeypatch.setattr(main_module, "read_json_cache", lambda name: cache_store.get(name))
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: cache_store.__setitem__(name, payload))
+    monkeypatch.setattr(main_module, "delete_json_cache", lambda name: bool(cache_store.pop(name, None)))
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+
+    def fake_import(_conn, force_refresh=False):
+        calls["import"] += 1
+        cache_store[main_module.ROTOWIRE_RAW_CACHE_NAME] = {
+            "captured_at": "2026-05-27T00:00:00+00:00",
+            "rows": [{"team": "ny", "player_name": "A Player", "status": "gtd"}],
+        }
+        return {"from_cache": False}
+
+    monkeypatch.setattr(main_module, "import_rotowire_lineups", fake_import)
+
+    first = main_module.roster(Response())
+    second = main_module.roster(Response())
+
+    assert first == second
+    assert calls["import"] == 1
+    assert first[0]["team"] == "NY"
+    assert first[0]["status"] == "GTD"
+
+
+def test_read_cache_invalidation_clears_new_cache_keys(monkeypatch) -> None:
+    deleted: list[str] = []
+    monkeypatch.setattr(main_module, "delete_json_cache", lambda name: deleted.append(name) or True)
+
+    main_module._invalidate_read_caches()
+
+    assert main_module.MODEL_PERFORMANCE_CACHE_NAME in deleted
+    assert main_module.MODEL_RUNS_CACHE_NAME in deleted
+    assert main_module.ROSTER_CACHE_NAME in deleted
 
 
 def test_espn_history_accepts_batch_dates(monkeypatch) -> None:

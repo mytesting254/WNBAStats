@@ -34,10 +34,16 @@ LOW_CONFIDENCE_EDGE_MIN = 0.12
 VALUE_BOARD_CACHE_NAME = "current_value_board.json"
 MATCHUPS_CACHE_NAME = "current_matchups.json"
 LINE_DISCREPANCIES_CACHE_NAME = "line_discrepancies.json"
+MODEL_PERFORMANCE_CACHE_NAME = "model_performance.json"
+MODEL_RUNS_CACHE_NAME = "model_runs.json"
+ROSTER_CACHE_NAME = "roster.json"
 READ_CACHE_VERSION = 1
-VALUE_BOARD_TTL_SECONDS = 45
-LINE_DISCREPANCIES_TTL_SECONDS = 45
-MATCHUPS_TTL_SECONDS = 60
+VALUE_BOARD_TTL_SECONDS = int(os.getenv("VALUE_BOARD_TTL_SECONDS", "300"))
+LINE_DISCREPANCIES_TTL_SECONDS = int(os.getenv("LINE_DISCREPANCIES_TTL_SECONDS", "300"))
+MATCHUPS_TTL_SECONDS = int(os.getenv("MATCHUPS_TTL_SECONDS", "300"))
+MODEL_PERFORMANCE_TTL_SECONDS = int(os.getenv("MODEL_PERFORMANCE_TTL_SECONDS", "300"))
+MODEL_RUNS_TTL_SECONDS = int(os.getenv("MODEL_RUNS_TTL_SECONDS", "300"))
+ROSTER_TTL_SECONDS = int(os.getenv("ROSTER_TTL_SECONDS", "300"))
 RATE_LIMIT_MUTATION_CAPACITY = float(os.getenv("RATE_LIMIT_MUTATION_CAPACITY", "10"))
 RATE_LIMIT_MUTATION_REFILL_PER_SEC = float(os.getenv("RATE_LIMIT_MUTATION_REFILL_PER_SEC", "0.5"))
 RATE_LIMIT_REFRESH_CAPACITY = float(os.getenv("RATE_LIMIT_REFRESH_CAPACITY", "6"))
@@ -201,7 +207,14 @@ def _read_through_cache_with_meta(cache_name: str, ttl_seconds: int, compute: Ca
 
 
 def _invalidate_read_caches() -> None:
-    for name in (VALUE_BOARD_CACHE_NAME, LINE_DISCREPANCIES_CACHE_NAME, MATCHUPS_CACHE_NAME):
+    for name in (
+        VALUE_BOARD_CACHE_NAME,
+        LINE_DISCREPANCIES_CACHE_NAME,
+        MATCHUPS_CACHE_NAME,
+        MODEL_PERFORMANCE_CACHE_NAME,
+        MODEL_RUNS_CACHE_NAME,
+        ROSTER_CACHE_NAME,
+    ):
         delete_json_cache(name)
 
 
@@ -256,48 +269,57 @@ def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
 
 
 @app.get("/api/model-performance")
-def model_performance() -> dict:
-    with connect() as conn:
-        total_settled_row = conn.execute(
-            "SELECT COUNT(*) AS count FROM settled_props"
-        ).fetchone()
-        total_settled = int(total_settled_row["count"] or 0)
-        rows = conn.execute(
-            """
-            SELECT
-                pp.recommended_side,
-                pp.expected_value,
-                sp.winning_side
-            FROM prop_predictions pp
-            JOIN settled_props sp ON sp.prop_line_id = pp.prop_line_id
-            """
-        ).fetchall()
-    evaluated = len(rows)
-    if total_settled == 0:
+def model_performance(response: Response) -> dict:
+    def compute() -> dict:
+        with connect() as conn:
+            total_settled_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM settled_props"
+            ).fetchone()
+            total_settled = int(total_settled_row["count"] or 0)
+            rows = conn.execute(
+                """
+                SELECT
+                    pp.recommended_side,
+                    pp.expected_value,
+                    sp.winning_side
+                FROM prop_predictions pp
+                JOIN settled_props sp ON sp.prop_line_id = pp.prop_line_id
+                """
+            ).fetchall()
+        evaluated = len(rows)
+        if total_settled == 0:
+            return {
+                "settled": 0,
+                "wins": 0,
+                "win_rate": None,
+                "average_ev": None,
+                "message": "No settled props yet. Settle completed games to evaluate the model.",
+            }
+        if evaluated == 0:
+            return {
+                "settled": 0,
+                "wins": 0,
+                "win_rate": None,
+                "average_ev": None,
+                "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but there are no matching model predictions.",
+            }
+        wins = sum(1 for row in rows if row["recommended_side"] == row["winning_side"])
+        avg_ev = sum(float(row["expected_value"]) for row in rows) / evaluated
         return {
-            "settled": 0,
-            "wins": 0,
-            "win_rate": None,
-            "average_ev": None,
-            "message": "No settled props yet. Settle completed games to evaluate the model.",
+            "settled": evaluated,
+            "wins": wins,
+            "win_rate": round(wins / evaluated, 4),
+            "average_ev": round(avg_ev, 4),
+            "message": f"Evaluated {evaluated} settled model prediction{'s' if evaluated != 1 else ''}.",
         }
-    if evaluated == 0:
-        return {
-            "settled": 0,
-            "wins": 0,
-            "win_rate": None,
-            "average_ev": None,
-            "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but there are no matching model predictions.",
-        }
-    wins = sum(1 for row in rows if row["recommended_side"] == row["winning_side"])
-    avg_ev = sum(float(row["expected_value"]) for row in rows) / evaluated
-    return {
-        "settled": evaluated,
-        "wins": wins,
-        "win_rate": round(wins / evaluated, 4),
-        "average_ev": round(avg_ev, 4),
-        "message": f"Evaluated {evaluated} settled model prediction{'s' if evaluated != 1 else ''}.",
-    }
+
+    payload, status, compute_ms = _read_through_cache_with_meta(
+        MODEL_PERFORMANCE_CACHE_NAME,
+        MODEL_PERFORMANCE_TTL_SECONDS,
+        compute,
+    )
+    _set_observability_headers(response, MODEL_PERFORMANCE_CACHE_NAME, status, compute_ms)
+    return payload
 
 
 @app.get("/api/model-diagnostics")
@@ -759,43 +781,61 @@ def discrepancies(response: Response, game_id: int | None = None, force_refresh:
 
 
 @app.get("/api/roster")
-def roster() -> list[dict]:
-    with connect() as conn:
-        try:
-            import_rotowire_lineups(conn, force_refresh=False)
-        except Exception:
-            # Keep roster endpoint non-fatal so dashboard loads even if live Rotowire fetch fails.
-            pass
-    payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
-    rows = payload.get("rows", []) if isinstance(payload, dict) else []
-    captured_at = payload.get("captured_at") if isinstance(payload, dict) else None
-    normalized = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        team = str(row.get("team") or "").strip().upper()
-        player_name = str(row.get("player_name") or "").strip()
-        status = str(row.get("status") or "").strip().upper()
-        if not team or not player_name or not status:
-            continue
-        normalized.append(
-            {
-                "team": team,
-                "player_name": player_name,
-                "status": status,
-                "captured_at": captured_at,
-            }
-        )
-    return sorted(normalized, key=lambda item: (item["team"], item["player_name"]))
+def roster(response: Response) -> list[dict]:
+    def compute() -> list[dict]:
+        with connect() as conn:
+            try:
+                import_rotowire_lineups(conn, force_refresh=False)
+            except Exception:
+                # Keep roster endpoint non-fatal so dashboard loads even if live Rotowire fetch fails.
+                pass
+        payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
+        rows = payload.get("rows", []) if isinstance(payload, dict) else []
+        captured_at = payload.get("captured_at") if isinstance(payload, dict) else None
+        normalized = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            team = str(row.get("team") or "").strip().upper()
+            player_name = str(row.get("player_name") or "").strip()
+            status = str(row.get("status") or "").strip().upper()
+            if not team or not player_name or not status:
+                continue
+            normalized.append(
+                {
+                    "team": team,
+                    "player_name": player_name,
+                    "status": status,
+                    "captured_at": captured_at,
+                }
+            )
+        return sorted(normalized, key=lambda item: (item["team"], item["player_name"]))
+
+    payload, status, compute_ms = _read_through_cache_with_meta(
+        ROSTER_CACHE_NAME,
+        ROSTER_TTL_SECONDS,
+        compute,
+    )
+    _set_observability_headers(response, ROSTER_CACHE_NAME, status, compute_ms)
+    return payload
 
 
 @app.get("/api/models/runs")
-def model_runs() -> dict:
-    with connect() as conn:
-        return {
-            "latest": latest_model_run(conn),
-            "runs": list_model_runs(conn),
-        }
+def model_runs(response: Response) -> dict:
+    def compute() -> dict:
+        with connect() as conn:
+            return {
+                "latest": latest_model_run(conn),
+                "runs": list_model_runs(conn),
+            }
+
+    payload, status, compute_ms = _read_through_cache_with_meta(
+        MODEL_RUNS_CACHE_NAME,
+        MODEL_RUNS_TTL_SECONDS,
+        compute,
+    )
+    _set_observability_headers(response, MODEL_RUNS_CACHE_NAME, status, compute_ms)
+    return payload
 
 
 @app.get("/api/ball_dont_lie/history")
