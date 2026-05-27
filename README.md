@@ -1,6 +1,6 @@
 # WNBA Prop Value
 
-Pregame WNBA prop-value app backed by Turso Cloud.
+Pregame WNBA prop-value app with local SQLite runtime by default.
 
 The app is built around a provider-backed pregame workflow:
 
@@ -14,7 +14,7 @@ The app is built around a provider-backed pregame workflow:
 
 - React + TypeScript + Vite frontend
 - Python + FastAPI backend
-- Turso Cloud database
+- Local SQLite database (Turso optional via `USE_TURSO=true`)
 - JSON/JSONL cache layer
 - pytest and Python Playwright tests
 
@@ -390,6 +390,11 @@ One-command startup (restore latest snapshot, then run dev servers):
 ```bash
 ./snapshot.sh
 ```
+
+`./snapshot.sh` now does both automatically:
+
+- startup: restores the latest snapshot if available
+- shutdown: creates a new snapshot (`--label auto`) after `dev.sh` exits
 
 Create a snapshot:
 

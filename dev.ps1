@@ -43,10 +43,10 @@ function Resolve-FreePort {
     throw "No available port found from $PreferredPort to 65535."
 }
 
-# Enforce Turso in dev startup (ignore any stale shell-level local DB overrides).
-$env:USE_LOCAL_DB = "0"
-if (Test-Path Env:WNBA_DB_PATH) {
-    Remove-Item Env:WNBA_DB_PATH
+# Enforce local SQLite in dev startup by default.
+$env:USE_TURSO = "0"
+if (-not (Test-Path Env:WNBA_DB_PATH)) {
+    $env:WNBA_DB_PATH = (Join-Path $Root "data\\wnba.sqlite")
 }
 
 if (-not (Test-Path $BackendPython)) {

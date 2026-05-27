@@ -23,17 +23,17 @@ def get_turso_database_url() -> str | None:
 
 
 def using_turso() -> bool:
-    return os.getenv("USE_LOCAL_DB", "").strip().lower() not in {"1", "true", "yes"}
+    return os.getenv("USE_TURSO", "").strip().lower() in {"1", "true", "yes"}
 
 
 def connect() -> Any:
     if using_turso():
         database_url = get_turso_database_url()
         if not database_url:
-            raise RuntimeError("TURSO_DATABASE_URL is required. Set TURSO_DATABASE_URL and TURSO_AUTH_TOKEN in .env.")
+            raise RuntimeError("TURSO_DATABASE_URL is required when USE_TURSO=true.")
         auth_token = os.getenv("TURSO_AUTH_TOKEN")
         if not auth_token:
-            raise RuntimeError("TURSO_AUTH_TOKEN is required when TURSO_DATABASE_URL is set.")
+            raise RuntimeError("TURSO_AUTH_TOKEN is required when USE_TURSO=true.")
         return TursoHttpConnection(database_url, auth_token)
 
     db_path = get_db_path()

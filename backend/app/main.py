@@ -581,7 +581,8 @@ def import_espn_history(
                 status_code=503,
                 detail=(
                     "Unable to connect to Turso while refreshing ESPN history. "
-                    "Check TURSO_DATABASE_URL/TURSO_AUTH_TOKEN and network/DNS access, or set USE_LOCAL_DB=true."
+                    "Check TURSO_DATABASE_URL/TURSO_AUTH_TOKEN and network/DNS access, "
+                    "or disable Turso by setting USE_TURSO=false."
                 ),
             ) from exc
         raise

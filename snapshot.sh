@@ -42,7 +42,11 @@ case "$command" in
       echo "No snapshots found in $SNAPSHOT_DIR. Starting without restore."
     fi
     echo "Starting app..."
-    exec "$ROOT/dev.sh"
+    "$ROOT/dev.sh"
+    dev_exit=$?
+    echo "Creating shutdown snapshot..."
+    "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --label auto
+    exit "$dev_exit"
     ;;
   create)
     "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" "$@"
