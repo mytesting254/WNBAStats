@@ -16,7 +16,7 @@ The app is built around a provider-backed pregame workflow:
 - Python + FastAPI backend
 - Local SQLite database (Turso optional via `USE_TURSO=true`)
 - JSON/JSONL cache layer
-- pytest and Python Playwright tests
+- pytest tests
 
 ## GitHub Codespaces
 

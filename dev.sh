@@ -9,6 +9,7 @@ FRONTEND_PORT="${FRONTEND_PORT:-5184}"
 BACKEND_HOST="${BACKEND_HOST:-0.0.0.0}"
 FRONTEND_HOST="${FRONTEND_HOST:-0.0.0.0}"
 LOCAL_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
+SKIP_HEALTH_CHECK="${SKIP_HEALTH_CHECK:-0}"
 export BACKEND_PORT
 
 if [[ ! -x "$PYTHON" ]]; then
@@ -45,31 +46,37 @@ cd "$ROOT"
 "$PYTHON" -m uvicorn backend.app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
-echo "Waiting for backend health..."
-for _ in {1..60}; do
-  if "$PYTHON" - <<'PY' >/dev/null 2>&1
+if [[ "$SKIP_HEALTH_CHECK" == "1" ]]; then
+  echo "Skipping backend health check (SKIP_HEALTH_CHECK=1)."
+else
+  echo "Waiting for backend health..."
+  health_ok=0
+  for _ in {1..60}; do
+    if "$PYTHON" - <<'PY' >/dev/null 2>&1
 from urllib.request import urlopen
 import os
 urlopen(f"http://127.0.0.1:{os.environ['BACKEND_PORT']}/api/health", timeout=1).read()
 PY
-  then
-    break
-  fi
-  if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-    echo "Backend exited before becoming healthy."
-    exit 1
-  fi
-  sleep 1
-done
+    then
+      health_ok=1
+      break
+    fi
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+      echo "Backend exited before becoming healthy."
+      exit 1
+    fi
+    sleep 1
+  done
 
-if ! "$PYTHON" - <<'PY' >/dev/null 2>&1
-from urllib.request import urlopen
-import os
-urlopen(f"http://127.0.0.1:{os.environ['BACKEND_PORT']}/api/health", timeout=1).read()
-PY
-then
-  echo "Backend did not become healthy at http://127.0.0.1:$BACKEND_PORT/api/health."
-  exit 1
+  if [[ "$health_ok" != "1" ]]; then
+    if kill -0 "$BACKEND_PID" 2>/dev/null; then
+      echo "Backend health probe failed at http://127.0.0.1:$BACKEND_PORT/api/health, but backend process is running."
+      echo "Continuing startup. Set SKIP_HEALTH_CHECK=1 to suppress this check."
+    else
+      echo "Backend did not become healthy and is no longer running."
+      exit 1
+    fi
+  fi
 fi
 
 echo "Starting React frontend on http://$FRONTEND_HOST:$FRONTEND_PORT"

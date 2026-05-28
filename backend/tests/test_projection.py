@@ -1232,6 +1232,9 @@ def test_covers_records_parser_extracts_h2h_and_team_last_10() -> None:
 
 def test_covers_market_title_aliases() -> None:
     assert _market_from_title("3 Pointers Made") == "3-pointers_made"
+    assert _market_from_title("Total Steals") == "total_steals"
+    assert _market_from_title("Total Blocks") == "total_blocks"
+    assert _market_from_title("Total Steals + Blocks") == "total_steals_and_blocks"
     assert _market_from_title("Total Points + Rebounds") == "total_points_and_rebounds"
     assert _market_from_title("Total Points + Rebounds + Assists") == "total_points_rebounds_and_assists"
 

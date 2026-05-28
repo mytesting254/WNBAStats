@@ -36,6 +36,9 @@ MARKET_SLUGS = {
     "total_assists": "assists",
     "3-pointers_made": "threes",
     "total_points_rebounds_and_assists": "points_rebounds_assists",
+    "total_steals": "steals",
+    "total_blocks": "blocks",
+    "total_steals_and_blocks": "blocks_steals",
 }
 
 BOOK_NAMES = {
@@ -406,6 +409,10 @@ def _market_from_title(title: str) -> str | None:
         "total assists": "total_assists",
         "3-pointers made": "3-pointers_made",
         "3 pointers made": "3-pointers_made",
+        "total steals": "total_steals",
+        "total blocks": "total_blocks",
+        "total steals and blocks": "total_steals_and_blocks",
+        "total steals + blocks": "total_steals_and_blocks",
         "total points and rebounds": "total_points_and_rebounds",
         "total points + rebounds": "total_points_and_rebounds",
         "total points rebounds and assists": "total_points_rebounds_and_assists",
