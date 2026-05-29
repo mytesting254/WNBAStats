@@ -2623,10 +2623,19 @@ function TeamSummary({
       <div className="stat-strip">
         <MiniStat label="W-L" value={winsLosses} />
         <MiniStat label="Rest" value={restLabel(restDays)} />
-        <MiniStat label={context === "home" ? "Home Rec" : "Away Rec"} value={contextRecord} />
-        <MiniStat label={context === "home" ? "Home ATS" : "Away ATS"} value={contextAtsDerived ?? "N/A"} />
+        {context === "away" ? (
+          <>
+            <MiniStat label="ATS" value={ats} />
+            <MiniStat label="Away Rec" value={contextRecord} />
+          </>
+        ) : (
+          <>
+            <MiniStat label="Home Rec" value={contextRecord} />
+            <MiniStat label="ATS" value={ats} />
+          </>
+        )}
         <MiniStat label={context === "home" ? "Home O/U" : "Away O/U"} value={contextOuDerived ?? "N/A"} />
-        <MiniStat label="ATS" value={ats} />
+        <MiniStat label={context === "home" ? "Home ATS" : "Away ATS"} value={contextAtsDerived ?? "N/A"} />
         <MiniStat label="O/U" value={ou} />
       </div>
       <div className="points-row">
