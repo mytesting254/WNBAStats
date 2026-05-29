@@ -1632,6 +1632,7 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         total: totalLabel(game.total_result)
       }));
   const h2hOwner = h2hMatchupOwner(h2hRows, matchup);
+  const h2hSummary = summarizeCoversTeamRows(h2hRows);
   if (!h2hRows.length && !awayRows.length && !homeRows.length) {
     return null;
   }
@@ -1642,6 +1643,7 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         <span className="owner-label">Matchup Owner</span>
         <strong className="owner-team">{h2hOwner.owner}</strong>
         <span className="owner-record">{h2hOwner.record}</span>
+        <span className="owner-record">H2H O/U {h2hSummary?.ou ?? "N/A"}</span>
       </div>
       <div className="covers-records-list">
         <h4>H2H Last 10</h4>
@@ -1967,6 +1969,25 @@ function summarizeCoversContextAts(rows: CoversRecordRow[] | undefined, context:
     else if (atsToken === "P") pushes += 1;
   }
   return `${wins}-${losses}-${pushes}`;
+}
+
+function summarizeCoversContextOu(rows: CoversRecordRow[] | undefined, context: "home" | "away") {
+  if (!rows?.length) {
+    return null;
+  }
+  let overs = 0;
+  let unders = 0;
+  let pushes = 0;
+  for (const row of rows) {
+    if (row.location !== context) {
+      continue;
+    }
+    const ouToken = (row.total ?? "").trim().charAt(0).toLowerCase();
+    if (ouToken === "o") overs += 1;
+    else if (ouToken === "u") unders += 1;
+    else if (ouToken === "p") pushes += 1;
+  }
+  return `${overs}-${unders}-${pushes}`;
 }
 
 function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp[]; loading: boolean; error: string | null }) {
@@ -2585,6 +2606,7 @@ function TeamSummary({
   const ou = coversTeamRow?.ou ?? coversDerived?.ou ?? `${summary.overs}-${summary.unders}-${summary.total_pushes}`;
   const contextDerived = summarizeCoversContextRecord(coversLast10Rows, context);
   const contextAtsDerived = summarizeCoversContextAts(coversLast10Rows, context);
+  const contextOuDerived = summarizeCoversContextOu(coversLast10Rows, context);
   const contextRecord = coversTeamRow
     ? (context === "home" ? coversTeamRow.home : coversTeamRow.away)
     : contextDerived ?? (context === "home" ? `${summary.home_games}` : `${summary.away_games}`);
@@ -2603,6 +2625,7 @@ function TeamSummary({
         <MiniStat label="Rest" value={restLabel(restDays)} />
         <MiniStat label={context === "home" ? "Home Rec" : "Away Rec"} value={contextRecord} />
         <MiniStat label={context === "home" ? "Home ATS" : "Away ATS"} value={contextAtsDerived ?? "N/A"} />
+        <MiniStat label={context === "home" ? "Home O/U" : "Away O/U"} value={contextOuDerived ?? "N/A"} />
         <MiniStat label="ATS" value={ats} />
         <MiniStat label="O/U" value={ou} />
       </div>
