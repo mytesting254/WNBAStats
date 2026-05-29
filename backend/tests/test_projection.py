@@ -1591,3 +1591,123 @@ def test_value_board_filters_low_confidence_unless_edge_is_high() -> None:
     player_market = {(str(row["player"]), str(row["market"])) for row in rows}
     assert ("Breanna Stewart", "points") in player_market
     assert ("Sonia Citron", "assists") in player_market
+
+
+def test_gems_keep_one_direction_per_player_market_game(monkeypatch) -> None:
+    with connect() as conn:
+        monkeypatch.setattr(
+            main_module,
+            "_value_board_payload",
+            lambda _conn: [
+                {
+                    "id": 1,
+                    "game_id": 401856946,
+                    "player_id": 2566106,
+                    "player": "Dearica Hamby",
+                    "market": "threes",
+                    "line": 0.5,
+                    "recommended_side": "under",
+                    "edge": 0.11,
+                    "expected_value": 0.26,
+                    "confidence": "medium",
+                },
+                {
+                    "id": 2,
+                    "game_id": 401856946,
+                    "player_id": 2566106,
+                    "player": "Dearica Hamby",
+                    "market": "threes",
+                    "line": 1.5,
+                    "recommended_side": "over",
+                    "edge": 0.10,
+                    "expected_value": 0.24,
+                    "confidence": "medium",
+                },
+                {
+                    "id": 3,
+                    "game_id": 401856946,
+                    "player_id": 2566106,
+                    "player": "Dearica Hamby",
+                    "market": "threes",
+                    "line": 2.5,
+                    "recommended_side": "under",
+                    "edge": 0.08,
+                    "expected_value": 0.10,
+                    "confidence": "medium",
+                },
+            ],
+        )
+        monkeypatch.setattr(
+            main_module,
+            "line_discrepancies",
+            lambda _conn: [
+                {"game_id": 401856946, "player_name": "Dearica Hamby", "market": "threes", "side": "under", "line_gap": 1.0, "price_gap": 20},
+                {"game_id": 401856946, "player_name": "Dearica Hamby", "market": "threes", "side": "over", "line_gap": 1.0, "price_gap": 20},
+            ],
+        )
+        gems = main_module._build_current_gems(conn, "balanced")
+
+    assert gems
+    assert gems[0]["side"] == "under"
+    assert all(item["side"] == "under" for item in gems)
+
+
+def test_watchlist_snapshot_and_settlement_sync(monkeypatch) -> None:
+    load_test_history()
+    now = datetime.now(timezone.utc)
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (9920, '2026-05-23', ?, 10, 3, 'scheduled', 2, 2, -2.5, 161.5)
+            """,
+            ((now + timedelta(hours=3)).isoformat(),),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9921, 9920, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (now.isoformat(),),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9922, 9921, 'adaptive-context-v1', ?, 19.0, 'under', 0.57, 0.50, 0.06, 0.03, 'low', 'watch-test')
+            """,
+            (now.isoformat(),),
+        )
+
+        monkeypatch.setattr(main_module, "_is_active_game_time", lambda _start_time: True)
+        snap = main_module._snapshot_watchlist(conn, "2026-05-23")
+
+        assert snap["tracked"] >= 1
+        snapshot_id = int(snap["snapshot_id"])
+        item = conn.execute(
+            "SELECT * FROM watchlist_snapshot_items WHERE snapshot_id = ? AND prop_line_id = 9921",
+            (snapshot_id,),
+        ).fetchone()
+        assert item is not None
+        assert item["is_settled"] == 0
+
+        conn.execute(
+            """
+            INSERT INTO settled_props (
+                prop_line_id, actual_result, winning_side, margin, player_minutes, game_margin, team_margin,
+                team_spread, blowout_result, blowout_threshold, settled_at
+            ) VALUES (9921, 18.0, 'under', 2.5, 31.0, 4.0, 4.0, -2.5, 'no', 15.0, ?)
+            """,
+            (now.isoformat(),),
+        )
+        settled = main_module._sync_watchlist_snapshot_settlements(conn, snapshot_id=snapshot_id)
+        refreshed = conn.execute("SELECT * FROM watchlist_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+
+    assert settled["settled_count"] >= 1
+    assert settled["wins_count"] >= 1
+    assert refreshed["settled_count"] >= 1
+    assert refreshed["wins_count"] >= 1

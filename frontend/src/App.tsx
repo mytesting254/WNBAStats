@@ -9,6 +9,8 @@ import {
   fetchPerformance,
   fetchRoster,
   fetchValueBoard,
+  fetchWatchlistPerformance,
+  fetchWatchlist,
   importCoversOdds,
   createGemSnapshot,
   importEspnHistory,
@@ -26,7 +28,9 @@ import {
   type ModelRun,
   type RosterPlayer,
   type TeamLast10,
-  type ValueProp
+  type ValueProp,
+  type WatchlistPerformance,
+  type WatchlistProp
 } from "./api";
 
 const markets = [
@@ -60,18 +64,20 @@ const WNBA_TEAM_LOGOS: Record<string, string> = {
   PDX: "/team-logos/por.png"
 };
 
-type DashboardTab = "props" | "gems" | "matchups" | "parlays" | "discrepancies" | "roster" | "models" | "data";
+type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "discrepancies" | "roster" | "models" | "data";
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
 
 export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
+  const [watchlist, setWatchlist] = useState<WatchlistProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
   const [discrepancies, setDiscrepancies] = useState<LineDiscrepancy[]>([]);
   const [roster, setRoster] = useState<RosterPlayer[]>([]);
   const [performance, setPerformance] = useState<ModelPerformance | null>(null);
   const [gemPerformance, setGemPerformance] = useState<GemPerformance | null>(null);
+  const [watchlistPerformance, setWatchlistPerformance] = useState<WatchlistPerformance | null>(null);
   const [modelRuns, setModelRuns] = useState<ModelRun[]>([]);
   const [latestModelRun, setLatestModelRun] = useState<ModelRun | null>(null);
   const [training, setTraining] = useState(false);
@@ -100,6 +106,8 @@ export function App() {
       boardResult,
       performanceResult,
       gemPerformanceResult,
+      watchlistPerformanceResult,
+      watchlistResult,
       matchupsResult,
       discrepanciesResult,
       modelRunsResult,
@@ -108,6 +116,8 @@ export function App() {
       fetchValueBoard(),
       fetchPerformance(),
       fetchGemPerformance(),
+      fetchWatchlistPerformance(),
+      fetchWatchlist(),
       fetchMatchups(),
       fetchLineDiscrepancies(),
       fetchModelRuns(),
@@ -137,6 +147,20 @@ export function App() {
     } else {
       failures.push("gem performance");
       setGemPerformance(null);
+    }
+
+    if (watchlistPerformanceResult.status === "fulfilled") {
+      setWatchlistPerformance(watchlistPerformanceResult.value);
+    } else {
+      failures.push("watchlist performance");
+      setWatchlistPerformance(null);
+    }
+
+    if (watchlistResult.status === "fulfilled") {
+      setWatchlist(watchlistResult.value);
+    } else {
+      failures.push("watchlist");
+      setWatchlist([]);
     }
 
     if (matchupsResult.status === "fulfilled") {
@@ -399,6 +423,10 @@ export function App() {
           <TrendingUp size={18} />
           Gems
         </button>
+        <button className={activeTab === "watchlist" ? "active" : ""} onClick={() => setActiveTab("watchlist")}>
+          <ListChecks size={18} />
+          Watchlist
+        </button>
         <button className={activeTab === "matchups" ? "active" : ""} onClick={() => setActiveTab("matchups")}>
           <CalendarDays size={18} />
           Matchups
@@ -427,16 +455,19 @@ export function App() {
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Model props"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : props.length.toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Model props"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : props.length.toString()}
         />
         <Metric
-          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={performance?.settled.toString() ?? "0"} />
-        <Metric label="Win rate" value={performance?.win_rate == null ? "Pending" : formatPercent(performance.win_rate)} />
-        <Metric label="Gem hit rate" value={gemPerformance?.win_rate == null ? "Pending" : formatPercent(gemPerformance.win_rate)} />
+        <Metric
+          label="Win Rates"
+          className="metric-compact"
+          value={`Model ${performance?.win_rate == null ? "Pending" : formatPercent(performance.win_rate)} | Gems ${gemPerformance?.win_rate == null ? "Pending" : formatPercent(gemPerformance.win_rate)} | Watch ${watchlistPerformance?.win_rate == null ? "Pending" : formatPercent(watchlistPerformance.win_rate)}`}
+        />
       </section>
       {performance?.message ? <div className="summary-message">{performance.message}</div> : null}
 
@@ -456,6 +487,8 @@ export function App() {
         />
       ) : activeTab === "gems" ? (
         <GemsView gems={gems} matchups={matchups} loading={loading} error={error} />
+      ) : activeTab === "watchlist" ? (
+        <WatchlistView watchlist={watchlist} loading={loading} error={error} />
       ) : activeTab === "matchups" ? (
         <MatchupsView matchups={matchups} loading={loading} error={error} />
       ) : activeTab === "parlays" ? (
@@ -1483,18 +1516,26 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
           <ShieldCheck size={20} />
         </div>
         {error && <div className="error">{error}</div>}
-        <div className="game-tabs" aria-label="Game tabs">
-          {matchups.map((matchup) => (
+        <div className="game-tabs matchup-game-tabs" aria-label="Game tabs">
+          {matchups.map((matchup) => {
+            const winnerCode = normalizeTeamCode(matchup.winner_pick);
+            const homeCode = normalizeTeamCode(matchup.home_team);
+            const awayCode = normalizeTeamCode(matchup.away_team);
+            const winnerClass =
+              winnerCode === homeCode ? "winner-home" : winnerCode === awayCode ? "winner-away" : "winner-none";
+            const activeClass = selectedMatchup?.id === matchup.id ? "active" : "";
+            return (
             <button
               key={matchup.id}
-              className={selectedMatchup?.id === matchup.id ? "active" : ""}
+              className={`${activeClass} ${winnerClass}`.trim()}
               onClick={() => setSelectedGameId(matchup.id)}
             >
               <span>{formatDate(matchup.start_time)}</span>
               <strong>{matchup.away_team} at {matchup.home_team}</strong>
               <em>{availableLabel(matchup)}</em>
             </button>
-          ))}
+            );
+          })}
         </div>
         <div className="matchup-grid single">
           {selectedMatchup ? (
@@ -1621,7 +1662,7 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
                   <td>{row.date}</td>
                   <td>{coversRecordOpponent(row, "h2h", matchup)}</td>
                   <td>
-                    <RecordResultCell row={row} matchup={matchup} />
+                    <RecordResultCell row={row} matchup={matchup} winnerOnly />
                   </td>
                   <td>{row.ats}</td>
                   <td>{row.total}</td>
@@ -1655,7 +1696,7 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
                   <td>{row.date}</td>
                   <td>{coversRecordOpponent(row, "team", matchup)}</td>
                   <td>
-                    <RecordResultCell row={row} matchup={matchup} />
+                    <RecordResultCell row={row} matchup={matchup} teamCode={matchup.away_team} />
                   </td>
                   <td>{row.ats}</td>
                   <td>{row.total}</td>
@@ -1689,7 +1730,7 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
                   <td>{row.date}</td>
                   <td>{coversRecordOpponent(row, "team", matchup)}</td>
                   <td>
-                    <RecordResultCell row={row} matchup={matchup} />
+                    <RecordResultCell row={row} matchup={matchup} teamCode={matchup.home_team} />
                   </td>
                   <td>{row.ats}</td>
                   <td>{row.total}</td>
@@ -1758,9 +1799,19 @@ function coversRecordOpponent(row: CoversRecordRow, mode: "h2h" | "team", matchu
   );
 }
 
-function RecordTeamCell({ prefix, teamCode, logoUrl }: { prefix: string; teamCode: string; logoUrl?: string | null }) {
+function RecordTeamCell({
+  prefix,
+  teamCode,
+  logoUrl,
+  outcomeClass = "is-neutral",
+}: {
+  prefix: string;
+  teamCode: string;
+  logoUrl?: string | null;
+  outcomeClass?: "is-win" | "is-loss" | "is-neutral";
+}) {
   return (
-    <span className="record-team-cell">
+    <span className={`record-team-cell ${outcomeClass}`}>
       <span>{prefix}</span>
       <TeamLogo src={logoUrl} alt={`${teamCode} logo`} />
       <strong>{teamCode}</strong>
@@ -1768,12 +1819,23 @@ function RecordTeamCell({ prefix, teamCode, logoUrl }: { prefix: string; teamCod
   );
 }
 
-function RecordResultCell({ row, matchup }: { row: CoversRecordRow; matchup: Matchup }) {
+function RecordResultCell({
+  row,
+  matchup,
+  teamCode: _teamCode,
+  winnerOnly: _winnerOnly = false,
+}: {
+  row: CoversRecordRow;
+  matchup: Matchup;
+  teamCode?: string;
+  winnerOnly?: boolean;
+}) {
   const winnerLogo = logoForTeamCode(row.winner, matchup);
   return (
     <span className="record-team-cell">
       {winnerLogo ? <TeamLogo src={winnerLogo} alt={`${row.winner ?? "Winner"} logo`} /> : null}
-      <strong>{row.result ? `${row.result} ${row.score}` : row.score}</strong>
+      {!winnerLogo ? <strong>{row.result || row.winner || "Winner"}</strong> : null}
+      <span className="record-score-text">{row.score}</span>
     </span>
   );
 }
@@ -1886,6 +1948,187 @@ function summarizeCoversContextRecord(rows: CoversRecordRow[] | undefined, conte
     else if (result === "L") losses += 1;
   }
   return `${wins}-${losses}`;
+}
+
+function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp[]; loading: boolean; error: string | null }) {
+  const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
+  const [marketFilter, setMarketFilter] = useState("all");
+  const [sideFilter, setSideFilter] = useState("all");
+  const [confidenceFilter, setConfidenceFilter] = useState("all");
+  const [candidateSort, setCandidateSort] = useState<CandidateSortField>("expected_value");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+
+  const gameGroups = useMemo(() => {
+    const map = new Map<number, { gameId: number; startTime: string; away: string; home: string; count: number }>();
+    watchlist.forEach((item) => {
+      const current = map.get(item.game_id);
+      if (current) {
+        current.count += 1;
+        return;
+      }
+      map.set(item.game_id, {
+        gameId: item.game_id,
+        startTime: item.start_time,
+        away: item.away_team ?? "AWAY",
+        home: item.home_team ?? "HOME",
+        count: 1,
+      });
+    });
+    return Array.from(map.values()).sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
+  }, [watchlist]);
+
+  const selected = selectedGameId ?? gameGroups[0]?.gameId ?? null;
+  const filtered = watchlist
+    .filter((prop) => prop.game_id === selected)
+    .filter((prop) => (marketFilter === "all" || prop.market === marketFilter))
+    .filter((prop) => (sideFilter === "all" || prop.recommended_side === sideFilter))
+    .filter((prop) => (confidenceFilter === "all" || prop.confidence === confidenceFilter))
+    .sort((a, b) => compareCandidateProps(a, b, candidateSort, sortDirection));
+
+  return (
+    <section className="matchup-list">
+      <div className="board-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Watchlist</h2>
+            <p>{loading ? "Loading watchlist" : "Low-confidence value plays that missed Props and Gems filters"}</p>
+          </div>
+          <ListChecks size={20} />
+        </div>
+        {error && <div className="error">{error}</div>}
+        <div className="game-tabs" aria-label="Watchlist matchup tabs">
+          {gameGroups.map((group) => (
+            <button
+              key={group.gameId}
+              className={selected === group.gameId ? "active" : ""}
+              onClick={() => setSelectedGameId(group.gameId)}
+            >
+              <span>{formatDate(group.startTime)}</span>
+              <strong>{group.away} at {group.home}</strong>
+              <em>{group.count} watch items</em>
+            </button>
+          ))}
+        </div>
+        <div className="parlay-tab-content">
+          <div className="matchup-props">
+            <div className="candidate-filters" aria-label="Watchlist filters">
+              <div className="segmented candidate-tabs" aria-label="Market filter">
+                {markets.map((item) => (
+                  <button
+                    key={`watch-market-${item.id}`}
+                    className={marketFilter === item.id ? "active" : ""}
+                    type="button"
+                    onClick={() => setMarketFilter(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              <div className="segmented candidate-tabs" aria-label="Side filter">
+                {["all", "over", "under"].map((side) => (
+                  <button
+                    key={`watch-side-${side}`}
+                    className={sideFilter === side ? "active" : ""}
+                    type="button"
+                    onClick={() => setSideFilter(side)}
+                  >
+                    {side === "all" ? "Both" : side.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              <select
+                aria-label="Confidence filter"
+                value={confidenceFilter}
+                onChange={(event) => setConfidenceFilter(event.target.value)}
+              >
+                <option value="all">All confidence</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+              <select
+                aria-label="Sort watchlist"
+                value={candidateSort}
+                onChange={(event) => setCandidateSort(event.target.value as CandidateSortField)}
+              >
+                <option value="expected_value">Sort by EV</option>
+                <option value="edge">Sort by edge</option>
+                <option value="projection">Sort by projection</option>
+                <option value="line">Sort by line</option>
+                <option value="projection_gap">Sort by proj gap</option>
+                <option value="model_probability">Sort by model probability</option>
+                <option value="confidence">Sort by confidence</option>
+                <option value="player">Sort by player</option>
+              </select>
+              <div className="segmented candidate-tabs compact-tabs" aria-label="Sort direction">
+                <button
+                  className={sortDirection === "desc" ? "active" : ""}
+                  type="button"
+                  onClick={() => setSortDirection("desc")}
+                >
+                  Desc
+                </button>
+                <button
+                  className={sortDirection === "asc" ? "active" : ""}
+                  type="button"
+                  onClick={() => setSortDirection("asc")}
+                >
+                  Asc
+                </button>
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Player</th>
+                    <th>Market</th>
+                    <th>Side</th>
+                    <th>Line</th>
+                    <th>Proj</th>
+                    <th>Diff</th>
+                    <th>Model Prob</th>
+                    <th>Edge</th>
+                    <th>EV</th>
+                    <th>Confidence</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filtered.map((prop) => (
+                    <tr key={`watch-${prop.id}`}>
+                      <td>
+                        <div className="player-cell">
+                          <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
+                          <div>
+                            <strong>{prop.player}</strong>
+                            <span>{prop.team} | {prop.sportsbook}</span>
+                          </div>
+                        </div>
+                      </td>
+                      <td>{marketLabel(prop.market)}</td>
+                      <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
+                      <td>{prop.line.toFixed(1)}</td>
+                      <td>{prop.projection.toFixed(1)}</td>
+                      <td>{formatSigned(prop.projection - prop.line)}</td>
+                      <td>{formatPercent(prop.model_probability)}</td>
+                      <td>{formatPercent(prop.edge)}</td>
+                      <td>{formatPercent(prop.expected_value)}</td>
+                      <td>{prop.confidence}</td>
+                    </tr>
+                  ))}
+                  {!filtered.length && (
+                    <tr>
+                      <td colSpan={10}>No watchlist props match current filters.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[]; loading: boolean; error: string | null }) {
@@ -2372,9 +2615,9 @@ function MiniStat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({ label, value, className = "" }: { label: string; value: string; className?: string }) {
   return (
-    <div className="metric">
+    <div className={`metric ${className}`.trim()}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -2446,6 +2689,7 @@ function tabTitle(tab: DashboardTab) {
   const titles = {
     props: "Prop Value Board",
     gems: "Gem Finder",
+    watchlist: "Prop Watchlist",
     matchups: "Pregame Matchups",
     parlays: "Parlay Candidates",
     discrepancies: "Line Discrepancies",

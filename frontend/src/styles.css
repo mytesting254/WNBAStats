@@ -506,6 +506,26 @@ tbody tr.selected {
   background: #e8f1fb;
 }
 
+.matchup-game-tabs button.winner-home {
+  border-color: #8dd3b3;
+  background: #effcf6;
+}
+
+.matchup-game-tabs button.winner-away {
+  border-color: #f0c587;
+  background: #fff8ed;
+}
+
+.matchup-game-tabs button.winner-home.active {
+  border-color: #1f9d6a;
+  background: #ddf7eb;
+}
+
+.matchup-game-tabs button.winner-away.active {
+  border-color: #d08826;
+  background: #fff0da;
+}
+
 .game-tabs span,
 .game-tabs strong,
 .game-tabs em {
@@ -893,6 +913,12 @@ tbody tr.selected {
   overflow-wrap: anywhere;
 }
 
+.metric.metric-compact strong {
+  font-size: 14px;
+  line-height: 1.25;
+  font-weight: 700;
+}
+
 .points-row,
 .recent-list div {
   display: flex;
@@ -1009,10 +1035,23 @@ tbody tr.selected {
   font-size: 12px;
 }
 
+.record-team-cell .record-score-text {
+  color: #1b1f29;
+  font-weight: 700;
+}
+
 .record-team-cell > strong {
   color: #1b1f29;
   font-size: 13px;
   font-weight: 800;
+}
+
+.record-team-cell.is-win > strong {
+  color: #027a48;
+}
+
+.record-team-cell.is-loss > strong {
+  color: #b42318;
 }
 
 .record-team-cell .team-logo {

@@ -451,6 +451,65 @@ def init_db() -> None:
             ON gem_snapshot_items(prop_line_id)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist_snapshots (
+                id INTEGER PRIMARY KEY,
+                snapshot_date TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                min_ev REAL NOT NULL,
+                min_edge REAL NOT NULL,
+                max_edge REAL NOT NULL,
+                item_count INTEGER NOT NULL DEFAULT 0,
+                settled_count INTEGER NOT NULL DEFAULT 0,
+                wins_count INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS watchlist_snapshot_items (
+                id INTEGER PRIMARY KEY,
+                snapshot_id INTEGER NOT NULL,
+                prop_line_id INTEGER NOT NULL,
+                prediction_id INTEGER NOT NULL,
+                game_id INTEGER NOT NULL,
+                player_id INTEGER NOT NULL,
+                market TEXT NOT NULL,
+                side TEXT NOT NULL,
+                line REAL NOT NULL,
+                edge REAL NOT NULL,
+                expected_value REAL NOT NULL,
+                confidence TEXT NOT NULL,
+                is_settled INTEGER NOT NULL DEFAULT 0,
+                winning_side TEXT,
+                settled_at TEXT,
+                FOREIGN KEY (snapshot_id) REFERENCES watchlist_snapshots(id),
+                FOREIGN KEY (prop_line_id) REFERENCES prop_lines(id),
+                FOREIGN KEY (prediction_id) REFERENCES prop_predictions(id),
+                UNIQUE(snapshot_id, prop_line_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_watchlist_snapshots_date
+            ON watchlist_snapshots(snapshot_date)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_watchlist_snapshot_items_snapshot
+            ON watchlist_snapshot_items(snapshot_id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_watchlist_snapshot_items_prop_line
+            ON watchlist_snapshot_items(prop_line_id)
+            """
+        )
 
 
 SCHEMA = """
@@ -678,6 +737,41 @@ CREATE TABLE IF NOT EXISTS gem_snapshot_items (
     UNIQUE(snapshot_id, prop_line_id)
 );
 
+CREATE TABLE IF NOT EXISTS watchlist_snapshots (
+    id INTEGER PRIMARY KEY,
+    snapshot_date TEXT NOT NULL UNIQUE,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    min_ev REAL NOT NULL,
+    min_edge REAL NOT NULL,
+    max_edge REAL NOT NULL,
+    item_count INTEGER NOT NULL DEFAULT 0,
+    settled_count INTEGER NOT NULL DEFAULT 0,
+    wins_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS watchlist_snapshot_items (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL,
+    prop_line_id INTEGER NOT NULL,
+    prediction_id INTEGER NOT NULL,
+    game_id INTEGER NOT NULL,
+    player_id INTEGER NOT NULL,
+    market TEXT NOT NULL,
+    side TEXT NOT NULL,
+    line REAL NOT NULL,
+    edge REAL NOT NULL,
+    expected_value REAL NOT NULL,
+    confidence TEXT NOT NULL,
+    is_settled INTEGER NOT NULL DEFAULT 0,
+    winning_side TEXT,
+    settled_at TEXT,
+    FOREIGN KEY (snapshot_id) REFERENCES watchlist_snapshots(id),
+    FOREIGN KEY (prop_line_id) REFERENCES prop_lines(id),
+    FOREIGN KEY (prediction_id) REFERENCES prop_predictions(id),
+    UNIQUE(snapshot_id, prop_line_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_player_stats_player_game ON player_game_stats(player_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_team_results_team_game ON team_game_results(team_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_prop_lines_game ON prop_lines(game_id);
@@ -688,4 +782,7 @@ CREATE INDEX IF NOT EXISTS idx_model_runs_started ON model_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_gem_snapshots_date_preset ON gem_snapshots(snapshot_date, preset);
 CREATE INDEX IF NOT EXISTS idx_gem_snapshot_items_snapshot ON gem_snapshot_items(snapshot_id);
 CREATE INDEX IF NOT EXISTS idx_gem_snapshot_items_prop_line ON gem_snapshot_items(prop_line_id);
+CREATE INDEX IF NOT EXISTS idx_watchlist_snapshots_date ON watchlist_snapshots(snapshot_date);
+CREATE INDEX IF NOT EXISTS idx_watchlist_snapshot_items_snapshot ON watchlist_snapshot_items(snapshot_id);
+CREATE INDEX IF NOT EXISTS idx_watchlist_snapshot_items_prop_line ON watchlist_snapshot_items(prop_line_id);
 """

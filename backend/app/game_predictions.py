@@ -352,7 +352,7 @@ def _team_injury_impact(conn: sqlite3.Connection, team_id: int) -> dict[str, flo
 
     # Translate contribution penalty into a bounded offense multiplier.
     # About 18 contribution points roughly maps to ~8% team offense impact.
-    penalty_ratio = _clamp(penalty_points / 18.0, 0.0, 0.18)
+    penalty_ratio = _clamp((penalty_points / 18.0) * 0.08, 0.0, 0.18)
     return {
         "factor": _clamp(1.0 - penalty_ratio, 0.82, 1.0),
         "missing_key_players": missing_key_players,

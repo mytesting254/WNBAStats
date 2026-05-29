@@ -235,6 +235,7 @@ def recalculate() -> dict[str, int]:
         projections = rebuild_predictions(conn)
         settlements = settle_completed_props(conn)
         game_settlements = settle_completed_game_predictions(conn)
+        _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     _invalidate_read_caches()
     return {"predictions": len(projections), "settled": settlements["settled"], "game_settled": game_settlements["settled"]}
 
@@ -245,8 +246,9 @@ def settle_props() -> dict:
         props = settle_completed_props(conn)
         games = settle_completed_game_predictions(conn)
         gems = _sync_gem_snapshot_settlements(conn)
+        watchlist = _sync_watchlist_snapshot_settlements(conn)
     _invalidate_read_caches()
-    return {"props": props, "games": games, "gems": gems}
+    return {"props": props, "games": games, "gems": gems, "watchlist": watchlist}
 
 
 @app.get("/api/value-board", dependencies=[Depends(_protect_force_refresh)])
@@ -269,6 +271,12 @@ def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
     )
     _set_observability_headers(response, VALUE_BOARD_CACHE_NAME, status, compute_ms)
     return payload
+
+
+@app.get("/api/watchlist")
+def watchlist() -> list[dict]:
+    with connect() as conn:
+        return _watchlist_payload(conn)
 
 
 @app.get("/api/model-performance")
@@ -421,6 +429,189 @@ def gem_performance() -> dict:
     }
 
 
+@app.get("/api/watchlist-performance")
+def watchlist_performance() -> dict:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+              SELECT
+                pp.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY pp.prop_line_id
+                  ORDER BY pp.prediction_time DESC, pp.id DESC
+                ) AS rn
+              FROM prop_predictions pp
+            )
+            SELECT
+              r.recommended_side,
+              r.edge,
+              r.expected_value,
+              r.confidence,
+              sp.winning_side
+            FROM ranked r
+            JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+            WHERE r.rn = 1
+            """
+        ).fetchall()
+    qualified = []
+    for row in rows:
+        edge = float(row["edge"] or 0.0)
+        ev = float(row["expected_value"] or 0.0)
+        confidence = str(row["confidence"] or "").strip().lower()
+        if confidence == "low" and ev >= 0.02 and abs(edge) >= 0.05 and abs(edge) < LOW_CONFIDENCE_EDGE_MIN:
+            qualified.append(row)
+    if not qualified:
+        return {
+            "qualified": 0,
+            "wins": 0,
+            "win_rate": None,
+            "message": "No settled watchlist-qualified picks yet.",
+        }
+    wins = sum(1 for row in qualified if str(row["recommended_side"]) == str(row["winning_side"]))
+    return {
+        "qualified": len(qualified),
+        "wins": wins,
+        "win_rate": round(wins / len(qualified), 4),
+        "message": f"Evaluated {len(qualified)} settled watchlist-qualified picks.",
+    }
+
+
+def _snapshot_watchlist(conn, snapshot_date: str) -> dict:
+    now = datetime.now(timezone.utc).isoformat()
+    min_ev = 0.02
+    min_edge = 0.05
+    max_edge = LOW_CONFIDENCE_EDGE_MIN
+    rows = _watchlist_payload(conn, min_ev=min_ev, min_edge=min_edge)
+    existing = conn.execute(
+        "SELECT id FROM watchlist_snapshots WHERE snapshot_date = ?",
+        (snapshot_date,),
+    ).fetchone()
+    if existing:
+        snapshot_id = int(existing["id"])
+        conn.execute(
+            """
+            UPDATE watchlist_snapshots
+            SET updated_at = ?, min_ev = ?, min_edge = ?, max_edge = ?, item_count = ?
+            WHERE id = ?
+            """,
+            (now, min_ev, min_edge, max_edge, len(rows), snapshot_id),
+        )
+        conn.execute("DELETE FROM watchlist_snapshot_items WHERE snapshot_id = ?", (snapshot_id,))
+    else:
+        cursor = conn.execute(
+            """
+            INSERT INTO watchlist_snapshots (
+                snapshot_date, created_at, updated_at, min_ev, min_edge, max_edge, item_count, settled_count, wins_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """,
+            (snapshot_date, now, now, min_ev, min_edge, max_edge, len(rows)),
+        )
+        snapshot_id = int(cursor.lastrowid)
+    if rows:
+        conn.executemany(
+            """
+            INSERT INTO watchlist_snapshot_items (
+                snapshot_id, prop_line_id, prediction_id, game_id, player_id, market, side, line, edge, expected_value, confidence
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    snapshot_id,
+                    int(row["prop_line_id"]),
+                    int(row["id"]),
+                    int(row["game_id"]),
+                    int(row["player_id"]),
+                    str(row["market"]),
+                    str(row["recommended_side"]),
+                    float(row["line"]),
+                    float(row["edge"]),
+                    float(row["expected_value"]),
+                    str(row["confidence"]),
+                )
+                for row in rows
+            ],
+        )
+    conn.commit()
+    settlement = _sync_watchlist_snapshot_settlements(conn, snapshot_id=snapshot_id)
+    return {
+        "snapshot_id": snapshot_id,
+        "snapshot_date": snapshot_date,
+        "tracked": len(rows),
+        "settled": settlement["settled_count"],
+        "wins": settlement["wins_count"],
+    }
+
+
+def _sync_watchlist_snapshot_settlements(conn, snapshot_id: int | None = None) -> dict:
+    params: tuple = ()
+    filter_clause = ""
+    if snapshot_id is not None:
+        filter_clause = "WHERE i.snapshot_id = ?"
+        params = (snapshot_id,)
+    rows = conn.execute(
+        f"""
+        SELECT i.id, i.snapshot_id, i.side, sp.winning_side, sp.settled_at
+        FROM watchlist_snapshot_items i
+        LEFT JOIN settled_props sp ON sp.prop_line_id = i.prop_line_id
+        {filter_clause}
+        """,
+        params,
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        is_settled = 1 if row["winning_side"] is not None else 0
+        conn.execute(
+            """
+            UPDATE watchlist_snapshot_items
+            SET is_settled = ?, winning_side = ?, settled_at = ?
+            WHERE id = ?
+            """,
+            (is_settled, row["winning_side"], row["settled_at"], int(row["id"])),
+        )
+        updated += 1
+    target_params: tuple = () if snapshot_id is None else (snapshot_id,)
+    target_clause = "" if snapshot_id is None else "WHERE s.id = ?"
+    summary_rows = conn.execute(
+        f"""
+        SELECT
+            s.id AS snapshot_id,
+            COUNT(i.id) AS item_count,
+            SUM(CASE WHEN i.is_settled = 1 THEN 1 ELSE 0 END) AS settled_count,
+            SUM(CASE WHEN i.is_settled = 1 AND i.side = i.winning_side THEN 1 ELSE 0 END) AS wins_count
+        FROM watchlist_snapshots s
+        LEFT JOIN watchlist_snapshot_items i ON i.snapshot_id = s.id
+        {target_clause}
+        GROUP BY s.id
+        """,
+        target_params,
+    ).fetchall()
+    for row in summary_rows:
+        conn.execute(
+            """
+            UPDATE watchlist_snapshots
+            SET item_count = ?, settled_count = ?, wins_count = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(row["item_count"] or 0),
+                int(row["settled_count"] or 0),
+                int(row["wins_count"] or 0),
+                datetime.now(timezone.utc).isoformat(),
+                int(row["snapshot_id"]),
+            ),
+        )
+    conn.commit()
+    settled_count = sum(int(row["settled_count"] or 0) for row in summary_rows)
+    wins_count = sum(int(row["wins_count"] or 0) for row in summary_rows)
+    return {
+        "updated_items": updated,
+        "snapshots": len(summary_rows),
+        "settled_count": settled_count,
+        "wins_count": wins_count,
+    }
+
+
 def _gem_preset_config(preset: str) -> dict:
     key = (preset or "balanced").strip().lower()
     mapping = {
@@ -478,7 +669,18 @@ def _build_current_gems(conn, preset: str) -> list[dict]:
             }
         )
     scored.sort(key=lambda item: (item["gem_score"], item["expected_value"], item["edge"]), reverse=True)
-    return scored[: int(cfg["limit"])]
+    filtered: list[dict] = []
+    primary_side_by_key: dict[tuple[int, int, str], str] = {}
+    for item in scored:
+        key = (int(item["game_id"]), int(item["player_id"]), str(item["market"]))
+        primary_side = primary_side_by_key.get(key)
+        if primary_side is None:
+            primary_side_by_key[key] = str(item["side"])
+            filtered.append(item)
+            continue
+        if str(item["side"]) == primary_side:
+            filtered.append(item)
+    return filtered[: int(cfg["limit"])]
 
 
 def _snapshot_gems(conn, snapshot_date: str, preset: str) -> dict:
@@ -576,7 +778,7 @@ def _sync_gem_snapshot_settlements(conn, snapshot_id: int | None = None) -> dict
         )
         updated += 1
     target_params: tuple = () if snapshot_id is None else (snapshot_id,)
-    target_clause = "" if snapshot_id is None else "WHERE id = ?"
+    target_clause = "" if snapshot_id is None else "WHERE s.id = ?"
     summary_rows = conn.execute(
         f"""
         SELECT
@@ -635,6 +837,24 @@ def sync_gem_settlements() -> dict:
     return payload
 
 
+@app.post("/api/watchlist/snapshot", dependencies=[Depends(_protect_mutation)])
+def create_watchlist_snapshot(snapshot_date: str | None = None) -> dict:
+    date_text = snapshot_date or datetime.now(LOCAL_TZ).date().isoformat()
+    _parse_iso_date(date_text, "snapshot_date")
+    with connect() as conn:
+        payload = _snapshot_watchlist(conn, date_text)
+    _invalidate_read_caches()
+    return payload
+
+
+@app.post("/api/watchlist/sync-settlements", dependencies=[Depends(_protect_mutation)])
+def sync_watchlist_settlements() -> dict:
+    with connect() as conn:
+        payload = _sync_watchlist_snapshot_settlements(conn)
+    _invalidate_read_caches()
+    return payload
+
+
 @app.get("/api/gems/snapshots")
 def list_gem_snapshots(limit: int = 30, preset: str | None = None) -> list[dict]:
     max_limit = max(1, min(limit, 180))
@@ -676,6 +896,118 @@ def list_gem_snapshots(limit: int = 30, preset: str | None = None) -> list[dict]
             }
         )
     return payload
+
+
+@app.get("/api/watchlist/snapshots")
+def list_watchlist_snapshots(limit: int = 30) -> list[dict]:
+    max_limit = max(1, min(limit, 180))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                id, snapshot_date, created_at, updated_at,
+                min_ev, min_edge, max_edge,
+                item_count, settled_count, wins_count
+            FROM watchlist_snapshots
+            ORDER BY snapshot_date DESC, id DESC
+            LIMIT ?
+            """,
+            (max_limit,),
+        ).fetchall()
+    payload = []
+    for row in rows:
+        settled = int(row["settled_count"] or 0)
+        wins = int(row["wins_count"] or 0)
+        payload.append(
+            {
+                **dict(row),
+                "win_rate": round(wins / settled, 4) if settled else None,
+            }
+        )
+    return payload
+
+
+@app.get("/api/performance/timeline")
+def performance_timeline(limit: int = 30) -> list[dict]:
+    max_limit = max(1, min(limit, 180))
+    with connect() as conn:
+        model_rows = conn.execute(
+            """
+            WITH ranked AS (
+              SELECT
+                pp.prop_line_id,
+                pp.recommended_side,
+                DATE(sp.settled_at) AS settled_date,
+                sp.winning_side,
+                ROW_NUMBER() OVER (
+                  PARTITION BY pp.prop_line_id
+                  ORDER BY pp.prediction_time DESC, pp.id DESC
+                ) AS rn
+              FROM prop_predictions pp
+              JOIN settled_props sp ON sp.prop_line_id = pp.prop_line_id
+            )
+            SELECT
+              settled_date,
+              COUNT(*) AS n,
+              SUM(CASE WHEN lower(recommended_side) = lower(winning_side) THEN 1 ELSE 0 END) AS wins
+            FROM ranked
+            WHERE rn = 1
+            GROUP BY settled_date
+            ORDER BY settled_date DESC
+            LIMIT ?
+            """,
+            (max_limit,),
+        ).fetchall()
+        gem_rows = conn.execute(
+            """
+            SELECT
+              snapshot_date,
+              settled_count,
+              wins_count
+            FROM gem_snapshots
+            ORDER BY snapshot_date DESC
+            LIMIT ?
+            """,
+            (max_limit,),
+        ).fetchall()
+        watch_rows = conn.execute(
+            """
+            SELECT
+              snapshot_date,
+              settled_count,
+              wins_count
+            FROM watchlist_snapshots
+            ORDER BY snapshot_date DESC
+            LIMIT ?
+            """,
+            (max_limit,),
+        ).fetchall()
+    by_date: dict[str, dict] = {}
+    for row in model_rows:
+        d = str(row["settled_date"])
+        item = by_date.setdefault(d, {"date": d})
+        n = int(row["n"] or 0)
+        wins = int(row["wins"] or 0)
+        item["model_settled"] = n
+        item["model_wins"] = wins
+        item["model_win_rate"] = round(wins / n, 4) if n else None
+    for row in gem_rows:
+        d = str(row["snapshot_date"])
+        item = by_date.setdefault(d, {"date": d})
+        n = int(row["settled_count"] or 0)
+        wins = int(row["wins_count"] or 0)
+        item["gem_settled"] = n
+        item["gem_wins"] = wins
+        item["gem_win_rate"] = round(wins / n, 4) if n else None
+    for row in watch_rows:
+        d = str(row["snapshot_date"])
+        item = by_date.setdefault(d, {"date": d})
+        n = int(row["settled_count"] or 0)
+        wins = int(row["wins_count"] or 0)
+        item["watchlist_settled"] = n
+        item["watchlist_wins"] = wins
+        item["watchlist_win_rate"] = round(wins / n, 4) if n else None
+    return sorted(by_date.values(), key=lambda item: item["date"], reverse=True)[:max_limit]
 
 
 @app.get("/api/model-diagnostics")
@@ -930,8 +1262,10 @@ def import_espn_history(
             settlements = settle_completed_props(conn)
             game_settlements = settle_completed_game_predictions(conn)
             gem_settlements = _sync_gem_snapshot_settlements(conn)
+            watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
             synced_props = sync_prop_lines_from_sportsbook(conn)
             projections = rebuild_predictions(conn)
+            watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     except Exception as exc:
         message = str(exc)
         if "turso" in message.lower() or "httpsconnectionpool" in message.lower() or "nameresolutionerror" in message.lower():
@@ -956,6 +1290,8 @@ def import_espn_history(
         "settlements": settlements,
         "game_settlements": game_settlements,
         "gem_settlements": gem_settlements,
+        "watchlist_settlements": watchlist_settlements,
+        "watchlist_snapshot": watchlist_snapshot,
         "predictions": len(projections),
         "missing_only": missing_only,
         "source": "espn",
@@ -1637,6 +1973,93 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         payload.append(item)
     return payload
+
+
+def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit: int = 60) -> list[dict]:
+    rows = conn.execute(
+        """
+        WITH ranked_props AS (
+            SELECT
+                pp.id,
+                pp.prop_line_id,
+                pl.game_id,
+                p.full_name AS player,
+                p.id AS player_id,
+                t.abbreviation AS team,
+                t.logo_url AS team_logo_url,
+                away.abbreviation AS away_team,
+                home.abbreviation AS home_team,
+                pl.sportsbook,
+                pl.market,
+                pl.line,
+                pl.over_odds,
+                pl.under_odds,
+                pp.projection,
+                pp.recommended_side,
+                pp.model_probability,
+                pp.implied_probability,
+                pp.edge,
+                pp.expected_value,
+                pp.confidence,
+                pp.reason,
+                pp.prediction_time,
+                g.start_time,
+                CASE
+                    WHEN p.team_id = g.home_team_id THEN g.rest_days_home
+                    ELSE g.rest_days_away
+                END AS rest_days,
+                p.rotation_role,
+                g.spread_home,
+                g.game_total,
+                CASE
+                    WHEN p.team_id = g.home_team_id THEN g.spread_home
+                    ELSE -g.spread_home
+                END AS team_spread,
+                ROW_NUMBER() OVER (
+                    PARTITION BY pl.game_id, pl.player_id, pl.market, pl.line
+                    ORDER BY
+                        CASE
+                            WHEN pp.recommended_side = 'over' THEN pl.over_odds
+                            ELSE pl.under_odds
+                        END DESC,
+                        pp.expected_value DESC,
+                        pp.id DESC
+                ) AS rn
+            FROM prop_predictions pp
+            JOIN prop_lines pl ON pl.id = pp.prop_line_id
+            JOIN players p ON p.id = pl.player_id
+            JOIN teams t ON t.id = p.team_id
+            JOIN games g ON g.id = pl.game_id
+            JOIN teams away ON away.id = g.away_team_id
+            JOIN teams home ON home.id = g.home_team_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE g.status = 'scheduled'
+              AND sp.id IS NULL
+        )
+        SELECT *
+        FROM ranked_props
+        WHERE rn = 1
+          AND lower(confidence) = 'low'
+          AND expected_value >= ?
+          AND ABS(edge) >= ?
+        ORDER BY expected_value DESC, edge DESC
+        """,
+        (float(min_ev), float(min_edge)),
+    ).fetchall()
+    value_board_prediction_ids = {int(item["id"]) for item in _value_board_payload(conn)}
+    gem_prop_line_ids = {int(item["prop_line_id"]) for item in _build_current_gems(conn, "balanced")}
+    payload = []
+    for row in rows:
+        item = dict(row)
+        if int(item["id"]) in value_board_prediction_ids:
+            continue
+        if int(item["prop_line_id"]) in gem_prop_line_ids:
+            continue
+        if not _is_active_game_time(item["start_time"]):
+            continue
+        item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
+        payload.append(item)
+    return payload[: max(1, min(int(limit), 200))]
 
 
 def _include_value_board_pick(item: dict) -> bool:

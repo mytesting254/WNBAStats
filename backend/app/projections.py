@@ -209,6 +209,10 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
     # especially in markets where overs have underperformed historically.
     if projection > line and (projection - line) < _over_min_margin(prop["market"]):
         edge_over -= 0.03
+    # Conservative under gating for points/rebounds: avoid medium-quality
+    # under calls that have historically been less stable.
+    if projection < line and (line - projection) < _under_min_margin(prop["market"]):
+        edge_under -= 0.03
 
     if edge_over >= edge_under:
         side = "over"
@@ -234,7 +238,16 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
         implied_probability=round(implied, 4),
         edge=round(edge, 4),
         expected_value=round(ev, 4),
-        confidence=_confidence(edge, abs(projection - line), stat_sigma, prop["player_id"], prop["game_id"], conn),
+        confidence=_confidence(
+            edge,
+            abs(projection - line),
+            stat_sigma,
+            prop["player_id"],
+            prop["game_id"],
+            conn,
+            prop["market"],
+            side,
+        ),
         reason=reason,
     )
 
@@ -689,18 +702,28 @@ def _confidence(
     player_id: int,
     game_id: int,
     conn: sqlite3.Connection,
+    market: str,
+    side: str,
 ) -> str:
     sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
     normalized_margin = stat_margin / max(sigma, 1.0)
+    base_confidence = "low"
     if sample_count < 7 or avg_minutes < 16:
         if edge >= 0.10 and normalized_margin >= 1.15:
-            return "medium"
+            base_confidence = "medium"
+    elif edge >= 0.08 and normalized_margin >= 1.0:
+        base_confidence = "high"
+    elif edge >= 0.04 and normalized_margin >= 0.65:
+        base_confidence = "medium"
+
+    if (
+        base_confidence == "medium"
+        and str(side).lower() == "under"
+        and str(market).lower() in {"points", "rebounds"}
+        and (edge < 0.10 or normalized_margin < 1.0)
+    ):
         return "low"
-    if edge >= 0.08 and normalized_margin >= 1.0:
-        return "high"
-    if edge >= 0.04 and normalized_margin >= 0.65:
-        return "medium"
-    return "low"
+    return base_confidence
 
 
 def _player_sample_quality(conn: sqlite3.Connection, player_id: int, game_id: int | None) -> tuple[int, float]:
@@ -801,6 +824,14 @@ def _over_min_margin(market: str) -> float:
         "points_rebounds_assists": 1.10,
     }
     return by_market.get(market, 0.50)
+
+
+def _under_min_margin(market: str) -> float:
+    by_market = {
+        "points": 0.90,
+        "rebounds": 0.90,
+    }
+    return by_market.get(market, 0.0)
 
 
 def _market_calibration(

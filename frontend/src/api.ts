@@ -29,6 +29,12 @@ export type ValueProp = {
   blowout_minutes_impact: number;
 };
 
+export type WatchlistProp = ValueProp & {
+  prop_line_id: number;
+  away_team?: string;
+  home_team?: string;
+};
+
 export type SportsbookProp = {
   id: number;
   game_id: number | null;
@@ -93,6 +99,13 @@ export type GemPerformance = {
   current_open_conservative?: number;
   current_open_balanced?: number;
   current_open_aggressive?: number;
+  message?: string;
+};
+
+export type WatchlistPerformance = {
+  qualified: number;
+  wins: number;
+  win_rate: number | null;
   message?: string;
 };
 
@@ -245,6 +258,14 @@ export async function fetchValueBoard(): Promise<ValueProp[]> {
   return response.json();
 }
 
+export async function fetchWatchlist(): Promise<WatchlistProp[]> {
+  const response = await fetch("/api/watchlist");
+  if (!response.ok) {
+    throw new Error("Failed to load watchlist");
+  }
+  return response.json();
+}
+
 export async function fetchPerformance(): Promise<ModelPerformance> {
   const response = await fetch("/api/model-performance");
   if (!response.ok) {
@@ -257,6 +278,14 @@ export async function fetchGemPerformance(): Promise<GemPerformance> {
   const response = await fetch("/api/gem-performance");
   if (!response.ok) {
     throw new Error("Failed to load gem performance");
+  }
+  return response.json();
+}
+
+export async function fetchWatchlistPerformance(): Promise<WatchlistPerformance> {
+  const response = await fetch("/api/watchlist-performance");
+  if (!response.ok) {
+    throw new Error("Failed to load watchlist performance");
   }
   return response.json();
 }

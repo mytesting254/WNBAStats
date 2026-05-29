@@ -61,6 +61,9 @@ GET  /api/model-diagnostics
 GET  /api/model-loss-breakdown
 GET  /api/models/runs
 GET  /api/matchups
+GET  /api/watchlist
+GET  /api/watchlist-performance
+GET  /api/watchlist/snapshots
 GET  /api/gem-performance
 GET  /api/gems/snapshots
 POST /api/odds/import
@@ -72,6 +75,8 @@ POST /api/history/recompute-ats
 POST /api/history/backfill-covers-lines
 POST /api/gems/snapshot
 POST /api/gems/sync-settlements
+POST /api/watchlist/snapshot
+POST /api/watchlist/sync-settlements
 POST /api/models/train
 POST /api/recalculate
 POST /api/settle-props
@@ -110,13 +115,14 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 
 - `Pregame Props`: ranked prop predictions with projection, line, model probability, edge, EV, and confidence.
 - `Gems`: ranked high-value props combining model edge, EV, and discrepancy signals with conservative/balanced/aggressive presets, optional matchup grouping, and per-matchup caps.
+- `Watchlist`: low-confidence props that still clear minimum EV/edge thresholds for optional tracking.
 - `Matchups`: active upcoming games only, with projected score, spread edge, total edge, and confidence.
 - `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Completed games are removed from this view after the stale-game grace window.
 - `Discrepancies`: cross-book line gaps and price gaps.
 - `Roster`: Rotowire lineup statuses grouped by team, with a manual `Refresh Roster` pull.
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history.
 - `Data`: operational controls for saved/fresh odds import, completed-game import, projection rebuilds, and reloads.
-- `Data`: includes `Track Gems Daily`, which snapshots the current gems set for daily tracking.
+- `Data`: includes `Track Gems Daily` and `Track Watchlist Daily` snapshot controls.
 
 `Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
 
@@ -150,6 +156,38 @@ Manual settlement sync (if needed):
 
 ```text
 POST /api/gems/sync-settlements
+```
+
+## Watchlist Daily Tracking
+
+Watchlist picks are low-confidence model calls that still meet minimum quality gates and are tracked separately from the main board.
+
+Current watchlist gates:
+
+- `confidence = low`
+- `EV >= 0.02`
+- `0.05 <= |edge| < LOW_CONFIDENCE_EDGE_MIN` (`LOW_CONFIDENCE_EDGE_MIN` defaults to `0.08`)
+
+Daily snapshot endpoint:
+
+```text
+POST /api/watchlist/snapshot
+POST /api/watchlist/snapshot?snapshot_date=2026-05-29
+```
+
+Snapshot history:
+
+```text
+GET /api/watchlist/snapshots
+GET /api/watchlist/snapshots?limit=30
+```
+
+Watchlist settlements are synced from `settled_props` and run automatically on prop settle and ESPN history imports.
+
+Manual settlement sync (if needed):
+
+```text
+POST /api/watchlist/sync-settlements
 ```
 
 ## Pregame Odds Import
