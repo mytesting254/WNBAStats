@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 
 from .bootstrap import ensure_team, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
+from .game_resolver import resolve_or_create_game
 from .odds_import import sync_prop_lines_from_sportsbook
 
 
@@ -635,41 +636,15 @@ def _match_or_create_local_game(
     spread_home: float | None = None,
     game_total: float | None = None,
 ) -> int | None:
-    home_team_id = ensure_team(conn, home_team)
-    away_team_id = ensure_team(conn, away_team)
-    if not home_team_id or not away_team_id:
-        return None
-
-    rows = conn.execute(
-        """
-        SELECT id, start_time
-        FROM games
-        WHERE home_team_id = ?
-          AND away_team_id = ?
-        ORDER BY start_time
-        """,
-        (home_team_id, away_team_id),
-    ).fetchall()
-    parsed_start = _parse_game_start(commence_time)
-    for row in rows:
-        existing_start = _parse_game_start(str(row["start_time"]))
-        if parsed_start and existing_start and abs((existing_start - parsed_start).total_seconds()) < 60:
-            game_id = int(row["id"])
-            _update_game_market(conn, game_id, spread_home, game_total)
-            return game_id
-
-    cursor = conn.execute(
-        """
-        INSERT INTO games (
-            game_date, start_time, home_team_id, away_team_id, status,
-            rest_days_home, rest_days_away, spread_home, game_total
-        ) VALUES (?, ?, ?, ?, 'scheduled', 2, 2, NULL, NULL)
-        """,
-        (game_date, commence_time, home_team_id, away_team_id),
+    return resolve_or_create_game(
+        conn,
+        home_team=home_team,
+        away_team=away_team,
+        start_time=commence_time,
+        game_date=game_date,
+        spread_home=spread_home,
+        game_total=game_total,
     )
-    game_id = int(cursor.lastrowid)
-    _update_game_market(conn, game_id, spread_home, game_total)
-    return game_id
 
 
 def _update_covers_game_markets(conn: sqlite3.Connection, game_payload: list[dict]) -> None:

@@ -30,13 +30,15 @@ from .training import latest_model_run, list_model_runs, run_walk_forward_traini
 app = FastAPI(title="WNBA Prop Value API")
 COMPLETED_GAME_GRACE_HOURS = 4
 LOCAL_TZ = timezone(timedelta(hours=-4))
-LOW_CONFIDENCE_EDGE_MIN = float(os.getenv("LOW_CONFIDENCE_EDGE_MIN", "0.05"))
+LOW_CONFIDENCE_EDGE_MIN = float(os.getenv("LOW_CONFIDENCE_EDGE_MIN", "0.08"))
 VALUE_BOARD_CACHE_NAME = "current_value_board.json"
 MATCHUPS_CACHE_NAME = "current_matchups.json"
 LINE_DISCREPANCIES_CACHE_NAME = "line_discrepancies.json"
 MODEL_PERFORMANCE_CACHE_NAME = "model_performance.json"
 MODEL_RUNS_CACHE_NAME = "model_runs.json"
 ROSTER_CACHE_NAME = "roster.json"
+GEM_MIN_EV = float(os.getenv("GEM_MIN_EV", "0.02"))
+GEM_MIN_EDGE = float(os.getenv("GEM_MIN_EDGE", "0.05"))
 READ_CACHE_VERSION = 1
 VALUE_BOARD_TTL_SECONDS = int(os.getenv("VALUE_BOARD_TTL_SECONDS", "300"))
 LINE_DISCREPANCIES_TTL_SECONDS = int(os.getenv("LINE_DISCREPANCIES_TTL_SECONDS", "300"))
@@ -242,8 +244,9 @@ def settle_props() -> dict:
     with connect() as conn:
         props = settle_completed_props(conn)
         games = settle_completed_game_predictions(conn)
+        gems = _sync_gem_snapshot_settlements(conn)
     _invalidate_read_caches()
-    return {"props": props, "games": games}
+    return {"props": props, "games": games, "gems": gems}
 
 
 @app.get("/api/value-board", dependencies=[Depends(_protect_force_refresh)])
@@ -269,7 +272,7 @@ def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
 
 
 @app.get("/api/model-performance")
-def model_performance(response: Response) -> dict:
+def model_performance(response=None) -> dict:
     def compute() -> dict:
         with connect() as conn:
             total_settled_row = conn.execute(
@@ -313,12 +316,365 @@ def model_performance(response: Response) -> dict:
             "message": f"Evaluated {evaluated} settled model prediction{'s' if evaluated != 1 else ''}.",
         }
 
+    if response is None:
+        return compute()
     payload, status, compute_ms = _read_through_cache_with_meta(
         MODEL_PERFORMANCE_CACHE_NAME,
         MODEL_PERFORMANCE_TTL_SECONDS,
         compute,
     )
-    _set_observability_headers(response, MODEL_PERFORMANCE_CACHE_NAME, status, compute_ms)
+    if response is not None:
+        _set_observability_headers(response, MODEL_PERFORMANCE_CACHE_NAME, status, compute_ms)
+    return payload
+
+
+@app.get("/api/gem-performance")
+def gem_performance() -> dict:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            WITH ranked AS (
+              SELECT
+                pp.*,
+                ROW_NUMBER() OVER (
+                  PARTITION BY pp.prop_line_id
+                  ORDER BY pp.prediction_time DESC, pp.id DESC
+                ) AS rn
+              FROM prop_predictions pp
+            )
+            SELECT
+              r.recommended_side,
+              r.edge,
+              r.expected_value,
+              r.confidence,
+              sp.winning_side
+            FROM ranked r
+            JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+            WHERE r.rn = 1
+            """
+        ).fetchall()
+        open_rows = conn.execute(
+            """
+            WITH ranked AS (
+              SELECT
+                pp.*,
+                pl.game_id,
+                ROW_NUMBER() OVER (
+                  PARTITION BY pp.prop_line_id
+                  ORDER BY pp.prediction_time DESC, pp.id DESC
+                ) AS rn
+              FROM prop_predictions pp
+              JOIN prop_lines pl ON pl.id = pp.prop_line_id
+            )
+            SELECT
+              r.edge,
+              r.expected_value,
+              r.confidence
+            FROM ranked r
+            JOIN games g ON g.id = r.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+            WHERE r.rn = 1
+              AND g.status = 'scheduled'
+              AND sp.id IS NULL
+            """
+        ).fetchall()
+    qualified = []
+    for row in rows:
+        edge = float(row["edge"] or 0.0)
+        ev = float(row["expected_value"] or 0.0)
+        confidence = str(row["confidence"] or "").strip().lower()
+        # Settled historical baseline (current metric)
+        if ev >= GEM_MIN_EV and abs(edge) >= GEM_MIN_EDGE and confidence != "low":
+            qualified.append(row)
+    current_open_conservative = 0
+    current_open_balanced = 0
+    current_open_aggressive = 0
+    for row in open_rows:
+        edge = float(row["edge"] or 0.0)
+        ev = float(row["expected_value"] or 0.0)
+        confidence = str(row["confidence"] or "").strip().lower()
+        if ev >= 0.03 and abs(edge) >= 0.08 and confidence != "low":
+            current_open_conservative += 1
+        if ev >= 0.02 and abs(edge) >= 0.05:
+            current_open_balanced += 1
+        if ev >= 0.01 and abs(edge) >= 0.035:
+            current_open_aggressive += 1
+    if not qualified:
+        return {
+            "qualified": 0,
+            "wins": 0,
+            "win_rate": None,
+            "current_open_conservative": current_open_conservative,
+            "current_open_balanced": current_open_balanced,
+            "current_open_aggressive": current_open_aggressive,
+            "message": "No settled picks currently meet gem thresholds.",
+        }
+    wins = sum(1 for row in qualified if str(row["recommended_side"]) == str(row["winning_side"]))
+    return {
+        "qualified": len(qualified),
+        "wins": wins,
+        "win_rate": round(wins / len(qualified), 4),
+        "current_open_conservative": current_open_conservative,
+        "current_open_balanced": current_open_balanced,
+        "current_open_aggressive": current_open_aggressive,
+        "message": f"Evaluated {len(qualified)} settled gem-qualified picks.",
+    }
+
+
+def _gem_preset_config(preset: str) -> dict:
+    key = (preset or "balanced").strip().lower()
+    mapping = {
+        "conservative": {"min_ev": 0.03, "min_edge": 0.08, "min_score": 0.55, "allow_low": False, "limit": 20},
+        "balanced": {"min_ev": 0.02, "min_edge": 0.05, "min_score": 0.42, "allow_low": True, "limit": 24},
+        "aggressive": {"min_ev": 0.01, "min_edge": 0.035, "min_score": 0.32, "allow_low": True, "limit": 30},
+    }
+    if key not in mapping:
+        raise HTTPException(status_code=400, detail=f"Invalid preset: {preset}")
+    return {"name": key, **mapping[key]}
+
+
+def _build_current_gems(conn, preset: str) -> list[dict]:
+    cfg = _gem_preset_config(preset)
+    props = _value_board_payload(conn)
+    discrepancies = line_discrepancies(conn)
+    disc_map = {}
+    for item in discrepancies:
+        disc_map[(item["game_id"], item["player_name"], item["market"], item["side"])] = item
+    scored = []
+    for prop in props:
+        disc = disc_map.get((prop["game_id"], prop["player"], prop["market"], prop["recommended_side"]))
+        if not disc:
+            continue
+        edge = float(prop["edge"] or 0.0)
+        ev = float(prop["expected_value"] or 0.0)
+        confidence = str(prop["confidence"] or "").strip().lower()
+        line_gap = float(disc.get("line_gap") or 0.0)
+        price_gap = float(disc.get("price_gap") or 0.0)
+        edge_norm = min(abs(edge) / 0.12, 1.0)
+        ev_norm = min(max(ev, 0.0) / 0.08, 1.0)
+        disc_norm = min(((line_gap * 0.7) + (price_gap / 40.0)) / 2.0, 1.0)
+        confidence_factor = 1.0 if confidence == "high" else (0.92 if confidence == "medium" else 0.82)
+        gem_score = round(((0.45 * edge_norm) + (0.35 * ev_norm) + (0.20 * disc_norm)) * confidence_factor, 3)
+        if ev < cfg["min_ev"] or abs(edge) < cfg["min_edge"]:
+            continue
+        if (not cfg["allow_low"]) and confidence == "low":
+            continue
+        if gem_score < cfg["min_score"]:
+            continue
+        scored.append(
+            {
+                "prop_line_id": int(prop["id"]),
+                "game_id": int(prop["game_id"]),
+                "player_id": int(prop["player_id"]),
+                "market": str(prop["market"]),
+                "side": str(prop["recommended_side"]),
+                "line": float(prop["line"]),
+                "edge": edge,
+                "expected_value": ev,
+                "confidence": confidence,
+                "line_gap": line_gap,
+                "price_gap": int(price_gap),
+                "gem_score": gem_score,
+            }
+        )
+    scored.sort(key=lambda item: (item["gem_score"], item["expected_value"], item["edge"]), reverse=True)
+    return scored[: int(cfg["limit"])]
+
+
+def _snapshot_gems(conn, snapshot_date: str, preset: str) -> dict:
+    cfg = _gem_preset_config(preset)
+    now = datetime.now(timezone.utc).isoformat()
+    rows = _build_current_gems(conn, cfg["name"])
+    existing = conn.execute(
+        "SELECT id FROM gem_snapshots WHERE snapshot_date = ? AND preset = ?",
+        (snapshot_date, cfg["name"]),
+    ).fetchone()
+    if existing:
+        snapshot_id = int(existing["id"])
+        conn.execute(
+            """
+            UPDATE gem_snapshots
+            SET updated_at = ?, min_ev = ?, min_edge = ?, allow_low = ?, min_score = ?, item_count = ?
+            WHERE id = ?
+            """,
+            (now, float(cfg["min_ev"]), float(cfg["min_edge"]), 1 if cfg["allow_low"] else 0, float(cfg["min_score"]), len(rows), snapshot_id),
+        )
+        conn.execute("DELETE FROM gem_snapshot_items WHERE snapshot_id = ?", (snapshot_id,))
+    else:
+        cursor = conn.execute(
+            """
+            INSERT INTO gem_snapshots (
+                snapshot_date, preset, created_at, updated_at, min_ev, min_edge, allow_low, min_score, item_count, settled_count, wins_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0)
+            """,
+            (snapshot_date, cfg["name"], now, now, float(cfg["min_ev"]), float(cfg["min_edge"]), 1 if cfg["allow_low"] else 0, float(cfg["min_score"]), len(rows)),
+        )
+        snapshot_id = int(cursor.lastrowid)
+    if rows:
+        conn.executemany(
+            """
+            INSERT INTO gem_snapshot_items (
+                snapshot_id, prop_line_id, game_id, player_id, market, side, line, edge, expected_value, confidence, line_gap, price_gap, gem_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    snapshot_id,
+                    row["prop_line_id"],
+                    row["game_id"],
+                    row["player_id"],
+                    row["market"],
+                    row["side"],
+                    row["line"],
+                    row["edge"],
+                    row["expected_value"],
+                    row["confidence"],
+                    row["line_gap"],
+                    row["price_gap"],
+                    row["gem_score"],
+                )
+                for row in rows
+            ],
+        )
+    conn.commit()
+    settlement = _sync_gem_snapshot_settlements(conn, snapshot_id=snapshot_id)
+    return {
+        "snapshot_id": snapshot_id,
+        "snapshot_date": snapshot_date,
+        "preset": cfg["name"],
+        "tracked": len(rows),
+        "settled": settlement["settled_count"],
+        "wins": settlement["wins_count"],
+    }
+
+
+def _sync_gem_snapshot_settlements(conn, snapshot_id: int | None = None) -> dict:
+    params: tuple = ()
+    filter_clause = ""
+    if snapshot_id is not None:
+        filter_clause = "WHERE i.snapshot_id = ?"
+        params = (snapshot_id,)
+    rows = conn.execute(
+        f"""
+        SELECT i.id, i.snapshot_id, i.side, sp.winning_side, sp.settled_at
+        FROM gem_snapshot_items i
+        LEFT JOIN settled_props sp ON sp.prop_line_id = i.prop_line_id
+        {filter_clause}
+        """,
+        params,
+    ).fetchall()
+    updated = 0
+    for row in rows:
+        is_settled = 1 if row["winning_side"] is not None else 0
+        conn.execute(
+            """
+            UPDATE gem_snapshot_items
+            SET is_settled = ?, winning_side = ?, settled_at = ?
+            WHERE id = ?
+            """,
+            (is_settled, row["winning_side"], row["settled_at"], int(row["id"])),
+        )
+        updated += 1
+    target_params: tuple = () if snapshot_id is None else (snapshot_id,)
+    target_clause = "" if snapshot_id is None else "WHERE id = ?"
+    summary_rows = conn.execute(
+        f"""
+        SELECT
+            s.id AS snapshot_id,
+            COUNT(i.id) AS item_count,
+            SUM(CASE WHEN i.is_settled = 1 THEN 1 ELSE 0 END) AS settled_count,
+            SUM(CASE WHEN i.is_settled = 1 AND i.side = i.winning_side THEN 1 ELSE 0 END) AS wins_count
+        FROM gem_snapshots s
+        LEFT JOIN gem_snapshot_items i ON i.snapshot_id = s.id
+        {target_clause}
+        GROUP BY s.id
+        """,
+        target_params,
+    ).fetchall()
+    for row in summary_rows:
+        conn.execute(
+            """
+            UPDATE gem_snapshots
+            SET item_count = ?, settled_count = ?, wins_count = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (
+                int(row["item_count"] or 0),
+                int(row["settled_count"] or 0),
+                int(row["wins_count"] or 0),
+                datetime.now(timezone.utc).isoformat(),
+                int(row["snapshot_id"]),
+            ),
+        )
+    conn.commit()
+    settled_count = sum(int(row["settled_count"] or 0) for row in summary_rows)
+    wins_count = sum(int(row["wins_count"] or 0) for row in summary_rows)
+    return {
+        "updated_items": updated,
+        "snapshots": len(summary_rows),
+        "settled_count": settled_count,
+        "wins_count": wins_count,
+    }
+
+
+@app.post("/api/gems/snapshot", dependencies=[Depends(_protect_mutation)])
+def create_gem_snapshot(snapshot_date: str | None = None, preset: str = "balanced") -> dict:
+    date_text = snapshot_date or datetime.now(LOCAL_TZ).date().isoformat()
+    _parse_iso_date(date_text, "snapshot_date")
+    with connect() as conn:
+        payload = _snapshot_gems(conn, date_text, preset)
+    _invalidate_read_caches()
+    return payload
+
+
+@app.post("/api/gems/sync-settlements", dependencies=[Depends(_protect_mutation)])
+def sync_gem_settlements() -> dict:
+    with connect() as conn:
+        payload = _sync_gem_snapshot_settlements(conn)
+    _invalidate_read_caches()
+    return payload
+
+
+@app.get("/api/gems/snapshots")
+def list_gem_snapshots(limit: int = 30, preset: str | None = None) -> list[dict]:
+    max_limit = max(1, min(limit, 180))
+    with connect() as conn:
+        if preset:
+            cfg = _gem_preset_config(preset)
+            rows = conn.execute(
+                """
+                SELECT
+                    id, snapshot_date, preset, created_at, updated_at,
+                    item_count, settled_count, wins_count
+                FROM gem_snapshots
+                WHERE preset = ?
+                ORDER BY snapshot_date DESC, id DESC
+                LIMIT ?
+                """,
+                (cfg["name"], max_limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT
+                    id, snapshot_date, preset, created_at, updated_at,
+                    item_count, settled_count, wins_count
+                FROM gem_snapshots
+                ORDER BY snapshot_date DESC, id DESC
+                LIMIT ?
+                """,
+                (max_limit,),
+            ).fetchall()
+    payload = []
+    for row in rows:
+        settled = int(row["settled_count"] or 0)
+        wins = int(row["wins_count"] or 0)
+        payload.append(
+            {
+                **dict(row),
+                "win_rate": round(wins / settled, 4) if settled else None,
+            }
+        )
     return payload
 
 
@@ -570,8 +926,10 @@ def import_espn_history(
                                     "error": str(exc),
                                 }
                             )
+            ats_backfill = _recompute_team_results_from_game_lines(conn)
             settlements = settle_completed_props(conn)
             game_settlements = settle_completed_game_predictions(conn)
+            gem_settlements = _sync_gem_snapshot_settlements(conn)
             synced_props = sync_prop_lines_from_sportsbook(conn)
             projections = rebuild_predictions(conn)
     except Exception as exc:
@@ -593,9 +951,11 @@ def import_espn_history(
         "selected_dates": daily_dates,
         "scoreboards": scoreboards,
         "player_stats": player_stats,
+        "ats_backfill": ats_backfill,
         "synced_props": synced_props,
         "settlements": settlements,
         "game_settlements": game_settlements,
+        "gem_settlements": gem_settlements,
         "predictions": len(projections),
         "missing_only": missing_only,
         "source": "espn",
@@ -640,6 +1000,60 @@ def import_missing_espn_history(
     return result
 
 
+@app.post("/api/history/recompute-ats", dependencies=[Depends(_protect_mutation)])
+def recompute_ats_from_game_lines() -> dict:
+    with connect() as conn:
+        result = _recompute_team_results_from_game_lines(conn)
+    _invalidate_read_caches()
+    return {"source": "game_lines", **result}
+
+
+@app.post("/api/history/backfill-covers-lines", dependencies=[Depends(_protect_mutation)])
+def backfill_covers_lines(
+    start_date: str,
+    end_date: str | None = None,
+    force_refresh: bool = True,
+    max_days: int = 45,
+) -> dict:
+    start = _parse_iso_date(start_date, "start_date")
+    end = _parse_iso_date(end_date or start_date, "end_date")
+    if end < start:
+        raise HTTPException(status_code=400, detail="end_date must be on or after start_date")
+    total_days = (end - start).days + 1
+    if total_days > max_days:
+        raise HTTPException(status_code=400, detail=f"Date range too large: {total_days} days (max {max_days})")
+
+    selected_dates = [(start + timedelta(days=offset)).isoformat() for offset in range(total_days)]
+    imported_events = 0
+    imported_rows = 0
+    synced_props = 0
+    errors = []
+    with connect() as conn:
+        for day in selected_dates:
+            try:
+                result = import_covers_props(conn, selected_date=day, force_refresh=force_refresh)
+                imported_events += int(result.get("events", 0) or 0)
+                imported_rows += int(result.get("imported", 0) or 0)
+                synced_props += int(result.get("synced_props", 0) or 0)
+                if result.get("status") == "failed":
+                    errors.append({"date": day, "error": str(result.get("message") or "failed")})
+            except Exception as exc:
+                errors.append({"date": day, "error": str(exc)})
+        ats = _recompute_team_results_from_game_lines(conn)
+    _invalidate_read_caches()
+    return {
+        "source": "covers",
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "dates": selected_dates,
+        "imported_events": imported_events,
+        "imported_rows": imported_rows,
+        "synced_props": synced_props,
+        "ats_backfill": ats,
+        "errors": errors,
+    }
+
+
 def _selected_espn_dates(selected_date: str | None, selected_dates: list[str] | None) -> list[str]:
     values = [selected_date] if selected_date else []
     values.extend(selected_dates or [])
@@ -660,6 +1074,75 @@ def _selected_espn_dates(selected_date: str | None, selected_dates: list[str] | 
                 dates.append(parsed)
                 seen.add(parsed)
     return dates
+
+
+def _parse_iso_date(value: str, field: str):
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid {field}: {value}") from exc
+
+
+def _recompute_team_results_from_game_lines(conn) -> dict:
+    rows = conn.execute(
+        """
+        SELECT
+            tgr.team_id,
+            tgr.game_id,
+            tgr.is_home,
+            tgr.points,
+            tgr.opponent_points,
+            tgr.possessions,
+            tgr.closing_spread,
+            tgr.closing_total,
+            tgr.ats_result,
+            tgr.total_result,
+            g.spread_home,
+            g.game_total
+        FROM team_game_results tgr
+        JOIN games g ON g.id = tgr.game_id
+        """
+    ).fetchall()
+    updated = 0
+    skipped = 0
+    for row in rows:
+        if row["spread_home"] is None:
+            skipped += 1
+            continue
+        game_total = row["game_total"] if _is_real_total(row["game_total"]) else (row["points"] + row["opponent_points"])
+        computed_ats = _team_ats_result(row)
+        computed_total = _game_total_result({**dict(row), "game_total": game_total})
+        if computed_ats == "none" or computed_total == "none":
+            skipped += 1
+            continue
+        is_home = int(row["is_home"]) == 1
+        closing_spread = float(row["spread_home"]) if is_home else -float(row["spread_home"])
+        if (
+            float(row["closing_spread"]) == float(closing_spread)
+            and float(row["closing_total"]) == float(game_total)
+            and str(row["ats_result"]) == computed_ats
+            and str(row["total_result"]) == computed_total
+        ):
+            continue
+        conn.execute(
+            """
+            UPDATE team_game_results
+            SET closing_spread = ?, closing_total = ?, ats_result = ?, total_result = ?
+            WHERE team_id = ? AND game_id = ? AND is_home = ?
+            """,
+            (
+                closing_spread,
+                float(game_total),
+                computed_ats,
+                computed_total,
+                int(row["team_id"]),
+                int(row["game_id"]),
+                int(row["is_home"]),
+            ),
+        )
+        updated += 1
+    conn.commit()
+    return {"updated_rows": updated, "skipped_rows": skipped, "scanned_rows": len(rows)}
 
 
 def _season_for_date(value: str) -> int:
@@ -723,18 +1206,21 @@ def _missing_espn_scores_payload(conn, limit: int = 30) -> dict:
 
 def _is_missing_completed_score(row, cutoff: datetime) -> bool:
     start = _parse_game_start(row["start_time"])
+    game_day = _parse_game_date(row["game_date"])
+    today_local = datetime.now(LOCAL_TZ).date()
     if start is None:
-        game_day = _parse_game_date(row["game_date"])
         if game_day is None:
             return False
-        return game_day < datetime.now(LOCAL_TZ).date()
+        return game_day < today_local
     if start >= cutoff:
         return False
     status = str(row["status"] or "").lower()
     has_team_results = bool(row["has_team_results"])
     if status == "final" and not has_team_results:
         return True
-    if status == "scheduled":
+    # Avoid false positives from stale intraday schedule states. We only flag
+    # scheduled games once the local game date has passed.
+    if status == "scheduled" and game_day is not None and game_day < today_local:
         return True
     return False
 
@@ -1327,13 +1813,12 @@ def _rest_days_before_game(conn, team_id: int, start_time: str, game_date: str |
     rows = conn.execute(
         """
         SELECT g.start_time, g.game_date
-        FROM team_game_results r
-        JOIN games g ON g.id = r.game_id
-        WHERE r.team_id = ?
-          AND g.status = 'final'
+        FROM games g
+        WHERE (g.home_team_id = ? OR g.away_team_id = ?)
+          AND lower(g.status) NOT IN ('canceled', 'cancelled')
         ORDER BY g.start_time DESC
         """,
-        (team_id,),
+        (team_id, team_id),
     ).fetchall()
     previous_dates = []
     for row in rows:

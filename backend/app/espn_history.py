@@ -8,8 +8,9 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .bootstrap import TEAM_BY_ABBREVIATION, ensure_team, ensure_teams
+from .bootstrap import ensure_team, ensure_teams
 from .cache import read_json_cache, write_json_cache
+from .game_resolver import resolve_or_create_game
 
 
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
@@ -86,7 +87,6 @@ def import_espn_scoreboard(
         start_time = str(event.get("date") or competition.get("date") or "")
         game_date = start_time[:10]
         espn_event_id = int(event["id"])
-        game_id = _local_game_id(conn, game_date, home_team_id, away_team_id) or espn_event_id
         status = _status(competition)
         home_score = _parse_score(home)
         away_score = _parse_score(away)
@@ -95,6 +95,18 @@ def import_espn_scoreboard(
             if status == "final" and home_score is not None and away_score is not None
             else None
         )
+        home_team_name = str((home.get("team") or {}).get("displayName") or (home.get("team") or {}).get("shortDisplayName") or "")
+        away_team_name = str((away.get("team") or {}).get("displayName") or (away.get("team") or {}).get("shortDisplayName") or "")
+        resolved = resolve_or_create_game(
+            conn,
+            home_team=home_team_name or str((home.get("team") or {}).get("abbreviation") or ""),
+            away_team=away_team_name or str((away.get("team") or {}).get("abbreviation") or ""),
+            start_time=start_time,
+            game_date=game_date,
+            espn_event_id=espn_event_id,
+            game_total=total,
+        )
+        game_id = resolved or espn_event_id
 
         conn.execute(
             """
@@ -399,10 +411,9 @@ def _player_stat_rows(conn: sqlite3.Connection, game_id: int, payload: dict[str,
 def _boxscore_team_id(conn: sqlite3.Connection, team_box: dict[str, Any]) -> int | None:
     abbreviation = str((team_box.get("team") or {}).get("abbreviation") or "").upper()
     abbreviation = ESPN_TEAM_ALIASES.get(abbreviation, abbreviation)
-    known_team = TEAM_BY_ABBREVIATION.get(abbreviation)
-    if known_team:
-        return int(known_team[0])
-    return ensure_team(conn, abbreviation)
+    team = team_box.get("team") or {}
+    display_name = str(team.get("displayName") or team.get("shortDisplayName") or abbreviation).strip()
+    return ensure_team(conn, abbreviation or display_name)
 
 
 def _stat(raw_stats: list[Any], label_index: dict[str, int], label: str) -> str:

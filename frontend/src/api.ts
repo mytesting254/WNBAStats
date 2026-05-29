@@ -86,6 +86,42 @@ export type ModelPerformance = {
   message?: string;
 };
 
+export type GemPerformance = {
+  qualified: number;
+  wins: number;
+  win_rate: number | null;
+  current_open_conservative?: number;
+  current_open_balanced?: number;
+  current_open_aggressive?: number;
+  message?: string;
+};
+
+export async function createGemSnapshot(snapshotDate?: string, preset = "balanced"): Promise<{
+  snapshot_id: number;
+  snapshot_date: string;
+  preset: string;
+  tracked: number;
+  settled: number;
+  wins: number;
+}> {
+  const params = new URLSearchParams({ preset });
+  if (snapshotDate) {
+    params.set("snapshot_date", snapshotDate);
+  }
+  const response = await fetch(`/api/gems/snapshot?${params.toString()}`, { method: "POST" });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "Failed to create gem snapshot");
+  }
+  return response.json();
+}
+
 export type TeamLast10 = {
   games: number;
   wins: number;
@@ -213,6 +249,14 @@ export async function fetchPerformance(): Promise<ModelPerformance> {
   const response = await fetch("/api/model-performance");
   if (!response.ok) {
     throw new Error("Failed to load model performance");
+  }
+  return response.json();
+}
+
+export async function fetchGemPerformance(): Promise<GemPerformance> {
+  const response = await fetch("/api/gem-performance");
+  if (!response.ok) {
+    throw new Error("Failed to load gem performance");
   }
   return response.json();
 }

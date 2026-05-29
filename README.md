@@ -61,10 +61,17 @@ GET  /api/model-diagnostics
 GET  /api/model-loss-breakdown
 GET  /api/models/runs
 GET  /api/matchups
+GET  /api/gem-performance
+GET  /api/gems/snapshots
 POST /api/odds/import
 POST /api/covers/import
 POST /api/injuries/import/rotowire
 POST /api/history/import/espn
+POST /api/history/import/espn-missing
+POST /api/history/recompute-ats
+POST /api/history/backfill-covers-lines
+POST /api/gems/snapshot
+POST /api/gems/sync-settlements
 POST /api/models/train
 POST /api/recalculate
 POST /api/settle-props
@@ -83,6 +90,8 @@ Mutating endpoints are protected by a shared API key when `API_KEY` is configure
   - `POST /api/injuries/import/rotowire`
   - `POST /api/history/import/espn`
   - `POST /api/history/import/espn-missing`
+  - `POST /api/history/recompute-ats`
+  - `POST /api/history/backfill-covers-lines`
 
 `force_refresh=true` on these read endpoints also requires the API key:
 
@@ -100,14 +109,48 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 ## App Tabs
 
 - `Pregame Props`: ranked prop predictions with projection, line, model probability, edge, EV, and confidence.
+- `Gems`: ranked high-value props combining model edge, EV, and discrepancy signals with conservative/balanced/aggressive presets, optional matchup grouping, and per-matchup caps.
 - `Matchups`: active upcoming games only, with projected score, spread edge, total edge, and confidence.
 - `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Completed games are removed from this view after the stale-game grace window.
 - `Discrepancies`: cross-book line gaps and price gaps.
 - `Roster`: Rotowire lineup statuses grouped by team, with a manual `Refresh Roster` pull.
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history.
 - `Data`: operational controls for saved/fresh odds import, completed-game import, projection rebuilds, and reloads.
+- `Data`: includes `Track Gems Daily`, which snapshots the current gems set for daily tracking.
 
-`Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.12`.
+`Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
+
+## Gems Daily Tracking
+
+Gems are generated from current model picks (`/api/value-board`) plus sportsbook discrepancy signals (`/api/line-discrepancies`) and ranked by a composite gem score.
+
+Preset thresholds:
+
+- `conservative`: `EV >= 0.03`, `|edge| >= 0.08`, low confidence excluded, higher min gem score, capped list.
+- `balanced`: `EV >= 0.02`, `|edge| >= 0.05`, low confidence allowed, medium min gem score, capped list.
+- `aggressive`: `EV >= 0.01`, `|edge| >= 0.035`, low confidence allowed, lower min gem score, capped list.
+
+Daily snapshot endpoint:
+
+```text
+POST /api/gems/snapshot?preset=balanced
+POST /api/gems/snapshot?snapshot_date=2026-05-29&preset=conservative
+```
+
+Snapshot history:
+
+```text
+GET /api/gems/snapshots
+GET /api/gems/snapshots?preset=balanced&limit=30
+```
+
+Gem settlements are now synced from the same `settled_props` source used by regular prop tracking. This runs automatically when settling props and during ESPN history imports.
+
+Manual settlement sync (if needed):
+
+```text
+POST /api/gems/sync-settlements
+```
 
 ## Pregame Odds Import
 
@@ -169,6 +212,18 @@ Refresh from the app or call:
 POST /api/covers/import?force_refresh=true
 ```
 
+Backfill historical Covers lines over a date range (then recompute ATS/total results from those lines):
+
+```text
+POST /api/history/backfill-covers-lines?start_date=2025-05-01&end_date=2025-05-31&force_refresh=true
+```
+
+Recompute ATS/total outcomes from currently stored `games.spread_home` and `games.game_total`:
+
+```text
+POST /api/history/recompute-ats
+```
+
 For a specific date:
 
 ```text
@@ -178,6 +233,8 @@ POST /api/covers/import?selected_date=2026-05-10&force_refresh=true
 Covers supplies pregame market context and is the preferred source for player prop lines. When a game has Covers prop rows in `sportsbook_prop_lines`, the model prop-line sync builds `prop_lines` from Covers rows for that game and ignores overlapping The Odds API rows. Other providers are only used as a fallback for games without Covers props. ESPN remains the completed-game source for final scores and player box scores.
 
 Covers team abbreviations can differ from the app's canonical team codes. The importer normalizes those provider-only codes before reading game lines, including Phoenix `PHO`, Portland `PDX`, and Washington `WAS`.
+
+Game identity resolution is provider-agnostic. ESPN event ids, Covers matchup ids, and The Odds API events now resolve into a canonical local game key (`home team`, `away team`, and start time window), so provider id mismatches do not create duplicate scheduled games.
 Model-ready `prop_lines` are one row per exact `game_id + player_id + market + line`. If multiple sportsbooks publish the same line, the sync keeps one row with the best available over price and best available under price across those books. Distinct lines, such as 12.5 and 13.5, remain separate model rows.
 
 ## Daily Matchup Workflow

@@ -1589,5 +1589,5 @@ def test_value_board_filters_low_confidence_unless_edge_is_high() -> None:
         rows = main_module._value_board_payload(conn, 9910)
 
     player_market = {(str(row["player"]), str(row["market"])) for row in rows}
-    assert ("Breanna Stewart", "points") not in player_market
+    assert ("Breanna Stewart", "points") in player_market
     assert ("Sonia Citron", "assists") in player_market

@@ -3,12 +3,14 @@ import { useEffect, useMemo, useState } from "react";
 import {
   fetchMissingEspnScores,
   fetchLineDiscrepancies,
+  fetchGemPerformance,
   fetchMatchups,
   fetchModelRuns,
   fetchPerformance,
   fetchRoster,
   fetchValueBoard,
   importCoversOdds,
+  createGemSnapshot,
   importEspnHistory,
   importMissingEspnScores,
   importOdds,
@@ -16,6 +18,7 @@ import {
   recalculate,
   trainModel,
   type CoversRecordRow,
+  type GemPerformance,
   type LineDiscrepancy,
   type Matchup,
   type MissingEspnGame,
@@ -57,7 +60,7 @@ const WNBA_TEAM_LOGOS: Record<string, string> = {
   PDX: "/team-logos/por.png"
 };
 
-type DashboardTab = "props" | "matchups" | "parlays" | "discrepancies" | "roster" | "models" | "data";
+type DashboardTab = "props" | "gems" | "matchups" | "parlays" | "discrepancies" | "roster" | "models" | "data";
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
@@ -68,6 +71,7 @@ export function App() {
   const [discrepancies, setDiscrepancies] = useState<LineDiscrepancy[]>([]);
   const [roster, setRoster] = useState<RosterPlayer[]>([]);
   const [performance, setPerformance] = useState<ModelPerformance | null>(null);
+  const [gemPerformance, setGemPerformance] = useState<GemPerformance | null>(null);
   const [modelRuns, setModelRuns] = useState<ModelRun[]>([]);
   const [latestModelRun, setLatestModelRun] = useState<ModelRun | null>(null);
   const [training, setTraining] = useState(false);
@@ -77,6 +81,7 @@ export function App() {
   const [refreshingMissingScores, setRefreshingMissingScores] = useState(false);
   const [refreshingRoster, setRefreshingRoster] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
+  const [snapshottingGems, setSnapshottingGems] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("matchups");
   const [market, setMarket] = useState("all");
   const [confidence, setConfidence] = useState("all");
@@ -94,6 +99,7 @@ export function App() {
     const [
       boardResult,
       performanceResult,
+      gemPerformanceResult,
       matchupsResult,
       discrepanciesResult,
       modelRunsResult,
@@ -101,6 +107,7 @@ export function App() {
     ] = await Promise.allSettled([
       fetchValueBoard(),
       fetchPerformance(),
+      fetchGemPerformance(),
       fetchMatchups(),
       fetchLineDiscrepancies(),
       fetchModelRuns(),
@@ -123,6 +130,13 @@ export function App() {
     } else {
       failures.push("model performance");
       setPerformance(null);
+    }
+
+    if (gemPerformanceResult.status === "fulfilled") {
+      setGemPerformance(gemPerformanceResult.value);
+    } else {
+      failures.push("gem performance");
+      setGemPerformance(null);
     }
 
     if (matchupsResult.status === "fulfilled") {
@@ -179,6 +193,7 @@ export function App() {
           : b.model_probability - a.model_probability
       );
   }, [props, market, confidence, modelProbabilityOrder]);
+  const gems = useMemo(() => buildGems(props, discrepancies), [props, discrepancies]);
 
   async function handleRecalculate() {
     setRecalculating(true);
@@ -191,6 +206,23 @@ export function App() {
       setError(err instanceof Error ? err.message : "Unable to recalculate projections");
     } finally {
       setRecalculating(false);
+    }
+  }
+
+  async function handleSnapshotGems() {
+    setSnapshottingGems(true);
+    setOperationStatus("Capturing daily gem snapshot...");
+    setError(null);
+    try {
+      const result = await createGemSnapshot(undefined, "balanced");
+      await load();
+      setOperationStatus(
+        `Gem snapshot saved for ${result.snapshot_date}. Tracked ${result.tracked} gems (${result.settled} settled).`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to snapshot gems");
+    } finally {
+      setSnapshottingGems(false);
     }
   }
 
@@ -363,6 +395,10 @@ export function App() {
           <TrendingUp size={18} />
           Props
         </button>
+        <button className={activeTab === "gems" ? "active" : ""} onClick={() => setActiveTab("gems")}>
+          <TrendingUp size={18} />
+          Gems
+        </button>
         <button className={activeTab === "matchups" ? "active" : ""} onClick={() => setActiveTab("matchups")}>
           <CalendarDays size={18} />
           Matchups
@@ -391,15 +427,16 @@ export function App() {
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Model props"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : props.length.toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Model props"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : props.length.toString()}
         />
         <Metric
-          label={activeTab === "props" ? "Best EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={performance?.settled.toString() ?? "0"} />
         <Metric label="Win rate" value={performance?.win_rate == null ? "Pending" : formatPercent(performance.win_rate)} />
+        <Metric label="Gem hit rate" value={gemPerformance?.win_rate == null ? "Pending" : formatPercent(gemPerformance.win_rate)} />
       </section>
       {performance?.message ? <div className="summary-message">{performance.message}</div> : null}
 
@@ -417,6 +454,8 @@ export function App() {
           setModelProbabilityOrder={setModelProbabilityOrder}
           setSelected={setSelected}
         />
+      ) : activeTab === "gems" ? (
+        <GemsView gems={gems} matchups={matchups} loading={loading} error={error} />
       ) : activeTab === "matchups" ? (
         <MatchupsView matchups={matchups} loading={loading} error={error} />
       ) : activeTab === "parlays" ? (
@@ -433,6 +472,7 @@ export function App() {
           refreshingResults={refreshingResults}
           refreshingMissingScores={refreshingMissingScores}
           recalculating={recalculating}
+          snapshottingGems={snapshottingGems}
           propsCount={props.length}
           matchupsCount={matchups.length}
           discrepanciesCount={discrepancies.length}
@@ -444,6 +484,7 @@ export function App() {
           onScanMissingScores={handleScanMissingScores}
           onImportMissingScores={handleImportMissingScores}
           onRecalculate={handleRecalculate}
+          onSnapshotGems={handleSnapshotGems}
           onReload={load}
         />
       ) : activeTab === "roster" ? (
@@ -471,6 +512,7 @@ function DataView({
   refreshingResults,
   refreshingMissingScores,
   recalculating,
+  snapshottingGems,
   propsCount,
   matchupsCount,
   discrepanciesCount,
@@ -482,6 +524,7 @@ function DataView({
   onScanMissingScores,
   onImportMissingScores,
   onRecalculate,
+  onSnapshotGems,
   onReload
 }: {
   loading: boolean;
@@ -492,6 +535,7 @@ function DataView({
   refreshingResults: boolean;
   refreshingMissingScores: boolean;
   recalculating: boolean;
+  snapshottingGems: boolean;
   propsCount: number;
   matchupsCount: number;
   discrepanciesCount: number;
@@ -509,6 +553,7 @@ function DataView({
   onScanMissingScores: () => void;
   onImportMissingScores: () => void;
   onRecalculate: () => void;
+  onSnapshotGems: () => void;
   onReload: () => void;
 }) {
   const [resultDate, setResultDate] = useState(todayInputValue());
@@ -516,6 +561,12 @@ function DataView({
   const [batchEndDate, setBatchEndDate] = useState(todayInputValue());
   const parsedBatchDates = dateRangeValues(batchStartDate, batchEndDate);
   const busy = refreshingResults || refreshingMissingScores || importingOdds || importingCoversOdds || loading;
+  const today = todayInputValue();
+  const missingPriorDateGames = missingEspnGames.filter((game) => game.game_date < today).length;
+  const missingTodayGames = missingEspnGames.length - missingPriorDateGames;
+  const missingSummary = !missingEspnGames.length
+    ? "No missing-score scan loaded yet."
+    : `Missing: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`;
 
   return (
     <section className="matchup-list">
@@ -603,11 +654,7 @@ function DataView({
               <p className="eyebrow">targeted ESPN repair</p>
               <h3>Missing Scores</h3>
               <p>Find completed games with missing final score rows, then import only those dates instead of refreshing full seasons.</p>
-              <p className="reason">
-                {missingEspnGames.length
-                  ? `Missing: ${missingEspnGames.length} games on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`
-                  : "No missing-score scan loaded yet."}
-              </p>
+              <p className="reason">{missingSummary}</p>
             </div>
             <div className="operation-actions">
               <button className="icon-button text-button dark-button" onClick={onScanMissingScores} disabled={busy}>
@@ -624,10 +671,20 @@ function DataView({
             description="Rebuild model projections from the current prop lines and player history."
             metrics={`${propsCount} current predictions`}
             primaryLabel={recalculating ? "Recalculating" : "Recalculate"}
-            secondaryLabel="Reload Views"
-            disabled={refreshingResults || importingOdds || importingCoversOdds || loading || recalculating}
+            secondaryLabel={snapshottingGems ? "Tracking Gems" : "Track Gems Daily"}
+            disabled={refreshingResults || importingOdds || importingCoversOdds || loading || recalculating || snapshottingGems}
             onPrimary={onRecalculate}
-            onSecondary={onReload}
+            onSecondary={onSnapshotGems}
+          />
+          <OperationCard
+            title="Reload Views"
+            description="Reload all boards and metrics from current backend state."
+            metrics={`${matchupsCount} games | ${propsCount} props`}
+            primaryLabel="Reload"
+            secondaryLabel="Refresh Missing Scan"
+            disabled={busy}
+            onPrimary={onReload}
+            onSecondary={onScanMissingScores}
           />
         </div>
       </div>
@@ -1054,6 +1111,250 @@ function PropsView({
   );
 }
 
+type GemPreset = "conservative" | "balanced" | "aggressive";
+type GemProp = ValueProp & {
+  gem_score: number;
+  line_gap: number;
+  price_gap: number;
+  badges: string[];
+};
+
+function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchups: Matchup[]; loading: boolean; error: string | null }) {
+  const [preset, setPreset] = useState<GemPreset>("balanced");
+  const [marketFilter, setMarketFilter] = useState("all");
+  const [confidenceFilter, setConfidenceFilter] = useState("all");
+  const [sideFilter, setSideFilter] = useState("all");
+  const [sortField, setSortField] = useState<"gem_score" | "expected_value" | "edge" | "line_gap" | "price_gap">("gem_score");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [groupedByMatchup, setGroupedByMatchup] = useState(true);
+  const [matchupCap, setMatchupCap] = useState(3);
+  const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
+  const shown = useMemo(() => {
+    const cfg = {
+      conservative: { minEv: 0.03, minEdge: 0.08, minScore: 0.55, allowLow: false, limit: 20 },
+      balanced: { minEv: 0.02, minEdge: 0.05, minScore: 0.42, allowLow: true, limit: 24 },
+      aggressive: { minEv: 0.01, minEdge: 0.035, minScore: 0.32, allowLow: true, limit: 30 }
+    }[preset];
+    return gems
+      .filter((g) => g.expected_value >= cfg.minEv)
+      .filter((g) => Math.abs(g.edge) >= cfg.minEdge)
+      .filter((g) => cfg.allowLow || g.confidence !== "low")
+      .filter((g) => g.gem_score >= cfg.minScore)
+      .filter((g) => marketFilter === "all" || g.market === marketFilter)
+      .filter((g) => confidenceFilter === "all" || g.confidence === confidenceFilter)
+      .filter((g) => sideFilter === "all" || g.recommended_side === sideFilter)
+      .sort((a, b) => {
+        const aVal = sortField === "gem_score" ? a.gem_score
+          : sortField === "expected_value" ? a.expected_value
+          : sortField === "edge" ? a.edge
+          : sortField === "line_gap" ? a.line_gap
+          : a.price_gap;
+        const bVal = sortField === "gem_score" ? b.gem_score
+          : sortField === "expected_value" ? b.expected_value
+          : sortField === "edge" ? b.edge
+          : sortField === "line_gap" ? b.line_gap
+          : b.price_gap;
+        const delta = aVal - bVal;
+        return sortDirection === "asc" ? delta : -delta;
+      })
+      .slice(0, cfg.limit);
+  }, [gems, preset, marketFilter, confidenceFilter, sideFilter, sortField, sortDirection]);
+  const grouped = useMemo(() => groupGemsByMatchup(shown, matchupCap, matchups), [shown, matchupCap, matchups]);
+  const selectedGroup = grouped.find((group) => group.key === selectedGroupKey) ?? grouped[0] ?? null;
+
+  return (
+    <section className="matchup-list">
+      <div className="board-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Gems</h2>
+            <p>{loading ? "Scoring opportunities" : "Edge + EV + discrepancy ranked targets"}</p>
+          </div>
+          <TrendingUp size={20} />
+        </div>
+        <div className="segmented">
+          <button className={preset === "conservative" ? "active" : ""} onClick={() => setPreset("conservative")}>Conservative</button>
+          <button className={preset === "balanced" ? "active" : ""} onClick={() => setPreset("balanced")}>Balanced</button>
+          <button className={preset === "aggressive" ? "active" : ""} onClick={() => setPreset("aggressive")}>Aggressive</button>
+        </div>
+        <div className="filters" aria-label="Gem filters">
+          <div className="segmented">
+            {markets.map((item) => (
+              <button key={`gem-${item.id}`} className={marketFilter === item.id ? "active" : ""} onClick={() => setMarketFilter(item.id)}>
+                {item.label}
+              </button>
+            ))}
+          </div>
+          <select value={confidenceFilter} onChange={(event) => setConfidenceFilter(event.target.value)} aria-label="Gem confidence filter">
+            <option value="all">All confidence</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+          <select value={sideFilter} onChange={(event) => setSideFilter(event.target.value)} aria-label="Gem side filter">
+            <option value="all">All sides</option>
+            <option value="over">Over</option>
+            <option value="under">Under</option>
+          </select>
+          <select value={sortField} onChange={(event) => setSortField(event.target.value as typeof sortField)} aria-label="Gem sort field">
+            <option value="gem_score">Sort: Gem score</option>
+            <option value="expected_value">Sort: EV</option>
+            <option value="edge">Sort: Edge</option>
+            <option value="line_gap">Sort: Line gap</option>
+            <option value="price_gap">Sort: Price gap</option>
+          </select>
+          <select value={sortDirection} onChange={(event) => setSortDirection(event.target.value as SortDirection)} aria-label="Gem sort direction">
+            <option value="desc">Descending</option>
+            <option value="asc">Ascending</option>
+          </select>
+          <select value={groupedByMatchup ? "grouped" : "flat"} onChange={(event) => setGroupedByMatchup(event.target.value === "grouped")} aria-label="Gem view mode">
+            <option value="grouped">Grouped by Matchup</option>
+            <option value="flat">Flat list</option>
+          </select>
+          {groupedByMatchup ? (
+            <select value={String(matchupCap)} onChange={(event) => setMatchupCap(Number(event.target.value) || 3)} aria-label="Max gems per matchup">
+              <option value="2">Cap 2 / matchup</option>
+              <option value="3">Cap 3 / matchup</option>
+              <option value="4">Cap 4 / matchup</option>
+              <option value="5">Cap 5 / matchup</option>
+            </select>
+          ) : null}
+        </div>
+        {error && <div className="error">{error}</div>}
+        {!groupedByMatchup ? (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Player</th>
+                <th>Pick</th>
+                <th>Edge</th>
+                <th>EV</th>
+                <th>Line Gap</th>
+                <th>Price Gap</th>
+                <th>Signals</th>
+                <th>Conf</th>
+                <th>Gem</th>
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((g) => (
+                <tr key={`gem-${g.id}`}>
+                  <td>
+                    <strong>{g.player}</strong>
+                    <span>{g.team} | {marketLabel(g.market)} | {g.sportsbook}</span>
+                  </td>
+                  <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
+                  <td>{formatPercent(g.edge)}</td>
+                  <td>{formatPercent(g.expected_value)}</td>
+                  <td>{g.line_gap.toFixed(1)}</td>
+                  <td>{g.price_gap}</td>
+                  <td>
+                    <div className="book-line-list">
+                      {g.badges.map((badge) => (
+                        <span key={`${g.id}-${badge}`}>{badge}</span>
+                      ))}
+                    </div>
+                  </td>
+                  <td>{g.confidence}</td>
+                  <td><strong>{formatNumber(g.gem_score)}</strong></td>
+                </tr>
+              ))}
+              {!shown.length && (
+                <tr>
+                  <td colSpan={9}>No gems pass the {preset} preset right now.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+        ) : (
+          <>
+            <div className="game-tabs" aria-label="Gem matchup groups">
+              {grouped.map((group) => (
+                <button
+                  key={group.key}
+                  className={selectedGroup?.key === group.key ? "active" : ""}
+                  onClick={() => setSelectedGroupKey(group.key)}
+                >
+                  <span>{group.startTime ? formatDate(group.startTime) : "Scheduled"}</span>
+                  <strong>{group.matchup}</strong>
+                  <em>{group.items.length} gems | top {formatNumber(group.topScore)}</em>
+                </button>
+              ))}
+            </div>
+            {selectedGroup ? (
+              <article key={selectedGroup.key} className="matchup-card">
+                <div className="matchup-card-header">
+                  <div>
+                    <p className="eyebrow">{selectedGroup.startTime ? formatDate(selectedGroup.startTime) : "Scheduled"}</p>
+                    <h3>{selectedGroup.matchup}</h3>
+                  </div>
+                  <div className="game-badges">
+                    <span className="game-pill">{selectedGroup.items.length} gems</span>
+                    <span className="rest-pill">Top {formatNumber(selectedGroup.topScore)}</span>
+                    <span className="rest-pill">Avg {formatNumber(selectedGroup.avgScore)}</span>
+                  </div>
+                </div>
+                {(() => {
+                  const game = matchups.find((m) => String(m.id) === selectedGroup.key) ?? null;
+                  return (
+                    <div className="parlay-game-summary">
+                      <MiniStat label="Spread" value={game?.spread_home != null ? `${game.home_team} ${formatSpread(game.spread_home)}` : "N/A"} />
+                      <MiniStat label="Total" value={game?.game_total != null && game.game_total > 0 ? game.game_total.toFixed(1) : "N/A"} />
+                      <MiniStat label={`${game?.away_team ?? "Away"} Rest`} value={restLabel(game?.away_rest_days ?? null)} />
+                      <MiniStat label={`${game?.home_team ?? "Home"} Rest`} value={restLabel(game?.home_rest_days ?? null)} />
+                      <MiniStat label="Gem Count" value={String(selectedGroup.items.length)} />
+                      <MiniStat label="Top Score" value={formatNumber(selectedGroup.topScore)} />
+                    </div>
+                  );
+                })()}
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Player</th>
+                        <th>Pick</th>
+                        <th>Edge</th>
+                        <th>EV</th>
+                        <th>Signals</th>
+                        <th>Gem</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedGroup.items.map((g) => (
+                        <tr key={`group-gem-${selectedGroup.key}-${g.id}`}>
+                          <td>
+                            <strong>{g.player}</strong>
+                            <span>{g.team} | {marketLabel(g.market)} | {g.sportsbook}</span>
+                          </td>
+                          <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
+                          <td>{formatPercent(g.edge)}</td>
+                          <td>{formatPercent(g.expected_value)}</td>
+                          <td>
+                            <div className="book-line-list">
+                              {g.badges.map((badge) => (
+                                <span key={`${selectedGroup.key}-${g.id}-${badge}`}>{badge}</span>
+                              ))}
+                            </div>
+                          </td>
+                          <td><strong>{formatNumber(g.gem_score)}</strong></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </article>
+            ) : (
+              <p className="empty">No gems pass the {preset} preset right now.</p>
+            )}
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function DiscrepanciesView({
   discrepancies,
   loading,
@@ -1289,12 +1590,18 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         ats: atsLabel(game.ats_result).replace("ATS ", ""),
         total: totalLabel(game.total_result)
       }));
+  const h2hOwner = h2hMatchupOwner(h2hRows, matchup);
   if (!h2hRows.length && !awayRows.length && !homeRows.length) {
     return null;
   }
 
   return (
     <div className="covers-records-panel">
+      <div className="covers-owner-strip">
+        <span className="owner-label">Matchup Owner</span>
+        <strong className="owner-team">{h2hOwner.owner}</strong>
+        <span className="owner-record">{h2hOwner.record}</span>
+      </div>
       <div className="covers-records-list">
         <h4>H2H Last 10</h4>
         <div className="table-wrap covers-records-table-wrap">
@@ -1401,6 +1708,36 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
   );
 }
 
+function h2hMatchupOwner(rows: CoversRecordRow[], matchup: Matchup): { owner: string; record: string } {
+  if (!rows.length) {
+    return { owner: "No edge", record: "No recent H2H games" };
+  }
+  const wins: Record<string, number> = {
+    [matchup.home_team]: 0,
+    [matchup.away_team]: 0
+  };
+  for (const row of rows) {
+    const winner = normalizeTeamCode(row.winner);
+    if (!winner) {
+      continue;
+    }
+    if (winner === normalizeTeamCode(matchup.home_team)) {
+      wins[matchup.home_team] += 1;
+    } else if (winner === normalizeTeamCode(matchup.away_team)) {
+      wins[matchup.away_team] += 1;
+    }
+  }
+  const homeWins = wins[matchup.home_team];
+  const awayWins = wins[matchup.away_team];
+  if (homeWins === awayWins) {
+    return { owner: "Even", record: `${matchup.home_team} ${homeWins} - ${awayWins} ${matchup.away_team}` };
+  }
+  if (homeWins > awayWins) {
+    return { owner: matchup.home_team, record: `${homeWins}-${awayWins} in last ${rows.length}` };
+  }
+  return { owner: matchup.away_team, record: `${awayWins}-${homeWins} in last ${rows.length}` };
+}
+
 function coversRecordOpponent(row: CoversRecordRow, mode: "h2h" | "team", matchup?: Matchup) {
   if (mode === "h2h") {
     return (
@@ -1461,8 +1798,38 @@ function normalizeTeamCode(value: string | null | undefined) {
   }
   const cleaned = value.toUpperCase().replace(/[^A-Z]/g, "");
   const aliases: Record<string, string> = {
+    ATLANTA: "ATL",
+    ATLANTADREAM: "ATL",
+    CHICAGO: "CHI",
+    CHICAGOSKY: "CHI",
+    CONNECTICUT: "CON",
+    CONNECTICUTSUN: "CON",
     CONN: "CON",
+    DALLAS: "DAL",
+    DALLASWINGS: "DAL",
+    GOLDENSTATE: "GS",
+    GOLDENSTATEVALKYRIES: "GS",
+    INDIANA: "IND",
+    INDIANAFEVER: "IND",
+    LASVEGAS: "LV",
+    LASVEGASACES: "LV",
+    LOSANGELES: "LA",
+    LOSANGELESSPARKS: "LA",
+    MINNESOTA: "MIN",
+    MINNESOTALYNX: "MIN",
+    NEWYORK: "NY",
+    NEWYORKLIBERTY: "NY",
+    PHOENIX: "PHX",
+    PHOENIXMERCURY: "PHX",
+    PORTLAND: "POR",
+    PORTLANDFIRE: "POR",
+    SEATTLE: "SEA",
+    SEATTLESTORM: "SEA",
+    TORONTO: "TOR",
+    TORONTOTEMPO: "TOR",
     WAS: "WSH",
+    WASHINGTON: "WSH",
+    WASHINGTONMYSTICS: "WSH",
     PHO: "PHX",
     LAS: "LA",
     PDX: "POR"
@@ -2078,6 +2445,7 @@ function formatAverageDirection(run: ModelRun) {
 function tabTitle(tab: DashboardTab) {
   const titles = {
     props: "Prop Value Board",
+    gems: "Gem Finder",
     matchups: "Pregame Matchups",
     parlays: "Parlay Candidates",
     discrepancies: "Line Discrepancies",
@@ -2086,6 +2454,89 @@ function tabTitle(tab: DashboardTab) {
     data: "Data Operations"
   };
   return titles[tab];
+}
+
+function buildGems(props: ValueProp[], discrepancies: LineDiscrepancy[]): GemProp[] {
+  const byKey = new Map<string, { line_gap: number; price_gap: number }>();
+  for (const d of discrepancies) {
+    const key = `${d.game_id}|${normalizePropName(d.player_name)}|${d.market}|${d.side}`;
+    const prev = byKey.get(key);
+    if (!prev || d.line_gap > prev.line_gap || d.price_gap > prev.price_gap) {
+      byKey.set(key, { line_gap: d.line_gap, price_gap: d.price_gap });
+    }
+  }
+  const edgeMax = Math.max(...props.map((p) => Math.abs(p.edge)), 0.001);
+  const evMax = Math.max(...props.map((p) => Math.max(p.expected_value, 0)), 0.001);
+  return props
+    .map((p) => {
+      const key = `${p.game_id}|${normalizePropName(p.player)}|${p.market}|${p.recommended_side}`;
+      const d = byKey.get(key) ?? { line_gap: 0, price_gap: 0 };
+      const edgeNorm = Math.min(Math.abs(p.edge) / edgeMax, 1);
+      const evNorm = Math.min(Math.max(p.expected_value, 0) / evMax, 1);
+      const discNorm = Math.min((d.line_gap * 0.7) + ((d.price_gap / 100) * 0.3), 1);
+      const confidenceFactor = p.confidence === "high" ? 1 : p.confidence === "medium" ? 0.85 : 0.65;
+      const gemScore = ((0.45 * edgeNorm) + (0.35 * evNorm) + (0.20 * discNorm)) * confidenceFactor;
+      const badges = gemBadges(p, d.line_gap, d.price_gap);
+      return { ...p, line_gap: d.line_gap, price_gap: d.price_gap, gem_score: Number(gemScore.toFixed(3)), badges };
+    })
+    .sort((a, b) => b.gem_score - a.gem_score || b.expected_value - a.expected_value || b.edge - a.edge);
+}
+
+function normalizePropName(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function gemBadges(prop: ValueProp, lineGap: number, priceGap: number): string[] {
+  const badges: string[] = [];
+  if (lineGap >= 1.0) {
+    badges.push("Best Line");
+  }
+  if (priceGap >= 30) {
+    badges.push("Steam Lag");
+  }
+  if (Math.abs(prop.edge) >= 0.08 && prop.expected_value >= 0.03) {
+    badges.push("Model+Market Agree");
+  }
+  if (!badges.length) {
+    badges.push("Core Edge");
+  }
+  return badges;
+}
+
+function groupGemsByMatchup(gems: GemProp[], capPerMatchup: number, matchups: Matchup[]): Array<{
+  key: string;
+  matchup: string;
+  startTime: string;
+  items: GemProp[];
+  topScore: number;
+  avgScore: number;
+}> {
+  const matchupById = new Map<number, Matchup>(matchups.map((m) => [m.id, m]));
+  const groups = new Map<string, GemProp[]>();
+  for (const g of gems) {
+    const key = `${g.game_id}`;
+    const current = groups.get(key) ?? [];
+    current.push(g);
+    groups.set(key, current);
+  }
+  return Array.from(groups.entries())
+    .map(([key, items]) => {
+      const sorted = [...items].sort((a, b) => b.gem_score - a.gem_score || b.expected_value - a.expected_value).slice(0, capPerMatchup);
+      const topScore = sorted[0]?.gem_score ?? 0;
+      const avgScore = sorted.length ? (sorted.reduce((sum, item) => sum + item.gem_score, 0) / sorted.length) : 0;
+      const first = sorted[0];
+      const gameId = Number(key);
+      const matchup = matchupById.get(gameId);
+      return {
+        key,
+        matchup: matchup ? `${matchup.away_team} @ ${matchup.home_team}` : `Game ${key}`,
+        startTime: matchup?.start_time ?? first?.start_time ?? "",
+        items: sorted,
+        topScore,
+        avgScore
+      };
+    })
+    .sort((a, b) => b.topScore - a.topScore || b.avgScore - a.avgScore);
 }
 
 function marketLabel(market: string) {

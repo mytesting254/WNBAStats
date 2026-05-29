@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 
 from .bootstrap import ensure_team
 from .cache import read_json_cache, write_json_cache
+from .game_resolver import resolve_or_create_game
 from .projections import rebuild_predictions
 
 
@@ -474,7 +475,8 @@ def _match_or_create_local_game(conn: sqlite3.Connection, event: dict) -> int | 
     away = TEAM_ALIASES.get(str(event.get("away_team", "")).lower())
     if not home or not away:
         return None
-    commence_time = _parse_utc(str(event["commence_time"]))
+    commence_time_text = str(event["commence_time"])
+    commence_time = _parse_utc(commence_time_text)
     rows = conn.execute(
         """
         SELECT g.id, g.start_time
@@ -491,21 +493,13 @@ def _match_or_create_local_game(conn: sqlite3.Connection, event: dict) -> int | 
         existing_start = _parse_game_start(str(row["start_time"]))
         if existing_start and abs((existing_start - commence_time).total_seconds()) < 60:
             return int(row["id"])
-
-    home_team_id = ensure_team(conn, str(event.get("home_team", "")))
-    away_team_id = ensure_team(conn, str(event.get("away_team", "")))
-    if not home_team_id or not away_team_id:
-        return None
-    cursor = conn.execute(
-        """
-        INSERT INTO games (
-            game_date, start_time, home_team_id, away_team_id, status,
-            rest_days_home, rest_days_away, spread_home, game_total
-        ) VALUES (?, ?, ?, ?, 'scheduled', 2, 2, NULL, NULL)
-        """,
-        (game_date, event["commence_time"], home_team_id, away_team_id),
+    return resolve_or_create_game(
+        conn,
+        home_team=str(event.get("home_team", "")),
+        away_team=str(event.get("away_team", "")),
+        start_time=commence_time_text,
+        game_date=game_date,
     )
-    return int(cursor.lastrowid)
 
 
 def _game_date(commence_time: str) -> str:

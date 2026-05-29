@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .odds import american_to_implied_probability, expected_value
 from .player_prop_model import MODEL_VERSION as LEARNED_MODEL_VERSION
@@ -11,6 +11,7 @@ from .player_prop_model import clear_model_cache, predict_player_prop
 
 
 MODEL_VERSION = LEARNED_MODEL_VERSION
+LOCAL_TZ = timezone(timedelta(hours=-4))
 
 MARKET_COLUMNS = {
     "points": "points",
@@ -180,19 +181,47 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
         under_odds=int(prop["under_odds"]),
     )
     line = float(prop["line"])
-    side = "over" if projection > line else "under"
     stat_sigma = _estimated_sigma(conn, prop["player_id"], prop["market"], projection, prop["game_id"])
     over_probability = 1 - _normal_cdf(line, projection, stat_sigma)
-    raw_model_probability = over_probability if side == "over" else 1 - over_probability
-    model_probability = _calibrated_probability(
+    under_probability = 1 - over_probability
+    over_model_probability = _calibrated_probability(
         conn,
-        raw_model_probability,
+        over_probability,
         prop["market"],
         model_version,
+        "over",
     )
-    odds = int(prop["over_odds"] if side == "over" else prop["under_odds"])
-    implied = american_to_implied_probability(odds)
-    edge = model_probability - implied
+    under_model_probability = _calibrated_probability(
+        conn,
+        under_probability,
+        prop["market"],
+        model_version,
+        "under",
+    )
+    over_odds = int(prop["over_odds"])
+    under_odds = int(prop["under_odds"])
+    over_implied = american_to_implied_probability(over_odds)
+    under_implied = american_to_implied_probability(under_odds)
+    edge_over = over_model_probability - over_implied
+    edge_under = under_model_probability - under_implied
+
+    # Conservative over gating: avoid thin-margin over recommendations,
+    # especially in markets where overs have underperformed historically.
+    if projection > line and (projection - line) < _over_min_margin(prop["market"]):
+        edge_over -= 0.03
+
+    if edge_over >= edge_under:
+        side = "over"
+        model_probability = over_model_probability
+        implied = over_implied
+        edge = edge_over
+        odds = over_odds
+    else:
+        side = "under"
+        model_probability = under_model_probability
+        implied = under_implied
+        edge = edge_under
+        odds = under_odds
     ev = expected_value(model_probability, odds)
 
     return PropProjection(
@@ -212,6 +241,7 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
 
 def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
     clear_model_cache()
+    _refresh_scheduled_game_rest_days(conn)
     props = conn.execute(
         """
         SELECT pl.id
@@ -259,6 +289,96 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
     )
     conn.commit()
     return projections
+
+
+def _refresh_scheduled_game_rest_days(conn: sqlite3.Connection) -> None:
+    games = conn.execute(
+        """
+        SELECT id, home_team_id, away_team_id, start_time, game_date
+        FROM games
+        WHERE status = 'scheduled'
+        """
+    ).fetchall()
+    updates = []
+    for game in games:
+        home_rest = _rest_days_before_game(conn, int(game["home_team_id"]), str(game["start_time"]), game["game_date"])
+        away_rest = _rest_days_before_game(conn, int(game["away_team_id"]), str(game["start_time"]), game["game_date"])
+        if home_rest is None and away_rest is None:
+            continue
+        updates.append(
+            (
+                int(home_rest) if home_rest is not None else 2,
+                int(away_rest) if away_rest is not None else 2,
+                int(game["id"]),
+            )
+        )
+    if updates:
+        conn.executemany(
+            """
+            UPDATE games
+            SET rest_days_home = ?, rest_days_away = ?
+            WHERE id = ?
+            """,
+            updates,
+        )
+
+
+def _rest_days_before_game(conn: sqlite3.Connection, team_id: int, start_time: str, game_date: str | None = None) -> int | None:
+    current_date = _parse_game_date(game_date) if game_date else None
+    if current_date is None:
+        current_start = _parse_game_start(start_time)
+        if current_start is None:
+            return None
+        current_date = current_start.astimezone(LOCAL_TZ).date()
+    else:
+        current_start = _parse_game_start(start_time)
+    rows = conn.execute(
+        """
+        SELECT g.start_time, g.game_date
+        FROM games g
+        WHERE (g.home_team_id = ? OR g.away_team_id = ?)
+          AND lower(g.status) NOT IN ('canceled', 'cancelled')
+        ORDER BY g.start_time DESC
+        """,
+        (team_id, team_id),
+    ).fetchall()
+    previous_dates = []
+    for row in rows:
+        previous_start = _parse_game_start(row["start_time"])
+        if current_start is not None and (previous_start is None or previous_start >= current_start):
+            continue
+        previous_date = _parse_game_date(row["game_date"])
+        if previous_date is None and previous_start is not None:
+            previous_date = previous_start.astimezone(LOCAL_TZ).date()
+        if previous_date and previous_date < current_date:
+            previous_dates.append(previous_date)
+    if not previous_dates:
+        return None
+    rest_days = max((current_date - max(previous_dates)).days, 0)
+    if rest_days > 14:
+        return None
+    return rest_days
+
+
+def _parse_game_date(value: str | None):
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except ValueError:
+        return None
+
+
+def _parse_game_start(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=LOCAL_TZ)
+    return parsed.astimezone(timezone.utc)
 
 
 def _market_value(row: sqlite3.Row, market: str) -> float:
@@ -649,9 +769,15 @@ def _player_minute_volatility(conn: sqlite3.Connection, player_id: int, game_id:
     return math.sqrt(max(variance, 0.0))
 
 
-def _calibrated_probability(conn: sqlite3.Connection, raw_probability: float, market: str, model_version: str) -> float:
+def _calibrated_probability(
+    conn: sqlite3.Connection,
+    raw_probability: float,
+    market: str,
+    model_version: str,
+    side: str | None = None,
+) -> float:
     # Use empirical hit rates by market/probability bin with Bayesian shrinkage.
-    calibration = _market_calibration(conn, market, model_version)
+    calibration = _market_calibration(conn, market, model_version, side=side)
     if not calibration:
         return _clamp(raw_probability, 0.05, 0.95)
     bin_key = _probability_bin(raw_probability)
@@ -666,9 +792,27 @@ def _calibrated_probability(conn: sqlite3.Connection, raw_probability: float, ma
     return _clamp(calibrated, 0.05, 0.95)
 
 
-def _market_calibration(conn: sqlite3.Connection, market: str, model_version: str) -> dict | None:
+def _over_min_margin(market: str) -> float:
+    by_market = {
+        "threes": 0.70,
+        "points": 0.45,
+        "rebounds": 0.40,
+        "assists": 0.35,
+        "points_rebounds_assists": 1.10,
+    }
+    return by_market.get(market, 0.50)
+
+
+def _market_calibration(
+    conn: sqlite3.Connection,
+    market: str,
+    model_version: str,
+    side: str | None = None,
+) -> dict | None:
+    side_filter = "AND r.recommended_side = ?" if side is not None else ""
+    params: tuple = (model_version, market, side) if side is not None else (model_version, market)
     rows = conn.execute(
-        """
+        f"""
         WITH ranked AS (
           SELECT
             pp.prop_line_id,
@@ -691,10 +835,13 @@ def _market_calibration(conn: sqlite3.Connection, market: str, model_version: st
         JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
         WHERE r.rn = 1
           AND r.market = ?
+          {side_filter}
           AND r.model_probability IS NOT NULL
         """,
-        (model_version, market),
+        params,
     ).fetchall()
+    if len(rows) < CALIBRATION_MIN_SAMPLES and side is not None:
+        return _market_calibration(conn, market, model_version, side=None)
     if len(rows) < CALIBRATION_MIN_SAMPLES:
         return None
     hits = 0

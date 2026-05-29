@@ -35,6 +35,7 @@ FEATURE_NAMES = [
     "pace_factor",
     "opponent_factor",
     "common_opponent_factor",
+    "h2h_factor",
     "blowout_minutes_delta",
     "spread_abs",
     "game_total",
@@ -162,6 +163,7 @@ def feature_snapshot(
     pace_factor = _pace_factor(conn, context["team_id"], context["opponent_id"]) if context else 1.0
     opponent_factor = _opponent_factor(conn, context["opponent_id"], market) if context else 1.0
     common_opponent_factor = _common_opponent_factor(conn, player_id, market, context, before_game_date) if context else 1.0
+    h2h_factor = _h2h_factor(conn, player_id, market, context, before_game_date) if context else 1.0
     home_factor = 1.02 if context and context["is_home"] else 0.99
     rest_factor = _rest_factor(context["rest_days"]) if context else 1.0
     usage_multiplier, adjustment_note = _manual_adjustment(conn, player_id)
@@ -172,6 +174,7 @@ def feature_snapshot(
         * pace_factor
         * opponent_factor
         * common_opponent_factor
+        * h2h_factor
         * home_factor
         * rest_factor
         * usage_multiplier
@@ -195,6 +198,7 @@ def feature_snapshot(
         pace_factor,
         opponent_factor,
         common_opponent_factor,
+        h2h_factor,
         blowout["minutes_delta"],
         spread_abs,
         game_total,
@@ -204,7 +208,7 @@ def feature_snapshot(
         f"last 10 {last_10_avg:.1f}, rate x minutes {rate_projection:.1f} on {projected_minutes:.1f} projected minutes. "
         f"Minutes trend {minutes_trend:+.1f}, volatility {value_volatility:.1f}, consistency {consistency_score:.2f}. "
         f"Context: pace {pace_factor:.2f}, opponent {opponent_factor:.2f}, "
-        f"common opponents {common_opponent_factor:.2f}, blowout {blowout['risk']} "
+        f"common opponents {common_opponent_factor:.2f}, h2h {h2h_factor:.2f}, blowout {blowout['risk']} "
         f"({blowout['minutes_delta']:+.1f} min), "
         f"{'home' if context and context['is_home'] else 'away'} {home_factor:.2f}, "
         f"rest {rest_factor:.2f}, usage {usage_multiplier:.2f}; "
@@ -385,6 +389,7 @@ def _historical_training_features(row: sqlite3.Row, history: list[float], minute
         consistency_score,
         float(rest_days),
         1.0 if is_home else 0.0,
+        1.0,
         1.0,
         1.0,
         1.0,
@@ -869,6 +874,49 @@ def _common_opponent_factor(
         return 1.0
     sample_weight = min(len(player_rows) / 5, 1.0)
     return _clamp(1 + (((common_avg / player_avg) - 1) * sample_weight * 0.5), 0.94, 1.06)
+
+
+def _h2h_factor(
+    conn: sqlite3.Connection,
+    player_id: int,
+    market: str,
+    context: dict,
+    before_game_date: str | None,
+) -> float:
+    opponent_id = int(context["opponent_id"])
+    date_filter = "AND g.game_date < ?" if before_game_date is not None else ""
+    params: list[object] = [player_id, opponent_id]
+    if before_game_date is not None:
+        params.append(before_game_date)
+    h2h_rows = conn.execute(
+        f"""
+        SELECT s.*
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        JOIN games g ON g.id = s.game_id
+        WHERE s.player_id = ?
+          AND CASE
+            WHEN p.team_id = g.home_team_id THEN g.away_team_id
+            ELSE g.home_team_id
+          END = ?
+          {date_filter}
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT 6
+        """,
+        params,
+    ).fetchall()
+    if len(h2h_rows) < 2:
+        return 1.0
+    baseline_rows = _player_history(conn, player_id, market, before_game_date, exclude_game_id=None)
+    if not baseline_rows:
+        return 1.0
+    h2h_avg = sum(_market_value(row, market) for row in h2h_rows) / len(h2h_rows)
+    baseline_avg = sum(row["value"] for row in baseline_rows) / len(baseline_rows)
+    if baseline_avg <= 0:
+        return 1.0
+    sample_weight = min(1.0, len(h2h_rows) / 6.0)
+    ratio = _clamp(h2h_avg / baseline_avg, 0.82, 1.18)
+    return _clamp(1 + ((ratio - 1) * sample_weight * 0.55), 0.92, 1.08)
 
 
 def _common_opponent_ids(conn: sqlite3.Connection, team_id: int, opponent_id: int, before_game_date: str | None) -> list[int]:
