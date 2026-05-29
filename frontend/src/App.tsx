@@ -1950,6 +1950,25 @@ function summarizeCoversContextRecord(rows: CoversRecordRow[] | undefined, conte
   return `${wins}-${losses}`;
 }
 
+function summarizeCoversContextAts(rows: CoversRecordRow[] | undefined, context: "home" | "away") {
+  if (!rows?.length) {
+    return null;
+  }
+  let wins = 0;
+  let losses = 0;
+  let pushes = 0;
+  for (const row of rows) {
+    if (row.location !== context) {
+      continue;
+    }
+    const atsToken = (row.ats ?? "").trim().charAt(0).toUpperCase();
+    if (atsToken === "W") wins += 1;
+    else if (atsToken === "L") losses += 1;
+    else if (atsToken === "P") pushes += 1;
+  }
+  return `${wins}-${losses}-${pushes}`;
+}
+
 function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp[]; loading: boolean; error: string | null }) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const [marketFilter, setMarketFilter] = useState("all");
@@ -2565,6 +2584,7 @@ function TeamSummary({
   const ats = coversTeamRow?.ats ?? coversDerived?.ats ?? `${summary.ats_wins}-${summary.ats_losses}-${summary.ats_pushes}`;
   const ou = coversTeamRow?.ou ?? coversDerived?.ou ?? `${summary.overs}-${summary.unders}-${summary.total_pushes}`;
   const contextDerived = summarizeCoversContextRecord(coversLast10Rows, context);
+  const contextAtsDerived = summarizeCoversContextAts(coversLast10Rows, context);
   const contextRecord = coversTeamRow
     ? (context === "home" ? coversTeamRow.home : coversTeamRow.away)
     : contextDerived ?? (context === "home" ? `${summary.home_games}` : `${summary.away_games}`);
@@ -2582,6 +2602,7 @@ function TeamSummary({
         <MiniStat label="W-L" value={winsLosses} />
         <MiniStat label="Rest" value={restLabel(restDays)} />
         <MiniStat label={context === "home" ? "Home Rec" : "Away Rec"} value={contextRecord} />
+        <MiniStat label={context === "home" ? "Home ATS" : "Away ATS"} value={contextAtsDerived ?? "N/A"} />
         <MiniStat label="ATS" value={ats} />
         <MiniStat label="O/U" value={ou} />
       </div>
