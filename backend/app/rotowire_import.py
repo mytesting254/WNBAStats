@@ -27,25 +27,40 @@ UNAVAILABLE_STATUSES = {"OUT", "GTD", "DOUBTFUL", "QUESTIONABLE"}
 def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = False) -> dict:
     cached_payload = read_json_cache(RAW_CACHE_NAME)
     use_cache = not force_refresh and _cache_is_current(conn, cached_payload)
+    used_fallback_cache = False
+    fetch_error: str | None = None
     if use_cache:
         rows = _cached_rows(cached_payload)
         captured_at = str(cached_payload["captured_at"])
         source = "cache"
     else:
-        page = _fetch_text(ROTOWIRE_LINEUPS_URL)
-        captured_at = datetime.now(timezone.utc).isoformat()
-        rows = _parse_lineup_injuries(page)
-        write_json_cache(
-            RAW_CACHE_NAME,
-            {
-                "source": "rotowire",
-                "url": ROTOWIRE_LINEUPS_URL,
-                "captured_at": captured_at,
-                "cache_date": datetime.now(timezone.utc).date().isoformat(),
-                "rows": rows,
-            },
-        )
-        source = "rotowire"
+        try:
+            page = _fetch_text(ROTOWIRE_LINEUPS_URL)
+            captured_at = datetime.now(timezone.utc).isoformat()
+            rows = _parse_lineup_injuries(page)
+            write_json_cache(
+                RAW_CACHE_NAME,
+                {
+                    "source": "rotowire",
+                    "url": ROTOWIRE_LINEUPS_URL,
+                    "captured_at": captured_at,
+                    "cache_date": datetime.now(timezone.utc).date().isoformat(),
+                    "rows": rows,
+                },
+            )
+            source = "rotowire"
+        except Exception as exc:
+            fallback_rows = _cached_rows(cached_payload) if isinstance(cached_payload, dict) else []
+            fallback_captured_at = str(cached_payload.get("captured_at") or "") if isinstance(cached_payload, dict) else ""
+            if fallback_rows and fallback_captured_at:
+                rows = fallback_rows
+                captured_at = fallback_captured_at
+                source = "cache"
+                use_cache = True
+                used_fallback_cache = True
+                fetch_error = str(exc)
+            else:
+                raise
 
     _update_roster_snapshot_cache(rows, captured_at, source)
 
@@ -90,6 +105,8 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
         "unresolved": unresolved,
         "skipped_stale": skipped_stale,
         "from_cache": use_cache,
+        "used_fallback_cache": used_fallback_cache,
+        "fetch_error": fetch_error,
         "ttl_seconds": _refresh_ttl_seconds(conn),
         "unresolved_examples": unresolved_names[:10],
     }

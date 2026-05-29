@@ -1368,6 +1368,30 @@ def test_rotowire_import_force_refresh_fetches(monkeypatch) -> None:
     assert result["source"] == "rotowire"
 
 
+def test_rotowire_import_force_refresh_falls_back_to_cached_rows_on_fetch_failure(monkeypatch) -> None:
+    cached_payload = {
+        "captured_at": "2026-05-22T20:00:00+00:00",
+        "rows": [
+            {"team": "IND", "player_name": "Caitlin Clark", "status": "GTD"},
+        ],
+    }
+    monkeypatch.setattr(rotowire_import_module, "read_json_cache", lambda _: cached_payload)
+    monkeypatch.setattr(
+        rotowire_import_module,
+        "_fetch_text",
+        lambda _: (_ for _ in ()).throw(TimeoutError("network timeout")),
+    )
+    monkeypatch.setattr(rotowire_import_module, "write_json_cache", lambda *args, **kwargs: None)
+
+    with connect() as conn:
+        result = rotowire_import_module.import_rotowire_lineups(conn, force_refresh=True)
+
+    assert result["from_cache"] is True
+    assert result["used_fallback_cache"] is True
+    assert result["source"] == "cache"
+    assert "timeout" in str(result["fetch_error"]).lower()
+
+
 def test_espn_boxscore_missing_only_skips_games_with_stats(monkeypatch) -> None:
     load_test_history()
     fetched_game_ids: list[int] = []
