@@ -2630,8 +2630,8 @@ function TeamSummary({
           </>
         ) : (
           <>
-            <MiniStat label="Home Rec" value={contextRecord} />
             <MiniStat label="ATS" value={ats} />
+            <MiniStat label="Home Rec" value={contextRecord} />
           </>
         )}
         <MiniStat label={context === "home" ? "Home O/U" : "Away O/U"} value={contextOuDerived ?? "N/A"} />
