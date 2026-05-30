@@ -46,7 +46,7 @@ def connect() -> Any:
 def _configure_connection(conn: Any) -> None:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA journal_mode = DELETE")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA cache_size = -8000")
     conn.execute("PRAGMA temp_store = MEMORY")
