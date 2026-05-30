@@ -474,13 +474,28 @@ def _game_context(conn: sqlite3.Connection, player_id: int, game_id: int | None)
     row = conn.execute(
         """
         SELECT
-            p.team_id,
             g.home_team_id,
             g.away_team_id,
             g.rest_days_home,
             g.rest_days_away,
             g.spread_home,
-            g.game_total
+            g.game_total,
+            COALESCE(
+                (
+                    SELECT h.team_id
+                    FROM player_team_history h
+                    LEFT JOIN games hg ON hg.id = h.game_id
+                    WHERE h.player_id = p.id
+                      AND (
+                        h.game_id IS NULL
+                        OR hg.game_date IS NULL
+                        OR hg.game_date <= g.game_date
+                      )
+                    ORDER BY hg.game_date DESC, h.id DESC
+                    LIMIT 1
+                ),
+                p.team_id
+            ) AS resolved_team_id
         FROM players p
         JOIN games g ON g.id = ?
         WHERE p.id = ?
@@ -489,11 +504,12 @@ def _game_context(conn: sqlite3.Connection, player_id: int, game_id: int | None)
     ).fetchone()
     if not row:
         return {"team_id": 0, "opponent_id": 0, "is_home": False, "rest_days": 2}
-    is_home = int(row["team_id"]) == int(row["home_team_id"])
+    team_id = int(row["resolved_team_id"])
+    is_home = team_id == int(row["home_team_id"])
     opponent_id = int(row["away_team_id"] if is_home else row["home_team_id"])
     rest_days = int(row["rest_days_home"] if is_home else row["rest_days_away"] or 2)
     return {
-        "team_id": int(row["team_id"]),
+        "team_id": team_id,
         "opponent_id": opponent_id,
         "is_home": is_home,
         "rest_days": rest_days,

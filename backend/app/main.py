@@ -156,6 +156,76 @@ def _protect_force_refresh(
     _enforce_api_key(x_api_key, authorization)
 
 
+@app.get("/api/admin/team-conflicts", dependencies=[Depends(_protect_mutation)])
+def team_conflicts(limit: int = Query(default=100, ge=1, le=500)) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            WITH history_counts AS (
+                SELECT
+                    h.player_id,
+                    h.team_id,
+                    COUNT(*) AS team_count,
+                    MAX(COALESCE(g.game_date, substr(h.observed_at, 1, 10))) AS last_seen_date
+                FROM player_team_history h
+                LEFT JOIN games g ON g.id = h.game_id
+                GROUP BY h.player_id, h.team_id
+            ),
+            resolved AS (
+                SELECT
+                    hc.player_id,
+                    hc.team_id AS resolved_team_id,
+                    hc.team_count AS resolved_team_count,
+                    hc.last_seen_date AS resolved_last_seen_date
+                FROM history_counts hc
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM history_counts other
+                    WHERE other.player_id = hc.player_id
+                      AND (
+                        other.team_count > hc.team_count
+                        OR (
+                            other.team_count = hc.team_count
+                            AND other.last_seen_date > hc.last_seen_date
+                        )
+                        OR (
+                            other.team_count = hc.team_count
+                            AND other.last_seen_date = hc.last_seen_date
+                            AND other.team_id > hc.team_id
+                        )
+                      )
+                )
+            )
+            SELECT
+                p.id AS player_id,
+                p.full_name,
+                p.team_id AS current_team_id,
+                current_team.abbreviation AS current_team,
+                resolved.resolved_team_id,
+                resolved_team.abbreviation AS resolved_team,
+                resolved.resolved_team_count,
+                resolved.resolved_last_seen_date,
+                (
+                    SELECT COALESCE(SUM(hc2.team_count), 0)
+                    FROM history_counts hc2
+                    WHERE hc2.player_id = p.id
+                ) AS total_history_rows
+            FROM players p
+            JOIN resolved ON resolved.player_id = p.id
+            JOIN teams current_team ON current_team.id = p.team_id
+            JOIN teams resolved_team ON resolved_team.id = resolved.resolved_team_id
+            WHERE p.team_id != resolved.resolved_team_id
+            ORDER BY
+                resolved.resolved_team_count DESC,
+                resolved.resolved_last_seen_date DESC,
+                p.full_name ASC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def _cache_envelope(payload: Any, ttl_seconds: int) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     return {
@@ -1907,14 +1977,14 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
         params = ()
     rows = conn.execute(
         f"""
-        WITH ranked_props AS (
+        WITH raw_props AS (
             SELECT
                 pp.id,
                 pl.game_id,
                 p.full_name AS player,
                 p.id AS player_id,
-                t.abbreviation AS team,
-                t.logo_url AS team_logo_url,
+                rt.abbreviation AS team,
+                rt.logo_url AS team_logo_url,
                 pl.sportsbook,
                 pl.market,
                 pl.line,
@@ -1930,33 +2000,57 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
                 pp.reason,
                 pp.prediction_time,
                 g.start_time,
-                CASE
-                    WHEN p.team_id = g.home_team_id THEN g.rest_days_home
-                    ELSE g.rest_days_away
-                END AS rest_days,
                 p.rotation_role,
                 g.spread_home,
                 g.game_total,
-                CASE
-                    WHEN p.team_id = g.home_team_id THEN g.spread_home
-                    ELSE -g.spread_home
-                END AS team_spread,
-                ROW_NUMBER() OVER (
-                    PARTITION BY pl.game_id, pl.player_id, pl.market, pl.line
-                    ORDER BY
-                        CASE
-                            WHEN pp.recommended_side = 'over' THEN pl.over_odds
-                            ELSE pl.under_odds
-                        END DESC,
-                        pp.expected_value DESC,
-                        pp.id DESC
-                ) AS rn
+                rt.id AS resolved_team_id
             FROM prop_predictions pp
             JOIN prop_lines pl ON pl.id = pp.prop_line_id
             JOIN players p ON p.id = pl.player_id
-            JOIN teams t ON t.id = p.team_id
             JOIN games g ON g.id = pl.game_id
+            JOIN teams rt ON rt.id = (
+                SELECT COALESCE(
+                    (
+                        SELECT h.team_id
+                        FROM player_team_history h
+                        LEFT JOIN games hg ON hg.id = h.game_id
+                        WHERE h.player_id = p.id
+                          AND (
+                            h.game_id IS NULL
+                            OR hg.game_date IS NULL
+                            OR hg.game_date <= g.game_date
+                          )
+                        ORDER BY hg.game_date DESC, h.id DESC
+                        LIMIT 1
+                    ),
+                    p.team_id
+                )
+            )
             {game_filter}
+        ),
+        ranked_props AS (
+            SELECT
+                rp.*,
+                CASE
+                    WHEN rp.resolved_team_id = g.home_team_id THEN g.rest_days_home
+                    ELSE g.rest_days_away
+                END AS rest_days,
+                CASE
+                    WHEN rp.resolved_team_id = g.home_team_id THEN g.spread_home
+                    ELSE -g.spread_home
+                END AS team_spread,
+                ROW_NUMBER() OVER (
+                    PARTITION BY rp.game_id, rp.player_id, rp.market, rp.line
+                    ORDER BY
+                        CASE
+                            WHEN rp.recommended_side = 'over' THEN rp.over_odds
+                            ELSE rp.under_odds
+                        END DESC,
+                        rp.expected_value DESC,
+                        rp.id DESC
+                ) AS rn
+            FROM raw_props rp
+            JOIN games g ON g.id = rp.game_id
         )
         SELECT * FROM ranked_props WHERE rn = 1
         ORDER BY expected_value DESC, edge DESC
@@ -1978,15 +2072,15 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
 def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit: int = 60) -> list[dict]:
     rows = conn.execute(
         """
-        WITH ranked_props AS (
+        WITH raw_props AS (
             SELECT
                 pp.id,
                 pp.prop_line_id,
                 pl.game_id,
                 p.full_name AS player,
                 p.id AS player_id,
-                t.abbreviation AS team,
-                t.logo_url AS team_logo_url,
+                rt.abbreviation AS team,
+                rt.logo_url AS team_logo_url,
                 away.abbreviation AS away_team,
                 home.abbreviation AS home_team,
                 pl.sportsbook,
@@ -2004,37 +2098,61 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
                 pp.reason,
                 pp.prediction_time,
                 g.start_time,
-                CASE
-                    WHEN p.team_id = g.home_team_id THEN g.rest_days_home
-                    ELSE g.rest_days_away
-                END AS rest_days,
                 p.rotation_role,
                 g.spread_home,
                 g.game_total,
-                CASE
-                    WHEN p.team_id = g.home_team_id THEN g.spread_home
-                    ELSE -g.spread_home
-                END AS team_spread,
-                ROW_NUMBER() OVER (
-                    PARTITION BY pl.game_id, pl.player_id, pl.market, pl.line
-                    ORDER BY
-                        CASE
-                            WHEN pp.recommended_side = 'over' THEN pl.over_odds
-                            ELSE pl.under_odds
-                        END DESC,
-                        pp.expected_value DESC,
-                        pp.id DESC
-                ) AS rn
+                rt.id AS resolved_team_id
             FROM prop_predictions pp
             JOIN prop_lines pl ON pl.id = pp.prop_line_id
             JOIN players p ON p.id = pl.player_id
-            JOIN teams t ON t.id = p.team_id
             JOIN games g ON g.id = pl.game_id
+            JOIN teams rt ON rt.id = (
+                SELECT COALESCE(
+                    (
+                        SELECT h.team_id
+                        FROM player_team_history h
+                        LEFT JOIN games hg ON hg.id = h.game_id
+                        WHERE h.player_id = p.id
+                          AND (
+                            h.game_id IS NULL
+                            OR hg.game_date IS NULL
+                            OR hg.game_date <= g.game_date
+                          )
+                        ORDER BY hg.game_date DESC, h.id DESC
+                        LIMIT 1
+                    ),
+                    p.team_id
+                )
+            )
             JOIN teams away ON away.id = g.away_team_id
             JOIN teams home ON home.id = g.home_team_id
             LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
             WHERE g.status = 'scheduled'
               AND sp.id IS NULL
+        ),
+        ranked_props AS (
+            SELECT
+                rp.*,
+                CASE
+                    WHEN rp.resolved_team_id = g.home_team_id THEN g.rest_days_home
+                    ELSE g.rest_days_away
+                END AS rest_days,
+                CASE
+                    WHEN rp.resolved_team_id = g.home_team_id THEN g.spread_home
+                    ELSE -g.spread_home
+                END AS team_spread,
+                ROW_NUMBER() OVER (
+                    PARTITION BY rp.game_id, rp.player_id, rp.market, rp.line
+                    ORDER BY
+                        CASE
+                            WHEN rp.recommended_side = 'over' THEN rp.over_odds
+                            ELSE rp.under_odds
+                        END DESC,
+                        rp.expected_value DESC,
+                        rp.id DESC
+                ) AS rn
+            FROM raw_props rp
+            JOIN games g ON g.id = rp.game_id
         )
         SELECT *
         FROM ranked_props

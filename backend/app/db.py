@@ -259,6 +259,35 @@ def init_db() -> None:
         player_columns = {row["name"] for row in conn.execute("PRAGMA table_info(players)").fetchall()}
         if "rotation_role" not in player_columns:
             conn.execute("ALTER TABLE players ADD COLUMN rotation_role TEXT DEFAULT 'starter'")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_team_history (
+                id INTEGER PRIMARY KEY,
+                player_id INTEGER NOT NULL,
+                team_id INTEGER NOT NULL,
+                game_id INTEGER,
+                source TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                observed_at TEXT NOT NULL,
+                FOREIGN KEY (player_id) REFERENCES players(id),
+                FOREIGN KEY (team_id) REFERENCES teams(id),
+                FOREIGN KEY (game_id) REFERENCES games(id),
+                UNIQUE(player_id, game_id, source)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_player_team_history_player_game
+            ON player_team_history(player_id, game_id, id)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_player_team_history_team
+            ON player_team_history(team_id)
+            """
+        )
         game_columns = {row["name"] for row in conn.execute("PRAGMA table_info(games)").fetchall()}
         if "rest_days_home" not in game_columns:
             conn.execute("ALTER TABLE games ADD COLUMN rest_days_home INTEGER DEFAULT 2")
@@ -386,6 +415,43 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_games_status_date
             ON games(status, game_date)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at)
+            SELECT p.id, p.team_id, NULL, 'bootstrap_players', 0.4, datetime('now')
+            FROM players p
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM player_team_history h
+                WHERE h.player_id = p.id
+            )
+            """
+        )
+        conn.execute(
+            """
+            UPDATE players
+            SET team_id = (
+                SELECT hist.team_id
+                FROM (
+                    SELECT
+                        h.team_id,
+                        COUNT(*) AS team_count,
+                        MAX(COALESCE(g.game_date, h.observed_at)) AS last_seen
+                    FROM player_team_history h
+                    LEFT JOIN games g ON g.id = h.game_id
+                    WHERE h.player_id = players.id
+                    GROUP BY h.team_id
+                    ORDER BY team_count DESC, last_seen DESC, h.team_id DESC
+                    LIMIT 1
+                ) hist
+            )
+            WHERE EXISTS (
+                SELECT 1
+                FROM player_team_history h2
+                WHERE h2.player_id = players.id
+            )
             """
         )
         conn.execute(
@@ -527,6 +593,20 @@ CREATE TABLE IF NOT EXISTS players (
     position TEXT,
     rotation_role TEXT DEFAULT 'starter',
     FOREIGN KEY (team_id) REFERENCES teams(id)
+);
+
+CREATE TABLE IF NOT EXISTS player_team_history (
+    id INTEGER PRIMARY KEY,
+    player_id INTEGER NOT NULL,
+    team_id INTEGER NOT NULL,
+    game_id INTEGER,
+    source TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 1.0,
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY (player_id) REFERENCES players(id),
+    FOREIGN KEY (team_id) REFERENCES teams(id),
+    FOREIGN KEY (game_id) REFERENCES games(id),
+    UNIQUE(player_id, game_id, source)
 );
 
 CREATE TABLE IF NOT EXISTS games (

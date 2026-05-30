@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Any
@@ -222,7 +223,9 @@ def import_espn_player_boxscores(
         fetched_games.sort(key=lambda item: game_order[item[0]])
 
     players_by_id: dict[int, dict] = {}
+    team_votes_by_player: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     stat_rows: list[tuple] = []
+    team_history_rows: set[tuple[int, int, int, str, float, str]] = set()
     game_ids_to_replace = []
 
     for game_id, _summary_event_id, payload in fetched_games:
@@ -237,7 +240,11 @@ def import_espn_player_boxscores(
 
         game_ids_to_replace.append(game_id)
         for player in player_rows["players"]:
-            players_by_id[int(player["id"])] = player
+            player_id = int(player["id"])
+            team_id = int(player["team_id"])
+            players_by_id[player_id] = player
+            team_votes_by_player[player_id][team_id] += 1
+            team_history_rows.add((player_id, team_id, int(game_id), "espn_boxscore", 0.95, datetime.now(timezone.utc).isoformat()))
         stat_rows.extend(player_rows["stats"])
 
     if game_ids_to_replace:
@@ -258,7 +265,16 @@ def import_espn_player_boxscores(
                 rotation_role = excluded.rotation_role
             """,
             [
-                (player["id"], player["full_name"], player["team_id"], player["position"], player["rotation_role"])
+                (
+                    player["id"],
+                    player["full_name"],
+                    max(
+                        team_votes_by_player.get(int(player["id"]), {int(player["team_id"]): 1}).items(),
+                        key=lambda item: item[1],
+                    )[0],
+                    player["position"],
+                    player["rotation_role"],
+                )
                 for player in players_by_id.values()
             ],
         )
@@ -269,6 +285,17 @@ def import_espn_player_boxscores(
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             stat_rows,
+        )
+        conn.executemany(
+            """
+            INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(player_id, game_id, source) DO UPDATE SET
+                team_id = excluded.team_id,
+                confidence = excluded.confidence,
+                observed_at = excluded.observed_at
+            """,
+            sorted(team_history_rows),
         )
         inserted_stats = len(stat_rows)
 
