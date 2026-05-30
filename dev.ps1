@@ -72,18 +72,18 @@ try {
         Write-Host "Frontend port $FrontendPort is busy. Using $ResolvedFrontendPort."
     }
 
-    Write-Host "Starting FastAPI backend on http://127.0.0.1:$ResolvedBackendPort"
+    Write-Host "Starting FastAPI backend on http://0.0.0.0:$ResolvedBackendPort"
     $BackendProcess = Start-Process -FilePath $BackendPython -ArgumentList @(
         "-m", "uvicorn", "backend.app.main:app",
-        "--host", "127.0.0.1",
+        "--host", "0.0.0.0",
         "--port", $ResolvedBackendPort
     ) -WorkingDirectory $Root -NoNewWindow -PassThru
     $Processes += $BackendProcess
 
-    Write-Host "Starting React frontend on http://127.0.0.1:$ResolvedFrontendPort"
+    Write-Host "Starting React frontend on http://0.0.0.0:$ResolvedFrontendPort"
     $env:VITE_BACKEND_URL = "http://127.0.0.1:$ResolvedBackendPort"
     $FrontendProcess = Start-Process -FilePath "npm.cmd" -ArgumentList @(
-        "run", "dev", "--", "--host", "127.0.0.1", "--port", $ResolvedFrontendPort
+        "run", "dev", "--", "--host", "0.0.0.0", "--port", $ResolvedFrontendPort
     ) -WorkingDirectory $FrontendDir -NoNewWindow -PassThru
     $Processes += $FrontendProcess
 

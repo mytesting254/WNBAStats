@@ -486,6 +486,12 @@ One-command startup (restore latest snapshot, then run dev servers):
 ./snapshot.sh
 ```
 
+PowerShell equivalent:
+
+```powershell
+.\snapshot.ps1
+```
+
 `./snapshot.sh` now does both automatically:
 
 - startup: restores the latest snapshot if available
@@ -520,8 +526,15 @@ What the scripts do:
 
 - `snapshot.sh`: single command wrapper around create/restore/list/latest operations.
 - `snapshot.sh` with no args (or `auto`/`start`): restore latest snapshot if one exists, then run `dev.sh`.
+- `snapshot.ps1` with no args (or `auto`/`start`): restore latest snapshot if one exists, then run `dev.ps1`.
 - `snapshot_create.py`: checkpoints WAL, copies the SQLite file, writes a JSON manifest with `created_at`, `schema_version`, `app_commit_sha`, `row_counts`, `source_device`, and `sha256`, then prunes older snapshots (default keep latest 5).
 - `snapshot_restore.py`: validates checksum + schema version, creates a timestamped backup of the current DB, removes stale `-wal/-shm`, then atomically replaces the DB file.
+
+Network access notes:
+
+- `dev.sh` and `dev.ps1` bind backend/frontend to `0.0.0.0` for same-network access.
+- Dynamic port assignment is unchanged in `dev.ps1`; it still auto-selects open backend/frontend ports when defaults are busy.
+- Access from the host machine still works via `127.0.0.1:<resolved-port>`.
 
 Safety:
 
