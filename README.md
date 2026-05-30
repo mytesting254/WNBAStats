@@ -490,6 +490,7 @@ One-command startup (restore latest snapshot, then run dev servers):
 
 - startup: restores the latest snapshot if available
 - shutdown: creates a new snapshot (`--label auto`) after `dev.sh` exits
+- retention: keeps only the latest 5 snapshots by default (`SNAPSHOT_KEEP_LATEST=5`)
 
 Create a snapshot:
 
@@ -519,7 +520,7 @@ What the scripts do:
 
 - `snapshot.sh`: single command wrapper around create/restore/list/latest operations.
 - `snapshot.sh` with no args (or `auto`/`start`): restore latest snapshot if one exists, then run `dev.sh`.
-- `snapshot_create.py`: checkpoints WAL, copies the SQLite file, and writes a JSON manifest with `created_at`, `schema_version`, `app_commit_sha`, `row_counts`, `source_device`, and `sha256`.
+- `snapshot_create.py`: checkpoints WAL, copies the SQLite file, writes a JSON manifest with `created_at`, `schema_version`, `app_commit_sha`, `row_counts`, `source_device`, and `sha256`, then prunes older snapshots (default keep latest 5).
 - `snapshot_restore.py`: validates checksum + schema version, creates a timestamped backup of the current DB, removes stale `-wal/-shm`, then atomically replaces the DB file.
 
 Safety:

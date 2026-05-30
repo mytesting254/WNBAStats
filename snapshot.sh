@@ -6,6 +6,7 @@ PYTHON="$ROOT/.venv/bin/python"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-$ROOT/data/snapshots}"
 DB_PATH="${WNBA_DB_PATH:-$ROOT/data/wnba.sqlite}"
 SNAPSHOT_AUTOSAVE_INTERVAL="${SNAPSHOT_AUTOSAVE_INTERVAL:-300}"
+SNAPSHOT_KEEP_LATEST="${SNAPSHOT_KEEP_LATEST:-5}"
 
 if [[ ! -x "$PYTHON" ]]; then
   echo "Missing Python virtual environment."
@@ -20,7 +21,7 @@ Usage:
   ./snapshot.sh auto
   ./snapshot.sh start
   ./snapshot.sh watch [--label NAME]
-  ./snapshot.sh create [--label NAME] [--device NAME] [--db-path PATH] [--output-dir PATH]
+  ./snapshot.sh create [--label NAME] [--device NAME] [--db-path PATH] [--output-dir PATH] [--keep-latest N]
   ./snapshot.sh restore <snapshot.sqlite> [--force] [--db-path PATH] [--snapshot-dir PATH]
   ./snapshot.sh list [--snapshot-dir PATH]
   ./snapshot.sh latest [--snapshot-dir PATH]
@@ -42,7 +43,7 @@ snapshot_watch() {
     if [[ -f "$DB_PATH" ]]; then
       current_mtime="$(stat -c %Y "$DB_PATH" 2>/dev/null || true)"
       if [[ -n "$current_mtime" && "$current_mtime" != "$last_mtime" ]]; then
-        "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --label "$label"
+        "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --label "$label" --keep-latest "$SNAPSHOT_KEEP_LATEST"
         last_mtime="$current_mtime"
       fi
     fi
@@ -76,7 +77,7 @@ case "$command" in
       wait "$WATCHER_PID" 2>/dev/null || true
     fi
     echo "Creating shutdown snapshot..."
-    "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --label auto
+    "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --label auto --keep-latest "$SNAPSHOT_KEEP_LATEST"
     exit "$dev_exit"
     ;;
   watch)
@@ -88,7 +89,7 @@ case "$command" in
     snapshot_watch "$label"
     ;;
   create)
-    "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" "$@"
+    "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --keep-latest "$SNAPSHOT_KEEP_LATEST" "$@"
     ;;
   restore)
     if [[ $# -lt 1 ]]; then

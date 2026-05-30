@@ -57,7 +57,23 @@ def _row_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
-def create_snapshot(db_path: Path, output_dir: Path, label: str | None, device: str | None) -> tuple[Path, Path]:
+def _prune_old_snapshots(output_dir: Path, keep_latest: int) -> None:
+    if keep_latest <= 0:
+        return
+    snapshot_files = sorted(output_dir.glob("*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old_db in snapshot_files[keep_latest:]:
+        old_manifest = old_db.with_suffix(".manifest.json")
+        old_db.unlink(missing_ok=True)
+        old_manifest.unlink(missing_ok=True)
+
+
+def create_snapshot(
+    db_path: Path,
+    output_dir: Path,
+    label: str | None,
+    device: str | None,
+    keep_latest: int,
+) -> tuple[Path, Path]:
     if not db_path.exists():
         raise FileNotFoundError(f"Database file not found: {db_path}")
 
@@ -91,6 +107,7 @@ def create_snapshot(db_path: Path, output_dir: Path, label: str | None, device: 
         "sha256": checksum,
     }
     snapshot_manifest.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    _prune_old_snapshots(output_dir, keep_latest)
     return snapshot_db, snapshot_manifest
 
 
@@ -100,11 +117,19 @@ def main() -> None:
     parser.add_argument("--output-dir", default=str(DEFAULT_SNAPSHOT_DIR))
     parser.add_argument("--label", default=None, help="Optional label in snapshot filename.")
     parser.add_argument("--device", default=None, help="Optional source device identifier.")
+    parser.add_argument(
+        "--keep-latest",
+        type=int,
+        default=5,
+        help="Keep only the most recent N snapshots (SQLite + manifest). Use 0 to disable pruning.",
+    )
     args = parser.parse_args()
 
     db_path = Path(args.db_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
-    snapshot_db, snapshot_manifest = create_snapshot(db_path, output_dir, args.label, args.device)
+    snapshot_db, snapshot_manifest = create_snapshot(
+        db_path, output_dir, args.label, args.device, args.keep_latest
+    )
     print(f"Created snapshot DB: {snapshot_db}")
     print(f"Created manifest:   {snapshot_manifest}")
 
