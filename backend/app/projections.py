@@ -17,6 +17,9 @@ MARKET_COLUMNS = {
     "points": "points",
     "rebounds": "rebounds",
     "assists": "assists",
+    "points_rebounds": "points + rebounds",
+    "points_assists": "points + assists",
+    "rebounds_assists": "rebounds + assists",
     "threes": "threes",
     "steals": "steals",
     "blocks": "blocks",
@@ -27,6 +30,9 @@ MARKET_SIGMA_FLOORS = {
     "points": 3.0,
     "rebounds": 2.2,
     "assists": 1.8,
+    "points_rebounds": 4.2,
+    "points_assists": 3.8,
+    "rebounds_assists": 3.2,
     "threes": 1.1,
     "steals": 0.8,
     "blocks": 0.7,
@@ -395,6 +401,12 @@ def _parse_game_start(value: str | None) -> datetime | None:
 
 
 def _market_value(row: sqlite3.Row, market: str) -> float:
+    if market == "points_rebounds":
+        return float(row["points"] + row["rebounds"])
+    if market == "points_assists":
+        return float(row["points"] + row["assists"])
+    if market == "rebounds_assists":
+        return float(row["rebounds"] + row["assists"])
     if market == "points_rebounds_assists":
         return float(row["points"] + row["rebounds"] + row["assists"])
     if market == "blocks_steals":
@@ -837,6 +849,9 @@ def _over_min_margin(market: str) -> float:
         "points": 0.45,
         "rebounds": 0.40,
         "assists": 0.35,
+        "points_rebounds": 0.75,
+        "points_assists": 0.70,
+        "rebounds_assists": 0.60,
         "points_rebounds_assists": 1.10,
     }
     return by_market.get(market, 0.50)

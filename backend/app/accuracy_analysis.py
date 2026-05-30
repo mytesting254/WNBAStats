@@ -465,6 +465,12 @@ def _accuracy_from_row(row: sqlite3.Row) -> PredictionAccuracy:
 
 def _market_value(row: sqlite3.Row, market: str) -> float:
     """Extract the stat value for a given market."""
+    if market == "points_rebounds":
+        return float(row["points"] + row["rebounds"])
+    elif market == "points_assists":
+        return float(row["points"] + row["assists"])
+    elif market == "rebounds_assists":
+        return float(row["rebounds"] + row["assists"])
     if market == "points_rebounds_assists":
         return float(row["points"] + row["rebounds"] + row["assists"])
     elif market == "points":
@@ -475,5 +481,11 @@ def _market_value(row: sqlite3.Row, market: str) -> float:
         return float(row["assists"])
     elif market == "threes":
         return float(row["threes"])
+    elif market == "steals":
+        return float(row["steals"])
+    elif market == "blocks":
+        return float(row["blocks"])
+    elif market == "blocks_steals":
+        return float(row["blocks"] + row["steals"])
     else:
         raise ValueError(f"Unsupported market: {market}")

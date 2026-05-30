@@ -1848,6 +1848,11 @@ def _covers_records_by_game() -> dict[int, dict]:
     payload = read_json_cache("covers_props_raw.json")
     if not isinstance(payload, dict):
         return {}
+    cache_date = payload.get("cache_date")
+    today_local = datetime.now(LOCAL_TZ).date().isoformat()
+    if cache_date != today_local:
+        delete_json_cache("covers_props_raw.json")
+        return {}
     records_by_game = {}
     for item in payload.get("games", []):
         if not isinstance(item, dict) or item.get("game_id") is None:

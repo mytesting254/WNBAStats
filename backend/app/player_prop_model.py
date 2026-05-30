@@ -13,6 +13,9 @@ TRAINING_MARKETS = [
     "points",
     "rebounds",
     "assists",
+    "points_rebounds",
+    "points_assists",
+    "rebounds_assists",
     "points_rebounds_assists",
     "threes",
     "steals",
@@ -45,6 +48,9 @@ MARKET_VOLATILITY_FLOORS = {
     "points": 3.0,
     "rebounds": 2.2,
     "assists": 1.8,
+    "points_rebounds": 4.2,
+    "points_assists": 3.8,
+    "rebounds_assists": 3.2,
     "threes": 1.1,
     "steals": 0.8,
     "blocks": 0.7,
@@ -510,7 +516,11 @@ def _player_sample_quality(conn: sqlite3.Connection, player_id: int, game_id: in
 
 
 def _market_price_nudge(market: str) -> float:
-    return 1.8 if market == "points_rebounds_assists" else 1.0
+    if market == "points_rebounds_assists":
+        return 1.8
+    if market in {"points_rebounds", "points_assists", "rebounds_assists"}:
+        return 1.4
+    return 1.0
 
 
 def _adaptive_component_projection(
@@ -616,6 +626,12 @@ def _player_history(
 
 
 def _market_value(row: sqlite3.Row, market: str) -> float:
+    if market == "points_rebounds":
+        return float(row["points"] + row["rebounds"])
+    if market == "points_assists":
+        return float(row["points"] + row["assists"])
+    if market == "rebounds_assists":
+        return float(row["rebounds"] + row["assists"])
     if market == "points_rebounds_assists":
         return float(row["points"] + row["rebounds"] + row["assists"])
     if market == "blocks_steals":

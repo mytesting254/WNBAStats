@@ -190,6 +190,12 @@ def _weighted_average(values: list[float]) -> float:
 
 
 def _market_value(row: sqlite3.Row, market: str) -> float:
+    if market == "points_rebounds":
+        return float(row["points"] + row["rebounds"])
+    if market == "points_assists":
+        return float(row["points"] + row["assists"])
+    if market == "rebounds_assists":
+        return float(row["rebounds"] + row["assists"])
     if market == "points_rebounds_assists":
         return float(row["points"] + row["rebounds"] + row["assists"])
     if market == "blocks_steals":

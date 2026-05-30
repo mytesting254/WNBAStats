@@ -234,6 +234,9 @@ player_points
 player_rebounds
 player_assists
 player_threes
+player_points_rebounds
+player_points_assists
+player_rebounds_assists
 player_points_rebounds_assists
 player_steals
 player_blocks
@@ -269,6 +272,8 @@ POST /api/covers/import?selected_date=2026-05-10&force_refresh=true
 ```
 
 Covers supplies pregame market context and is the preferred source for player prop lines. When a game has Covers prop rows in `sportsbook_prop_lines`, the model prop-line sync builds `prop_lines` from Covers rows for that game and ignores overlapping The Odds API rows. Other providers are only used as a fallback for games without Covers props. ESPN remains the completed-game source for final scores and player box scores.
+
+On app load, Covers records shown in matchups are read from `data/cache/covers_props_raw.json` only when `cache_date` matches the current local date. If the cache date is stale, that cache file is deleted and Covers records are not displayed until a fresh Covers import runs.
 
 Covers team abbreviations can differ from the app's canonical team codes. The importer normalizes those provider-only codes before reading game lines, including Phoenix `PHO`, Portland `PDX`, and Washington `WAS`.
 
