@@ -60,7 +60,8 @@ def _row_counts(conn: sqlite3.Connection) -> dict[str, int]:
 def _prune_old_snapshots(output_dir: Path, keep_latest: int) -> None:
     if keep_latest <= 0:
         return
-    snapshot_files = sorted(output_dir.glob("*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # Names include UTC timestamps (YYYYMMDDTHHMMSSZ), so lexical order is chronological.
+    snapshot_files = sorted(output_dir.glob("wnba-*.sqlite"), key=lambda p: p.name, reverse=True)
     for old_db in snapshot_files[keep_latest:]:
         old_manifest = old_db.with_suffix(".manifest.json")
         old_db.unlink(missing_ok=True)

@@ -29,6 +29,15 @@ Usage:
 EOF
 }
 
+latest_snapshot_file() {
+  local dir="$1"
+  if [[ ! -d "$dir" ]]; then
+    return 0
+  fi
+  # Determine "latest" by sortable timestamp in filename, not filesystem mtime.
+  ls -1 "$dir"/wnba-*.sqlite 2>/dev/null | sort | tail -n 1 || true
+}
+
 snapshot_watch() {
   local label="${1:-auto-watch}"
   local interval="$SNAPSHOT_AUTOSAVE_INTERVAL"
@@ -59,7 +68,7 @@ fi
 case "$command" in
   auto|start)
     mkdir -p "$SNAPSHOT_DIR"
-    latest_file="$(ls -1t "$SNAPSHOT_DIR"/*.sqlite 2>/dev/null | head -n 1 || true)"
+    latest_file="$(latest_snapshot_file "$SNAPSHOT_DIR")"
     if [[ -n "$latest_file" ]]; then
       echo "Restoring latest snapshot: $latest_file"
       "$PYTHON" "$ROOT/scripts/snapshot_restore.py" "$latest_file" --db-path "$DB_PATH" --snapshot-dir "$SNAPSHOT_DIR"
@@ -107,7 +116,7 @@ case "$command" in
       dir="$2"
     fi
     mkdir -p "$dir"
-    ls -1t "$dir"/*.sqlite 2>/dev/null || echo "No snapshots found in $dir"
+    ls -1 "$dir"/wnba-*.sqlite 2>/dev/null | sort -r || echo "No snapshots found in $dir"
     ;;
   latest)
     dir="$SNAPSHOT_DIR"
@@ -115,7 +124,7 @@ case "$command" in
       dir="$2"
     fi
     mkdir -p "$dir"
-    latest_file="$(ls -1t "$dir"/*.sqlite 2>/dev/null | head -n 1 || true)"
+    latest_file="$(latest_snapshot_file "$dir")"
     if [[ -z "$latest_file" ]]; then
       echo "No snapshots found in $dir"
       exit 1
