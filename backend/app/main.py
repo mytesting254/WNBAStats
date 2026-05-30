@@ -2020,6 +2020,7 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
                         FROM player_team_history h
                         LEFT JOIN games hg ON hg.id = h.game_id
                         WHERE h.player_id = p.id
+                          AND h.team_id IN (g.home_team_id, g.away_team_id)
                           AND (
                             h.game_id IS NULL
                             OR hg.game_date IS NULL
@@ -2028,7 +2029,19 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
                         ORDER BY hg.game_date DESC, h.id DESC
                         LIMIT 1
                     ),
-                    p.team_id
+                    (
+                        SELECT h.team_id
+                        FROM player_team_history h
+                        WHERE h.player_id = p.id
+                          AND h.team_id IN (g.home_team_id, g.away_team_id)
+                        ORDER BY h.id DESC
+                        LIMIT 1
+                    ),
+                    CASE
+                        WHEN p.team_id IN (g.home_team_id, g.away_team_id) THEN p.team_id
+                        ELSE NULL
+                    END,
+                    g.home_team_id
                 )
             )
             {game_filter}
@@ -2118,6 +2131,7 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
                         FROM player_team_history h
                         LEFT JOIN games hg ON hg.id = h.game_id
                         WHERE h.player_id = p.id
+                          AND h.team_id IN (g.home_team_id, g.away_team_id)
                           AND (
                             h.game_id IS NULL
                             OR hg.game_date IS NULL
@@ -2126,7 +2140,19 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
                         ORDER BY hg.game_date DESC, h.id DESC
                         LIMIT 1
                     ),
-                    p.team_id
+                    (
+                        SELECT h.team_id
+                        FROM player_team_history h
+                        WHERE h.player_id = p.id
+                          AND h.team_id IN (g.home_team_id, g.away_team_id)
+                        ORDER BY h.id DESC
+                        LIMIT 1
+                    ),
+                    CASE
+                        WHEN p.team_id IN (g.home_team_id, g.away_team_id) THEN p.team_id
+                        ELSE NULL
+                    END,
+                    g.home_team_id
                 )
             )
             JOIN teams away ON away.id = g.away_team_id
