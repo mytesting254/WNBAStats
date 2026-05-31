@@ -31,6 +31,7 @@ app = FastAPI(title="WNBA Prop Value API")
 COMPLETED_GAME_GRACE_HOURS = 4
 LOCAL_TZ = timezone(timedelta(hours=-4))
 LOW_CONFIDENCE_EDGE_MIN = float(os.getenv("LOW_CONFIDENCE_EDGE_MIN", "0.08"))
+LOW_CONFIDENCE_EDGE_MAX = float(os.getenv("LOW_CONFIDENCE_EDGE_MAX", "0.18"))
 VALUE_BOARD_CACHE_NAME = "current_value_board.json"
 MATCHUPS_CACHE_NAME = "current_matchups.json"
 LINE_DISCREPANCIES_CACHE_NAME = "line_discrepancies.json"
@@ -2213,12 +2214,31 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
 
 def _include_value_board_pick(item: dict) -> bool:
     confidence = str(item.get("confidence") or "").strip().lower()
-    if confidence != "low":
-        return True
+    market = str(item.get("market") or "").strip().lower()
     try:
-        return float(item.get("edge") or 0.0) >= LOW_CONFIDENCE_EDGE_MIN
+        edge = abs(float(item.get("edge") or 0.0))
     except (TypeError, ValueError):
         return False
+
+    # Medium confidence has underperformed in rebounds; require stricter admission.
+    if confidence == "medium":
+        if market == "rebounds":
+            return edge >= 0.14 and edge < LOW_CONFIDENCE_EDGE_MAX
+        return edge >= 0.12 and edge < LOW_CONFIDENCE_EDGE_MAX
+    if confidence == "high":
+        return edge >= 0.10 and edge < max(LOW_CONFIDENCE_EDGE_MAX, 0.25)
+    if confidence != "low":
+        return False
+
+    # Market-aware low-confidence admission gates, tuned from settled calibration.
+    if market == "points":
+        return edge >= 0.05 and edge < 0.12
+    if market == "rebounds":
+        return edge >= 0.08 and edge < LOW_CONFIDENCE_EDGE_MAX
+    if market == "threes":
+        return (edge >= 0.05 and edge < 0.08) or (edge >= 0.12 and edge < LOW_CONFIDENCE_EDGE_MAX)
+
+    return edge >= LOW_CONFIDENCE_EDGE_MIN and edge < LOW_CONFIDENCE_EDGE_MAX
 
 
 def _blowout_display(team_spread, role: str | None) -> dict:

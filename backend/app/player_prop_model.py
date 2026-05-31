@@ -9,6 +9,7 @@ from .odds import american_to_implied_probability
 
 
 MODEL_VERSION = "adaptive-context-v1"
+MINUTES_MODEL_VERSION = "minutes-ridge-v1"
 TRAINING_MARKETS = [
     "points",
     "rebounds",
@@ -43,6 +44,7 @@ FEATURE_NAMES = [
     "spread_abs",
     "game_total",
 ]
+FEATURE_INDEX = {name: idx for idx, name in enumerate(FEATURE_NAMES)}
 
 MARKET_VOLATILITY_FLOORS = {
     "points": 3.0,
@@ -59,6 +61,8 @@ MARKET_VOLATILITY_FLOORS = {
 }
 
 _CONNECTION_MODEL_CACHE: dict[tuple[int, str], RidgeModel | None] = {}
+_CONNECTION_MINUTES_MODEL_CACHE: dict[int, RidgeModel | None] = {}
+_CONNECTION_GAME_TOTAL_MEAN_CACHE: dict[int, float] = {}
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,21 @@ class RidgeModel:
     feature_scales: list[float]
 
 
+MINUTES_FEATURE_NAMES = [
+    "ewma_minutes",
+    "recent_minutes_avg",
+    "last_10_minutes_avg",
+    "minutes_trend",
+    "rest_days",
+    "is_home",
+    "spread_abs",
+    "game_total",
+    "blowout_probability",
+    "role_minutes_score",
+    "frontcourt_support_minutes",
+]
+
+
 def predict_player_prop(
     conn: sqlite3.Connection,
     player_id: int,
@@ -97,6 +116,8 @@ def predict_player_prop(
 
     learned = _predict(model, snapshot.values)
     learned = max(0.0, learned)
+    learned = _stabilize_combo_market_projection(learned, snapshot, market)
+    learned, stabilization_note = _stabilize_learned_projection(learned, snapshot, market)
     projection = learned
     market_note = "no sportsbook line blend"
 
@@ -120,9 +141,71 @@ def predict_player_prop(
 
     reason = (
         f"{snapshot.reason} Learned model {MODEL_VERSION} projected {learned:.1f} from "
-        f"{model.rows} historical rows; {market_note}. Final projection {projection:.1f}."
+        f"{model.rows} historical rows; {market_note}; {stabilization_note}. Final projection {projection:.1f}."
     )
     return round(projection, 2), reason, MODEL_VERSION
+
+
+def _stabilize_combo_market_projection(learned: float, snapshot: FeatureSnapshot, market: str) -> float:
+    """Limit extreme downside drift for combo markets when recent form is materially stronger."""
+    if market not in {"points_assists", "points_rebounds", "rebounds_assists", "points_rebounds_assists"}:
+        return learned
+    if len(snapshot.values) < len(FEATURE_NAMES):
+        return learned
+
+    weighted_recent = snapshot.values[FEATURE_INDEX["weighted_recent"]]
+    last_10_avg = snapshot.values[FEATURE_INDEX["last_10_avg"]]
+    rate_projection = snapshot.values[FEATURE_INDEX["rate_projection"]]
+    ewma_minutes = snapshot.values[FEATURE_INDEX["ewma_minutes"]]
+    minutes_trend = snapshot.values[FEATURE_INDEX["minutes_trend"]]
+    projected_minutes = max(ewma_minutes + (0.35 * minutes_trend), 0.0)
+    minute_ratio = projected_minutes / max(ewma_minutes, 1.0)
+
+    anchor = max(weighted_recent, last_10_avg, rate_projection)
+    severe_downside_drift = learned < (anchor * 0.70)
+
+    # If minutes are projected down or learned output drifts too far under recent anchors,
+    # apply a partial floor for combo markets to avoid implausible collapses.
+    if minute_ratio < 0.98 or severe_downside_drift:
+        floor = anchor * 0.78
+        return max(learned, floor)
+    return learned
+
+
+def _stabilize_learned_projection(learned: float, snapshot: FeatureSnapshot, market: str) -> tuple[float, str]:
+    """Global guardrail against implausible learned-vs-anchor drift."""
+    if len(snapshot.values) < len(FEATURE_NAMES):
+        return learned, "no stabilization"
+    weighted_recent = snapshot.values[FEATURE_INDEX["weighted_recent"]]
+    last_10_avg = snapshot.values[FEATURE_INDEX["last_10_avg"]]
+    rate_projection = snapshot.values[FEATURE_INDEX["rate_projection"]]
+    component_projection = snapshot.values[FEATURE_INDEX["component_projection"]]
+    ewma_minutes = snapshot.values[FEATURE_INDEX["ewma_minutes"]]
+    minutes_trend = snapshot.values[FEATURE_INDEX["minutes_trend"]]
+
+    anchor = max(0.01, (0.45 * weighted_recent) + (0.30 * last_10_avg) + (0.25 * rate_projection))
+    minute_ratio = max(ewma_minutes + (0.35 * minutes_trend), 0.0) / max(ewma_minutes, 1.0)
+    ratio = learned / anchor
+
+    low_guard = 0.82
+    high_guard = 1.25
+    if minute_ratio < 0.92:
+        low_guard = 0.72
+    if minute_ratio > 1.08:
+        high_guard = 1.35
+
+    adjusted = learned
+    if ratio < low_guard:
+        floor = anchor * low_guard
+        adjusted = (0.65 * floor) + (0.35 * component_projection)
+        adjusted = max(adjusted, floor)
+        return max(0.0, adjusted), f"stabilized up ({ratio:.2f}x anchor)"
+    if ratio > high_guard:
+        cap = anchor * high_guard
+        adjusted = (0.70 * cap) + (0.30 * component_projection)
+        adjusted = min(adjusted, cap)
+        return max(0.0, adjusted), f"stabilized down ({ratio:.2f}x anchor)"
+    return learned, "no stabilization"
 
 
 def feature_snapshot(
@@ -132,7 +215,9 @@ def feature_snapshot(
     game_id: int,
     before_game_date: str | None = None,
 ) -> FeatureSnapshot:
-    history = _player_history(conn, player_id, market, before_game_date, exclude_game_id=game_id)
+    context = _game_context(conn, player_id, game_id)
+    reference_game_date = before_game_date or context.get("game_date")
+    history = _player_history(conn, player_id, market, reference_game_date, exclude_game_id=game_id)
     if not history:
         return FeatureSnapshot([0.0 for _ in FEATURE_NAMES], 0.0, "No historical stats found; projection defaults to 0.")
 
@@ -151,11 +236,22 @@ def feature_snapshot(
     value_volatility = _ewma_volatility_newest_first(values, ewma_value, market)
     consistency_score = _consistency_score(ewma_value, value_volatility, market)
 
-    context = _game_context(conn, player_id, game_id)
     blowout = _blowout_adjustment(conn, context, history[0]["rotation_role"] if history else "starter")
-    projected_minutes = max(ewma_minutes + (0.35 * minutes_trend) + blowout["minutes_delta"], 4.0)
     injury = _injury_adjustment_for_prop(conn, player_id, context["team_id"], history[0]["rotation_role"] if history else "starter")
-    projected_minutes = max(projected_minutes + injury["minutes_delta"], 0.0)
+    projected_minutes, minutes_note = _project_minutes(
+        conn,
+        player_id=player_id,
+        game_id=game_id,
+        rotation_role=str(history[0]["rotation_role"] if history else "starter"),
+        ewma_minutes=ewma_minutes,
+        minutes_trend=minutes_trend,
+        recent_minutes_avg=sum(minutes[:5]) / min(len(minutes), 5),
+        last_10_minutes_avg=sum(minutes) / len(minutes),
+        context=context,
+        blowout_delta=float(blowout["minutes_delta"]),
+        injury_delta=float(injury["minutes_delta"]),
+        before_game_date=before_game_date,
+    )
     rate_projection = weighted_rate * projected_minutes
     component_base = _adaptive_component_projection(
         weighted_recent=weighted_recent,
@@ -187,7 +283,7 @@ def feature_snapshot(
         * injury["availability_factor"]
     )
     spread_abs = abs(context["team_spread"]) if context and context["team_spread"] is not None else 0.0
-    game_total = context["game_total"] if context and context["game_total"] is not None else 0.0
+    game_total = _game_total_or_neutral(conn, context["game_total"] if context else None)
     features = [
         component_projection,
         weighted_recent,
@@ -220,6 +316,7 @@ def feature_snapshot(
         f"rest {rest_factor:.2f}, usage {usage_multiplier:.2f}; "
         f"injury {injury['status']} (avail {injury['availability_factor']:.2f}, "
         f"team usage {injury['usage_multiplier']:.2f}, min {injury['minutes_delta']:+.1f}); {adjustment_note}."
+        f" Minutes model: {minutes_note}."
     )
     return FeatureSnapshot(
         features,
@@ -250,14 +347,31 @@ def train_market_model(conn: sqlite3.Connection, market: str) -> RidgeModel | No
     return _train_market_model_cached(db_path, market)
 
 
+def train_minutes_model(conn: sqlite3.Connection) -> RidgeModel | None:
+    if not isinstance(conn, sqlite3.Connection):
+        key = id(conn)
+        if key not in _CONNECTION_MINUTES_MODEL_CACHE:
+            _CONNECTION_MINUTES_MODEL_CACHE[key] = _train_minutes_model_uncached(conn)
+        return _CONNECTION_MINUTES_MODEL_CACHE[key]
+    rows = _minutes_training_rows(conn)
+    return _fit_model_from_rows(MINUTES_MODEL_VERSION, rows)
+
+
 def clear_model_cache() -> None:
     _train_market_model_cached.cache_clear()
     _CONNECTION_MODEL_CACHE.clear()
+    _CONNECTION_MINUTES_MODEL_CACHE.clear()
+    _CONNECTION_GAME_TOTAL_MEAN_CACHE.clear()
 
 
 def _train_market_model_uncached(conn: sqlite3.Connection, market: str) -> RidgeModel | None:
     rows = _training_rows(conn, market)
     return _fit_model_from_rows(market, rows)
+
+
+def _train_minutes_model_uncached(conn: sqlite3.Connection) -> RidgeModel | None:
+    rows = _minutes_training_rows(conn)
+    return _fit_model_from_rows(MINUTES_MODEL_VERSION, rows)
 
 
 def evaluate_market_model(conn: sqlite3.Connection, market: str) -> dict:
@@ -382,6 +496,7 @@ def _historical_training_features(row: sqlite3.Row, history: list[float], minute
     rest_days = int(row["rest_days_home"] if is_home else row["rest_days_away"] or 2)
     spread_home = float(row["spread_home"]) if row["spread_home"] is not None else None
     team_spread = spread_home if is_home else -spread_home if spread_home is not None else None
+    game_total = float(row["game_total"]) if row["game_total"] is not None and float(row["game_total"]) > 0 else 165.0
     return [
         component_projection,
         weighted_recent,
@@ -401,8 +516,205 @@ def _historical_training_features(row: sqlite3.Row, history: list[float], minute
         1.0,
         0.0,
         abs(team_spread) if team_spread is not None else 0.0,
-        float(row["game_total"]) if row["game_total"] is not None else 0.0,
+        game_total,
     ]
+
+
+def _minutes_training_rows(conn: sqlite3.Connection) -> list[tuple[list[float], float]]:
+    samples: list[tuple[list[float], float]] = []
+    players = conn.execute("SELECT id, rotation_role FROM players ORDER BY id").fetchall()
+    for player in players:
+        rows = conn.execute(
+            """
+            SELECT
+                s.minutes,
+                g.game_date,
+                g.game_total,
+                g.home_team_id,
+                g.away_team_id,
+                g.rest_days_home,
+                g.rest_days_away,
+                g.spread_home,
+                p.team_id,
+                p.rotation_role
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN players p ON p.id = s.player_id
+            WHERE s.player_id = ?
+            ORDER BY g.game_date ASC, s.game_id ASC
+            """,
+            (int(player["id"]),),
+        ).fetchall()
+        minutes = [float(row["minutes"]) for row in rows]
+        for idx in range(5, len(rows)):
+            history = minutes[max(0, idx - 10):idx]
+            samples.append(
+                (
+                    _minutes_feature_vector_from_row(
+                        conn,
+                        rows[idx],
+                        history,
+                        player_id=int(player["id"]),
+                        player_team_id=int(rows[idx]["team_id"]),
+                        rotation_role=str(rows[idx]["rotation_role"] or "starter"),
+                    ),
+                    minutes[idx],
+                )
+            )
+    return samples
+
+
+def _minutes_feature_vector_from_row(
+    conn: sqlite3.Connection,
+    row: sqlite3.Row,
+    history: list[float],
+    player_id: int,
+    player_team_id: int,
+    rotation_role: str,
+) -> list[float]:
+    newest_minutes = list(reversed(history))
+    ewma_minutes = _ewma_newest_first(newest_minutes, alpha=0.38)
+    minutes_trend = _recent_trend(newest_minutes)
+    recent_minutes_avg = sum(newest_minutes[:3]) / min(len(newest_minutes), 3)
+    last_10_minutes_avg = sum(newest_minutes) / len(newest_minutes)
+    is_home = player_team_id == int(row["home_team_id"])
+    spread_home = float(row["spread_home"]) if row["spread_home"] is not None else None
+    team_spread = spread_home if is_home else -spread_home if spread_home is not None else None
+    spread_abs = abs(team_spread) if team_spread is not None else 0.0
+    game_total = float(row["game_total"]) if row["game_total"] is not None and float(row["game_total"]) > 0 else 165.0
+    rest_days = int(row["rest_days_home"] if is_home else row["rest_days_away"] or 2)
+    support_minutes = _frontcourt_support_minutes(
+        conn,
+        team_id=player_team_id,
+        player_id=player_id,
+        before_game_date=str(row["game_date"]),
+    )
+    return [
+        ewma_minutes,
+        recent_minutes_avg,
+        last_10_minutes_avg,
+        minutes_trend,
+        float(rest_days),
+        1.0 if is_home else 0.0,
+        spread_abs,
+        game_total,
+        _blowout_probability(spread_abs),
+        _role_minutes_score(rotation_role),
+        support_minutes,
+    ]
+
+
+def _project_minutes(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    game_id: int,
+    rotation_role: str,
+    ewma_minutes: float,
+    minutes_trend: float,
+    recent_minutes_avg: float,
+    last_10_minutes_avg: float,
+    context: dict,
+    blowout_delta: float,
+    injury_delta: float,
+    before_game_date: str | None,
+) -> tuple[float, str]:
+    base_heuristic = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
+    sample_count, _ = _player_sample_quality(conn, player_id, game_id)
+    model = train_minutes_model(conn)
+    if not model or sample_count < 5:
+        projected = max(base_heuristic + blowout_delta + injury_delta, 0.0)
+        return projected, "heuristic fallback"
+    spread_abs = abs(context["team_spread"]) if context and context["team_spread"] is not None else 0.0
+    game_total = _game_total_or_neutral(conn, context["game_total"] if context else None)
+    features = [
+        ewma_minutes,
+        recent_minutes_avg,
+        last_10_minutes_avg,
+        minutes_trend,
+        float(context["rest_days"] if context else 2),
+        1.0 if context and context["is_home"] else 0.0,
+        spread_abs,
+        game_total,
+        _blowout_probability(spread_abs),
+        _role_minutes_score(rotation_role),
+        _frontcourt_support_minutes(conn, team_id=int(context["team_id"]), player_id=player_id, before_game_date=before_game_date),
+    ]
+    learned_base = max(0.0, _predict(model, features))
+    blend_weight = 0.35 if sample_count >= 10 else 0.25
+    if sample_count >= 15:
+        blend_weight += 0.10
+    if abs(learned_base - base_heuristic) >= 2.0:
+        blend_weight += 0.15
+    blend_weight = _clamp(blend_weight, 0.20, 0.65)
+    blended_base = ((1 - blend_weight) * base_heuristic) + (blend_weight * learned_base)
+    projected = max(blended_base + blowout_delta + injury_delta, 0.0)
+
+    # Keep minutes within plausible player-relative bounds.
+    lower_bound = max(8.0, last_10_minutes_avg * 0.60)
+    upper_bound = min(40.0, max(last_10_minutes_avg * 1.35, lower_bound + 4.0))
+    projected = _clamp(projected, lower_bound, upper_bound)
+    return projected, f"{MINUTES_MODEL_VERSION} blend {blend_weight:.0%} (rows {model.rows})"
+
+
+def _role_minutes_score(rotation_role: str | None) -> float:
+    role = str(rotation_role or "starter").strip().lower()
+    by_role = {
+        "star": 1.15,
+        "starter": 1.0,
+        "rotation": 0.78,
+        "bench": 0.55,
+    }
+    return by_role.get(role, 0.9)
+
+
+def _frontcourt_support_minutes(
+    conn: sqlite3.Connection,
+    *,
+    team_id: int,
+    player_id: int,
+    before_game_date: str | None,
+) -> float:
+    filters = ["p.team_id = ?", "s.player_id != ?", "(p.position LIKE '%F%' OR p.position LIKE '%C%')"]
+    params: list[object] = [int(team_id), int(player_id)]
+    if before_game_date is not None:
+        filters.append("g.game_date < ?")
+        params.append(before_game_date)
+    rows = conn.execute(
+        f"""
+        SELECT s.game_id, SUM(s.minutes) AS total_minutes
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        JOIN games g ON g.id = s.game_id
+        WHERE {' AND '.join(filters)}
+        GROUP BY s.game_id
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT 3
+        """,
+        params,
+    ).fetchall()
+    if not rows:
+        return 80.0
+    return float(sum(float(r["total_minutes"] or 0.0) for r in rows) / len(rows))
+
+
+def _game_total_or_neutral(conn: sqlite3.Connection, game_total: float | None) -> float:
+    if game_total is not None and float(game_total) > 0:
+        return float(game_total)
+    conn_key = id(conn)
+    if conn_key in _CONNECTION_GAME_TOTAL_MEAN_CACHE:
+        return _CONNECTION_GAME_TOTAL_MEAN_CACHE[conn_key]
+    row = conn.execute(
+        """
+        SELECT AVG(game_total) AS avg_total
+        FROM games
+        WHERE game_total IS NOT NULL
+          AND game_total > 0
+        """
+    ).fetchone()
+    neutral = float(row["avg_total"]) if row and row["avg_total"] is not None else 165.0
+    _CONNECTION_GAME_TOTAL_MEAN_CACHE[conn_key] = neutral
+    return neutral
 
 
 def _training_rows_slow(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
@@ -603,18 +915,38 @@ def _player_history(
     if exclude_game_id is not None:
         filters.append("s.game_id != ?")
         params.append(exclude_game_id)
-    rows = conn.execute(
-        f"""
-        SELECT s.*, g.game_date, p.rotation_role
-        FROM player_game_stats s
-        JOIN games g ON g.id = s.game_id
-        JOIN players p ON p.id = s.player_id
-        WHERE {' AND '.join(filters)}
-        ORDER BY g.game_date DESC, s.game_id DESC
-        LIMIT 10
-        """,
-        params,
-    ).fetchall()
+    if before_game_date is not None:
+        rows = conn.execute(
+            f"""
+            SELECT s.*, g.game_date, p.rotation_role
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN players p ON p.id = s.player_id
+            WHERE {' AND '.join(filters)}
+            ORDER BY
+                CASE
+                    WHEN substr(g.game_date, 1, 4) = substr(?, 1, 4) THEN 0
+                    ELSE 1
+                END,
+                g.game_date DESC,
+                s.game_id DESC
+            LIMIT 10
+            """,
+            (*params, before_game_date),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            f"""
+            SELECT s.*, g.game_date, p.rotation_role
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN players p ON p.id = s.player_id
+            WHERE {' AND '.join(filters)}
+            ORDER BY g.game_date DESC, s.game_id DESC
+            LIMIT 10
+            """,
+            params,
+        ).fetchall()
     return [
         {
             "value": _market_value(row, market),
@@ -648,6 +980,7 @@ def _game_context(conn: sqlite3.Connection, player_id: int, game_id: int | None)
     row = conn.execute(
         """
         SELECT
+            g.game_date,
             g.home_team_id,
             g.away_team_id,
             g.rest_days_home,
@@ -677,7 +1010,7 @@ def _game_context(conn: sqlite3.Connection, player_id: int, game_id: int | None)
         (game_id, player_id),
     ).fetchone()
     if not row:
-        return {"team_id": 0, "opponent_id": 0, "is_home": False, "rest_days": 2, "team_spread": None, "game_total": None}
+        return {"team_id": 0, "opponent_id": 0, "is_home": False, "rest_days": 2, "team_spread": None, "game_total": None, "game_date": None}
     team_id = int(row["resolved_team_id"])
     is_home = team_id == int(row["home_team_id"])
     opponent_id = int(row["away_team_id"] if is_home else row["home_team_id"])
@@ -689,6 +1022,7 @@ def _game_context(conn: sqlite3.Connection, player_id: int, game_id: int | None)
         "rest_days": int(row["rest_days_home"] if is_home else row["rest_days_away"] or 2),
         "team_spread": spread_home if is_home else -spread_home if spread_home is not None else None,
         "game_total": float(row["game_total"]) if row["game_total"] is not None else None,
+        "game_date": str(row["game_date"]) if row["game_date"] is not None else None,
     }
 
 

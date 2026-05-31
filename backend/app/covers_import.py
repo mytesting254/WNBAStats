@@ -4,6 +4,7 @@ import html
 import re
 import sqlite3
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
@@ -106,10 +107,60 @@ def import_covers_props(
     force_refresh: bool = False,
 ) -> dict:
     captured_at = datetime.now(timezone.utc).isoformat()
+    _purge_stale_covers_cache()
     cached_payload = read_json_cache(RAW_CACHE_NAME)
     if selected_date is None and not force_refresh and _covers_cache_is_current(cached_payload):
-        result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
-        synced = sync_prop_lines_from_sportsbook(conn)
+        cache_date = (
+            str(cached_payload.get("cache_date")).strip()
+            if isinstance(cached_payload, dict) and cached_payload.get("cache_date")
+            else None
+        )
+        if cache_date:
+            existing_rows = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM sportsbook_prop_lines
+                WHERE provider = ?
+                  AND game_date >= ?
+                """,
+                (PROVIDER, cache_date),
+            ).fetchone()[0]
+        else:
+            existing_rows = conn.execute(
+                "SELECT COUNT(*) FROM sportsbook_prop_lines WHERE provider = ?",
+                (PROVIDER,),
+            ).fetchone()[0]
+        if int(existing_rows or 0) > 0:
+            cached_rows = cached_payload.get("rows") if isinstance(cached_payload, dict) else []
+            cached_events = (
+                len({str(row.get("provider_event_id")) for row in cached_rows if isinstance(row, dict) and row.get("provider_event_id")})
+                if isinstance(cached_rows, list)
+                else 0
+            )
+            return {
+                "events": cached_events,
+                "imported": len(cached_rows) if isinstance(cached_rows, list) else 0,
+                "captured_at": cached_payload.get("captured_at") if isinstance(cached_payload, dict) else None,
+                "synced_props": 0,
+                "status": "loaded_from_cache_noop",
+                "source": "cache",
+                "message": "Covers cache is current and DB already has Covers rows; skipped rewrite/sync for fast load.",
+            }
+        try:
+            result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
+            synced = sync_prop_lines_from_sportsbook(conn)
+        except sqlite3.OperationalError as exc:
+            if "database is locked" in str(exc).lower():
+                return {
+                    "events": 0,
+                    "imported": 0,
+                    "captured_at": None,
+                    "synced_props": 0,
+                    "status": "db_locked",
+                    "source": "cache",
+                    "message": "Covers cache load skipped because database is locked. Retry shortly.",
+                }
+            raise
         return {
             **result,
             "synced_props": synced,
@@ -122,8 +173,21 @@ def import_covers_props(
         games = covers_matchup_links(selected_date)
     except Exception as exc:
         if isinstance(cached_payload, dict) and cached_payload.get("rows"):
-            result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
-            synced = sync_prop_lines_from_sportsbook(conn)
+            try:
+                result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
+                synced = sync_prop_lines_from_sportsbook(conn)
+            except sqlite3.OperationalError as exc2:
+                if "database is locked" in str(exc2).lower():
+                    return {
+                        "events": 0,
+                        "imported": 0,
+                        "captured_at": None,
+                        "synced_props": 0,
+                        "status": "db_locked",
+                        "source": "cache",
+                        "message": "Fresh Covers scrape fallback skipped because database is locked. Retry shortly.",
+                    }
+                raise
             return {
                 **result,
                 "synced_props": synced,
@@ -184,8 +248,22 @@ def import_covers_props(
     game_payload = [_metadata_to_row(row) for row in metadata_rows]
     if not row_payload:
         if isinstance(cached_payload, dict) and cached_payload.get("rows"):
-            result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
-            synced = sync_prop_lines_from_sportsbook(conn)
+            try:
+                result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
+                synced = sync_prop_lines_from_sportsbook(conn)
+            except sqlite3.OperationalError as exc:
+                if "database is locked" in str(exc).lower():
+                    return {
+                        "events": 0,
+                        "imported": 0,
+                        "captured_at": captured_at,
+                        "synced_props": 0,
+                        "status": "db_locked",
+                        "source": "cache",
+                        "message": "Covers empty-refresh fallback skipped because database is locked. Retry shortly.",
+                        "errors": errors,
+                    }
+                raise
             return {
                 **result,
                 "synced_props": synced,
@@ -216,8 +294,22 @@ def import_covers_props(
             "games": game_payload,
         },
     )
-    result = _replace_covers_rows(conn, row_payload, game_payload)
-    synced = sync_prop_lines_from_sportsbook(conn)
+    try:
+        result = _replace_covers_rows(conn, row_payload, game_payload)
+        synced = sync_prop_lines_from_sportsbook(conn)
+    except sqlite3.OperationalError as exc:
+        if "database is locked" in str(exc).lower():
+            return {
+                "events": len(games),
+                "imported": 0,
+                "captured_at": captured_at,
+                "synced_props": 0,
+                "status": "db_locked",
+                "source": PROVIDER,
+                "message": "Covers import fetched data but database was locked during write/sync. Retry shortly.",
+                "errors": errors,
+            }
+        raise
     return {
         **result,
         "synced_props": synced,
@@ -678,7 +770,7 @@ def _update_game_market(conn: sqlite3.Connection, game_id: int, spread_home: flo
     if not updates:
         return
     params.append(game_id)
-    conn.execute(f"UPDATE games SET {', '.join(updates)} WHERE id = ?", params)
+    _execute_with_lock_retry(conn, f"UPDATE games SET {', '.join(updates)} WHERE id = ?", tuple(params))
 
 
 def _coerce_float(value) -> float | None:
@@ -688,6 +780,31 @@ def _coerce_float(value) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _execute_with_lock_retry(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple | list = (),
+    *,
+    attempts: int = 6,
+    base_sleep: float = 0.08,
+) -> None:
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(attempts):
+        try:
+            conn.execute(sql, params)
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "database is locked" not in message:
+                raise
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(base_sleep * (attempt + 1))
+    if last_error is not None:
+        raise last_error
 
 
 def _parse_covers_start(value: str) -> str:
@@ -739,6 +856,21 @@ def _metadata_to_row(row: CoversMetadata) -> dict:
 
 def _today_local() -> str:
     return datetime.now(LOCAL_TZ).date().isoformat()
+
+
+def _purge_stale_covers_cache() -> None:
+    today = _today_local()
+    for cache_name in (RAW_CACHE_NAME, RAW_PAGE_CACHE_NAME):
+        payload = read_json_cache(cache_name)
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("provider") != PROVIDER:
+            continue
+        cache_date = str(payload.get("cache_date") or "").strip()
+        if not cache_date:
+            continue
+        if cache_date != today:
+            delete_json_cache(cache_name)
 
 
 def _fetch_text(url: str) -> str:

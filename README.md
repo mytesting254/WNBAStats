@@ -247,6 +247,12 @@ player_blocks_steals
 
 Covers is used for matchup pages that publish WNBA pregame lines, totals, team records, ATS/O-U records, and player prop tables. The importer reads the Covers matchup pages, stores the raw payload in `data/cache/covers_props_raw.json`, updates matching `games.spread_home` and `games.game_total`, and writes player prop offers into `sportsbook_prop_lines` with provider `covers`.
 
+Cache behavior safeguards:
+
+- Covers cache is day-scoped by local date. When a new local day starts, stale Covers cache files are purged before import (`covers_props_raw.json` and `covers_pages_raw.json`).
+- Saved-cache no-op is date-aware. A cache load skips rewrite only when DB already has Covers rows for `game_date >= cache_date`; historical leftover rows no longer block loading today's cached slate.
+- When Covers write/sync hits SQLite lock contention, the API returns a `db_locked` status instead of crashing, so retries are safe.
+
 Refresh from the app or call:
 
 ```text

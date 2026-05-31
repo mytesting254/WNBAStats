@@ -8,6 +8,8 @@ from .bootstrap import ensure_team
 
 LOCAL_TZ = timezone(timedelta(hours=-4))
 MATCH_TOLERANCE_SECONDS = 6 * 60 * 60
+TEAM_RECENT_WINDOW = 5
+H2H_WINDOW = 5
 
 
 def resolve_or_create_game(
@@ -146,6 +148,125 @@ def _update_game_market(conn: sqlite3.Connection, game_id: int, spread_home: flo
         return
     params.append(int(game_id))
     conn.execute(f"UPDATE games SET {', '.join(updates)} WHERE id = ?", params)
+    if game_total is None or float(game_total) <= 0:
+        _backfill_game_total_if_missing(conn, int(game_id))
+
+
+def _backfill_game_total_if_missing(conn: sqlite3.Connection, game_id: int) -> None:
+    row = conn.execute(
+        """
+        SELECT home_team_id, away_team_id, game_total
+        FROM games
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (game_id,),
+    ).fetchone()
+    if not row:
+        return
+    current_total = row["game_total"]
+    if current_total is not None and float(current_total) > 0:
+        return
+    home_team_id = int(row["home_team_id"])
+    away_team_id = int(row["away_team_id"])
+    estimate = _estimate_game_total(conn, game_id=game_id, home_team_id=home_team_id, away_team_id=away_team_id)
+    if estimate is None:
+        return
+    conn.execute(
+        """
+        UPDATE games
+        SET game_total = ?
+        WHERE id = ?
+          AND (game_total IS NULL OR game_total <= 0)
+        """,
+        (round(float(estimate), 1), game_id),
+    )
+
+
+def _estimate_game_total(conn: sqlite3.Connection, *, game_id: int, home_team_id: int, away_team_id: int) -> float | None:
+    home_recent = _recent_team_totals(conn, team_id=home_team_id, is_home=True, limit=TEAM_RECENT_WINDOW, exclude_game_id=game_id)
+    away_recent = _recent_team_totals(conn, team_id=away_team_id, is_home=False, limit=TEAM_RECENT_WINDOW, exclude_game_id=game_id)
+    h2h_recent = _recent_h2h_totals(
+        conn,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        limit=H2H_WINDOW,
+        exclude_game_id=game_id,
+    )
+
+    components: list[tuple[float, float]] = []
+    if home_recent:
+        components.append((sum(home_recent) / len(home_recent), 0.4))
+    if away_recent:
+        components.append((sum(away_recent) / len(away_recent), 0.4))
+    if h2h_recent:
+        components.append((sum(h2h_recent) / len(h2h_recent), 0.2))
+    if not components:
+        return None
+    weight_sum = sum(weight for _, weight in components)
+    return sum(value * (weight / weight_sum) for value, weight in components)
+
+
+def _recent_team_totals(
+    conn: sqlite3.Connection,
+    *,
+    team_id: int,
+    is_home: bool,
+    limit: int,
+    exclude_game_id: int | None = None,
+) -> list[float]:
+    rows = conn.execute(
+        """
+        SELECT r.points, r.opponent_points
+        FROM team_game_results r
+        JOIN games g ON g.id = r.game_id
+        WHERE r.team_id = ?
+          AND r.is_home = ?
+          AND (? IS NULL OR r.game_id != ?)
+          AND lower(g.status) IN ('final', 'completed')
+        ORDER BY g.game_date DESC, r.game_id DESC
+        LIMIT ?
+        """,
+        (int(team_id), 1 if is_home else 0, exclude_game_id, exclude_game_id, int(limit)),
+    ).fetchall()
+    return [float(row["points"]) + float(row["opponent_points"]) for row in rows]
+
+
+def _recent_h2h_totals(
+    conn: sqlite3.Connection,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+    limit: int,
+    exclude_game_id: int | None = None,
+) -> list[float]:
+    rows = conn.execute(
+        """
+        SELECT r.points, r.opponent_points
+        FROM games g
+        JOIN team_game_results r
+          ON r.game_id = g.id
+         AND r.team_id = g.home_team_id
+        WHERE (
+                (g.home_team_id = ? AND g.away_team_id = ?)
+             OR (g.home_team_id = ? AND g.away_team_id = ?)
+              )
+          AND (? IS NULL OR g.id != ?)
+          AND lower(g.status) IN ('final', 'completed')
+        ORDER BY g.game_date DESC, g.id DESC
+        LIMIT ?
+        """,
+        (
+            int(home_team_id),
+            int(away_team_id),
+            int(away_team_id),
+            int(home_team_id),
+            exclude_game_id,
+            exclude_game_id,
+            int(limit),
+        ),
+    ).fetchall()
+    return [float(row["points"]) + float(row["opponent_points"]) for row in rows]
 
 
 def _parse_game_start(value: str) -> datetime | None:

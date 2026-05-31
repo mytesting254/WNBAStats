@@ -261,6 +261,17 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
 def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
     clear_model_cache()
     _refresh_scheduled_game_rest_days(conn)
+    # Defensive cleanup in case legacy/orphaned rows exist from prior partial imports.
+    conn.execute(
+        """
+        DELETE FROM prop_predictions
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM prop_lines pl
+            WHERE pl.id = prop_predictions.prop_line_id
+        )
+        """
+    )
     props = conn.execute(
         """
         SELECT pl.id
@@ -274,14 +285,34 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
     prop_ids = [p.prop_line_id for p in projections]
     if prop_ids:
         placeholders = ",".join("?" for _ in prop_ids)
-        conn.execute(
-            f"""
-            DELETE FROM prop_predictions
-            WHERE model_version = ?
-              AND prop_line_id IN ({placeholders})
-            """,
-            (MODEL_VERSION, *prop_ids),
-        )
+        try:
+            conn.execute(
+                f"""
+                DELETE FROM prop_predictions
+                WHERE model_version = ?
+                  AND prop_line_id IN ({placeholders})
+                """,
+                (MODEL_VERSION, *prop_ids),
+            )
+        except sqlite3.IntegrityError:
+            conn.execute(
+                """
+                DELETE FROM prop_predictions
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM prop_lines pl
+                    WHERE pl.id = prop_predictions.prop_line_id
+                )
+                """
+            )
+            conn.execute(
+                f"""
+                DELETE FROM prop_predictions
+                WHERE model_version = ?
+                  AND prop_line_id IN ({placeholders})
+                """,
+                (MODEL_VERSION, *prop_ids),
+            )
     conn.executemany(
         """
         INSERT INTO prop_predictions (

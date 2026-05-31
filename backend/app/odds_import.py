@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -232,42 +233,130 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
         not in tracked_keys
     ]
 
-    conn.execute(
-        """
-        DELETE FROM prop_predictions
-        WHERE prop_line_id IN (
-            SELECT pl.id
-            FROM prop_lines pl
-            JOIN games g ON g.id = pl.game_id
-            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
-            WHERE sp.id IS NULL
-              AND g.status = 'scheduled'
+    try:
+        _begin_immediate_with_retry(conn)
+        conn.execute(
+            """
+            DELETE FROM prop_predictions
+            WHERE prop_line_id IN (
+                SELECT pl.id
+                FROM prop_lines pl
+                JOIN games g ON g.id = pl.game_id
+                LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+                WHERE sp.id IS NULL
+                  AND g.status = 'scheduled'
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        DELETE FROM prop_lines
-        WHERE id IN (
-            SELECT pl.id
-            FROM prop_lines pl
-            JOIN games g ON g.id = pl.game_id
-            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
-            WHERE sp.id IS NULL
-              AND g.status = 'scheduled'
+        conn.execute(
+            """
+            DELETE FROM prop_lines
+            WHERE id IN (
+                SELECT pl.id
+                FROM prop_lines pl
+                JOIN games g ON g.id = pl.game_id
+                LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+                WHERE sp.id IS NULL
+                  AND g.status = 'scheduled'
+            )
+            """
         )
-        """
-    )
-    conn.executemany(
-        """
-        INSERT INTO prop_lines (
-            game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        insert_rows,
-    )
-    rebuild_predictions(conn)
-    return len(rows)
+        if insert_rows:
+            conn.executemany(
+                """
+                INSERT INTO prop_lines (
+                    game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                insert_rows,
+            )
+        rebuild_predictions(conn)
+        conn.commit()
+        return len(rows)
+    except sqlite3.OperationalError as exc:
+        if "database is locked" in str(exc).lower():
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            return 0
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+
+
+def _execute_with_lock_retry(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple | list = (),
+    *,
+    attempts: int = 20,
+    base_sleep: float = 0.15,
+) -> None:
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(attempts):
+        try:
+            conn.execute(sql, params)
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "database is locked" not in message:
+                raise
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(base_sleep * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
+def _executemany_with_lock_retry(
+    conn: sqlite3.Connection,
+    sql: str,
+    seq_of_params,
+    *,
+    attempts: int = 20,
+    base_sleep: float = 0.15,
+) -> None:
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(attempts):
+        try:
+            conn.executemany(sql, seq_of_params)
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "database is locked" not in message:
+                raise
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(base_sleep * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
+def _begin_immediate_with_retry(
+    conn: sqlite3.Connection,
+    *,
+    attempts: int = 24,
+    base_sleep: float = 0.20,
+) -> None:
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(attempts):
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "database is locked" not in message:
+                raise
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(base_sleep * (attempt + 1))
+    if last_error is not None:
+        raise last_error
 
 
 def _merge_event_cache(cached_payload: object, fetched_payload: list[dict]) -> list[dict]:
