@@ -503,13 +503,66 @@ def _project_minutes(
     before_game_date: str | None,
 ) -> tuple[float, str]:
     base_heuristic = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
-    projected = max(base_heuristic + blowout_delta + injury_delta, 0.0)
+    venue_delta = _venue_minutes_adjustment(
+        conn,
+        player_id=player_id,
+        is_home=bool(context.get("is_home")) if isinstance(context, dict) else False,
+        before_game_date=before_game_date,
+        exclude_game_id=game_id,
+    )
+    projected = max(base_heuristic + venue_delta + blowout_delta + injury_delta, 0.0)
 
     # Keep minutes within plausible player-relative bounds.
     lower_bound = max(8.0, last_10_minutes_avg * 0.60)
     upper_bound = min(40.0, max(last_10_minutes_avg * 1.35, lower_bound + 4.0))
     projected = _clamp(projected, lower_bound, upper_bound)
-    return projected, "heuristic minutes"
+    if abs(venue_delta) >= 0.05:
+        venue_note = f", venue {venue_delta:+.1f}"
+    else:
+        venue_note = ""
+    return projected, f"heuristic minutes{venue_note}"
+
+
+def _venue_minutes_adjustment(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    is_home: bool,
+    before_game_date: str | None,
+    exclude_game_id: int | None,
+) -> float:
+    filters = ["s.player_id = ?"]
+    params: list[object] = [int(player_id)]
+    if before_game_date is not None:
+        filters.append("g.game_date < ?")
+        params.append(before_game_date)
+    if exclude_game_id is not None:
+        filters.append("s.game_id != ?")
+        params.append(int(exclude_game_id))
+    rows = conn.execute(
+        f"""
+        SELECT
+            s.minutes,
+            CASE WHEN p.team_id = g.home_team_id THEN 1 ELSE 0 END AS sample_is_home
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        JOIN players p ON p.id = s.player_id
+        WHERE {' AND '.join(filters)}
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT 12
+        """,
+        params,
+    ).fetchall()
+    if len(rows) < 4:
+        return 0.0
+    same_venue = [float(row["minutes"]) for row in rows if bool(int(row["sample_is_home"])) == bool(is_home)]
+    opposite_venue = [float(row["minutes"]) for row in rows if bool(int(row["sample_is_home"])) != bool(is_home)]
+    if not same_venue or not opposite_venue:
+        return 0.0
+    same_avg = sum(same_venue) / len(same_venue)
+    opp_avg = sum(opposite_venue) / len(opposite_venue)
+    # Keep venue correction small so it nudges, not dominates, the recency heuristic.
+    return _clamp((same_avg - opp_avg) * 0.35, -2.0, 2.0)
 
 
 def _game_total_or_neutral(conn: sqlite3.Connection, game_total: float | None) -> float:

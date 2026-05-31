@@ -126,7 +126,7 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 
 `Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
 
-Minutes projections are computed directly from player game-history in the database (recency-weighted EWMA plus trend and context adjustments). The previous minutes-model and minutes-precompute cache path is no longer used.
+Minutes projections are computed directly from player game-history in the database (recency-weighted EWMA plus trend and context adjustments). The heuristic now includes a bounded home/away venue split adjustment from recent games. The previous minutes-model and minutes-precompute cache path is no longer used.
 
 ## Gems Daily Tracking
 
