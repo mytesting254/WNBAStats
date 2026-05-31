@@ -1054,6 +1054,14 @@ tbody tr.selected {
   color: #b42318;
 }
 
+.record-team-cell.is-win .record-score-text {
+  color: #027a48;
+}
+
+.record-team-cell.is-loss .record-score-text {
+  color: #b42318;
+}
+
 .record-team-cell .team-logo {
   width: 18px;
   height: 18px;

@@ -1827,7 +1827,7 @@ function RecordTeamCell({
 function RecordResultCell({
   row,
   matchup,
-  teamCode: _teamCode,
+  teamCode,
   winnerOnly: _winnerOnly = false,
 }: {
   row: CoversRecordRow;
@@ -1836,13 +1836,30 @@ function RecordResultCell({
   winnerOnly?: boolean;
 }) {
   const winnerLogo = logoForTeamCode(row.winner, matchup);
+  const outcomeClass = teamCode ? recordOutcomeClass(row, teamCode) : "";
   return (
-    <span className="record-team-cell">
+    <span className={`record-team-cell ${outcomeClass}`.trim()}>
       {winnerLogo ? <TeamLogo src={winnerLogo} alt={`${row.winner ?? "Winner"} logo`} /> : null}
       {!winnerLogo ? <strong>{row.result || row.winner || "Winner"}</strong> : null}
       <span className="record-score-text">{row.score}</span>
     </span>
   );
+}
+
+function recordOutcomeClass(row: CoversRecordRow, teamCode: string) {
+  const normalizedTeam = normalizeTeamCode(teamCode);
+  const normalizedWinner = normalizeTeamCode(row.winner);
+  if (normalizedTeam && normalizedWinner) {
+    return normalizedWinner === normalizedTeam ? "is-win" : "is-loss";
+  }
+  const token = (row.result ?? "").trim().charAt(0).toUpperCase();
+  if (token === "W") {
+    return "is-win";
+  }
+  if (token === "L") {
+    return "is-loss";
+  }
+  return "";
 }
 
 function logoForTeamCode(value: string | null | undefined, matchup?: Matchup) {
