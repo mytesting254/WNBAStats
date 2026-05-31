@@ -12,7 +12,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from .bootstrap import ensure_team, normalize_team_abbreviation
-from .cache import read_json_cache, write_json_cache
+from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .game_resolver import resolve_or_create_game
 from .odds_import import sync_prop_lines_from_sportsbook
 
@@ -148,7 +148,7 @@ def import_covers_props(
             }
         try:
             result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
-            synced = sync_prop_lines_from_sportsbook(conn)
+            synced = _maybe_sync_cached_covers(conn)
         except sqlite3.OperationalError as exc:
             if "database is locked" in str(exc).lower():
                 return {
@@ -175,7 +175,7 @@ def import_covers_props(
         if isinstance(cached_payload, dict) and cached_payload.get("rows"):
             try:
                 result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
-                synced = sync_prop_lines_from_sportsbook(conn)
+                synced = _maybe_sync_cached_covers(conn)
             except sqlite3.OperationalError as exc2:
                 if "database is locked" in str(exc2).lower():
                     return {
@@ -250,7 +250,7 @@ def import_covers_props(
         if isinstance(cached_payload, dict) and cached_payload.get("rows"):
             try:
                 result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
-                synced = sync_prop_lines_from_sportsbook(conn)
+                synced = _maybe_sync_cached_covers(conn)
             except sqlite3.OperationalError as exc:
                 if "database is locked" in str(exc).lower():
                     return {
@@ -856,6 +856,13 @@ def _metadata_to_row(row: CoversMetadata) -> dict:
 
 def _today_local() -> str:
     return datetime.now(LOCAL_TZ).date().isoformat()
+
+
+def _maybe_sync_cached_covers(conn: sqlite3.Connection) -> int:
+    projection_count = conn.execute("SELECT COUNT(*) FROM prop_predictions").fetchone()[0]
+    if int(projection_count or 0) > 0:
+        return 0
+    return sync_prop_lines_from_sportsbook(conn, fast_fail=True)
 
 
 def _purge_stale_covers_cache() -> None:

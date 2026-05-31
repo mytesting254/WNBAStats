@@ -297,8 +297,14 @@ export function App() {
         setError(result.message ?? "Unable to import Covers odds");
         return;
       }
-      await load();
       setOperationStatus(result.message ?? `${forceRefresh ? "Fresh" : "Saved"} Covers odds loaded. Imported ${result.imported ?? 0} sportsbook rows from ${result.source ?? "covers"}.`);
+      void load().catch((err) => {
+        setError(
+          `Covers import succeeded, but dashboard reload failed: ${
+            err instanceof Error ? err.message : "unknown error"
+          }`
+        );
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to import Covers odds");
     } finally {

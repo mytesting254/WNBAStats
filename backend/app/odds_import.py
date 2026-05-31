@@ -116,7 +116,7 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
     }
 
 
-def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
+def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool = False) -> int:
     rows = conn.execute(
         """
         SELECT
@@ -234,7 +234,11 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection) -> int:
     ]
 
     try:
-        _begin_immediate_with_retry(conn)
+        _begin_immediate_with_retry(
+            conn,
+            attempts=4 if fast_fail else 24,
+            base_sleep=0.05 if fast_fail else 0.20,
+        )
         conn.execute(
             """
             DELETE FROM prop_predictions
