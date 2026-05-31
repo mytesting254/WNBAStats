@@ -27,6 +27,7 @@ export type ValueProp = {
   blowout_risk: string;
   blowout_probability: number;
   blowout_minutes_impact: number;
+  recent_values?: number[];
 };
 
 export type WatchlistProp = ValueProp & {

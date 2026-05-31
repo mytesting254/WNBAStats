@@ -117,7 +117,7 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 - `Gems`: ranked high-value props combining model edge, EV, and discrepancy signals with conservative/balanced/aggressive presets, optional matchup grouping, and per-matchup caps.
 - `Watchlist`: low-confidence props that still clear minimum EV/edge thresholds for optional tracking.
 - `Matchups`: active upcoming games only, with projected score, spread edge, total edge, and confidence.
-- `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Completed games are removed from this view after the stale-game grace window.
+- `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Player rows include an `L5` strip (last 5 market outcomes) with hit/miss color coding against the current side+line. Completed games are removed from this view after the stale-game grace window.
 - `Discrepancies`: cross-book line gaps and price gaps.
 - `Roster`: Rotowire lineup statuses grouped by team, with a manual `Refresh Roster` pull.
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history.

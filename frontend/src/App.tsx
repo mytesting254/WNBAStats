@@ -1091,6 +1091,23 @@ function PropsView({
                       <div>
                         <strong>{prop.player}</strong>
                         <span>{prop.team} | {prop.sportsbook}</span>
+                        {Array.isArray(prop.recent_values) && prop.recent_values.length > 0 && (
+                          <div className="prop-l5-strip" aria-label="Last 5 results">
+                            <b className="prop-l5-label">L5</b>
+                            {prop.recent_values.slice(0, 5).map((value, idx) => {
+                              const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
+                              return (
+                                <span
+                                  key={`${prop.id}-l5-${idx}`}
+                                  className={hit ? "hit" : "miss"}
+                                  title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
+                                >
+                                  {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </td>
@@ -2434,7 +2451,9 @@ function MatchupProps({
             <div key={`candidate-${prop.id}`} className="candidate-card">
               <span>{prop.team} | {marketLabel(prop.market)}</span>
               <strong>{prop.player}</strong>
-              <em>{prop.recommended_side.toUpperCase()} {prop.line.toFixed(1)} | EV {formatPercent(prop.expected_value)}</em>
+              <em className={`candidate-side-${prop.recommended_side}`}>
+                {prop.recommended_side.toUpperCase()} {prop.line.toFixed(1)} | EV {formatPercent(prop.expected_value)}
+              </em>
             </div>
           ))}
         </div>

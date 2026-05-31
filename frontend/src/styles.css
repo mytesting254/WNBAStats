@@ -375,6 +375,48 @@ td span {
   font-size: 13px;
 }
 
+.prop-l5-strip {
+  display: inline-flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.prop-l5-strip span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  margin-top: 0;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.prop-l5-strip .prop-l5-label {
+  margin-top: 0;
+  padding-right: 2px;
+  color: #667085;
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.prop-l5-strip span.hit {
+  color: #027a48;
+  background: #e7f7ef;
+  border-color: #b7ebcf;
+}
+
+.prop-l5-strip span.miss {
+  color: #b42318;
+  background: #fff1f0;
+  border-color: #ffd3cf;
+}
+
 .player-cell,
 .detail-title,
 .matchup-title-row,
@@ -841,6 +883,14 @@ tbody tr.selected {
 }
 
 .candidate-card em {
+  color: #027a48;
+}
+
+.candidate-card em.candidate-side-under {
+  color: #b42318;
+}
+
+.candidate-card em.candidate-side-over {
   color: #027a48;
 }
 

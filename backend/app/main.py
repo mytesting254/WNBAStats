@@ -2141,9 +2141,68 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
         item = dict(row)
         if not _include_value_board_pick(item):
             continue
+        item["recent_values"] = _recent_market_values(
+            conn,
+            player_id=int(item["player_id"]),
+            market=str(item["market"]),
+            game_id=int(item["game_id"]),
+            limit=5,
+        )
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         payload.append(item)
     return payload
+
+
+def _recent_market_values(conn, *, player_id: int, market: str, game_id: int, limit: int = 5) -> list[float]:
+    rows = conn.execute(
+        """
+        SELECT
+            s.points,
+            s.rebounds,
+            s.assists,
+            s.threes,
+            s.steals,
+            s.blocks
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        JOIN games target ON target.id = ?
+        WHERE s.player_id = ?
+          AND (g.game_date < target.game_date OR (g.game_date = target.game_date AND s.game_id < target.id))
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT ?
+        """,
+        (int(game_id), int(player_id), int(limit)),
+    ).fetchall()
+    values: list[float] = []
+    for row in rows:
+        value = _market_value_from_stats_row(row, market)
+        if value is not None:
+            values.append(round(float(value), 1))
+    return values
+
+
+def _market_value_from_stats_row(row, market: str) -> float | None:
+    key = str(market or "").strip().lower()
+    points = float(row["points"] or 0.0)
+    rebounds = float(row["rebounds"] or 0.0)
+    assists = float(row["assists"] or 0.0)
+    threes = float(row["threes"] or 0.0)
+    steals = float(row["steals"] or 0.0)
+    blocks = float(row["blocks"] or 0.0)
+    mapping = {
+        "points": points,
+        "rebounds": rebounds,
+        "assists": assists,
+        "threes": threes,
+        "steals": steals,
+        "blocks": blocks,
+        "points_rebounds": points + rebounds,
+        "points_assists": points + assists,
+        "rebounds_assists": rebounds + assists,
+        "points_rebounds_assists": points + rebounds + assists,
+        "blocks_steals": blocks + steals,
+    }
+    return mapping.get(key)
 
 
 def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit: int = 60) -> list[dict]:
