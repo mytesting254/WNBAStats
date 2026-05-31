@@ -144,10 +144,9 @@ def _update_game_market(conn: sqlite3.Connection, game_id: int, spread_home: flo
     if game_total is not None and float(game_total) > 0:
         updates.append("game_total = ?")
         params.append(float(game_total))
-    if not updates:
-        return
-    params.append(int(game_id))
-    conn.execute(f"UPDATE games SET {', '.join(updates)} WHERE id = ?", params)
+    if updates:
+        params.append(int(game_id))
+        conn.execute(f"UPDATE games SET {', '.join(updates)} WHERE id = ?", params)
     if game_total is None or float(game_total) <= 0:
         _backfill_game_total_if_missing(conn, int(game_id))
 

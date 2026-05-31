@@ -53,6 +53,14 @@ RATE_LIMIT_REFRESH_CAPACITY = float(os.getenv("RATE_LIMIT_REFRESH_CAPACITY", "6"
 RATE_LIMIT_REFRESH_REFILL_PER_SEC = float(os.getenv("RATE_LIMIT_REFRESH_REFILL_PER_SEC", "0.33"))
 _RATE_BUCKETS: dict[tuple[str, str], tuple[float, float]] = {}
 _RATE_LOCK = threading.Lock()
+_PROP_SYNC_LOCK = threading.Lock()
+_PROP_SYNC_STATE: dict[str, Any] = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": None,
+    "last_result": None,
+}
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,6 +92,16 @@ def on_startup() -> None:
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/ops/health")
+def ops_health() -> dict[str, Any]:
+    with _PROP_SYNC_LOCK:
+        sync_state = dict(_PROP_SYNC_STATE)
+    return {
+        "status": "ok",
+        "prop_sync": sync_state,
+    }
 
 
 def _is_dev_env() -> bool:
@@ -309,6 +327,12 @@ def recalculate() -> dict[str, int]:
         _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     _invalidate_read_caches()
     return {"predictions": len(projections), "settled": settlements["settled"], "game_settled": game_settlements["settled"]}
+
+
+@app.get("/api/props/sync-status")
+def props_sync_status() -> dict:
+    with _PROP_SYNC_LOCK:
+        return dict(_PROP_SYNC_STATE)
 
 
 @app.post("/api/settle-props", dependencies=[Depends(_protect_mutation)])
@@ -1215,6 +1239,8 @@ def train_model() -> dict:
 def import_odds(force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_the_odds_api_props(conn, force_refresh=force_refresh)
+    if result.get("sync_error"):
+        _start_prop_sync_if_needed("odds_import")
     _invalidate_read_caches()
     return result
 
@@ -1223,6 +1249,8 @@ def import_odds(force_refresh: bool = False) -> dict:
 def import_covers(selected_date: str | None = None, force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh)
+    if result.get("sync_error"):
+        _start_prop_sync_if_needed("covers_import")
     _invalidate_read_caches()
     return result
 
@@ -1843,6 +1871,36 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
     compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
     _set_observability_headers(response, MATCHUPS_CACHE_NAME, "BYPASS" if force_refresh else "MISS", round(compute_ms, 2))
     return payload
+
+
+def _start_prop_sync_if_needed(source: str) -> bool:
+    with _PROP_SYNC_LOCK:
+        if _PROP_SYNC_STATE["running"]:
+            return False
+        _PROP_SYNC_STATE["running"] = True
+        _PROP_SYNC_STATE["started_at"] = datetime.now(timezone.utc).isoformat()
+        _PROP_SYNC_STATE["finished_at"] = None
+        _PROP_SYNC_STATE["last_error"] = None
+
+    def _run() -> None:
+        try:
+            with connect() as conn:
+                synced = sync_prop_lines_from_sportsbook(conn)
+            with _PROP_SYNC_LOCK:
+                _PROP_SYNC_STATE["last_result"] = {
+                    "source": source,
+                    "synced_props": int(synced),
+                }
+        except Exception as exc:
+            with _PROP_SYNC_LOCK:
+                _PROP_SYNC_STATE["last_error"] = str(exc)
+        finally:
+            with _PROP_SYNC_LOCK:
+                _PROP_SYNC_STATE["running"] = False
+                _PROP_SYNC_STATE["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
 
 
 def _covers_records_by_game() -> dict[int, dict]:

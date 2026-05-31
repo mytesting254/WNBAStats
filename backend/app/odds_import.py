@@ -62,13 +62,19 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
     cached_payload = read_json_cache(RAW_CACHE_NAME)
     if cached_payload and not force_refresh:
         result = _replace_sportsbook_rows(conn, cached_payload, datetime.now(timezone.utc).isoformat())
-        synced = sync_prop_lines_from_sportsbook(conn)
+        synced = 0
+        sync_error = None
+        try:
+            synced = sync_prop_lines_from_sportsbook(conn)
+        except sqlite3.OperationalError as exc:
+            sync_error = str(exc)
         return {
             **result,
             "synced_props": synced,
             "status": "loaded_from_cache",
             "source": "cache",
-            "message": "Loaded sportsbook props from saved JSON. Use force_refresh=true to fetch fresh odds.",
+            "message": "Loaded sportsbook props from saved JSON.",
+            "sync_error": sync_error,
         }
 
     load_dotenv()
@@ -104,7 +110,12 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
     merged_payload = _merge_event_cache(cached_payload, fetched_payload)
     write_json_cache(RAW_CACHE_NAME, merged_payload)
     result = _replace_sportsbook_rows(conn, merged_payload, captured_at)
-    synced = sync_prop_lines_from_sportsbook(conn)
+    synced = 0
+    sync_error = None
+    try:
+        synced = sync_prop_lines_from_sportsbook(conn)
+    except sqlite3.OperationalError as exc:
+        sync_error = str(exc)
     return {
         **result,
         "synced_props": synced,
@@ -113,6 +124,7 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
         "fetched_events": len(fetched_payload),
         "cached_events": len(merged_payload),
         "captured_at": captured_at,
+        "sync_error": sync_error,
     }
 
 

@@ -126,6 +126,8 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 
 `Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
 
+Minutes projections are computed directly from player game-history in the database (recency-weighted EWMA plus trend and context adjustments). The previous minutes-model and minutes-precompute cache path is no longer used.
+
 ## Gems Daily Tracking
 
 Gems are generated from current model picks (`/api/value-board`) plus sportsbook discrepancy signals (`/api/line-discrepancies`) and ranked by a composite gem score.
@@ -198,7 +200,7 @@ Live sportsbook prop import uses The Odds API from the backend only. Set an API 
 $env:ODDS_API_KEY="your_key_here"
 ```
 
-Click `Load Saved Odds` in the app to reload the most recent JSON file from `data/cache/sportsbook_props_raw.json` without calling the provider.
+Click `Load Saved Odds` in the app to reload the most recent JSON file from `data/cache/sportsbook_props_raw.json` without calling the provider. The import still syncs `sportsbook_prop_lines -> prop_lines` and refreshes model predictions so value-board/watchlist/gem views update immediately.
 
 Click `Refresh Odds` only when you want a fresh provider call. Fresh calls merge by provider event id, so future events already saved in `sportsbook_props_raw.json` remain cached instead of being discarded.
 
@@ -258,6 +260,8 @@ Refresh from the app or call:
 ```text
 POST /api/covers/import?force_refresh=true
 ```
+
+Loading saved Covers cache (`POST /api/covers/import` without `force_refresh`) also performs immediate prop-line sync so model props load without waiting for a background precompute.
 
 Backfill historical Covers lines over a date range (then recompute ATS/total results from those lines):
 
