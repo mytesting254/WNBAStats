@@ -548,7 +548,9 @@ What the scripts do:
 Network access notes:
 
 - `dev.sh` and `dev.ps1` bind backend/frontend to `0.0.0.0` for same-network access.
-- Dynamic port assignment is unchanged in `dev.ps1`; it still auto-selects open backend/frontend ports when defaults are busy.
+- Default ports are backend `8010` and frontend `5184`.
+- `dev.ps1` auto-selects the next open ports when defaults are busy and prints the resolved URLs.
+- `snapshot.ps1` (`auto`/`start`) uses the same dynamic port behavior because it delegates app startup to `dev.ps1`.
 - Access from the host machine still works via `127.0.0.1:<resolved-port>`.
 
 Safety:

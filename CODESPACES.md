@@ -2,10 +2,11 @@
 
 This project runs in Codespaces with two processes:
 
-- FastAPI backend on port `8010`
-- Vite React frontend on port `5184`
+- FastAPI backend (default port `8010`)
+- Vite React frontend (default port `5184`)
 
 Codespaces needs both servers to bind to `0.0.0.0` so GitHub can forward the ports.
+If default ports are already in use, use the helper scripts (`dev.sh`, `dev.ps1`, `snapshot.sh`, `snapshot.ps1`) to auto-select free ports.
 
 ## 1. Create A Codespace
 
@@ -176,7 +177,7 @@ python scripts/reset_live_db.py
 
 ## Troubleshooting
 
-- If the frontend opens but API calls fail, confirm the backend is running on port `8010`.
-- If a port is not visible, open the `Ports` tab and manually forward `5184` or `8010`.
-- If the frontend server prints a localhost URL, still open the Codespaces forwarded `5184` URL.
+- If the frontend opens but API calls fail, confirm the backend is running on the resolved backend port.
+- If a port is not visible, open the `Ports` tab and forward the resolved frontend/backend ports.
+- If the frontend server prints a localhost URL, open the Codespaces forwarded URL for the frontend's resolved port.
 - If dependencies are missing after rebuilding the Codespace, rerun the install commands above.

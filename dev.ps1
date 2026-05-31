@@ -8,9 +8,17 @@ $FrontendPort = if ($env:FRONTEND_PORT) { [int]$env:FRONTEND_PORT } else { 5184 
 
 function Test-PortAvailable {
     param([int]$Port)
+
+    # netstat reliably reports active listeners across bind addresses on Windows.
+    $ListenPattern = ":{0}\s+.*LISTENING" -f $Port
+    $ExistingListener = netstat -ano -p tcp | Select-String -Pattern $ListenPattern | Select-Object -First 1
+    if ($null -ne $ExistingListener) {
+        return $false
+    }
+
     $Listener = $null
     try {
-        $Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+        $Listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Any, $Port)
         $Listener.Start()
         return $true
     }
