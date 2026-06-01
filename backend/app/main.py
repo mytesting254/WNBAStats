@@ -2324,6 +2324,13 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
             continue
         if not _is_active_game_time(item["start_time"]):
             continue
+        item["recent_values"] = _recent_market_values(
+            conn,
+            player_id=int(item["player_id"]),
+            market=str(item["market"]),
+            game_id=int(item["game_id"]),
+            limit=5,
+        )
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         payload.append(item)
     return payload[: max(1, min(int(limit), 200))]

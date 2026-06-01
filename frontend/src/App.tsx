@@ -1093,7 +1093,6 @@ function PropsView({
                         <span>{prop.team} | {prop.sportsbook}</span>
                         {Array.isArray(prop.recent_values) && prop.recent_values.length > 0 && (
                           <div className="prop-l5-strip" aria-label="Last 5 results">
-                            <b className="prop-l5-label">L5</b>
                             {prop.recent_values.slice(0, 5).map((value, idx) => {
                               const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
                               return (
@@ -1302,6 +1301,22 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                   <td>
                     <strong>{g.player}</strong>
                     <span>{g.team} | {marketLabel(g.market)} | {g.sportsbook}</span>
+                    {Array.isArray(g.recent_values) && g.recent_values.length > 0 && (
+                      <div className="prop-l5-strip" aria-label="Last 5 results">
+                        {g.recent_values.slice(0, 5).map((value, idx) => {
+                          const hit = g.recommended_side === "over" ? value > g.line : value < g.line;
+                          return (
+                            <span
+                              key={`${g.id}-gem-flat-l5-${idx}`}
+                              className={hit ? "hit" : "miss"}
+                              title={`${value.toFixed(1)} vs ${g.recommended_side.toUpperCase()} ${g.line.toFixed(1)}`}
+                            >
+                              {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    )}
                   </td>
                   <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
                   <td>{formatPercent(g.edge)}</td>
@@ -1386,6 +1401,22 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                           <td>
                             <strong>{g.player}</strong>
                             <span>{g.team} | {marketLabel(g.market)} | {g.sportsbook}</span>
+                            {Array.isArray(g.recent_values) && g.recent_values.length > 0 && (
+                              <div className="prop-l5-strip" aria-label="Last 5 results">
+                                {g.recent_values.slice(0, 5).map((value, idx) => {
+                                  const hit = g.recommended_side === "over" ? value > g.line : value < g.line;
+                                  return (
+                                    <span
+                                      key={`${selectedGroup.key}-${g.id}-gem-group-l5-${idx}`}
+                                      className={hit ? "hit" : "miss"}
+                                      title={`${value.toFixed(1)} vs ${g.recommended_side.toUpperCase()} ${g.line.toFixed(1)}`}
+                                    >
+                                      {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </td>
                           <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
                           <td>{formatPercent(g.edge)}</td>
@@ -2185,6 +2216,22 @@ function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp
                           <div>
                             <strong>{prop.player}</strong>
                             <span>{prop.team} | {prop.sportsbook}</span>
+                            {Array.isArray(prop.recent_values) && prop.recent_values.length > 0 && (
+                              <div className="prop-l5-strip" aria-label="Last 5 results">
+                                {prop.recent_values.slice(0, 5).map((value, idx) => {
+                                  const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
+                                  return (
+                                    <span
+                                      key={`${prop.id}-watch-l5-${idx}`}
+                                      className={hit ? "hit" : "miss"}
+                                      title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
+                                    >
+                                      {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                         </div>
                       </td>
@@ -2498,6 +2545,22 @@ function MatchupProps({
                       <div>
                         <strong>{prop.player}</strong>
                         <span>{prop.team} | {prop.sportsbook}</span>
+                        {Array.isArray(prop.recent_values) && prop.recent_values.length > 0 && (
+                          <div className="prop-l5-strip" aria-label="Last 5 results">
+                            {prop.recent_values.slice(0, 5).map((value, idx) => {
+                              const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
+                              return (
+                                <span
+                                  key={`${prop.id}-matchup-l5-${idx}`}
+                                  className={hit ? "hit" : "miss"}
+                                  title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
+                                >
+                                  {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     </div>
                   </td>
