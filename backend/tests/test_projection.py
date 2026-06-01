@@ -6,6 +6,7 @@ import pytest
 from fastapi import Response
 
 from backend.app import covers_import as covers_import_module
+from backend.app import cache as cache_module
 from backend.app import rotowire_import as rotowire_import_module
 from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
@@ -166,6 +167,14 @@ def test_american_odds_helpers() -> None:
     assert round(american_to_implied_probability(-110), 4) == 0.5238
     assert round(american_to_implied_probability(150), 4) == 0.4
     assert expected_value(0.55, -110) > 0
+
+
+def test_read_json_cache_returns_none_for_invalid_json(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cache_module, "CACHE_DIR", tmp_path)
+    bad_cache = tmp_path / "broken.json"
+    bad_cache.write_text("", encoding="utf-8")
+
+    assert cache_module.read_json_cache("broken.json") is None
 
 
 def test_normalize_team_abbreviation_handles_covers_name_variants() -> None:
@@ -943,6 +952,65 @@ def test_odds_sync_preserves_tracking_for_completed_unsettled_props() -> None:
     assert line is not None
     assert prediction["prediction_time"] == "pregame"
     assert [row["id"] for row in matching_lines] == [9301]
+
+
+def test_odds_sync_deletes_snapshot_dependents_before_scheduled_line_cleanup() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9501, 2010, 1001, 'DraftKings', 'points', 21.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9502, 9501, 'adaptive-context-v1', 'pregame', 22.0, 'over', 0.56, 0.52, 0.04, 0.07, 'medium', 'test')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO gem_snapshots (
+                id, snapshot_date, preset, created_at, updated_at, min_ev, min_edge, allow_low, min_score
+            ) VALUES (9503, '2026-05-08', 'default', ?, ?, 0.0, 0.0, 0, 0.0)
+            """,
+            (captured_at, captured_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO gem_snapshot_items (
+                snapshot_id, prop_line_id, game_id, player_id, market, side, line, edge, expected_value, confidence
+            ) VALUES (9503, 9501, 2010, 1001, 'points', 'over', 21.5, 0.04, 0.07, 'medium')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO watchlist_snapshots (
+                id, snapshot_date, created_at, updated_at, min_ev, min_edge, max_edge, item_count
+            ) VALUES (9504, '2026-05-08', ?, ?, 0.0, 0.0, 1.0, 1)
+            """,
+            (captured_at, captured_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO watchlist_snapshot_items (
+                snapshot_id, prop_line_id, prediction_id, game_id, player_id, market, side, line, edge, expected_value, confidence
+            ) VALUES (9504, 9501, 9502, 2010, 1001, 'points', 'over', 21.5, 0.04, 0.07, 'medium')
+            """
+        )
+
+        sync_prop_lines_from_sportsbook(conn)
+
+        assert conn.execute("SELECT 1 FROM prop_lines WHERE id = 9501").fetchone() is None
+        assert conn.execute("SELECT 1 FROM prop_predictions WHERE id = 9502").fetchone() is None
+        assert conn.execute("SELECT 1 FROM gem_snapshot_items WHERE prop_line_id = 9501").fetchone() is None
+        assert conn.execute("SELECT 1 FROM watchlist_snapshot_items WHERE prop_line_id = 9501").fetchone() is None
 
 
 def test_rebuild_predictions_does_not_overwrite_completed_game_tracking() -> None:

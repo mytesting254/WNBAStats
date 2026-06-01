@@ -253,6 +253,32 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
         )
         conn.execute(
             """
+            DELETE FROM watchlist_snapshot_items
+            WHERE prop_line_id IN (
+                SELECT pl.id
+                FROM prop_lines pl
+                JOIN games g ON g.id = pl.game_id
+                LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+                WHERE sp.id IS NULL
+                  AND g.status = 'scheduled'
+            )
+            """
+        )
+        conn.execute(
+            """
+            DELETE FROM gem_snapshot_items
+            WHERE prop_line_id IN (
+                SELECT pl.id
+                FROM prop_lines pl
+                JOIN games g ON g.id = pl.game_id
+                LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+                WHERE sp.id IS NULL
+                  AND g.status = 'scheduled'
+            )
+            """
+        )
+        conn.execute(
+            """
             DELETE FROM prop_predictions
             WHERE prop_line_id IN (
                 SELECT pl.id

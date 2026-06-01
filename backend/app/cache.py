@@ -20,7 +20,10 @@ def read_json_cache(name: str) -> Any | None:
     path = CACHE_DIR / name
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
 def delete_json_cache(name: str) -> bool:
