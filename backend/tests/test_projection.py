@@ -29,6 +29,7 @@ from backend.app import main as main_module
 from backend.app.odds import american_to_implied_probability, expected_value
 from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies, sync_prop_lines_from_sportsbook
 from backend.app.player_prop_model import _market_value as learned_market_value
+from backend.app.player_prop_model import MODEL_VERSION
 from backend.app.player_prop_model import train_market_model
 from backend.app.projections import _market_value as component_market_value
 from backend.app.projections import rebuild_predictions
@@ -1040,6 +1041,67 @@ def test_rebuild_predictions_does_not_overwrite_completed_game_tracking() -> Non
     assert len(projections) == 3
     assert prediction["prediction_time"] == "pregame"
     assert prediction["projection"] == 18.0
+
+
+def test_rebuild_predictions_clears_watchlist_rows_for_replaced_predictions() -> None:
+    load_test_history()
+    now = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (9940, '2026-05-25', ?, 10, 3, 'scheduled', 2, 2, -2.5, 161.5)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9941, 9940, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (now,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9942, 9941, ?, ?, 19.0, 'under', 0.57, 0.50, 0.06, 0.03, 'low', 'watch-fk-test')
+            """,
+            (MODEL_VERSION, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO watchlist_snapshots (
+                id, snapshot_date, created_at, updated_at, min_ev, min_edge, max_edge, item_count
+            ) VALUES (9943, '2026-05-25', ?, ?, 0.0, 0.0, 1.0, 1)
+            """,
+            (now, now),
+        )
+        conn.execute(
+            """
+            INSERT INTO watchlist_snapshot_items (
+                snapshot_id, prop_line_id, prediction_id, game_id, player_id, market, side, line, edge, expected_value, confidence
+            ) VALUES (9943, 9941, 9942, 9940, 1001, 'points', 'under', 20.5, 0.06, 0.03, 'low')
+            """
+        )
+
+        projections = rebuild_predictions(conn)
+        replacement = conn.execute(
+            "SELECT * FROM prop_predictions WHERE prop_line_id = 9941 AND model_version = ?",
+            (MODEL_VERSION,),
+        ).fetchone()
+        old_watch_row = conn.execute(
+            "SELECT 1 FROM watchlist_snapshot_items WHERE prediction_id = 9942",
+        ).fetchone()
+
+    assert projections
+    assert replacement is not None
+    assert replacement["id"] != 9942
+    assert old_watch_row is None
 
 
 def test_model_performance_counts_settled_props_without_predictions() -> None:
