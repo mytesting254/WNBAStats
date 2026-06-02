@@ -1834,9 +1834,13 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
             home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
             away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
             game_id = int(game["id"])
+            market_override = covers_market_odds.get(game_id, {})
             home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
             away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
             game_context = dict(game)
+            for field in ("spread_home", "game_total", "home_moneyline", "away_moneyline"):
+                if market_override.get(field) is not None:
+                    game_context[field] = market_override[field]
             game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
             game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
             prediction = project_game(conn, game_context)
@@ -1855,12 +1859,12 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
                     "away_logo_url": game["away_logo_url"],
                     "home_rest_days": home_rest_days,
                     "away_rest_days": away_rest_days,
-                    "spread_home": game["spread_home"],
-                    "game_total": game["game_total"],
-                    "home_moneyline": game["home_moneyline"],
-                    "away_moneyline": game["away_moneyline"],
-                    **covers_market_odds.get(game_id, {}),
-                    "blowout_risk": _blowout_display(game["spread_home"], "starter")["blowout_risk"],
+                    "spread_home": game_context["spread_home"],
+                    "game_total": game_context["game_total"],
+                    "home_moneyline": game_context["home_moneyline"],
+                    "away_moneyline": game_context["away_moneyline"],
+                    **market_override,
+                    "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
                     **prediction,
                     "home": home_summary,
                     "away": away_summary,
@@ -1951,6 +1955,7 @@ def _covers_market_odds_by_game() -> dict[int, dict]:
             "away_spread": item.get("away_spread"),
             "away_spread_price": item.get("away_spread_price"),
             "spread_home": item.get("spread_home"),
+            "game_total": item.get("game_total"),
             "home_spread_price": item.get("home_spread_price"),
             "over_total": item.get("over_total"),
             "over_price": item.get("over_price"),
@@ -1965,6 +1970,10 @@ def _covers_market_odds_by_game() -> dict[int, dict]:
                 parsed_market = _game_market_from_page(page_item.get("odds_page", ""), str(item.get("home_team") or ""), str(item.get("away_team") or ""))
                 market = {**market, **{key: parsed_market.get(key) for key in market}}
         odds_by_game[int(item["game_id"])] = {
+            "spread_home": market.get("spread_home"),
+            "game_total": market.get("game_total"),
+            "home_moneyline": market.get("home_moneyline"),
+            "away_moneyline": market.get("away_moneyline"),
             "spread_market": {
                 "away_line": market.get("away_spread"),
                 "away_price": market.get("away_spread_price"),
