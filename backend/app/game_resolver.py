@@ -22,6 +22,8 @@ def resolve_or_create_game(
     espn_event_id: int | None = None,
     spread_home: float | None = None,
     game_total: float | None = None,
+    home_moneyline: float | None = None,
+    away_moneyline: float | None = None,
 ) -> int | None:
     home_team_id = ensure_team(conn, home_team)
     away_team_id = ensure_team(conn, away_team)
@@ -48,6 +50,8 @@ def resolve_or_create_game(
                 espn_event_id=int(espn_event_id),
                 spread_home=spread_home,
                 game_total=game_total,
+                home_moneyline=home_moneyline,
+                away_moneyline=away_moneyline,
             )
             return game_id
 
@@ -75,6 +79,8 @@ def resolve_or_create_game(
                 espn_event_id=espn_event_id,
                 spread_home=spread_home,
                 game_total=game_total,
+                home_moneyline=home_moneyline,
+                away_moneyline=away_moneyline,
             )
             return game_id
 
@@ -91,7 +97,7 @@ def resolve_or_create_game(
                 (int(espn_event_id), resolved_date, start_time, int(home_team_id), int(away_team_id), int(espn_event_id)),
             )
             game_id = int(espn_event_id)
-            _update_game_market(conn, game_id, spread_home, game_total)
+            _update_game_market(conn, game_id, spread_home, game_total, home_moneyline, away_moneyline)
             return game_id
 
     cursor = conn.execute(
@@ -104,7 +110,7 @@ def resolve_or_create_game(
         (resolved_date, start_time, int(home_team_id), int(away_team_id), espn_event_id),
     )
     game_id = int(cursor.lastrowid)
-    _update_game_market(conn, game_id, spread_home, game_total)
+    _update_game_market(conn, game_id, spread_home, game_total, home_moneyline, away_moneyline)
     return game_id
 
 
@@ -119,6 +125,8 @@ def _update_game_identity(
     espn_event_id: int | None,
     spread_home: float | None,
     game_total: float | None,
+    home_moneyline: float | None,
+    away_moneyline: float | None,
 ) -> None:
     conn.execute(
         """
@@ -132,10 +140,17 @@ def _update_game_identity(
         """,
         (game_date, start_time, home_team_id, away_team_id, espn_event_id, game_id),
     )
-    _update_game_market(conn, game_id, spread_home, game_total)
+    _update_game_market(conn, game_id, spread_home, game_total, home_moneyline, away_moneyline)
 
 
-def _update_game_market(conn: sqlite3.Connection, game_id: int, spread_home: float | None, game_total: float | None) -> None:
+def _update_game_market(
+    conn: sqlite3.Connection,
+    game_id: int,
+    spread_home: float | None,
+    game_total: float | None,
+    home_moneyline: float | None,
+    away_moneyline: float | None,
+) -> None:
     updates = []
     params: list[object] = []
     if spread_home is not None:
@@ -144,6 +159,12 @@ def _update_game_market(conn: sqlite3.Connection, game_id: int, spread_home: flo
     if game_total is not None and float(game_total) > 0:
         updates.append("game_total = ?")
         params.append(float(game_total))
+    if home_moneyline is not None:
+        updates.append("home_moneyline = ?")
+        params.append(float(home_moneyline))
+    if away_moneyline is not None:
+        updates.append("away_moneyline = ?")
+        params.append(float(away_moneyline))
     if updates:
         params.append(int(game_id))
         conn.execute(f"UPDATE games SET {', '.join(updates)} WHERE id = ?", params)

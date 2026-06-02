@@ -1292,6 +1292,182 @@ def test_covers_metadata_prefers_odds_page_market_over_matchup_page_noise() -> N
     assert metadata.game_total == 172.5
 
 
+def test_covers_odds_page_parser_extracts_spread_total_and_moneyline() -> None:
+    html = """
+    <section class="covers-CoversGame-Tickers">
+      <div class="covers-CoversGame-Card game-Scheduled">
+        <div class="game-info">
+          <div class="team-row away-row">
+            <span class="team-name">
+              <span class="team-ShortName">CHI</span>
+            </span>
+            <span class="team-odds spread">-1.5</span>
+            <span class="team-odds totals">o161.0</span>
+          </div>
+          <div class="team-row home-row">
+            <span class="team-name">
+              <span class="team-ShortName">WAS</span>
+            </span>
+            <span class="team-odds spread">1.5</span>
+            <span class="team-odds totals">u161.0</span>
+          </div>
+        </div>
+      </div>
+    </section>
+    <article class="card bg-white rounded rounded-2 shadow-sm p-3">
+      <header class="card-header d-flex flex-row justify-content-between align-items-center pb-2">
+        <h2 class="fs-9">Moneyline</h2>
+      </header>
+      <div class="card-body">
+        <table class="w-100 m-0 bg-white">
+          <caption class="visually-hidden">Game Odds Chicago Sky vs. Washington Mystics</caption>
+          <thead>
+            <tr>
+              <th scope="col" class="emptyCellHeader"></th>
+              <th scope="col" class="oddsHeader w-auto mw-50 text-center fw-normal fs-13 pb-1 pe-1">CHI</th>
+              <th scope="col" class="oddsHeader w-auto mw-50 text-center fw-normal fs-13 pb-1 ps-1">WAS</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr scope="row">
+              <td class="emptyCell"></td>
+              <td class="ps-lg-2 pe-1 oddsCell">
+                <div class="oddsSide">
+                  <a data-linkcont="matchup-odds-best_odds-click-wnba-moneyline-chi-draftkings">
+                    <span class="fw-bold fs-12">-130</span>
+                  </a>
+                </div>
+              </td>
+              <td class="ps-1 oddsCell">
+                <div class="oddsSide">
+                  <a data-linkcont="matchup-odds-best_odds-click-wnba-moneyline-was-fanduel">
+                    <span class="fw-bold fs-12">&#x2B;110</span>
+                  </a>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+    <article class="card bg-white rounded rounded-2 shadow-sm p-3">
+      <header class="card-header d-flex flex-row justify-content-between align-items-center pb-2">
+        <h2 class="fs-9">Spread</h2>
+      </header>
+      <div class="card-body">
+        <table class="w-100 m-0 bg-white">
+          <thead>
+            <tr>
+              <th scope="col" class="emptyCellHeader"></th>
+              <th scope="col" class="oddsHeader w-auto mw-50 text-center fw-normal fs-13 pb-1 pe-1">CHI</th>
+              <th scope="col" class="oddsHeader w-auto mw-50 text-center fw-normal fs-13 pb-1 ps-1">WAS</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr scope="row">
+              <td class="emptyCell"></td>
+              <td class="ps-lg-2 pe-1 oddsCell">
+                <div class="oddsSide">
+                  <a data-linkcont="matchup-odds-best_odds-click-wnba-spread-chi-fanduel">
+                    <span class="fw-bold fs-12">-1.5</span>
+                    <span class="fw-bold americanOdds fs-13">-114</span>
+                  </a>
+                </div>
+              </td>
+              <td class="ps-1 oddsCell">
+                <div class="oddsSide">
+                  <a data-linkcont="matchup-odds-best_odds-click-wnba-spread-was-caesars">
+                    <span class="fw-bold fs-12">&#x2B;1.5</span>
+                    <span class="fw-bold americanOdds fs-13">&#x2B;100</span>
+                  </a>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+    <article class="card bg-white rounded rounded-2 shadow-sm p-3">
+      <header class="card-header d-flex flex-row justify-content-between align-items-center pb-2">
+        <h2 class="fs-9">Total</h2>
+      </header>
+      <div class="card-body">
+        <table class="w-100 m-0 bg-white">
+          <thead>
+            <tr>
+              <th scope="col" class="emptyCellHeader"></th>
+              <th scope="col" class="oddsHeader w-auto mw-50 text-center fw-normal fs-13 pb-1 pe-1">OVER</th>
+              <th scope="col" class="oddsHeader w-auto mw-50 text-center fw-normal fs-13 pb-1 ps-1">UNDER</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr scope="row">
+              <td class="emptyCell"></td>
+              <td class="ps-lg-2 pe-1 oddsCell">
+                <div class="oddsSide">
+                  <a data-linkcont="matchup-odds-best_odds-click-wnba-total-over-caesars">
+                    <span class="fw-bold fs-12">o161.0</span>
+                    <span class="fw-bold americanOdds fs-13">-110</span>
+                  </a>
+                </div>
+              </td>
+              <td class="ps-1 oddsCell">
+                <div class="oddsSide">
+                  <a data-linkcont="matchup-odds-best_odds-click-wnba-total-under-betmgm">
+                    <span class="fw-bold fs-12">u160.5</span>
+                    <span class="fw-bold americanOdds fs-13">-110</span>
+                  </a>
+                </div>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+    """
+
+    market = covers_import_module._game_market_from_page(html, "Washington Mystics", "Chicago Sky")
+
+    assert market == {
+        "spread_home": 1.5,
+        "game_total": 161.0,
+        "home_moneyline": 110.0,
+        "away_moneyline": -130.0,
+        "away_spread": -1.5,
+        "away_spread_price": -114.0,
+        "home_spread_price": 100.0,
+        "over_total": 161.0,
+        "over_price": -110.0,
+        "under_total": 160.5,
+        "under_price": -110.0,
+    }
+
+
+def test_covers_odds_board_parser_extracts_moneylines() -> None:
+    html = """
+    <section>
+      <div>Moneyline Odds Table</div>
+      <div>Today, 19:30</div>
+      <div>CON</div>
+      <div>ATL</div>
+      <div>+809 9.09 81/10</div>
+      <div>-1282 1.08 1/12</div>
+      <div>Odds &amp; Props</div>
+      <div>Today, 22:00</div>
+      <div>PDX</div>
+      <div>GS</div>
+      <div>+289 3.89 26/9</div>
+      <div>-377 1.27 3/11</div>
+      <div>Odds &amp; Props</div>
+    </section>
+    """
+
+    result = covers_import_module._moneylines_from_odds_board(html)
+
+    assert result[("CON", "ATL")] == {"away_moneyline": 809.0, "home_moneyline": -1282.0}
+    assert result[("PDX", "GS")] == {"away_moneyline": 289.0, "home_moneyline": -377.0}
+
+
 def test_covers_records_parser_extracts_h2h_and_team_last_10() -> None:
     html = """
     <section class="both-team-section">
@@ -1804,6 +1980,57 @@ def test_gems_keep_one_direction_per_player_market_game(monkeypatch) -> None:
     assert gems
     assert gems[0]["side"] == "under"
     assert all(item["side"] == "under" for item in gems)
+
+
+def test_coalesce_matchup_games_handles_sqlite_rows_with_moneylines() -> None:
+    start_time = datetime(2026, 6, 2, 23, 0, tzinfo=timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, home_moneyline, away_moneyline
+            ) VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)
+            """,
+            (9001, "2026-06-02", start_time, 10, 3, 2, 2, -4.5, 161.5, None, None),
+        )
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, home_moneyline, away_moneyline
+            ) VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?, ?, ?, ?)
+            """,
+            (9002, "2026-06-02", start_time, 10, 3, 2, 2, -4.5, 161.5, -175, 145),
+        )
+        games = conn.execute(
+            """
+            SELECT
+                id,
+                game_date,
+                start_time,
+                home_team_id,
+                away_team_id,
+                rest_days_home,
+                rest_days_away,
+                spread_home,
+                game_total,
+                home_moneyline,
+                away_moneyline
+            FROM games
+            WHERE id IN (9001, 9002)
+            ORDER BY id
+            """
+        ).fetchall()
+
+    groups = main_module._coalesce_matchup_games(games)
+
+    assert len(groups) == 1
+    game, game_ids = groups[0]
+    assert game["id"] == 9002
+    assert game["home_moneyline"] == -175
+    assert game["away_moneyline"] == 145
+    assert game_ids == [9001, 9002]
 
 
 def test_watchlist_snapshot_and_settlement_sync(monkeypatch) -> None:

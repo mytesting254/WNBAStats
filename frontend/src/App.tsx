@@ -1592,23 +1592,29 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
           {selectedMatchup ? (
             <article className="matchup-card" key={selectedMatchup.id}>
               <div className="matchup-card-header">
-                <div>
-                  <p className="eyebrow">{formatDate(selectedMatchup.start_time)}</p>
-                  <div className="matchup-title-row">
-                    <TeamLogo src={selectedMatchup.away_logo_url} alt={`${selectedMatchup.away_team} logo`} />
-                    <h3>{selectedMatchup.away_team} at {selectedMatchup.home_team}</h3>
-                    <TeamLogo src={selectedMatchup.home_logo_url} alt={`${selectedMatchup.home_team} logo`} />
+                <div className="matchup-header-top">
+                  <div className="matchup-header-main">
+                    <p className="eyebrow">{formatDate(selectedMatchup.start_time)}</p>
+                    <div className="matchup-title-row">
+                      <TeamLogo src={selectedMatchup.away_logo_url} alt={`${selectedMatchup.away_team} logo`} />
+                      <h3>{selectedMatchup.away_team} at {selectedMatchup.home_team}</h3>
+                      <TeamLogo src={selectedMatchup.home_logo_url} alt={`${selectedMatchup.home_team} logo`} />
+                    </div>
                   </div>
                 </div>
-                <div className="game-badges">
-                  <span className="game-pill">Pregame</span>
+                <div className="matchup-market-badges">
                   <span className={`risk-pill ${riskClass(selectedMatchup.blowout_risk)}`}>
                     Blowout {selectedMatchup.blowout_risk}
                   </span>
-                  <span className="rest-pill">Line {selectedMatchup.home_team} {formatSpread(selectedMatchup.spread_home)}</span>
-                  <span className="rest-pill">Total {selectedMatchup.game_total?.toFixed(1) ?? "N/A"}</span>
-                  <span className="rest-pill">{selectedMatchup.away_team} {restLabel(selectedMatchup.away_rest_days)}</span>
-                  <span className="rest-pill">{selectedMatchup.home_team} {restLabel(selectedMatchup.home_rest_days)}</span>
+                  <span className="market-pill">
+                    {formatSpreadMarket(selectedMatchup)}
+                  </span>
+                  <span className="market-pill">
+                    {formatTotalMarket(selectedMatchup)}
+                  </span>
+                  <span className="market-pill">
+                    {formatMoneylineMarket(selectedMatchup)}
+                  </span>
                 </div>
               </div>
               <div className="team-comparison">
@@ -1637,6 +1643,7 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
               </div>
               <div className="prediction-strip">
                 <MiniStat label="Projected Score" value={formatProjectedScore(selectedMatchup)} />
+                <MiniStat label="Moneyline" value={`${selectedMatchup.away_team} ${formatMoneyline(selectedMatchup.away_moneyline)} | ${selectedMatchup.home_team} ${formatMoneyline(selectedMatchup.home_moneyline)}`} />
                 <MiniStat label="Winner" value={selectedMatchup.winner_pick} />
                 <MiniStat label="ATS" value={selectedMatchup.ats_pick} />
                 <MiniStat label="ATS Edge" value={formatNullableEdge(selectedMatchup.ats_edge)} />
@@ -3110,6 +3117,43 @@ function formatSpread(value: number | null) {
     return "N/A";
   }
   return value > 0 ? `+${value.toFixed(1)}` : value.toFixed(1);
+}
+
+function formatMoneyline(value: number | null) {
+  if (value == null) {
+    return "N/A";
+  }
+  return value > 0 ? `+${Math.round(value)}` : Math.round(value).toString();
+}
+
+function formatGameTotal(value: number | null) {
+  if (value == null || value <= 0) {
+    return "N/A";
+  }
+  return value.toFixed(1);
+}
+
+function formatSpreadMarket(matchup: Matchup) {
+  const market = matchup.spread_market;
+  if (!market) {
+    return `${matchup.home_team} ${formatSpread(matchup.spread_home)}`;
+  }
+  return `${matchup.away_team} ${formatSpread(market.away_line)} (${formatMoneyline(market.away_price)}) / ${matchup.home_team} ${formatSpread(market.home_line)} (${formatMoneyline(market.home_price)})`;
+}
+
+function formatTotalMarket(matchup: Matchup) {
+  const market = matchup.total_market;
+  if (!market) {
+    return `${formatGameTotal(matchup.game_total)}`;
+  }
+  return `O${formatGameTotal(market.over_line)} (${formatMoneyline(market.over_price)}) / U${formatGameTotal(market.under_line)} (${formatMoneyline(market.under_price)})`;
+}
+
+function formatMoneylineMarket(matchup: Matchup) {
+  const market = matchup.moneyline_market;
+  const awayPrice = market?.away_price ?? matchup.away_moneyline;
+  const homePrice = market?.home_price ?? matchup.home_moneyline;
+  return `${matchup.away_team} ${formatMoneyline(awayPrice)} / ${matchup.home_team} ${formatMoneyline(homePrice)}`;
 }
 
 function formatNullableEdge(value: number | null) {

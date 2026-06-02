@@ -204,6 +204,24 @@ export type Matchup = {
   away_rest_days: number | null;
   spread_home: number | null;
   game_total: number | null;
+  home_moneyline: number | null;
+  away_moneyline: number | null;
+  spread_market?: {
+    away_line: number | null;
+    away_price: number | null;
+    home_line: number | null;
+    home_price: number | null;
+  };
+  total_market?: {
+    over_line: number | null;
+    over_price: number | null;
+    under_line: number | null;
+    under_price: number | null;
+  };
+  moneyline_market?: {
+    away_price: number | null;
+    home_price: number | null;
+  };
   blowout_risk: string;
   home_projected_points: number | null;
   away_projected_points: number | null;

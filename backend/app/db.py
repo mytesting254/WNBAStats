@@ -297,6 +297,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE games ADD COLUMN spread_home REAL")
         if "game_total" not in game_columns:
             conn.execute("ALTER TABLE games ADD COLUMN game_total REAL")
+        if "home_moneyline" not in game_columns:
+            conn.execute("ALTER TABLE games ADD COLUMN home_moneyline REAL")
+        if "away_moneyline" not in game_columns:
+            conn.execute("ALTER TABLE games ADD COLUMN away_moneyline REAL")
         if "espn_event_id" not in game_columns:
             conn.execute("ALTER TABLE games ADD COLUMN espn_event_id INTEGER")
         result_columns = {row["name"] for row in conn.execute("PRAGMA table_info(team_game_results)").fetchall()}
@@ -620,6 +624,8 @@ CREATE TABLE IF NOT EXISTS games (
     rest_days_away INTEGER DEFAULT 2,
     spread_home REAL,
     game_total REAL,
+    home_moneyline REAL,
+    away_moneyline REAL,
     espn_event_id INTEGER,
     FOREIGN KEY (home_team_id) REFERENCES teams(id),
     FOREIGN KEY (away_team_id) REFERENCES teams(id)

@@ -21,6 +21,7 @@ RAW_CACHE_NAME = "covers_props_raw.json"
 RAW_PAGE_CACHE_NAME = "covers_pages_raw.json"
 COVERS_BASE_URL = "https://www.covers.com"
 COVERS_MATCHUPS_URL = f"{COVERS_BASE_URL}/sports/wnba/matchups"
+COVERS_ODDS_URL = f"{COVERS_BASE_URL}/sport/basketball/wnba/odds"
 LOCAL_TZ = timezone(timedelta(hours=-4))
 FETCH_TIMEOUT_SECONDS = 12
 REQUEST_HEADERS = {
@@ -97,6 +98,15 @@ class CoversMetadata:
     away_team: str
     spread_home: float | None = None
     game_total: float | None = None
+    home_moneyline: float | None = None
+    away_moneyline: float | None = None
+    away_spread: float | None = None
+    away_spread_price: float | None = None
+    home_spread_price: float | None = None
+    over_total: float | None = None
+    over_price: float | None = None
+    under_total: float | None = None
+    under_price: float | None = None
     records: dict | None = None
 
 
@@ -145,6 +155,7 @@ def import_covers_props(
             "source": PROVIDER,
             "message": f"Fresh Covers scrape failed while loading matchups. {exc}",
         }
+    odds_board = _fetch_odds_board(selected_date)
     imported_rows = []
     metadata_rows: list[CoversMetadata] = []
     errors = []
@@ -165,6 +176,8 @@ def import_covers_props(
                 }
             )
             metadata = _metadata_from_page(conn, game, matchup_page, fallback_page=odds_page)
+            if odds_board:
+                metadata = _merge_moneylines_from_board(metadata, odds_board)
             metadata_rows.append(metadata)
             market_html = odds_page + "".join(fragments)
             imported_rows.extend(_event_rows(metadata, market_html, captured_at))
@@ -277,6 +290,16 @@ def covers_matchup_links(selected_date: str | None = None) -> list[CoversGame]:
     return games
 
 
+def _fetch_odds_board(selected_date: str | None) -> dict[tuple[str, str], dict[str, float]] | None:
+    if selected_date and selected_date != _today_local():
+        return None
+    try:
+        page = _fetch_text(COVERS_ODDS_URL)
+    except Exception:
+        return None
+    return _moneylines_from_odds_board(page)
+
+
 def _covers_matchup_hrefs(page: str) -> list[tuple[str, str]]:
     matches: list[tuple[str, str]] = []
     for match in re.finditer(
@@ -321,6 +344,8 @@ def _metadata_from_page(conn: sqlite3.Connection, game: CoversGame, page: str, f
         commence_time,
         market.get("spread_home"),
         market.get("game_total"),
+        market.get("home_moneyline"),
+        market.get("away_moneyline"),
     )
     return CoversMetadata(
         event_id=game.event_id,
@@ -331,7 +356,49 @@ def _metadata_from_page(conn: sqlite3.Connection, game: CoversGame, page: str, f
         away_team=away_team,
         spread_home=market.get("spread_home"),
         game_total=market.get("game_total"),
+        home_moneyline=market.get("home_moneyline"),
+        away_moneyline=market.get("away_moneyline"),
+        away_spread=market.get("away_spread"),
+        away_spread_price=market.get("away_spread_price"),
+        home_spread_price=market.get("home_spread_price"),
+        over_total=market.get("over_total"),
+        over_price=market.get("over_price"),
+        under_total=market.get("under_total"),
+        under_price=market.get("under_price"),
         records=_records_from_page(page),
+    )
+
+
+def _merge_moneylines_from_board(
+    metadata: CoversMetadata,
+    odds_board: dict[tuple[str, str], dict[str, float]],
+) -> CoversMetadata:
+    away_abbr = _covers_abbreviation(metadata.away_team)
+    home_abbr = _covers_abbreviation(metadata.home_team)
+    if not away_abbr or not home_abbr:
+        return metadata
+    moneylines = odds_board.get((away_abbr, home_abbr))
+    if not moneylines:
+        return metadata
+    return CoversMetadata(
+        event_id=metadata.event_id,
+        game_id=metadata.game_id,
+        game_date=metadata.game_date,
+        commence_time=metadata.commence_time,
+        home_team=metadata.home_team,
+        away_team=metadata.away_team,
+        spread_home=metadata.spread_home,
+        game_total=metadata.game_total,
+        home_moneyline=moneylines.get("home_moneyline"),
+        away_moneyline=moneylines.get("away_moneyline"),
+        away_spread=metadata.away_spread,
+        away_spread_price=metadata.away_spread_price,
+        home_spread_price=metadata.home_spread_price,
+        over_total=metadata.over_total,
+        over_price=metadata.over_price,
+        under_total=metadata.under_total,
+        under_price=metadata.under_price,
+        records=metadata.records,
     )
 
 
@@ -463,11 +530,15 @@ def _odds_from_player(player_html: str, market_key: str) -> list[tuple[str, floa
 
 
 def _game_market_from_page(page: str, home_team: str, away_team: str) -> dict[str, float | None]:
+    structured_market = _game_market_from_odds_html(page, home_team, away_team)
+    if any(value is not None for value in structured_market.values()):
+        return structured_market
+
     text = _visible_text(page)
     away_abbr = _covers_abbreviation(away_team)
     home_abbr = _covers_abbreviation(home_team)
     if not away_abbr or not home_abbr:
-        return {"spread_home": None, "game_total": None}
+        return {"spread_home": None, "game_total": None, "home_moneyline": None, "away_moneyline": None}
 
     spread_pattern = re.compile(
         rf"\b{re.escape(away_abbr)}\b\s+(?:\d+\s+)?(?P<away_spread>[+-]?\d+(?:\.\d+)?)"
@@ -479,7 +550,7 @@ def _game_market_from_page(page: str, home_team: str, away_team: str) -> dict[st
     )
     matches = list(spread_pattern.finditer(text))
     if not matches:
-        return {"spread_home": None, "game_total": None}
+        return {"spread_home": None, "game_total": None, "home_moneyline": None, "away_moneyline": None}
     match = matches[-1]
 
     away_total = _parse_float(match.group("away_total"))
@@ -488,7 +559,126 @@ def _game_market_from_page(page: str, home_team: str, away_team: str) -> dict[st
     return {
         "spread_home": _parse_float(match.group("home_spread")),
         "game_total": game_total,
+        "home_moneyline": None,
+        "away_moneyline": None,
     }
+
+
+def _game_market_from_odds_html(page: str, home_team: str, away_team: str) -> dict[str, float | None]:
+    away_abbr = _covers_abbreviation(away_team)
+    home_abbr = _covers_abbreviation(home_team)
+    if not away_abbr or not home_abbr:
+        return {"spread_home": None, "game_total": None, "home_moneyline": None, "away_moneyline": None}
+
+    away_row_match = re.search(
+        rf'<div class="team-row away-row">[\s\S]*?<span class="team-ShortName">\s*{re.escape(away_abbr)}\s*</span>[\s\S]*?'
+        r'<span class="team-odds spread">(?P<away_spread>[+-]?\d+(?:\.\d+)?)</span>[\s\S]*?'
+        r'<span class="team-odds totals">[ou](?P<away_total>\d+(?:\.\d+)?)</span>',
+        page,
+        re.I,
+    )
+    home_row_match = re.search(
+        rf'<div class="team-row home-row">[\s\S]*?<span class="team-ShortName">\s*{re.escape(home_abbr)}\s*</span>[\s\S]*?'
+        r'<span class="team-odds spread">(?P<home_spread>[+-]?\d+(?:\.\d+)?)</span>[\s\S]*?'
+        r'<span class="team-odds totals">[ou](?P<home_total>\d+(?:\.\d+)?)</span>',
+        page,
+        re.I,
+    )
+
+    spread_section = _market_table_section(page, "Spread")
+    total_section = _market_table_section(page, "Total")
+    moneyline_section = _market_table_section(page, "Moneyline")
+
+    spread_match = re.search(
+        r'<thead>[\s\S]*?'
+        r'<th[^>]*>\s*(?P<away>[A-Z]{2,5})\s*</th>[\s\S]*?'
+        r'<th[^>]*>\s*(?P<home>[A-Z]{2,5})\s*</th>[\s\S]*?</thead>[\s\S]*?<tbody>[\s\S]*?<tr[^>]*>[\s\S]*?'
+        r'<td[^>]*>[\s\S]*?<span class="fw-bold fs-12">(?P<away_line>[^<]+)</span>[\s\S]*?'
+        r'<span class="fw-bold americanOdds fs-13">(?P<away_price>[^<]+)</span>[\s\S]*?</td>[\s\S]*?'
+        r'<td[^>]*>[\s\S]*?<span class="fw-bold fs-12">(?P<home_line>[^<]+)</span>[\s\S]*?'
+        r'<span class="fw-bold americanOdds fs-13">(?P<home_price>[^<]+)</span>[\s\S]*?</td>',
+        spread_section or "",
+        re.I,
+    )
+    total_match = re.search(
+        r'<thead>[\s\S]*?'
+        r'<th[^>]*>\s*OVER\s*</th>[\s\S]*?'
+        r'<th[^>]*>\s*UNDER\s*</th>[\s\S]*?</thead>[\s\S]*?<tbody>[\s\S]*?<tr[^>]*>[\s\S]*?'
+        r'<td[^>]*>[\s\S]*?<span class="fw-bold fs-12">(?P<over_line>[^<]+)</span>[\s\S]*?'
+        r'<span class="fw-bold americanOdds fs-13">(?P<over_price>[^<]+)</span>[\s\S]*?</td>[\s\S]*?'
+        r'<td[^>]*>[\s\S]*?<span class="fw-bold fs-12">(?P<under_line>[^<]+)</span>[\s\S]*?'
+        r'<span class="fw-bold americanOdds fs-13">(?P<under_price>[^<]+)</span>[\s\S]*?</td>',
+        total_section or "",
+        re.I,
+    )
+    moneyline_match = re.search(
+        r'<thead>[\s\S]*?'
+        r'<th[^>]*>\s*(?P<away>[A-Z]{2,5})\s*</th>[\s\S]*?'
+        r'<th[^>]*>\s*(?P<home>[A-Z]{2,5})\s*</th>[\s\S]*?</thead>[\s\S]*?<tbody>[\s\S]*?<tr[^>]*>[\s\S]*?'
+        r'<td[^>]*>[\s\S]*?<span class="fw-bold fs-12">(?P<away_ml>[^<]+)</span>[\s\S]*?</td>[\s\S]*?'
+        r'<td[^>]*>[\s\S]*?<span class="fw-bold fs-12">(?P<home_ml>[^<]+)</span>[\s\S]*?</td>',
+        moneyline_section or "",
+        re.I,
+    )
+
+    away_moneyline = None
+    home_moneyline = None
+    if moneyline_match:
+        if moneyline_match.group("away").upper() == away_abbr and moneyline_match.group("home").upper() == home_abbr:
+            away_moneyline = _parse_moneyline(moneyline_match.group("away_ml"))
+            home_moneyline = _parse_moneyline(moneyline_match.group("home_ml"))
+
+    away_spread = _parse_market_line(spread_match.group("away_line")) if spread_match and spread_match.group("away").upper() == away_abbr else None
+    spread_home = _parse_market_line(spread_match.group("home_line")) if spread_match and spread_match.group("home").upper() == home_abbr else None
+    away_spread_price = _parse_moneyline(spread_match.group("away_price")) if spread_match and spread_match.group("away").upper() == away_abbr else None
+    home_spread_price = _parse_moneyline(spread_match.group("home_price")) if spread_match and spread_match.group("home").upper() == home_abbr else None
+    over_total = _parse_market_line(total_match.group("over_line")) if total_match else None
+    under_total = _parse_market_line(total_match.group("under_line")) if total_match else None
+    over_price = _parse_moneyline(total_match.group("over_price")) if total_match else None
+    under_price = _parse_moneyline(total_match.group("under_price")) if total_match else None
+    if over_total is not None and under_total is not None and abs(over_total - under_total) > 5:
+        normalized_total = max(over_total, under_total)
+        over_total = normalized_total
+        under_total = normalized_total
+    game_total = over_total if over_total == under_total else (over_total or under_total)
+
+    return {
+        "spread_home": spread_home if spread_home is not None else (_parse_float(home_row_match.group("home_spread")) if home_row_match else None),
+        "game_total": game_total,
+        "home_moneyline": home_moneyline,
+        "away_moneyline": away_moneyline,
+        "away_spread": away_spread,
+        "away_spread_price": away_spread_price,
+        "home_spread_price": home_spread_price,
+        "over_total": over_total,
+        "over_price": over_price,
+        "under_total": under_total,
+        "under_price": under_price,
+    }
+
+
+def _moneylines_from_odds_board(page: str) -> dict[tuple[str, str], dict[str, float]]:
+    text = _visible_text(page)
+    marker = "Moneyline Odds Table"
+    start = text.find(marker)
+    if start < 0:
+        return {}
+    table_text = text[start:]
+    pattern = re.compile(
+        r"(?:Today,?|[A-Z][a-z]{2}\s+\d{1,2},?)\s+\d{1,2}:\d{2}\s+"
+        r"(?P<away>[A-Z]{2,5})\s+(?P<home>[A-Z]{2,5})\s+"
+        r"(?P<away_ml>[+-]\d+)\s+\S+\s+\S+\s+"
+        r"(?P<home_ml>[+-]\d+)\s+\S+\s+\S+\s+"
+        r"Odds\s*&\s*Props",
+        re.S,
+    )
+    results: dict[tuple[str, str], dict[str, float]] = {}
+    for match in pattern.finditer(table_text):
+        results[(match.group("away").upper(), match.group("home").upper())] = {
+            "away_moneyline": float(match.group("away_ml")),
+            "home_moneyline": float(match.group("home_ml")),
+        }
+    return results
 
 
 def _records_from_page(page: str) -> dict:
@@ -644,6 +834,35 @@ def _parse_float(value: str | None) -> float | None:
         return None
 
 
+def _parse_moneyline(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(html.unescape(value).replace("+", "").strip())
+    except ValueError:
+        return None
+
+
+def _parse_market_line(value: str | None) -> float | None:
+    if value is None:
+        return None
+    cleaned = html.unescape(value).strip()
+    if cleaned and cleaned[0].lower() in {"o", "u"}:
+        cleaned = cleaned[1:]
+    return _parse_float(cleaned)
+
+
+def _market_table_section(page: str, title: str) -> str | None:
+    match = re.search(
+        rf'<h2 class="fs-9">{re.escape(title)}</h2>[\s\S]*?<table class="w-100 m-0 bg-white">[\s\S]*?</table>',
+        page,
+        re.I,
+    )
+    if not match:
+        return None
+    return match.group(0)
+
+
 def _match_or_create_local_game(
     conn: sqlite3.Connection,
     home_team: str,
@@ -652,6 +871,8 @@ def _match_or_create_local_game(
     commence_time: str,
     spread_home: float | None = None,
     game_total: float | None = None,
+    home_moneyline: float | None = None,
+    away_moneyline: float | None = None,
 ) -> int | None:
     return resolve_or_create_game(
         conn,
@@ -661,6 +882,8 @@ def _match_or_create_local_game(
         game_date=game_date,
         spread_home=spread_home,
         game_total=game_total,
+        home_moneyline=home_moneyline,
+        away_moneyline=away_moneyline,
     )
 
 
@@ -673,10 +896,19 @@ def _update_covers_game_markets(conn: sqlite3.Connection, game_payload: list[dic
             int(row["game_id"]),
             _coerce_float(row.get("spread_home")),
             _coerce_float(row.get("game_total")),
+            _coerce_float(row.get("home_moneyline")),
+            _coerce_float(row.get("away_moneyline")),
         )
 
 
-def _update_game_market(conn: sqlite3.Connection, game_id: int, spread_home: float | None, game_total: float | None) -> None:
+def _update_game_market(
+    conn: sqlite3.Connection,
+    game_id: int,
+    spread_home: float | None,
+    game_total: float | None,
+    home_moneyline: float | None,
+    away_moneyline: float | None,
+) -> None:
     updates = []
     params = []
     if spread_home is not None:
@@ -685,6 +917,12 @@ def _update_game_market(conn: sqlite3.Connection, game_id: int, spread_home: flo
     if game_total is not None and game_total > 0:
         updates.append("game_total = ?")
         params.append(game_total)
+    if home_moneyline is not None:
+        updates.append("home_moneyline = ?")
+        params.append(home_moneyline)
+    if away_moneyline is not None:
+        updates.append("away_moneyline = ?")
+        params.append(away_moneyline)
     if not updates:
         return
     params.append(game_id)
@@ -743,6 +981,15 @@ def _metadata_to_row(row: CoversMetadata) -> dict:
         "away_team": row.away_team,
         "spread_home": row.spread_home,
         "game_total": row.game_total,
+        "home_moneyline": row.home_moneyline,
+        "away_moneyline": row.away_moneyline,
+        "away_spread": row.away_spread,
+        "away_spread_price": row.away_spread_price,
+        "home_spread_price": row.home_spread_price,
+        "over_total": row.over_total,
+        "over_price": row.over_price,
+        "under_total": row.under_total,
+        "under_price": row.under_price,
         "records": row.records,
     }
 

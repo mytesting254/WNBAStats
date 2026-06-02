@@ -15,7 +15,7 @@ from .ball_dont_lie import fetch_team_history
 from .accuracy_analysis import build_accuracy_report, build_accuracy_report_for_days
 from .bootstrap import ensure_teams
 from .cache import delete_json_cache, read_json_cache, write_json_cache
-from .covers_import import import_covers_props
+from .covers_import import _game_market_from_page, import_covers_props
 from .db import connect, init_db
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
@@ -1816,6 +1816,8 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
                 ,g.rest_days_away
                 ,g.spread_home
                 ,g.game_total
+                ,g.home_moneyline
+                ,g.away_moneyline
             FROM games g
             JOIN teams home ON home.id = g.home_team_id
             JOIN teams away ON away.id = g.away_team_id
@@ -1826,6 +1828,7 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
         games = [game for game in games if _is_today_active_game_time(game["start_time"])]
         game_groups = _coalesce_matchup_games(games)
         covers_records = _covers_records_by_game()
+        covers_market_odds = _covers_market_odds_by_game()
         payload = []
         for game, game_ids in game_groups:
             home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
@@ -1854,6 +1857,9 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
                     "away_rest_days": away_rest_days,
                     "spread_home": game["spread_home"],
                     "game_total": game["game_total"],
+                    "home_moneyline": game["home_moneyline"],
+                    "away_moneyline": game["away_moneyline"],
+                    **covers_market_odds.get(game_id, {}),
                     "blowout_risk": _blowout_display(game["spread_home"], "starter")["blowout_risk"],
                     **prediction,
                     "home": home_summary,
@@ -1922,6 +1928,63 @@ def _covers_records_by_game() -> dict[int, dict]:
     return records_by_game
 
 
+def _covers_market_odds_by_game() -> dict[int, dict]:
+    payload = read_json_cache("covers_props_raw.json")
+    if not isinstance(payload, dict):
+        return {}
+    cache_date = payload.get("cache_date")
+    today_local = datetime.now(LOCAL_TZ).date().isoformat()
+    if cache_date != today_local:
+        delete_json_cache("covers_props_raw.json")
+        return {}
+    pages_payload = read_json_cache("covers_pages_raw.json")
+    pages_by_event_id = {}
+    if isinstance(pages_payload, dict):
+        for item in pages_payload.get("games", []):
+            if isinstance(item, dict) and item.get("event_id") is not None:
+                pages_by_event_id[str(item["event_id"])] = item
+    odds_by_game = {}
+    for item in payload.get("games", []):
+        if not isinstance(item, dict) or item.get("game_id") is None:
+            continue
+        market = {
+            "away_spread": item.get("away_spread"),
+            "away_spread_price": item.get("away_spread_price"),
+            "spread_home": item.get("spread_home"),
+            "home_spread_price": item.get("home_spread_price"),
+            "over_total": item.get("over_total"),
+            "over_price": item.get("over_price"),
+            "under_total": item.get("under_total"),
+            "under_price": item.get("under_price"),
+            "away_moneyline": item.get("away_moneyline"),
+            "home_moneyline": item.get("home_moneyline"),
+        }
+        if any(value is None for value in market.values()):
+            page_item = pages_by_event_id.get(str(item.get("provider_event_id")))
+            if isinstance(page_item, dict):
+                parsed_market = _game_market_from_page(page_item.get("odds_page", ""), str(item.get("home_team") or ""), str(item.get("away_team") or ""))
+                market = {**market, **{key: parsed_market.get(key) for key in market}}
+        odds_by_game[int(item["game_id"])] = {
+            "spread_market": {
+                "away_line": market.get("away_spread"),
+                "away_price": market.get("away_spread_price"),
+                "home_line": market.get("spread_home"),
+                "home_price": market.get("home_spread_price"),
+            },
+            "total_market": {
+                "over_line": market.get("over_total"),
+                "over_price": market.get("over_price"),
+                "under_line": market.get("under_total"),
+                "under_price": market.get("under_price"),
+            },
+            "moneyline_market": {
+                "away_price": market.get("away_moneyline"),
+                "home_price": market.get("home_moneyline"),
+            },
+        }
+    return odds_by_game
+
+
 def _coalesce_matchup_games(games) -> list[tuple[dict, list[int]]]:
     groups: dict[tuple, dict] = {}
     for game in games:
@@ -1946,6 +2009,8 @@ def _merged_game_row(primary, group_games) -> dict:
     for field, validator in (
         ("spread_home", _is_real_spread),
         ("game_total", _is_real_total),
+        ("home_moneyline", _is_real_moneyline),
+        ("away_moneyline", _is_real_moneyline),
         ("rest_days_home", _is_real_rest_days),
         ("rest_days_away", _is_real_rest_days),
     ):
@@ -1959,12 +2024,20 @@ def _merged_game_row(primary, group_games) -> dict:
     return merged
 
 
-def _game_row_score(game) -> tuple[int, int, int, int]:
+def _game_row_value(game, field: str) -> Any:
+    if isinstance(game, dict):
+        return game.get(field)
+    return game[field]
+
+
+def _game_row_score(game) -> tuple[int, int, int, int, int, int]:
     return (
-        1 if _is_real_spread(game["spread_home"]) else 0,
-        1 if _is_real_total(game["game_total"]) else 0,
-        1 if str(game["start_time"]).endswith("Z") or "+" in str(game["start_time"]) else 0,
-        int(game["id"]),
+        1 if _is_real_spread(_game_row_value(game, "spread_home")) else 0,
+        1 if _is_real_total(_game_row_value(game, "game_total")) else 0,
+        1 if _is_real_moneyline(_game_row_value(game, "home_moneyline")) else 0,
+        1 if _is_real_moneyline(_game_row_value(game, "away_moneyline")) else 0,
+        1 if str(_game_row_value(game, "start_time")).endswith("Z") or "+" in str(_game_row_value(game, "start_time")) else 0,
+        int(_game_row_value(game, "id")),
     )
 
 
@@ -1974,6 +2047,10 @@ def _is_real_spread(value) -> bool:
 
 def _is_real_total(value) -> bool:
     return value is not None and float(value) > 0
+
+
+def _is_real_moneyline(value) -> bool:
+    return value is not None
 
 
 def _is_real_rest_days(value) -> bool:
