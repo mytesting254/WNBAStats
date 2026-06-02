@@ -35,7 +35,7 @@ from backend.app.projections import _market_value as component_market_value
 from backend.app.projections import rebuild_predictions
 from backend.app.rotowire_import import _parse_lineup_injuries
 from backend.app.settlement import settle_completed_props
-from backend.app.training import run_walk_forward_training
+from backend.app.training import run_parameter_tuning, run_walk_forward_training
 
 
 @pytest.fixture(autouse=True)
@@ -442,12 +442,53 @@ def test_fixture_builds_matchup_results() -> None:
 def test_walk_forward_training_saves_model_run() -> None:
     load_test_history()
     with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (8801, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (8802, 8801, 'adaptive-context-v1', ?, 21.7, 'over', 0.58, 0.52, 0.06, 0.03, 'medium', 'validation-test')
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
         result = run_walk_forward_training(conn)
         rows = conn.execute("SELECT * FROM model_runs").fetchall()
     assert result["status"] == "completed"
     assert result["training_rows"] > 0
     assert len(rows) == 2
     assert {row["model_version"] for row in rows} == {"adaptive-context-v1", "component-pregame-v2"}
+    assert result["metrics"]["points"]["settled_rows"] >= 1
+    assert "side_accuracy" in result["metrics"]["points"]
+    assert result["metrics"]["overall"]["settled_rows"] >= 1
+
+
+def test_run_parameter_tuning_returns_ranked_candidates() -> None:
+    load_test_history()
+    with connect() as conn:
+        result = run_parameter_tuning(
+            conn,
+            ridge_penalties=[0.75, 1.25],
+            market_weight_scales=[1.0],
+            player_weight_scales=[1.0],
+            stabilization_scales=[0.9],
+        )
+
+    assert result["run_type"] == "parameter_tuning"
+    assert result["candidate_count"] == 2
+    assert result["best_candidate"] is not None
+    assert len(result["candidates"]) == 2
+    assert result["candidates"][0]["rank"] == 1
+    assert result["candidates"][1]["rank"] == 2
+    assert result["best_candidate"]["summary"]["avg_mae"] is not None
+    assert result["best_candidate"]["summary"]["total_rows"] > 0
 
 
 def test_train_market_model_uses_active_non_sqlite_connection(monkeypatch) -> None:

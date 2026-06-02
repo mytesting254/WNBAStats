@@ -24,7 +24,7 @@ from .odds_import import import_the_odds_api_props, line_discrepancies, list_spo
 from .projections import rebuild_predictions
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
-from .training import latest_model_run, list_model_runs, run_walk_forward_training
+from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
 
 
 app = FastAPI(title="WNBA Prop Value API")
@@ -1233,6 +1233,12 @@ def model_loss_breakdown(model_version: str = "adaptive-context-v1", top_n_playe
 def train_model() -> dict:
     with connect() as conn:
         return run_walk_forward_training(conn)
+
+
+@app.post("/api/models/tune", dependencies=[Depends(_protect_mutation)])
+def tune_model() -> dict:
+    with connect() as conn:
+        return run_parameter_tuning(conn)
 
 
 @app.post("/api/odds/import", dependencies=[Depends(_protect_mutation)])

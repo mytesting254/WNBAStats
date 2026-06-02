@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+from collections import defaultdict
 from datetime import datetime, timezone
 
-from .player_prop_model import MODEL_VERSION as LEARNED_MODEL_VERSION
-from .player_prop_model import TRAINING_MARKETS, evaluate_market_model
+from .player_prop_model import DEFAULT_TUNING_CONFIG, MODEL_VERSION as LEARNED_MODEL_VERSION
+from .player_prop_model import ModelTuningConfig, TRAINING_MARKETS, evaluate_market_model
 
 TRAINING_MODEL_VERSION = LEARNED_MODEL_VERSION
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
@@ -25,8 +26,12 @@ def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
         metrics[market] = result
         total_rows += int(result["rows"])
 
+    settled_validation = _settled_validation_metrics(conn, TRAINING_MODEL_VERSION)
+    _merge_validation_metrics(metrics, settled_validation)
+
     finished_at = datetime.now(timezone.utc).isoformat()
     status = "completed" if total_rows > 0 else "no_data"
+    validation_rows = sum(int(item.get("settled_rows") or 0) for item in settled_validation.values())
     learned_run = {
         "model_version": TRAINING_MODEL_VERSION,
         "run_type": "chronological_holdout",
@@ -36,11 +41,73 @@ def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
         "training_rows": total_rows,
         "markets": TRAINING_MARKETS,
         "metrics": metrics,
-        "notes": "Chronological 80/20 holdout for the adaptive history/context regression model.",
+        "notes": (
+            "Chronological 80/20 holdout for the adaptive history/context regression model. "
+            f"Settled pipeline validation rows merged into market metrics: {validation_rows}."
+        ),
     }
     _save_model_run(conn, learned_run)
     conn.commit()
     return learned_run
+
+
+def run_parameter_tuning(
+    conn: sqlite3.Connection,
+    *,
+    ridge_penalties: list[float] | None = None,
+    market_weight_scales: list[float] | None = None,
+    player_weight_scales: list[float] | None = None,
+    stabilization_scales: list[float] | None = None,
+) -> dict:
+    started_at = datetime.now(timezone.utc).isoformat()
+    candidates = _tuning_candidates(
+        ridge_penalties=ridge_penalties,
+        market_weight_scales=market_weight_scales,
+        player_weight_scales=player_weight_scales,
+        stabilization_scales=stabilization_scales,
+    )
+    results = []
+    for config in candidates:
+        metrics = {}
+        total_rows = 0
+        for market in TRAINING_MARKETS:
+            result = evaluate_market_model(conn, market, config=config)
+            metrics[market] = result
+            total_rows += int(result["rows"])
+        summary = _aggregate_tuning_summary(metrics)
+        results.append(
+            {
+                "config": config.to_dict(),
+                "summary": summary,
+                "metrics": metrics,
+                "training_rows": total_rows,
+            }
+        )
+
+    ranked = sorted(
+        results,
+        key=lambda item: (
+            item["summary"]["avg_mae"] is None,
+            item["summary"]["avg_mae"] if item["summary"]["avg_mae"] is not None else math.inf,
+            item["summary"]["avg_rmse"] if item["summary"]["avg_rmse"] is not None else math.inf,
+            -1 * (item["summary"]["avg_directional_accuracy"] or 0.0),
+        ),
+    )
+    for idx, candidate in enumerate(ranked, start=1):
+        candidate["rank"] = idx
+
+    finished_at = datetime.now(timezone.utc).isoformat()
+    best = ranked[0] if ranked else None
+    return {
+        "model_version": TRAINING_MODEL_VERSION,
+        "run_type": "parameter_tuning",
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "candidate_count": len(ranked),
+        "default_config": DEFAULT_TUNING_CONFIG.to_dict(),
+        "best_candidate": best,
+        "candidates": ranked,
+    }
 
 
 def list_model_runs(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
@@ -110,6 +177,192 @@ def _save_model_run(conn: sqlite3.Connection, run: dict) -> None:
             run.get("notes"),
         ),
     )
+
+
+def _tuning_candidates(
+    *,
+    ridge_penalties: list[float] | None = None,
+    market_weight_scales: list[float] | None = None,
+    player_weight_scales: list[float] | None = None,
+    stabilization_scales: list[float] | None = None,
+) -> list[ModelTuningConfig]:
+    penalties = ridge_penalties or [0.75, 1.25, 2.0]
+    market_scales = market_weight_scales or [0.85, 1.0, 1.15]
+    player_scales = player_weight_scales or [0.9, 1.0, 1.1]
+    guard_scales = stabilization_scales or [0.9, 1.0, 1.1]
+    return [
+        ModelTuningConfig(
+            ridge_penalty=penalty,
+            market_weight_scale=market_scale,
+            player_weight_scale=player_scale,
+            stabilization_scale=guard_scale,
+        )
+        for penalty in penalties
+        for market_scale in market_scales
+        for player_scale in player_scales
+        for guard_scale in guard_scales
+    ]
+
+
+def _aggregate_tuning_summary(metrics: dict[str, dict]) -> dict[str, float | int | None]:
+    row_count = 0
+    mae_total = 0.0
+    rmse_total = 0.0
+    direction_total = 0.0
+    direction_rows = 0
+    for metric in metrics.values():
+        rows = int(metric.get("rows") or 0)
+        if not rows:
+            continue
+        row_count += rows
+        if metric.get("mae") is not None:
+            mae_total += float(metric["mae"]) * rows
+        if metric.get("rmse") is not None:
+            rmse_total += float(metric["rmse"]) * rows
+        if metric.get("directional_accuracy") is not None:
+            direction_total += float(metric["directional_accuracy"]) * rows
+            direction_rows += rows
+    return {
+        "total_rows": row_count,
+        "avg_mae": round(mae_total / row_count, 4) if row_count else None,
+        "avg_rmse": round(rmse_total / row_count, 4) if row_count else None,
+        "avg_directional_accuracy": round(direction_total / direction_rows, 4) if direction_rows else None,
+    }
+
+
+def _merge_validation_metrics(base_metrics: dict[str, dict], validation_metrics: dict[str, dict]) -> None:
+    for market, validation in validation_metrics.items():
+        target = base_metrics.setdefault(
+            market,
+            {
+                "rows": 0,
+                "mae": None,
+                "rmse": None,
+                "bias": None,
+                "directional_accuracy": None,
+            },
+        )
+        target.update(validation)
+
+
+def _settled_validation_metrics(conn: sqlite3.Connection, model_version: str) -> dict[str, dict]:
+    rows = conn.execute(
+        """
+        SELECT
+            pp.model_probability,
+            pp.edge,
+            pp.expected_value,
+            pp.recommended_side,
+            pp.projection,
+            pp.model_version,
+            pl.market,
+            pl.line,
+            pl.over_odds,
+            pl.under_odds,
+            pgs.points,
+            pgs.rebounds,
+            pgs.assists,
+            pgs.threes,
+            pgs.steals,
+            pgs.blocks
+        FROM prop_predictions pp
+        JOIN prop_lines pl ON pl.id = pp.prop_line_id
+        JOIN player_game_stats pgs ON pgs.player_id = pl.player_id AND pgs.game_id = pl.game_id
+        WHERE pp.model_version = ?
+        """,
+        (model_version,),
+    ).fetchall()
+    if not rows:
+        return {}
+
+    grouped: dict[str, list[sqlite3.Row]] = defaultdict(list)
+    for row in rows:
+        grouped[str(row["market"])].append(row)
+
+    metrics = {market: _validation_metric(group_rows) for market, group_rows in grouped.items()}
+    metrics["overall"] = _validation_metric(rows)
+    return metrics
+
+
+def _validation_metric(rows: list[sqlite3.Row]) -> dict:
+    if not rows:
+        return {
+            "settled_rows": 0,
+            "side_accuracy": None,
+            "calibration_gap": None,
+            "brier_score": None,
+            "avg_edge": None,
+            "avg_expected_value": None,
+            "realized_roi": None,
+        }
+
+    errors = []
+    squared_errors = []
+    side_hits = 0
+    probability_sum = 0.0
+    outcome_sum = 0.0
+    brier_sum = 0.0
+    edge_sum = 0.0
+    ev_sum = 0.0
+    roi_sum = 0.0
+
+    for row in rows:
+        actual = _validation_market_value(row, str(row["market"]))
+        projection = float(row["projection"])
+        error = projection - actual
+        errors.append(error)
+        squared_errors.append(error * error)
+
+        line = float(row["line"])
+        recommended_side = str(row["recommended_side"])
+        actual_side = "over" if actual > line else "under"
+        win = 1.0 if recommended_side == actual_side else 0.0
+        side_hits += int(win)
+
+        probability = float(row["model_probability"])
+        probability_sum += probability
+        outcome_sum += win
+        brier_sum += (probability - win) ** 2
+
+        edge_sum += float(row["edge"] or 0.0)
+        ev_sum += float(row["expected_value"] or 0.0)
+        odds = int(row["over_odds"] if recommended_side == "over" else row["under_odds"])
+        roi_sum += _bet_roi(win, odds)
+
+    count = len(rows)
+    side_accuracy = side_hits / count
+    calibration_gap = abs((probability_sum / count) - (outcome_sum / count))
+    return {
+        "settled_rows": count,
+        "side_accuracy": round(side_accuracy, 3),
+        "calibration_gap": round(calibration_gap, 3),
+        "brier_score": round(brier_sum / count, 4),
+        "avg_edge": round(edge_sum / count, 4),
+        "avg_expected_value": round(ev_sum / count, 4),
+        "realized_roi": round(roi_sum / count, 4),
+    }
+
+
+def _bet_roi(win: float, odds: int) -> float:
+    if not win:
+        return -1.0
+    if odds > 0:
+        return odds / 100.0
+    return 100.0 / abs(odds)
+
+
+def _validation_market_value(row: sqlite3.Row, market: str) -> float:
+    if market == "points_rebounds":
+        return float(row["points"] + row["rebounds"])
+    if market == "points_assists":
+        return float(row["points"] + row["assists"])
+    if market == "rebounds_assists":
+        return float(row["rebounds"] + row["assists"])
+    if market == "points_rebounds_assists":
+        return float(row["points"] + row["rebounds"] + row["assists"])
+    if market == "blocks_steals":
+        return float(row["blocks"] + row["steals"])
+    return float(row[market])
 
 
 def _evaluate_market(conn: sqlite3.Connection, market: str) -> dict:

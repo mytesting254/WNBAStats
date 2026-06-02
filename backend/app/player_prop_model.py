@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import sqlite3
 import math
-from dataclasses import dataclass
+import sqlite3
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 
 from .odds import american_to_implied_probability
@@ -59,7 +59,20 @@ MARKET_VOLATILITY_FLOORS = {
     "points_rebounds_assists": 5.0,
 }
 
-_CONNECTION_MODEL_CACHE: dict[tuple[int, str], RidgeModel | None] = {}
+@dataclass(frozen=True)
+class ModelTuningConfig:
+    ridge_penalty: float = 1.25
+    market_weight_scale: float = 1.0
+    player_weight_scale: float = 1.0
+    stabilization_scale: float = 1.0
+
+    def to_dict(self) -> dict[str, float]:
+        return asdict(self)
+
+
+DEFAULT_TUNING_CONFIG = ModelTuningConfig()
+
+_CONNECTION_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_GAME_TOTAL_MEAN_CACHE: dict[int, float] = {}
 
 
@@ -90,23 +103,25 @@ def predict_player_prop(
     line: float | None = None,
     over_odds: int | None = None,
     under_odds: int | None = None,
+    config: ModelTuningConfig | None = None,
 ) -> tuple[float, str, str]:
+    tuning = config or DEFAULT_TUNING_CONFIG
     snapshot = feature_snapshot(conn, player_id, market, game_id)
     sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
-    model = train_market_model(conn, market)
+    model = train_market_model(conn, market, config=tuning)
     if not model:
         return snapshot.component_projection, snapshot.reason, "component"
 
     learned = _predict(model, snapshot.values)
     learned = max(0.0, learned)
     learned = _stabilize_combo_market_projection(learned, snapshot, market)
-    learned, stabilization_note = _stabilize_learned_projection(learned, snapshot, market)
+    learned, stabilization_note = _stabilize_learned_projection(learned, snapshot, market, config=tuning)
     projection = learned
     market_note = "no sportsbook line blend"
 
     if line is not None:
-        market_weight = _market_weight(model.rows)
-        market_weight = max(market_weight, _player_market_weight(sample_count, avg_minutes))
+        market_weight = _market_weight(model.rows, config=tuning)
+        market_weight = max(market_weight, _player_market_weight(sample_count, avg_minutes, config=tuning))
         projection = ((1 - market_weight) * learned) + (market_weight * float(line))
         if over_odds is not None and under_odds is not None:
             over_implied = american_to_implied_probability(int(over_odds))
@@ -155,8 +170,14 @@ def _stabilize_combo_market_projection(learned: float, snapshot: FeatureSnapshot
     return learned
 
 
-def _stabilize_learned_projection(learned: float, snapshot: FeatureSnapshot, market: str) -> tuple[float, str]:
+def _stabilize_learned_projection(
+    learned: float,
+    snapshot: FeatureSnapshot,
+    market: str,
+    config: ModelTuningConfig | None = None,
+) -> tuple[float, str]:
     """Global guardrail against implausible learned-vs-anchor drift."""
+    tuning = config or DEFAULT_TUNING_CONFIG
     if len(snapshot.values) < len(FEATURE_NAMES):
         return learned, "no stabilization"
     weighted_recent = snapshot.values[FEATURE_INDEX["weighted_recent"]]
@@ -170,12 +191,12 @@ def _stabilize_learned_projection(learned: float, snapshot: FeatureSnapshot, mar
     minute_ratio = max(ewma_minutes + (0.35 * minutes_trend), 0.0) / max(ewma_minutes, 1.0)
     ratio = learned / anchor
 
-    low_guard = 0.82
-    high_guard = 1.25
+    low_guard = _scaled_low_guard(0.82, tuning.stabilization_scale)
+    high_guard = _scaled_high_guard(1.25, tuning.stabilization_scale)
     if minute_ratio < 0.92:
-        low_guard = 0.72
+        low_guard = _scaled_low_guard(0.72, tuning.stabilization_scale)
     if minute_ratio > 1.08:
-        high_guard = 1.35
+        high_guard = _scaled_high_guard(1.35, tuning.stabilization_scale)
 
     adjusted = learned
     if ratio < low_guard:
@@ -311,23 +332,28 @@ def feature_snapshot(
 
 
 @lru_cache(maxsize=32)
-def _train_market_model_cached(db_path: str, market: str) -> RidgeModel | None:
+def _train_market_model_cached(db_path: str, market: str, config: ModelTuningConfig) -> RidgeModel | None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        return _train_market_model_uncached(conn, market)
+        return _train_market_model_uncached(conn, market, config=config)
     finally:
         conn.close()
 
 
-def train_market_model(conn: sqlite3.Connection, market: str) -> RidgeModel | None:
+def train_market_model(
+    conn: sqlite3.Connection,
+    market: str,
+    config: ModelTuningConfig | None = None,
+) -> RidgeModel | None:
+    tuning = config or DEFAULT_TUNING_CONFIG
     if not isinstance(conn, sqlite3.Connection):
-        key = (id(conn), market)
+        key = (id(conn), market, tuning)
         if key not in _CONNECTION_MODEL_CACHE:
-            _CONNECTION_MODEL_CACHE[key] = _train_market_model_uncached(conn, market)
+            _CONNECTION_MODEL_CACHE[key] = _train_market_model_uncached(conn, market, config=tuning)
         return _CONNECTION_MODEL_CACHE[key]
     db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
-    return _train_market_model_cached(db_path, market)
+    return _train_market_model_cached(db_path, market, tuning)
 
 
 def clear_model_cache() -> None:
@@ -336,19 +362,28 @@ def clear_model_cache() -> None:
     _CONNECTION_GAME_TOTAL_MEAN_CACHE.clear()
 
 
-def _train_market_model_uncached(conn: sqlite3.Connection, market: str) -> RidgeModel | None:
+def _train_market_model_uncached(
+    conn: sqlite3.Connection,
+    market: str,
+    config: ModelTuningConfig | None = None,
+) -> RidgeModel | None:
     rows = _training_rows(conn, market)
-    return _fit_model_from_rows(market, rows)
+    return _fit_model_from_rows(market, rows, config=config)
 
 
-def evaluate_market_model(conn: sqlite3.Connection, market: str) -> dict:
+def evaluate_market_model(
+    conn: sqlite3.Connection,
+    market: str,
+    config: ModelTuningConfig | None = None,
+) -> dict:
+    tuning = config or DEFAULT_TUNING_CONFIG
     rows = _training_rows(conn, market)
     if len(rows) < 20:
         return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
     split = max(int(len(rows) * 0.8), 10)
     train_rows = rows[:split]
     test_rows = rows[split:]
-    model = _fit_model_from_rows(market, train_rows)
+    model = _fit_model_from_rows(market, train_rows, config=tuning)
     if not model or not test_rows:
         return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
 
@@ -375,7 +410,12 @@ def evaluate_market_model(conn: sqlite3.Connection, market: str) -> dict:
     }
 
 
-def _fit_model_from_rows(market: str, rows: list[tuple[list[float], float]]) -> RidgeModel | None:
+def _fit_model_from_rows(
+    market: str,
+    rows: list[tuple[list[float], float]],
+    config: ModelTuningConfig | None = None,
+) -> RidgeModel | None:
+    tuning = config or DEFAULT_TUNING_CONFIG
     if len(rows) < 20:
         return None
     xs = [row[0] for row in rows]
@@ -391,7 +431,7 @@ def _fit_model_from_rows(market: str, rows: list[tuple[list[float], float]]) -> 
                 scales.append(max(variance ** 0.5, 1.0))
             standardized[-1].append((value - means[idx]) / scales[idx])
 
-    coefs = _ridge_regression(standardized, ys, penalty=1.25)
+    coefs = _ridge_regression(standardized, ys, penalty=tuning.ridge_penalty)
     return RidgeModel(
         market=market,
         rows=len(rows),
@@ -654,24 +694,42 @@ def _predict(model: RidgeModel, features: list[float]) -> float:
     return model.intercept + sum(coef * value for coef, value in zip(model.coefficients, standardized))
 
 
-def _market_weight(rows: int) -> float:
+def _market_weight(rows: int, config: ModelTuningConfig | None = None) -> float:
+    tuning = config or DEFAULT_TUNING_CONFIG
     if rows >= 500:
-        return 0.25
+        return _scaled_market_weight(0.25, tuning.market_weight_scale)
     if rows >= 150:
-        return 0.18
-    return 0.12
+        return _scaled_market_weight(0.18, tuning.market_weight_scale)
+    return _scaled_market_weight(0.12, tuning.market_weight_scale)
 
 
-def _player_market_weight(sample_count: int, avg_minutes: float) -> float:
+def _player_market_weight(
+    sample_count: int,
+    avg_minutes: float,
+    config: ModelTuningConfig | None = None,
+) -> float:
+    tuning = config or DEFAULT_TUNING_CONFIG
     if sample_count < 4:
-        return 0.70
+        return _scaled_market_weight(0.70, tuning.player_weight_scale)
     if sample_count < 7:
-        return 0.55
+        return _scaled_market_weight(0.55, tuning.player_weight_scale)
     if avg_minutes < 16:
-        return 0.48
+        return _scaled_market_weight(0.48, tuning.player_weight_scale)
     if sample_count < 10:
-        return 0.38
-    return 0.25
+        return _scaled_market_weight(0.38, tuning.player_weight_scale)
+    return _scaled_market_weight(0.25, tuning.player_weight_scale)
+
+
+def _scaled_market_weight(weight: float, scale: float) -> float:
+    return max(0.05, min(0.85, weight * scale))
+
+
+def _scaled_low_guard(base: float, scale: float) -> float:
+    return max(0.55, min(0.95, 1.0 - ((1.0 - base) * scale)))
+
+
+def _scaled_high_guard(base: float, scale: float) -> float:
+    return max(1.05, min(1.6, 1.0 + ((base - 1.0) * scale)))
 
 
 def _player_sample_quality(conn: sqlite3.Connection, player_id: int, game_id: int) -> tuple[int, float]:

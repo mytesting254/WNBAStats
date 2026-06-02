@@ -255,6 +255,13 @@ export type ModelRunMetric = {
   rmse: number | null;
   bias: number | null;
   directional_accuracy: number | null;
+  settled_rows?: number;
+  side_accuracy?: number | null;
+  calibration_gap?: number | null;
+  brier_score?: number | null;
+  avg_edge?: number | null;
+  avg_expected_value?: number | null;
+  realized_roi?: number | null;
 };
 
 export type ModelRun = {
@@ -268,6 +275,35 @@ export type ModelRun = {
   markets: string[];
   metrics: Record<string, ModelRunMetric>;
   notes?: string | null;
+};
+
+export type ModelTuningCandidate = {
+  rank: number;
+  config: {
+    ridge_penalty: number;
+    market_weight_scale: number;
+    player_weight_scale: number;
+    stabilization_scale: number;
+  };
+  summary: {
+    total_rows: number;
+    avg_mae: number | null;
+    avg_rmse: number | null;
+    avg_directional_accuracy: number | null;
+  };
+  metrics: Record<string, ModelRunMetric>;
+  training_rows: number;
+};
+
+export type ModelTuningRun = {
+  model_version: string;
+  run_type: string;
+  started_at: string;
+  finished_at: string;
+  candidate_count: number;
+  default_config: ModelTuningCandidate["config"];
+  best_candidate: ModelTuningCandidate | null;
+  candidates: ModelTuningCandidate[];
 };
 
 export async function fetchValueBoard(): Promise<ValueProp[]> {
@@ -497,6 +533,14 @@ export async function trainModel(): Promise<ModelRun> {
   const response = await fetch("/api/models/train", { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to train model");
+  }
+  return response.json();
+}
+
+export async function tuneModel(): Promise<ModelTuningRun> {
+  const response = await fetch("/api/models/tune", { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to tune model");
   }
   return response.json();
 }

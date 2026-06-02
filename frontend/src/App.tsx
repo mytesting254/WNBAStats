@@ -883,7 +883,8 @@ function ModelsView({
   error: string | null;
   onTrain: () => void;
 }) {
-  const metrics = latest ? Object.entries(latest.metrics) : [];
+  const metrics = latest ? sortModelMetrics(latest.metrics) : [];
+  const overallMetric = latest?.metrics.overall;
   const comparisonRuns = latestRunsByModel(runs);
   return (
     <section className="matchup-list">
@@ -908,9 +909,15 @@ function ModelsView({
             </p>
             <div className="detail-grid">
               <Metric label="Status" value={latest?.status ?? "Pending"} />
-              <Metric label="Rows" value={(latest?.training_rows ?? 0).toString()} />
+              <Metric label="Holdout rows" value={(latest?.training_rows ?? 0).toString()} />
               <Metric label="Type" value={latest?.run_type ?? "N/A"} />
               <Metric label="Finished" value={latest?.finished_at ? formatDate(latest.finished_at) : "N/A"} />
+            </div>
+            <div className="detail-grid model-validation-grid">
+              <Metric label="Settled rows" value={formatCount(overallMetric?.settled_rows)} />
+              <Metric label="Side accuracy" value={formatMetricPercent(overallMetric?.side_accuracy)} />
+              <Metric label="Calibration gap" value={formatMetricPercent(overallMetric?.calibration_gap)} />
+              <Metric label="Realized ROI" value={formatMetricPercent(overallMetric?.realized_roi)} />
             </div>
           </div>
           <div className="model-card">
@@ -925,22 +932,36 @@ function ModelsView({
                     <th>RMSE</th>
                     <th>Bias</th>
                     <th>Direction</th>
+                    <th>Settled</th>
+                    <th>Win rate</th>
+                    <th>Cal gap</th>
+                    <th>Brier</th>
+                    <th>Avg edge</th>
+                    <th>Avg EV</th>
+                    <th>ROI</th>
                   </tr>
                 </thead>
                 <tbody>
                   {metrics.map(([market, metric]) => (
-                    <tr key={market}>
+                    <tr key={market} className={market === "overall" ? "model-summary-row" : undefined}>
                       <td>{marketLabel(market)}</td>
                       <td>{metric.rows}</td>
                       <td>{formatNumber(metric.mae)}</td>
                       <td>{formatNumber(metric.rmse)}</td>
                       <td>{formatSigned(metric.bias)}</td>
                       <td>{formatPercent(metric.directional_accuracy ?? undefined)}</td>
+                      <td>{formatCount(metric.settled_rows)}</td>
+                      <td>{formatMetricPercent(metric.side_accuracy)}</td>
+                      <td>{formatMetricPercent(metric.calibration_gap)}</td>
+                      <td>{formatMetricNumber(metric.brier_score, 4)}</td>
+                      <td>{formatMetricSigned(metric.avg_edge, 3)}</td>
+                      <td>{formatMetricSigned(metric.avg_expected_value, 3)}</td>
+                      <td>{formatMetricPercent(metric.realized_roi)}</td>
                     </tr>
                   ))}
                   {!metrics.length && (
                     <tr>
-                      <td colSpan={6}>No model metrics yet.</td>
+                      <td colSpan={13}>No model metrics yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -962,6 +983,8 @@ function ModelsView({
                     <th>AST</th>
                     <th>PRA</th>
                     <th>Direction</th>
+                    <th>Val accuracy</th>
+                    <th>Val ROI</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -976,11 +999,13 @@ function ModelsView({
                       <td>{formatMetricMae(run, "assists")}</td>
                       <td>{formatMetricMae(run, "points_rebounds_assists")}</td>
                       <td>{formatAverageDirection(run)}</td>
+                      <td>{formatOverallMetricPercent(run, "side_accuracy")}</td>
+                      <td>{formatOverallMetricPercent(run, "realized_roi")}</td>
                     </tr>
                   ))}
                   {!comparisonRuns.length && (
                     <tr>
-                      <td colSpan={9}>No model runs saved yet.</td>
+                      <td colSpan={11}>No model runs saved yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -1643,7 +1668,6 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
               </div>
               <div className="prediction-strip">
                 <MiniStat label="Projected Score" value={formatProjectedScore(selectedMatchup)} />
-                <MiniStat label="Moneyline" value={`${selectedMatchup.away_team} ${formatMoneyline(selectedMatchup.away_moneyline)} | ${selectedMatchup.home_team} ${formatMoneyline(selectedMatchup.home_moneyline)}`} />
                 <MiniStat label="Winner" value={selectedMatchup.winner_pick} />
                 <MiniStat label="ATS" value={selectedMatchup.ats_pick} />
                 <MiniStat label="ATS Edge" value={formatNullableEdge(selectedMatchup.ats_edge)} />
@@ -2777,6 +2801,34 @@ function formatSigned(value: number | null) {
   return value > 0 ? `+${value.toFixed(2)}` : value.toFixed(2);
 }
 
+function formatMetricNumber(value?: number | null, digits = 2) {
+  if (value == null || Number.isNaN(value)) {
+    return "N/A";
+  }
+  return value.toFixed(digits);
+}
+
+function formatMetricSigned(value?: number | null, digits = 2) {
+  if (value == null || Number.isNaN(value)) {
+    return "N/A";
+  }
+  return value > 0 ? `+${value.toFixed(digits)}` : value.toFixed(digits);
+}
+
+function formatMetricPercent(value?: number | null) {
+  if (value == null || Number.isNaN(value)) {
+    return "N/A";
+  }
+  return `${(value * 100).toFixed(1)}%`;
+}
+
+function formatCount(value?: number | null) {
+  if (value == null || Number.isNaN(value)) {
+    return "N/A";
+  }
+  return value.toString();
+}
+
 function formatLatestMae(run: ModelRun | null) {
   if (!run) {
     return "Pending";
@@ -2815,6 +2867,22 @@ function formatAverageDirection(run: ModelRun) {
     return "N/A";
   }
   return formatPercent(values.reduce((sum, value) => sum + value, 0) / values.length);
+}
+
+function formatOverallMetricPercent(run: ModelRun, key: "side_accuracy" | "realized_roi") {
+  return formatMetricPercent(run.metrics.overall?.[key]);
+}
+
+function sortModelMetrics(metrics: ModelRun["metrics"]) {
+  return Object.entries(metrics).sort(([left], [right]) => {
+    if (left === "overall") {
+      return -1;
+    }
+    if (right === "overall") {
+      return 1;
+    }
+    return marketLabel(left).localeCompare(marketLabel(right));
+  });
 }
 
 function tabTitle(tab: DashboardTab) {
@@ -2917,6 +2985,7 @@ function groupGemsByMatchup(gems: GemProp[], capPerMatchup: number, matchups: Ma
 
 function marketLabel(market: string) {
   const labels: Record<string, string> = {
+    overall: "Overall",
     points: "PTS",
     rebounds: "REB",
     assists: "AST",
