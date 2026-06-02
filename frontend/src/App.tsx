@@ -1867,7 +1867,7 @@ function coversRecordOpponent(row: CoversRecordRow, mode: "h2h" | "team", matchu
   if (mode === "h2h") {
     return (
       <RecordTeamCell
-        prefix="Home"
+        prefix=""
         teamCode={row.home ?? "N/A"}
         logoUrl={logoForTeamCode(row.home, matchup)}
       />
@@ -1896,7 +1896,7 @@ function RecordTeamCell({
 }) {
   return (
     <span className={`record-team-cell ${outcomeClass}`}>
-      <span>{prefix}</span>
+      {prefix ? <span>{prefix}</span> : null}
       <TeamLogo src={logoUrl} alt={`${teamCode} logo`} />
       <strong>{teamCode}</strong>
     </span>
