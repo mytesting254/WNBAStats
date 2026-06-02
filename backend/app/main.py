@@ -2148,6 +2148,12 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
             game_id=int(item["game_id"]),
             limit=5,
         )
+        item["recent_minutes"] = _recent_minutes_played(
+            conn,
+            player_id=int(item["player_id"]),
+            game_id=int(item["game_id"]),
+            limit=5,
+        )
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         payload.append(item)
     return payload
@@ -2179,6 +2185,23 @@ def _recent_market_values(conn, *, player_id: int, market: str, game_id: int, li
         if value is not None:
             values.append(round(float(value), 1))
     return values
+
+
+def _recent_minutes_played(conn, *, player_id: int, game_id: int, limit: int = 5) -> list[float]:
+    rows = conn.execute(
+        """
+        SELECT s.minutes
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        JOIN games target ON target.id = ?
+        WHERE s.player_id = ?
+          AND (g.game_date < target.game_date OR (g.game_date = target.game_date AND s.game_id < target.id))
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT ?
+        """,
+        (int(game_id), int(player_id), int(limit)),
+    ).fetchall()
+    return [round(float(row["minutes"] or 0.0), 1) for row in rows]
 
 
 def _market_value_from_stats_row(row, market: str) -> float | None:
@@ -2328,6 +2351,12 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
             conn,
             player_id=int(item["player_id"]),
             market=str(item["market"]),
+            game_id=int(item["game_id"]),
+            limit=5,
+        )
+        item["recent_minutes"] = _recent_minutes_played(
+            conn,
+            player_id=int(item["player_id"]),
             game_id=int(item["game_id"]),
             limit=5,
         )

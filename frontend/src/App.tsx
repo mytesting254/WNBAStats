@@ -1091,22 +1091,7 @@ function PropsView({
                       <div>
                         <strong>{prop.player}</strong>
                         <span>{prop.team} | {prop.sportsbook}</span>
-                        {Array.isArray(prop.recent_values) && prop.recent_values.length > 0 && (
-                          <div className="prop-l5-strip" aria-label="Last 5 results">
-                            {prop.recent_values.slice(0, 5).map((value, idx) => {
-                              const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
-                              return (
-                                <span
-                                  key={`${prop.id}-l5-${idx}`}
-                                  className={hit ? "hit" : "miss"}
-                                  title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
-                                >
-                                  {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        )}
+                        {renderRecentFormWithMinutes(prop, `${prop.id}-l5`)}
                       </div>
                     </div>
                   </td>
@@ -1166,6 +1151,45 @@ function PropsView({
         )}
       </aside>
     </section>
+  );
+}
+
+function renderRecentFormWithMinutes(
+  prop: Pick<ValueProp, "id" | "recent_values" | "recent_minutes" | "recommended_side" | "line">,
+  keyPrefix: string
+) {
+  if (!Array.isArray(prop.recent_values) || prop.recent_values.length === 0) {
+    return null;
+  }
+  return (
+    <div className="prop-l5-strip" aria-label="Last 5 results and minutes">
+      {prop.recent_values.slice(0, 5).map((value, idx) => {
+        const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
+        return (
+          <span
+            key={`${keyPrefix}-${idx}`}
+            className={hit ? "hit" : "miss"}
+            title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
+          >
+            {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+          </span>
+        );
+      })}
+      {Array.isArray(prop.recent_minutes) && prop.recent_minutes.length > 0 && (
+        <>
+          <span className="l5-separator" title="Minutes distribution">|</span>
+          {prop.recent_minutes.slice(0, 5).map((minutes, idx) => (
+            <span
+              key={`${keyPrefix}-min-${idx}`}
+              className="min-chip"
+              title={`Minutes played: ${minutes.toFixed(1)}`}
+            >
+              {minutes.toFixed(1)}
+            </span>
+          ))}
+        </>
+      )}
+    </div>
   );
 }
 
@@ -1301,22 +1325,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                   <td>
                     <strong>{g.player}</strong>
                     <span>{g.team} | {marketLabel(g.market)} | {g.sportsbook}</span>
-                    {Array.isArray(g.recent_values) && g.recent_values.length > 0 && (
-                      <div className="prop-l5-strip" aria-label="Last 5 results">
-                        {g.recent_values.slice(0, 5).map((value, idx) => {
-                          const hit = g.recommended_side === "over" ? value > g.line : value < g.line;
-                          return (
-                            <span
-                              key={`${g.id}-gem-flat-l5-${idx}`}
-                              className={hit ? "hit" : "miss"}
-                              title={`${value.toFixed(1)} vs ${g.recommended_side.toUpperCase()} ${g.line.toFixed(1)}`}
-                            >
-                              {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    )}
+                    {renderRecentFormWithMinutes(g, `${g.id}-gem-flat-l5`)}
                   </td>
                   <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
                   <td>{formatPercent(g.edge)}</td>
@@ -1401,22 +1410,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                           <td>
                             <strong>{g.player}</strong>
                             <span>{g.team} | {marketLabel(g.market)} | {g.sportsbook}</span>
-                            {Array.isArray(g.recent_values) && g.recent_values.length > 0 && (
-                              <div className="prop-l5-strip" aria-label="Last 5 results">
-                                {g.recent_values.slice(0, 5).map((value, idx) => {
-                                  const hit = g.recommended_side === "over" ? value > g.line : value < g.line;
-                                  return (
-                                    <span
-                                      key={`${selectedGroup.key}-${g.id}-gem-group-l5-${idx}`}
-                                      className={hit ? "hit" : "miss"}
-                                      title={`${value.toFixed(1)} vs ${g.recommended_side.toUpperCase()} ${g.line.toFixed(1)}`}
-                                    >
-                                      {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
-                                    </span>
-                                  );
-                                })}
-                              </div>
-                            )}
+                            {renderRecentFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-l5`)}
                           </td>
                           <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
                           <td>{formatPercent(g.edge)}</td>
@@ -2216,22 +2210,7 @@ function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp
                           <div>
                             <strong>{prop.player}</strong>
                             <span>{prop.team} | {prop.sportsbook}</span>
-                            {Array.isArray(prop.recent_values) && prop.recent_values.length > 0 && (
-                              <div className="prop-l5-strip" aria-label="Last 5 results">
-                                {prop.recent_values.slice(0, 5).map((value, idx) => {
-                                  const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
-                                  return (
-                                    <span
-                                      key={`${prop.id}-watch-l5-${idx}`}
-                                      className={hit ? "hit" : "miss"}
-                                      title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
-                                    >
-                                      {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
-                                    </span>
-                                  );
-                                })}
-                              </div>
-                            )}
+                            {renderRecentFormWithMinutes(prop, `${prop.id}-watch-l5`)}
                           </div>
                         </div>
                       </td>
@@ -2545,22 +2524,7 @@ function MatchupProps({
                       <div>
                         <strong>{prop.player}</strong>
                         <span>{prop.team} | {prop.sportsbook}</span>
-                        {Array.isArray(prop.recent_values) && prop.recent_values.length > 0 && (
-                          <div className="prop-l5-strip" aria-label="Last 5 results">
-                            {prop.recent_values.slice(0, 5).map((value, idx) => {
-                              const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
-                              return (
-                                <span
-                                  key={`${prop.id}-matchup-l5-${idx}`}
-                                  className={hit ? "hit" : "miss"}
-                                  title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
-                                >
-                                  {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
-                                </span>
-                              );
-                            })}
-                          </div>
-                        )}
+                        {renderRecentFormWithMinutes(prop, `${prop.id}-matchup-l5`)}
                       </div>
                     </div>
                   </td>

@@ -417,6 +417,20 @@ td span {
   border-color: #ffd3cf;
 }
 
+.prop-l5-strip span.l5-separator {
+  min-width: auto;
+  padding: 0 2px;
+  border: 0;
+  color: #667085;
+  background: transparent;
+}
+
+.prop-l5-strip span.min-chip {
+  color: #5b21b6;
+  background: #f3e8ff;
+  border-color: #d8b4fe;
+}
+
 .player-cell,
 .detail-title,
 .matchup-title-row,
