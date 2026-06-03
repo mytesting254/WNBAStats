@@ -1,0 +1,16 @@
+[Unit]
+Description=WNBA Stats FastAPI backend
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_VM_USER
+Group=YOUR_VM_USER
+WorkingDirectory=/opt/wnba-stats
+EnvironmentFile=/opt/wnba-stats/.env
+ExecStart=/opt/wnba-stats/.venv/bin/python -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8010
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
