@@ -22,6 +22,11 @@ The app is built around a provider-backed pregame workflow:
 
 For Codespaces setup, see [CODESPACES.md](CODESPACES.md).
 
+## VM Deployment
+
+For Linux VM deployment with the local SQLite runtime at `data/wnba.sqlite`,
+see [VM.md](VM.md).
+
 ## First Run
 
 From the repo root:
@@ -544,13 +549,15 @@ What the scripts do:
 - `snapshot.ps1` with no args (or `auto`/`start`): restore latest snapshot if one exists, then run `dev.ps1`.
 - `snapshot_create.py`: checkpoints WAL, copies the SQLite file, writes a JSON manifest with `created_at`, `schema_version`, `app_commit_sha`, `row_counts`, `source_device`, and `sha256`, then prunes older snapshots (default keep latest 5).
 - `snapshot_restore.py`: validates checksum + schema version, creates a timestamped backup of the current DB, removes stale `-wal/-shm`, then atomically replaces the DB file.
+- `dev.sh` and `dev.ps1` default snapshot/dev startup to local SQLite by exporting `USE_TURSO=0` and `WNBA_DB_PATH=data/wnba.sqlite` unless you override them explicitly.
 
 Network access notes:
 
-- `dev.sh` and `dev.ps1` bind backend/frontend to `0.0.0.0` for same-network access.
+- `dev.sh` defaults to `127.0.0.1` outside Codespaces and `0.0.0.0` inside Codespaces. Override with `BACKEND_HOST` or `FRONTEND_HOST` if needed.
+- `dev.ps1` binds backend/frontend to `0.0.0.0` for same-network or Codespaces access.
 - Default ports are backend `8010` and frontend `5184`.
-- `dev.ps1` auto-selects the next open ports when defaults are busy and prints the resolved URLs.
-- `snapshot.ps1` (`auto`/`start`) uses the same dynamic port behavior because it delegates app startup to `dev.ps1`.
+- `dev.sh` and `dev.ps1` auto-select the next open ports when defaults are busy and print the resolved URLs.
+- `snapshot.sh` and `snapshot.ps1` (`auto`/`start`) inherit the same dynamic port behavior because they delegate app startup to the matching dev script.
 - Access from the host machine still works via `127.0.0.1:<resolved-port>`.
 
 Safety:

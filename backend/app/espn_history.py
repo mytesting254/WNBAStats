@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -16,6 +16,7 @@ from .game_resolver import resolve_or_create_game
 
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary"
+LOCAL_TZ = timezone(timedelta(hours=-4))
 ESPN_TEAM_ALIASES = {
     "CONN": "CON",
     "CON": "CON",
@@ -86,7 +87,7 @@ def import_espn_scoreboard(
             continue
 
         start_time = str(event.get("date") or competition.get("date") or "")
-        game_date = start_time[:10]
+        game_date = _game_date_from_start_time(start_time)
         espn_event_id = int(event["id"])
         status = _status(competition)
         home_score = _parse_score(home)
@@ -316,6 +317,19 @@ def _scoreboard_dates_param(season: int, selected_date: str | None = None) -> st
     if not selected_date:
         return str(season)
     return str(selected_date).replace("-", "")
+
+
+def _game_date_from_start_time(start_time: str) -> str:
+    value = str(start_time or "").strip()
+    if not value:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value[:10]
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(LOCAL_TZ).date().isoformat()
 
 
 def _competition(event: dict[str, Any]) -> dict[str, Any] | None:

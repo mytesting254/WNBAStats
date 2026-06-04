@@ -7,6 +7,7 @@ from fastapi import Response
 
 from backend.app import covers_import as covers_import_module
 from backend.app import cache as cache_module
+from backend.app import espn_history as espn_history_module
 from backend.app import rotowire_import as rotowire_import_module
 from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
@@ -1973,6 +1974,43 @@ def test_espn_scoreboard_imports_scheduled_games(monkeypatch) -> None:
     assert len(result_rows) == 0
 
 
+def test_espn_scoreboard_uses_local_game_date_for_late_utc_tip(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.espn_history.fetch_scoreboard",
+        lambda season, force_refresh=False, selected_date=None: {
+            "events": [
+                {
+                    "id": "777003",
+                    "date": "2026-06-03T02:00:00Z",
+                    "competitions": [
+                        {
+                            "status": {"type": {"name": "STATUS_FINAL", "state": "post", "completed": True}},
+                            "competitors": [
+                                {"homeAway": "home", "score": "95", "team": {"abbreviation": "GS", "displayName": "Golden State Valkyries"}},
+                                {"homeAway": "away", "score": "77", "team": {"abbreviation": "POR", "displayName": "Portland Fire"}},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    with connect() as conn:
+        result = import_espn_scoreboard(conn, 2026, selected_date="2026-06-03")
+        game = conn.execute("SELECT * FROM games WHERE id = 777003").fetchone()
+
+    assert result["inserted_games"] == 1
+    assert game["game_date"] == "2026-06-02"
+    assert game["status"] == "final"
+
+
+def test_default_espn_daily_dates_include_previous_local_day() -> None:
+    dates = main_module._default_espn_daily_dates(today_local=datetime(2026, 6, 4).date())
+
+    assert dates == ["2026-06-03", "2026-06-04"]
+
+
 def test_espn_scoreboard_preserves_covers_total_for_scheduled_zero_score(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.app.espn_history.fetch_scoreboard",
@@ -2009,6 +2047,11 @@ def test_espn_scoreboard_preserves_covers_total_for_scheduled_zero_score(monkeyp
 
     assert game["status"] == "scheduled"
     assert game["game_total"] == 166.5
+
+
+def test_game_date_from_start_time_uses_local_timezone() -> None:
+    assert espn_history_module._game_date_from_start_time("2026-06-03T02:00:00Z") == "2026-06-02"
+    assert espn_history_module._game_date_from_start_time("2026-06-03T23:30:00Z") == "2026-06-03"
 
 
 def test_defensive_markets_are_projectable() -> None:

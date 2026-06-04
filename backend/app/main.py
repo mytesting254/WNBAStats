@@ -1302,7 +1302,7 @@ def import_espn_history(
     unique_seasons = sorted(set(seasons))
     daily_dates = _selected_espn_dates(selected_date, selected_dates)
     if not daily_dates and not force_refresh and not include_previous_season:
-        daily_dates = [datetime.now(LOCAL_TZ).date().isoformat()]
+        daily_dates = _default_espn_daily_dates()
 
     try:
         with connect() as conn:
@@ -1531,6 +1531,12 @@ def _selected_espn_dates(selected_date: str | None, selected_dates: list[str] | 
                 dates.append(parsed)
                 seen.add(parsed)
     return dates
+
+
+def _default_espn_daily_dates(today_local=None) -> list[str]:
+    today = today_local or datetime.now(LOCAL_TZ).date()
+    previous = today - timedelta(days=1)
+    return [previous.isoformat(), today.isoformat()]
 
 
 def _parse_iso_date(value: str, field: str):
