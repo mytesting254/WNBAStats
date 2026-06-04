@@ -1177,6 +1177,138 @@ def test_model_performance_counts_settled_props_without_predictions() -> None:
     assert "no matching model predictions" in performance["message"].lower()
 
 
+def test_model_performance_uses_latest_value_board_pick_per_prop_line() -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (2002, "Latest Pick Player", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)",
+            (20002, "2026-05-02", "2026-05-02T19:00:00Z", 10, 3, -2.5, 151.5),
+        )
+        conn.execute(
+            "INSERT INTO team_game_results (team_id, game_id, is_home, points, opponent_points, possessions, closing_spread, closing_total, ats_result, total_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (10, 20002, 1, 81, 75, 79.0, -2.5, 151.5, "cover", "over"),
+        )
+        conn.execute(
+            "INSERT INTO player_game_stats (player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (2002, 20002, 33, 19, 4, 6, 2, 1, 0, 2),
+        )
+        conn.execute(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (20002, 20002, 2002, "DraftKings", "points", 20.5, -110, -110, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (200021, 20002, MODEL_VERSION, "2026-05-02T15:00:00Z", 21.6, "over", 0.62, 0.50, 0.12, 0.05, "medium", "older losing pick"),
+                (200022, 20002, MODEL_VERSION, "2026-05-02T16:00:00Z", 19.4, "under", 0.57, 0.50, 0.06, 0.03, "low", "latest winning pick"),
+            ],
+        )
+        settled = settle_completed_props(conn)
+
+    assert settled["settled"] == 1
+    performance = model_performance()
+    assert performance["settled"] == 1
+    assert performance["wins"] == 1
+    assert performance["win_rate"] == 1.0
+    assert performance["average_ev"] == 0.03
+    assert "value-board" in performance["message"].lower()
+
+
+def test_watchlist_payload_applies_market_specific_low_confidence_filters(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (2003, "Watchlist Filter Player", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)",
+            (20003, "2026-06-05", (now + timedelta(hours=4)).isoformat(), 10, 3, -1.5, 158.5),
+        )
+        conn.executemany(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (200031, 20003, 2003, "DraftKings", "assists", 5.5, -110, -110, now.isoformat()),
+                (200032, 20003, 2003, "DraftKings", "rebounds", 6.5, -110, -110, now.isoformat()),
+                (200033, 20003, 2003, "DraftKings", "points_assists", 23.5, -110, -110, now.isoformat()),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (2000311, 200031, MODEL_VERSION, now.isoformat(), 5.0, "under", 0.56, 0.50, 0.055, 0.03, "low", "eligible assists"),
+                (2000321, 200032, MODEL_VERSION, now.isoformat(), 6.0, "under", 0.555, 0.50, 0.055, 0.03, "low", "filtered rebounds"),
+                (2000331, 200033, MODEL_VERSION, now.isoformat(), 22.6, "under", 0.56, 0.50, 0.055, 0.03, "low", "filtered points assists"),
+            ],
+        )
+
+        monkeypatch.setattr(main_module, "_is_active_game_time", lambda _start_time: True)
+        payload = main_module._watchlist_payload(conn)
+
+    assert [item["market"] for item in payload] == ["assists"]
+
+
+def test_watchlist_performance_uses_market_specific_low_confidence_filters() -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (2004, "Settled Watchlist Player", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)",
+            (20004, "2026-05-04", "2026-05-04T19:00:00Z", 10, 3, -2.0, 156.0),
+        )
+        conn.execute(
+            "INSERT INTO team_game_results (team_id, game_id, is_home, points, opponent_points, possessions, closing_spread, closing_total, ats_result, total_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (10, 20004, 1, 80, 77, 78.0, -2.0, 156.0, "cover", "over"),
+        )
+        conn.execute(
+            "INSERT INTO player_game_stats (player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (2004, 20004, 32, 17, 6, 5, 1, 1, 0, 2),
+        )
+        conn.executemany(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (200041, 20004, 2004, "DraftKings", "assists", 5.5, -110, -110, datetime.now(timezone.utc).isoformat()),
+                (200042, 20004, 2004, "DraftKings", "rebounds", 6.5, -110, -110, datetime.now(timezone.utc).isoformat()),
+                (200043, 20004, 2004, "DraftKings", "points_assists", 23.5, -110, -110, datetime.now(timezone.utc).isoformat()),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (2000411, 200041, MODEL_VERSION, "2026-05-04T15:00:00Z", 5.0, "under", 0.56, 0.50, 0.055, 0.03, "low", "eligible assists"),
+                (2000421, 200042, MODEL_VERSION, "2026-05-04T15:05:00Z", 6.0, "under", 0.555, 0.50, 0.055, 0.03, "low", "filtered rebounds"),
+                (2000431, 200043, MODEL_VERSION, "2026-05-04T15:10:00Z", 22.6, "under", 0.56, 0.50, 0.055, 0.03, "low", "filtered points assists"),
+            ],
+        )
+        settled = settle_completed_props(conn)
+
+    assert settled["settled"] == 3
+    performance = main_module.watchlist_performance()
+    assert performance["qualified"] == 1
+    assert performance["wins"] == 1
+    assert performance["win_rate"] == 1.0
+
+
 def test_odds_refresh_merges_cached_future_events() -> None:
     cached = [
         {"id": "future-a", "commence_time": "2026-05-10T00:00:00Z", "bookmakers": []},
@@ -2091,7 +2223,7 @@ def test_watchlist_snapshot_and_settlement_sync(monkeypatch) -> None:
             """
             INSERT INTO prop_lines (
                 id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
-            ) VALUES (9921, 9920, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            ) VALUES (9921, 9920, 1001, 'DraftKings', 'assists', 6.5, -110, -110, ?)
             """,
             (now.isoformat(),),
         )
@@ -2100,7 +2232,7 @@ def test_watchlist_snapshot_and_settlement_sync(monkeypatch) -> None:
             INSERT INTO prop_predictions (
                 id, prop_line_id, model_version, prediction_time, projection, recommended_side,
                 model_probability, implied_probability, edge, expected_value, confidence, reason
-            ) VALUES (9922, 9921, 'adaptive-context-v1', ?, 19.0, 'under', 0.57, 0.50, 0.06, 0.03, 'low', 'watch-test')
+            ) VALUES (9922, 9921, 'adaptive-context-v1', ?, 6.0, 'under', 0.57, 0.50, 0.06, 0.03, 'low', 'watch-test')
             """,
             (now.isoformat(),),
         )

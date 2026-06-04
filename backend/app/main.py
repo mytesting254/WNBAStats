@@ -384,15 +384,31 @@ def model_performance(response=None) -> dict:
             total_settled = int(total_settled_row["count"] or 0)
             rows = conn.execute(
                 """
+                WITH ranked AS (
+                  SELECT
+                    pp.*,
+                    pl.market,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY pp.prop_line_id
+                      ORDER BY pp.prediction_time DESC, pp.id DESC
+                    ) AS rn
+                  FROM prop_predictions pp
+                  JOIN prop_lines pl ON pl.id = pp.prop_line_id
+                )
                 SELECT
-                    pp.recommended_side,
-                    pp.expected_value,
+                    r.recommended_side,
+                    r.expected_value,
+                    r.edge,
+                    r.confidence,
+                    r.market,
                     sp.winning_side
-                FROM prop_predictions pp
-                JOIN settled_props sp ON sp.prop_line_id = pp.prop_line_id
+                FROM ranked r
+                JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+                WHERE r.rn = 1
                 """
             ).fetchall()
-        evaluated = len(rows)
+        qualified = [row for row in rows if _include_value_board_pick(dict(row))]
+        evaluated = len(qualified)
         if total_settled == 0:
             return {
                 "settled": 0,
@@ -409,14 +425,14 @@ def model_performance(response=None) -> dict:
                 "average_ev": None,
                 "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but there are no matching model predictions.",
             }
-        wins = sum(1 for row in rows if row["recommended_side"] == row["winning_side"])
-        avg_ev = sum(float(row["expected_value"]) for row in rows) / evaluated
+        wins = sum(1 for row in qualified if row["recommended_side"] == row["winning_side"])
+        avg_ev = sum(float(row["expected_value"]) for row in qualified) / evaluated
         return {
             "settled": evaluated,
             "wins": wins,
             "win_rate": round(wins / evaluated, 4),
             "average_ev": round(avg_ev, 4),
-            "message": f"Evaluated {evaluated} settled model prediction{'s' if evaluated != 1 else ''}.",
+            "message": f"Evaluated {evaluated} settled value-board pick{'s' if evaluated != 1 else ''}.",
         }
 
     if response is None:
@@ -439,14 +455,17 @@ def gem_performance() -> dict:
             WITH ranked AS (
               SELECT
                 pp.*,
+                pl.market,
                 ROW_NUMBER() OVER (
                   PARTITION BY pp.prop_line_id
                   ORDER BY pp.prediction_time DESC, pp.id DESC
                 ) AS rn
               FROM prop_predictions pp
+              JOIN prop_lines pl ON pl.id = pp.prop_line_id
             )
             SELECT
               r.recommended_side,
+              r.market,
               r.edge,
               r.expected_value,
               r.confidence,
@@ -532,14 +551,17 @@ def watchlist_performance() -> dict:
             WITH ranked AS (
               SELECT
                 pp.*,
+                pl.market,
                 ROW_NUMBER() OVER (
                   PARTITION BY pp.prop_line_id
                   ORDER BY pp.prediction_time DESC, pp.id DESC
                 ) AS rn
               FROM prop_predictions pp
+              JOIN prop_lines pl ON pl.id = pp.prop_line_id
             )
             SELECT
               r.recommended_side,
+              r.market,
               r.edge,
               r.expected_value,
               r.confidence,
@@ -549,13 +571,7 @@ def watchlist_performance() -> dict:
             WHERE r.rn = 1
             """
         ).fetchall()
-    qualified = []
-    for row in rows:
-        edge = float(row["edge"] or 0.0)
-        ev = float(row["expected_value"] or 0.0)
-        confidence = str(row["confidence"] or "").strip().lower()
-        if confidence == "low" and ev >= 0.02 and abs(edge) >= 0.05 and abs(edge) < LOW_CONFIDENCE_EDGE_MIN:
-            qualified.append(row)
+    qualified = [row for row in rows if _include_watchlist_pick(dict(row))]
     if not qualified:
         return {
             "qualified": 0,
@@ -2433,6 +2449,8 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
     payload = []
     for row in rows:
         item = dict(row)
+        if not _include_watchlist_pick(item):
+            continue
         if int(item["id"]) in value_board_prediction_ids:
             continue
         if int(item["prop_line_id"]) in gem_prop_line_ids:
@@ -2455,6 +2473,29 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         payload.append(item)
     return payload[: max(1, min(int(limit), 200))]
+
+
+def _include_watchlist_pick(item: dict) -> bool:
+    confidence = str(item.get("confidence") or "").strip().lower()
+    market = str(item.get("market") or "").strip().lower()
+    try:
+        edge = abs(float(item.get("edge") or 0.0))
+        ev = float(item.get("expected_value") or 0.0)
+    except (TypeError, ValueError):
+        return False
+
+    if confidence != "low":
+        return False
+    if ev < 0.02 or edge < 0.05 or edge >= LOW_CONFIDENCE_EDGE_MIN:
+        return False
+
+    # Settled watchlist history supports a tighter rebound floor and
+    # excluding low-confidence points+assists from this fallback cohort.
+    if market == "rebounds":
+        return edge >= 0.06
+    if market == "points_assists":
+        return False
+    return True
 
 
 def _include_value_board_pick(item: dict) -> bool:
