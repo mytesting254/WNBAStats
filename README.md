@@ -27,6 +27,10 @@ For Codespaces setup, see [CODESPACES.md](CODESPACES.md).
 For Linux VM deployment with the local SQLite runtime at `data/wnba.sqlite`,
 see [VM.md](VM.md).
 
+## Coolify Deployment
+
+For a Coolify URL-based deployment using Docker Compose, see [COOLIFY.md](COOLIFY.md).
+
 ## First Run
 
 From the repo root:
@@ -515,19 +519,19 @@ PowerShell equivalent:
 `./snapshot.sh` now does both automatically:
 
 - startup: restores the latest snapshot if available
-- shutdown: creates a new snapshot (`--label auto`) after `dev.sh` exits
-- retention: keeps only the latest 5 snapshots by default (`SNAPSHOT_KEEP_LATEST=5`)
+- shutdown: updates the rolling snapshot after `dev.sh` exits
+- retention: the default rolling snapshot is a single file, `wnba-runtime.sqlite`
 
 Create a snapshot:
 
 ```bash
-./snapshot.sh create --label daily
+./snapshot.sh create
 ```
 
 Restore a snapshot:
 
 ```bash
-./snapshot.sh restore wnba-daily-20260527T120000Z.sqlite
+./snapshot.sh restore wnba-runtime.sqlite
 ```
 
 List snapshots:
@@ -545,9 +549,9 @@ Latest snapshot path:
 What the scripts do:
 
 - `snapshot.sh`: single command wrapper around create/restore/list/latest operations.
-- `snapshot.sh` with no args (or `auto`/`start`): restore latest snapshot if one exists, then run `dev.sh`.
-- `snapshot.ps1` with no args (or `auto`/`start`): restore latest snapshot if one exists, then run `dev.ps1`.
-- `snapshot_create.py`: checkpoints WAL, copies the SQLite file, writes a JSON manifest with `created_at`, `schema_version`, `app_commit_sha`, `row_counts`, `source_device`, and `sha256`, then prunes older snapshots (default keep latest 5).
+- `snapshot.sh` with no args (or `auto`/`start`): if `data/wnba.sqlite` is missing, restore the latest snapshot, then run `dev.sh`. If the runtime DB already exists, startup skips restore so newer local data is not rolled back.
+- `snapshot.ps1` with no args (or `auto`/`start`): if `data/wnba.sqlite` is missing, restore the latest snapshot, then run `dev.ps1`. If the runtime DB already exists, startup skips restore so newer local data is not rolled back.
+- `snapshot_create.py`: checkpoints WAL, copies the SQLite file into a rolling snapshot file (`wnba-runtime.sqlite` by default), writes a JSON manifest with `created_at`, `schema_version`, `app_commit_sha`, `row_counts`, `source_device`, and `sha256`, then prunes older snapshots if you also keep named legacy files around.
 - `snapshot_restore.py`: validates checksum + schema version, creates a timestamped backup of the current DB, removes stale `-wal/-shm`, then atomically replaces the DB file.
 - `dev.sh` and `dev.ps1` default snapshot/dev startup to local SQLite by exporting `USE_TURSO=0` and `WNBA_DB_PATH=data/wnba.sqlite` unless you override them explicitly.
 

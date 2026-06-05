@@ -1,0 +1,19 @@
+{
+  "snapshot_file": "wnba-recovered-20260602T203515Z.sqlite",
+  "created_at": "2026-06-02T20:35:15.335579+00:00",
+  "schema_version": 0,
+  "app_commit_sha": "c45478c",
+  "source_device": "codespaces-d6c128",
+  "db_path_source": "/workspaces/WNBAStats/data/wnba.backup-20260602T200332Z.sqlite",
+  "row_counts": {
+    "games": 672,
+    "players": 383,
+    "player_game_stats": 7862,
+    "sportsbook_prop_lines": 2950,
+    "prop_lines": 1222,
+    "prop_predictions": 780,
+    "settled_props": 991,
+    "model_runs": 4
+  },
+  "sha256": "315f7e9212f2074c94e5f96f6fdfda877d969c7270524fc4f0a5d738bbfd2bab"
+}

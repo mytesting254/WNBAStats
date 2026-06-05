@@ -6,14 +6,15 @@ $SnapshotDir = if ($env:SNAPSHOT_DIR) { $env:SNAPSHOT_DIR } else { Join-Path $Ro
 $DbPath = if ($env:WNBA_DB_PATH) { $env:WNBA_DB_PATH } else { Join-Path $Root "data\wnba.sqlite" }
 $SnapshotAutosaveInterval = if ($env:SNAPSHOT_AUTOSAVE_INTERVAL) { $env:SNAPSHOT_AUTOSAVE_INTERVAL } else { "300" }
 $SnapshotKeepLatest = if ($env:SNAPSHOT_KEEP_LATEST) { $env:SNAPSHOT_KEEP_LATEST } else { "5" }
+$SnapshotName = if ($env:SNAPSHOT_NAME) { $env:SNAPSHOT_NAME } else { "wnba-runtime" }
 
 function Show-Usage {
     Write-Host "Usage:"
     Write-Host "  .\snapshot.ps1"
     Write-Host "  .\snapshot.ps1 auto"
     Write-Host "  .\snapshot.ps1 start"
-    Write-Host "  .\snapshot.ps1 watch [--label NAME]"
-    Write-Host "  .\snapshot.ps1 create [--label NAME] [--device NAME] [--db-path PATH] [--output-dir PATH] [--keep-latest N]"
+    Write-Host "  .\snapshot.ps1 watch"
+    Write-Host "  .\snapshot.ps1 create [--name NAME] [--label NAME] [--device NAME] [--db-path PATH] [--output-dir PATH] [--keep-latest N]"
     Write-Host "  .\snapshot.ps1 restore <snapshot.sqlite> [--force] [--db-path PATH] [--snapshot-dir PATH]"
     Write-Host "  .\snapshot.ps1 list [--snapshot-dir PATH]"
     Write-Host "  .\snapshot.ps1 latest [--snapshot-dir PATH]"
@@ -36,9 +37,8 @@ function Resolve-SnapshotIntervalSeconds {
 
 function Get-LatestSnapshotFile {
     param([string]$Dir)
-    # Determine latest from sortable UTC timestamp in filename, not file mtime.
     return Get-ChildItem -Path $Dir -Filter "wnba-*.sqlite" -File -ErrorAction SilentlyContinue |
-        Sort-Object Name -Descending |
+        Sort-Object LastWriteTimeUtc -Descending |
         Select-Object -First 1
 }
 
@@ -49,26 +49,26 @@ function Start-SnapshotWatcher {
         [string]$DatabasePath,
         [string]$OutputDir,
         [int]$IntervalSeconds,
-        [string]$Label,
+        [string]$SnapshotName,
         [string]$SnapshotKeepLatest
     )
 
     New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
     return Start-Job -Name "snapshot-watcher" -ScriptBlock {
-        param($PythonExe, $RepoRoot, $DbFile, $Dir, $Interval, $WatcherLabel, $SnapshotKeep)
+        param($PythonExe, $RepoRoot, $DbFile, $Dir, $Interval, $RollingSnapshotName, $SnapshotKeep)
         $ErrorActionPreference = "Stop"
         $LastTicks = $null
         while ($true) {
             if (Test-Path $DbFile) {
                 $Ticks = (Get-Item -LiteralPath $DbFile).LastWriteTimeUtc.Ticks
                 if ($LastTicks -ne $Ticks) {
-                    & $PythonExe (Join-Path $RepoRoot "scripts\snapshot_create.py") "--db-path" $DbFile "--output-dir" $Dir "--label" $WatcherLabel "--keep-latest" $SnapshotKeep
+                    & $PythonExe (Join-Path $RepoRoot "scripts\snapshot_create.py") "--db-path" $DbFile "--output-dir" $Dir "--name" $RollingSnapshotName "--keep-latest" $SnapshotKeep
                     $LastTicks = $Ticks
                 }
             }
             Start-Sleep -Seconds $Interval
         }
-    } -ArgumentList @($PythonPath, $RootPath, $DatabasePath, $OutputDir, $IntervalSeconds, $Label, $SnapshotKeepLatest)
+    } -ArgumentList @($PythonPath, $RootPath, $DatabasePath, $OutputDir, $IntervalSeconds, $SnapshotName, $SnapshotKeepLatest)
 }
 
 $Command = if ($args.Count -gt 0) { $args[0] } else { "auto" }
@@ -77,9 +77,15 @@ $RemainingArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @
 switch ($Command) {
     { $_ -in @("auto", "start") } {
         New-Item -ItemType Directory -Force -Path $SnapshotDir | Out-Null
-        $LatestFile = Get-LatestSnapshotFile -Dir $SnapshotDir
+        $LatestFile = $null
+        if (-not (Test-Path $DbPath)) {
+            $LatestFile = Get-LatestSnapshotFile -Dir $SnapshotDir
+        }
 
-        if ($LatestFile) {
+        if (Test-Path $DbPath) {
+            Write-Host "Existing runtime DB found at $DbPath. Skipping auto-restore to avoid rolling back newer local data."
+        }
+        elseif ($LatestFile) {
             Write-Host "Restoring latest snapshot: $($LatestFile.FullName)"
             & $Python (Join-Path $Root "scripts\snapshot_restore.py") $LatestFile.FullName "--db-path" $DbPath "--snapshot-dir" $SnapshotDir
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -90,7 +96,7 @@ switch ($Command) {
 
         $IntervalSeconds = Resolve-SnapshotIntervalSeconds -Raw $SnapshotAutosaveInterval
         Write-Host "Starting snapshot watcher (every $($IntervalSeconds)s)..."
-        $WatcherJob = Start-SnapshotWatcher -PythonPath $Python -RootPath $Root -DatabasePath $DbPath -OutputDir $SnapshotDir -IntervalSeconds $IntervalSeconds -Label "auto-watch"
+        $WatcherJob = Start-SnapshotWatcher -PythonPath $Python -RootPath $Root -DatabasePath $DbPath -OutputDir $SnapshotDir -IntervalSeconds $IntervalSeconds -SnapshotName $SnapshotName
 
         Write-Host "Starting app..."
         try {
@@ -106,7 +112,7 @@ switch ($Command) {
 
         if ($DevExit -eq 0) {
             Write-Host "Creating shutdown snapshot..."
-            & $Python (Join-Path $Root "scripts\snapshot_create.py") "--db-path" $DbPath "--output-dir" $SnapshotDir "--label" "auto" "--keep-latest" $SnapshotKeepLatest
+            & $Python (Join-Path $Root "scripts\snapshot_create.py") "--db-path" $DbPath "--output-dir" $SnapshotDir "--name" $SnapshotName "--keep-latest" $SnapshotKeepLatest
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
         else {
@@ -116,12 +122,8 @@ switch ($Command) {
         exit $DevExit
     }
     "watch" {
-        $Label = "auto-watch"
-        if ($RemainingArgs.Count -ge 2 -and $RemainingArgs[0] -eq "--label") {
-            $Label = $RemainingArgs[1]
-        }
         $IntervalSeconds = Resolve-SnapshotIntervalSeconds -Raw $SnapshotAutosaveInterval
-        Write-Host "Watching DB changes for snapshots in $SnapshotDir (interval $($IntervalSeconds)s, label '$Label')."
+        Write-Host "Watching DB changes for snapshots in $SnapshotDir (interval $($IntervalSeconds)s, snapshot '$SnapshotName.sqlite')."
         New-Item -ItemType Directory -Force -Path $SnapshotDir | Out-Null
 
         $LastTicks = $null
@@ -129,7 +131,7 @@ switch ($Command) {
             if (Test-Path $DbPath) {
                 $Ticks = (Get-Item -LiteralPath $DbPath).LastWriteTimeUtc.Ticks
                 if ($LastTicks -ne $Ticks) {
-                    & $Python (Join-Path $Root "scripts\snapshot_create.py") "--db-path" $DbPath "--output-dir" $SnapshotDir "--label" $Label "--keep-latest" $SnapshotKeepLatest
+                    & $Python (Join-Path $Root "scripts\snapshot_create.py") "--db-path" $DbPath "--output-dir" $SnapshotDir "--name" $SnapshotName "--keep-latest" $SnapshotKeepLatest
                     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                     $LastTicks = $Ticks
                 }
@@ -138,7 +140,7 @@ switch ($Command) {
         }
     }
     "create" {
-        & $Python (Join-Path $Root "scripts\snapshot_create.py") "--db-path" $DbPath "--output-dir" $SnapshotDir "--keep-latest" $SnapshotKeepLatest @RemainingArgs
+        & $Python (Join-Path $Root "scripts\snapshot_create.py") "--db-path" $DbPath "--output-dir" $SnapshotDir "--name" $SnapshotName "--keep-latest" $SnapshotKeepLatest @RemainingArgs
         exit $LASTEXITCODE
     }
     "restore" {
@@ -160,7 +162,7 @@ switch ($Command) {
 
         New-Item -ItemType Directory -Force -Path $Dir | Out-Null
         $Files = Get-ChildItem -Path $Dir -Filter "wnba-*.sqlite" -File -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending
+            Sort-Object LastWriteTimeUtc -Descending
 
         if (-not $Files) {
             Write-Host "No snapshots found in $Dir"

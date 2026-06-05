@@ -411,6 +411,7 @@ def model_performance(response=None) -> dict:
         evaluated = len(qualified)
         if total_settled == 0:
             return {
+                "total_settled": 0,
                 "settled": 0,
                 "wins": 0,
                 "win_rate": None,
@@ -419,6 +420,7 @@ def model_performance(response=None) -> dict:
             }
         if evaluated == 0:
             return {
+                "total_settled": total_settled,
                 "settled": 0,
                 "wins": 0,
                 "win_rate": None,
@@ -428,6 +430,7 @@ def model_performance(response=None) -> dict:
         wins = sum(1 for row in qualified if row["recommended_side"] == row["winning_side"])
         avg_ev = sum(float(row["expected_value"]) for row in qualified) / evaluated
         return {
+            "total_settled": total_settled,
             "settled": evaluated,
             "wins": wins,
             "win_rate": round(wins / evaluated, 4),

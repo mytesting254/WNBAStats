@@ -87,6 +87,7 @@ export type LineDiscrepancy = {
 };
 
 export type ModelPerformance = {
+  total_settled?: number;
   settled: number;
   wins: number;
   win_rate: number | null;
@@ -111,6 +112,24 @@ export type WatchlistPerformance = {
   message?: string;
 };
 
+const API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
+
+function apiHeaders(headers?: HeadersInit, includeApiKey = false): Headers {
+  const merged = new Headers(headers);
+  if (includeApiKey && API_KEY) {
+    merged.set("X-API-Key", API_KEY);
+  }
+  return merged;
+}
+
+async function apiFetch(input: string, init?: RequestInit & { includeApiKey?: boolean }): Promise<Response> {
+  const { includeApiKey = false, headers, ...rest } = init ?? {};
+  return fetch(input, {
+    ...rest,
+    headers: apiHeaders(headers, includeApiKey),
+  });
+}
+
 export async function createGemSnapshot(snapshotDate?: string, preset = "balanced"): Promise<{
   snapshot_id: number;
   snapshot_date: string;
@@ -123,7 +142,10 @@ export async function createGemSnapshot(snapshotDate?: string, preset = "balance
   if (snapshotDate) {
     params.set("snapshot_date", snapshotDate);
   }
-  const response = await fetch(`/api/gems/snapshot?${params.toString()}`, { method: "POST" });
+  const response = await apiFetch(`/api/gems/snapshot?${params.toString()}`, {
+    method: "POST",
+    includeApiKey: true,
+  });
   if (!response.ok) {
     let detail = "";
     try {
@@ -380,7 +402,10 @@ export type OddsImportResult = {
 };
 
 export async function importOdds(forceRefresh = false): Promise<OddsImportResult> {
-  const response = await fetch(`/api/odds/import?force_refresh=${forceRefresh ? "true" : "false"}`, { method: "POST" });
+  const response = await apiFetch(`/api/odds/import?force_refresh=${forceRefresh ? "true" : "false"}`, {
+    method: "POST",
+    includeApiKey: true,
+  });
   if (!response.ok) {
     throw new Error("Failed to import sportsbook odds");
   }
@@ -388,7 +413,10 @@ export async function importOdds(forceRefresh = false): Promise<OddsImportResult
 }
 
 export async function importCoversOdds(forceRefresh = false): Promise<OddsImportResult> {
-  const response = await fetch(`/api/covers/import?force_refresh=${forceRefresh ? "true" : "false"}`, { method: "POST" });
+  const response = await apiFetch(`/api/covers/import?force_refresh=${forceRefresh ? "true" : "false"}`, {
+    method: "POST",
+    includeApiKey: true,
+  });
   if (!response.ok) {
     throw new Error("Failed to import Covers odds");
   }
@@ -402,7 +430,10 @@ export async function importRotowireInjuries(forceRefresh = false): Promise<{
   inserted: number;
   from_cache: boolean;
 }> {
-  const response = await fetch(`/api/injuries/import/rotowire?force_refresh=${forceRefresh ? "true" : "false"}`, { method: "POST" });
+  const response = await apiFetch(`/api/injuries/import/rotowire?force_refresh=${forceRefresh ? "true" : "false"}`, {
+    method: "POST",
+    includeApiKey: true,
+  });
   if (!response.ok) {
     throw new Error("Failed to import Rotowire lineups");
   }
@@ -441,7 +472,10 @@ export async function importEspnHistory(
       params.append("selected_dates", date);
     }
   });
-  const response = await fetch(`/api/history/import/espn?${params.toString()}`, { method: "POST" });
+  const response = await apiFetch(`/api/history/import/espn?${params.toString()}`, {
+    method: "POST",
+    includeApiKey: true,
+  });
   if (!response.ok) {
     let detail = "";
     try {
@@ -500,7 +534,10 @@ export async function importMissingEspnScores(
     missing_only: missingOnly ? "true" : "false",
     limit: String(limit)
   });
-  const response = await fetch(`/api/history/import/espn-missing?${params.toString()}`, { method: "POST" });
+  const response = await apiFetch(`/api/history/import/espn-missing?${params.toString()}`, {
+    method: "POST",
+    includeApiKey: true,
+  });
   if (!response.ok) {
     let detail = "";
     try {
@@ -515,7 +552,7 @@ export async function importMissingEspnScores(
 }
 
 export async function recalculate(): Promise<void> {
-  const response = await fetch("/api/recalculate", { method: "POST" });
+  const response = await apiFetch("/api/recalculate", { method: "POST", includeApiKey: true });
   if (!response.ok) {
     throw new Error("Failed to recalculate projections");
   }
@@ -530,7 +567,7 @@ export async function fetchModelRuns(): Promise<{ latest: ModelRun | null; runs:
 }
 
 export async function trainModel(): Promise<ModelRun> {
-  const response = await fetch("/api/models/train", { method: "POST" });
+  const response = await apiFetch("/api/models/train", { method: "POST", includeApiKey: true });
   if (!response.ok) {
     throw new Error("Failed to train model");
   }
@@ -538,7 +575,7 @@ export async function trainModel(): Promise<ModelRun> {
 }
 
 export async function tuneModel(): Promise<ModelTuningRun> {
-  const response = await fetch("/api/models/tune", { method: "POST" });
+  const response = await apiFetch("/api/models/tune", { method: "POST", includeApiKey: true });
   if (!response.ok) {
     throw new Error("Failed to tune model");
   }

@@ -7,6 +7,7 @@ SNAPSHOT_DIR="${SNAPSHOT_DIR:-$ROOT/data/snapshots}"
 DB_PATH="${WNBA_DB_PATH:-$ROOT/data/wnba.sqlite}"
 SNAPSHOT_AUTOSAVE_INTERVAL="${SNAPSHOT_AUTOSAVE_INTERVAL:-300}"
 SNAPSHOT_KEEP_LATEST="${SNAPSHOT_KEEP_LATEST:-5}"
+SNAPSHOT_NAME="${SNAPSHOT_NAME:-wnba-runtime}"
 
 if [[ ! -x "$PYTHON" ]]; then
   echo "Missing Python virtual environment."
@@ -20,8 +21,8 @@ Usage:
   ./snapshot.sh
   ./snapshot.sh auto
   ./snapshot.sh start
-  ./snapshot.sh watch [--label NAME]
-  ./snapshot.sh create [--label NAME] [--device NAME] [--db-path PATH] [--output-dir PATH] [--keep-latest N]
+  ./snapshot.sh watch
+  ./snapshot.sh create [--name NAME] [--label NAME] [--device NAME] [--db-path PATH] [--output-dir PATH] [--keep-latest N]
   ./snapshot.sh restore <snapshot.sqlite> [--force] [--db-path PATH] [--snapshot-dir PATH]
   ./snapshot.sh list [--snapshot-dir PATH]
   ./snapshot.sh latest [--snapshot-dir PATH]
@@ -34,12 +35,10 @@ latest_snapshot_file() {
   if [[ ! -d "$dir" ]]; then
     return 0
   fi
-  # Determine "latest" by sortable timestamp in filename, not filesystem mtime.
-  ls -1 "$dir"/wnba-*.sqlite 2>/dev/null | sort | tail -n 1 || true
+  find "$dir" -maxdepth 1 -type f -name 'wnba-*.sqlite' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n 1 | cut -d' ' -f2- || true
 }
 
 snapshot_watch() {
-  local label="${1:-auto-watch}"
   local interval="$SNAPSHOT_AUTOSAVE_INTERVAL"
   if ! [[ "$interval" =~ ^[0-9]+$ ]] || [[ "$interval" -lt 5 ]]; then
     echo "Invalid SNAPSHOT_AUTOSAVE_INTERVAL='$interval'. Using 300 seconds."
@@ -52,7 +51,7 @@ snapshot_watch() {
     if [[ -f "$DB_PATH" ]]; then
       current_mtime="$(stat -c %Y "$DB_PATH" 2>/dev/null || true)"
       if [[ -n "$current_mtime" && "$current_mtime" != "$last_mtime" ]]; then
-        "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --label "$label" --keep-latest "$SNAPSHOT_KEEP_LATEST"
+        "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --name "$SNAPSHOT_NAME" --keep-latest "$SNAPSHOT_KEEP_LATEST"
         last_mtime="$current_mtime"
       fi
     fi
@@ -68,15 +67,20 @@ fi
 case "$command" in
   auto|start)
     mkdir -p "$SNAPSHOT_DIR"
-    latest_file="$(latest_snapshot_file "$SNAPSHOT_DIR")"
-    if [[ -n "$latest_file" ]]; then
+    latest_file=""
+    if [[ ! -f "$DB_PATH" ]]; then
+      latest_file="$(latest_snapshot_file "$SNAPSHOT_DIR")"
+    fi
+    if [[ -f "$DB_PATH" ]]; then
+      echo "Existing runtime DB found at $DB_PATH. Skipping auto-restore to avoid rolling back newer local data."
+    elif [[ -n "$latest_file" ]]; then
       echo "Restoring latest snapshot: $latest_file"
       "$PYTHON" "$ROOT/scripts/snapshot_restore.py" "$latest_file" --db-path "$DB_PATH" --snapshot-dir "$SNAPSHOT_DIR"
     else
       echo "No snapshots found in $SNAPSHOT_DIR. Starting without restore."
     fi
     echo "Starting snapshot watcher (every ${SNAPSHOT_AUTOSAVE_INTERVAL}s)..."
-    snapshot_watch auto-watch &
+    snapshot_watch &
     WATCHER_PID=$!
     echo "Starting app..."
     "$ROOT/dev.sh"
@@ -86,19 +90,15 @@ case "$command" in
       wait "$WATCHER_PID" 2>/dev/null || true
     fi
     echo "Creating shutdown snapshot..."
-    "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --label auto --keep-latest "$SNAPSHOT_KEEP_LATEST"
+    "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --name "$SNAPSHOT_NAME" --keep-latest "$SNAPSHOT_KEEP_LATEST"
     exit "$dev_exit"
     ;;
   watch)
-    label="auto-watch"
-    if [[ "${1:-}" == "--label" && -n "${2:-}" ]]; then
-      label="$2"
-    fi
-    echo "Watching DB changes for snapshots in $SNAPSHOT_DIR (interval ${SNAPSHOT_AUTOSAVE_INTERVAL}s, label '$label')."
-    snapshot_watch "$label"
+    echo "Watching DB changes for snapshots in $SNAPSHOT_DIR (interval ${SNAPSHOT_AUTOSAVE_INTERVAL}s, snapshot '$SNAPSHOT_NAME.sqlite')."
+    snapshot_watch
     ;;
   create)
-    "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --keep-latest "$SNAPSHOT_KEEP_LATEST" "$@"
+    "$PYTHON" "$ROOT/scripts/snapshot_create.py" --db-path "$DB_PATH" --output-dir "$SNAPSHOT_DIR" --name "$SNAPSHOT_NAME" --keep-latest "$SNAPSHOT_KEEP_LATEST" "$@"
     ;;
   restore)
     if [[ $# -lt 1 ]]; then

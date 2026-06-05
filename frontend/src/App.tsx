@@ -471,7 +471,7 @@ export function App() {
           label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
           value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
-        <Metric label="Settled props" value={performance?.settled.toString() ?? "0"} />
+        <Metric label="Settled props" value={(performance?.total_settled ?? performance?.settled ?? 0).toString()} />
         <Metric
           label="Win Rates"
           className="metric-compact"
@@ -1676,7 +1676,6 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
                 <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
               </div>
               <CoversRecordsPanel matchup={selectedMatchup} />
-              <p className="reason matchup-reason">{selectedMatchup.game_reason}</p>
             </article>
           ) : (
             <p className="empty">No scheduled games found.</p>

@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_DB_PATH = ROOT_DIR / "data" / "wnba.sqlite"
 DEFAULT_SNAPSHOT_DIR = ROOT_DIR / "data" / "snapshots"
+DEFAULT_SNAPSHOT_BASENAME = "wnba-runtime"
 ROW_COUNT_TABLES = (
     "games",
     "players",
@@ -60,8 +61,7 @@ def _row_counts(conn: sqlite3.Connection) -> dict[str, int]:
 def _prune_old_snapshots(output_dir: Path, keep_latest: int) -> None:
     if keep_latest <= 0:
         return
-    # Names include UTC timestamps (YYYYMMDDTHHMMSSZ), so lexical order is chronological.
-    snapshot_files = sorted(output_dir.glob("wnba-*.sqlite"), key=lambda p: p.name, reverse=True)
+    snapshot_files = sorted(output_dir.glob("wnba-*.sqlite"), key=lambda p: p.stat().st_mtime, reverse=True)
     for old_db in snapshot_files[keep_latest:]:
         old_manifest = old_db.with_suffix(".manifest.json")
         old_db.unlink(missing_ok=True)
@@ -71,7 +71,7 @@ def _prune_old_snapshots(output_dir: Path, keep_latest: int) -> None:
 def create_snapshot(
     db_path: Path,
     output_dir: Path,
-    label: str | None,
+    snapshot_name: str,
     device: str | None,
     keep_latest: int,
 ) -> tuple[Path, Path]:
@@ -79,10 +79,8 @@ def create_snapshot(
         raise FileNotFoundError(f"Database file not found: {db_path}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    name = f"wnba-{label}-{timestamp}" if label else f"wnba-{timestamp}"
-    snapshot_db = output_dir / f"{name}.sqlite"
-    snapshot_manifest = output_dir / f"{name}.manifest.json"
+    snapshot_db = output_dir / f"{snapshot_name}.sqlite"
+    snapshot_manifest = output_dir / f"{snapshot_name}.manifest.json"
 
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -116,7 +114,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Create a local SQLite snapshot with manifest and checksum.")
     parser.add_argument("--db-path", default=os.getenv("WNBA_DB_PATH") or str(DEFAULT_DB_PATH))
     parser.add_argument("--output-dir", default=str(DEFAULT_SNAPSHOT_DIR))
-    parser.add_argument("--label", default=None, help="Optional label in snapshot filename.")
+    parser.add_argument("--label", default=None, help="Optional label for a rolling snapshot filename (for example 'auto-watch' => wnba-auto-watch.sqlite).")
+    parser.add_argument("--name", default=None, help="Exact rolling snapshot basename without extension.")
     parser.add_argument("--device", default=None, help="Optional source device identifier.")
     parser.add_argument(
         "--keep-latest",
@@ -128,8 +127,12 @@ def main() -> None:
 
     db_path = Path(args.db_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
+    snapshot_name = str(args.name or "").strip()
+    if not snapshot_name:
+        label = str(args.label or "").strip()
+        snapshot_name = f"wnba-{label}" if label else DEFAULT_SNAPSHOT_BASENAME
     snapshot_db, snapshot_manifest = create_snapshot(
-        db_path, output_dir, args.label, args.device, args.keep_latest
+        db_path, output_dir, snapshot_name, args.device, args.keep_latest
     )
     print(f"Created snapshot DB: {snapshot_db}")
     print(f"Created manifest:   {snapshot_manifest}")
