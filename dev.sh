@@ -24,6 +24,12 @@ LOCAL_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
 SKIP_HEALTH_CHECK="${SKIP_HEALTH_CHECK:-0}"
 export BACKEND_PORT
 
+# Enforce local SQLite in dev startup by default.
+export USE_TURSO=0
+if [[ -z "${WNBA_DB_PATH:-}" ]]; then
+  export WNBA_DB_PATH="$ROOT/data/wnba.sqlite"
+fi
+
 if [[ ! -x "$PYTHON" ]]; then
   echo "Missing Python virtual environment."
   echo "Run: python3 -m venv .venv && \"$ROOT/.venv/bin/pip\" install -r backend/requirements.txt"

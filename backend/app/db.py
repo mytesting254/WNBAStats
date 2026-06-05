@@ -436,25 +436,73 @@ def init_db() -> None:
         conn.execute(
             """
             UPDATE players
-            SET team_id = (
-                SELECT hist.team_id
-                FROM (
-                    SELECT
-                        h.team_id,
-                        COUNT(*) AS team_count,
-                        MAX(COALESCE(g.game_date, h.observed_at)) AS last_seen
-                    FROM player_team_history h
-                    LEFT JOIN games g ON g.id = h.game_id
-                    WHERE h.player_id = players.id
-                    GROUP BY h.team_id
-                    ORDER BY team_count DESC, last_seen DESC, h.team_id DESC
-                    LIMIT 1
-                ) hist
-            )
-            WHERE EXISTS (
-                SELECT 1
-                FROM player_team_history h2
-                WHERE h2.player_id = players.id
+            SET team_id = COALESCE(
+                (
+                    SELECT resolved.team_id
+                    FROM (
+                        WITH recent_games AS (
+                            SELECT
+                                s.player_id,
+                                g.home_team_id,
+                                g.away_team_id,
+                                ROW_NUMBER() OVER (
+                                    PARTITION BY s.player_id
+                                    ORDER BY g.game_date DESC, g.id DESC
+                                ) AS rn
+                            FROM player_game_stats s
+                            JOIN games g ON g.id = s.game_id
+                            WHERE s.player_id = players.id
+                        ),
+                        recent_window AS (
+                            SELECT *
+                            FROM recent_games
+                            WHERE rn <= 8
+                        ),
+                        side_counts AS (
+                            SELECT home_team_id AS team_id, COUNT(*) AS appearances
+                            FROM recent_window
+                            GROUP BY home_team_id
+                            UNION ALL
+                            SELECT away_team_id AS team_id, COUNT(*) AS appearances
+                            FROM recent_window
+                            GROUP BY away_team_id
+                        ),
+                        collapsed AS (
+                            SELECT team_id, SUM(appearances) AS appearances
+                            FROM side_counts
+                            GROUP BY team_id
+                        ),
+                        ranked AS (
+                            SELECT
+                                team_id,
+                                appearances,
+                                ROW_NUMBER() OVER (ORDER BY appearances DESC, team_id DESC) AS rn,
+                                LEAD(appearances) OVER (ORDER BY appearances DESC, team_id DESC) AS next_appearances
+                            FROM collapsed
+                        )
+                        SELECT team_id
+                        FROM ranked
+                        WHERE rn = 1
+                          AND appearances >= 3
+                          AND appearances > COALESCE(next_appearances, 0)
+                    ) resolved
+                ),
+                (
+                    SELECT hist.team_id
+                    FROM (
+                        SELECT
+                            h.team_id,
+                            COUNT(*) AS team_count,
+                            MAX(g.game_date) AS last_seen
+                        FROM player_team_history h
+                        JOIN games g ON g.id = h.game_id
+                        WHERE h.player_id = players.id
+                        GROUP BY h.team_id
+                        ORDER BY team_count DESC, last_seen DESC, h.team_id DESC
+                        LIMIT 1
+                    ) hist
+                ),
+                players.team_id
             )
             """
         )

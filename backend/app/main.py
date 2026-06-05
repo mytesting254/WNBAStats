@@ -32,6 +32,10 @@ COMPLETED_GAME_GRACE_HOURS = 4
 LOCAL_TZ = timezone(timedelta(hours=-4))
 LOW_CONFIDENCE_EDGE_MIN = float(os.getenv("LOW_CONFIDENCE_EDGE_MIN", "0.08"))
 LOW_CONFIDENCE_EDGE_MAX = float(os.getenv("LOW_CONFIDENCE_EDGE_MAX", "0.18"))
+PLAYER_DATA_MAX_LAG_DAYS = int(os.getenv("PLAYER_DATA_MAX_LAG_DAYS", "5"))
+PLAYER_DATA_MIN_RECENT_GAMES = int(os.getenv("PLAYER_DATA_MIN_RECENT_GAMES", "3"))
+PLAYER_DATA_RECENT_WINDOW_DAYS = int(os.getenv("PLAYER_DATA_RECENT_WINDOW_DAYS", "30"))
+ENABLE_PLAYER_FRESHNESS_GATE = os.getenv("ENABLE_PLAYER_FRESHNESS_GATE", "0").strip().lower() in {"1", "true", "yes"}
 VALUE_BOARD_CACHE_NAME = "current_value_board.json"
 MATCHUPS_CACHE_NAME = "current_matchups.json"
 LINE_DISCREPANCIES_CACHE_NAME = "line_discrepancies.json"
@@ -1297,6 +1301,7 @@ def import_espn_history(
     include_player_stats: bool = True,
     include_previous_season: bool = False,
     missing_only: bool = False,
+    auto_backfill_gaps: bool = False,
     selected_date: str | None = None,
     selected_dates: Annotated[list[str] | None, Query()] = None,
 ) -> dict:
@@ -1390,6 +1395,15 @@ def import_espn_history(
             synced_props = sync_prop_lines_from_sportsbook(conn)
             projections = rebuild_predictions(conn)
             watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
+            gap_audit = _espn_stats_gap_audit(conn)
+            backfill_result: dict[str, Any] | None = None
+            if auto_backfill_gaps and include_player_stats and gap_audit["missing_dates"]:
+                backfill_result = _backfill_espn_stats_gaps(
+                    conn,
+                    gap_audit["missing_dates"],
+                    force_refresh=force_refresh,
+                )
+                gap_audit = _espn_stats_gap_audit(conn)
     except Exception as exc:
         message = str(exc)
         if "turso" in message.lower() or "httpsconnectionpool" in message.lower() or "nameresolutionerror" in message.lower():
@@ -1420,6 +1434,8 @@ def import_espn_history(
         "missing_only": missing_only,
         "source": "espn",
         "errors": errors,
+        "gap_audit": gap_audit,
+        "gap_backfill": backfill_result,
     }
 
 
@@ -1458,6 +1474,60 @@ def import_missing_espn_history(
     result["missing_dates"] = selected_dates
     result["missing_count"] = len(payload.get("games", []))
     return result
+
+
+@app.get("/api/history/audit/espn-gaps")
+def audit_espn_history_gaps(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit_missing_games: int = 200,
+) -> dict:
+    with connect() as conn:
+        return _espn_stats_gap_audit(
+            conn,
+            start_date=start_date,
+            end_date=end_date,
+            limit_missing_games=max(1, min(limit_missing_games, 1000)),
+        )
+
+
+@app.post("/api/history/backfill/espn-gaps", dependencies=[Depends(_protect_mutation)])
+def backfill_espn_history_gaps(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    force_refresh: bool = True,
+) -> dict:
+    with connect() as conn:
+        before = _espn_stats_gap_audit(conn, start_date=start_date, end_date=end_date, limit_missing_games=1000)
+        result = _backfill_espn_stats_gaps(
+            conn,
+            before["missing_dates"],
+            force_refresh=force_refresh,
+        )
+        ats_backfill = _recompute_team_results_from_game_lines(conn)
+        settlements = settle_completed_props(conn)
+        game_settlements = settle_completed_game_predictions(conn)
+        gem_settlements = _sync_gem_snapshot_settlements(conn)
+        watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
+        synced_props = sync_prop_lines_from_sportsbook(conn)
+        projections = rebuild_predictions(conn)
+        watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
+        after = _espn_stats_gap_audit(conn, start_date=start_date, end_date=end_date, limit_missing_games=1000)
+    _invalidate_read_caches()
+    return {
+        "source": "espn",
+        "backfill": result,
+        "gap_audit_before": before,
+        "gap_audit_after": after,
+        "ats_backfill": ats_backfill,
+        "settlements": settlements,
+        "game_settlements": game_settlements,
+        "gem_settlements": gem_settlements,
+        "watchlist_settlements": watchlist_settlements,
+        "watchlist_snapshot": watchlist_snapshot,
+        "synced_props": synced_props,
+        "predictions": len(projections),
+    }
 
 
 @app.post("/api/history/recompute-ats", dependencies=[Depends(_protect_mutation)])
@@ -1547,6 +1617,143 @@ def _parse_iso_date(value: str, field: str):
         return datetime.strptime(value, "%Y-%m-%d").date()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid {field}: {value}") from exc
+
+
+def _espn_stats_gap_audit(
+    conn,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit_missing_games: int = 200,
+) -> dict:
+    today = datetime.now(LOCAL_TZ).date()
+    if end_date:
+        end = _parse_iso_date(end_date, "end_date")
+    else:
+        end = today
+    if start_date:
+        start = _parse_iso_date(start_date, "start_date")
+    else:
+        start = max(end - timedelta(days=45), datetime(end.year, 1, 1).date())
+    if end < start:
+        raise HTTPException(status_code=400, detail="end_date must be on or after start_date")
+
+    coverage_rows = conn.execute(
+        """
+        SELECT
+            g.game_date,
+            COUNT(*) AS final_games,
+            SUM(CASE WHEN EXISTS (SELECT 1 FROM player_game_stats s WHERE s.game_id = g.id) THEN 1 ELSE 0 END) AS games_with_stats,
+            SUM(CASE WHEN EXISTS (SELECT 1 FROM player_game_stats s WHERE s.game_id = g.id) THEN 0 ELSE 1 END) AS games_missing_stats
+        FROM games g
+        WHERE g.status = 'final'
+          AND g.game_date >= ?
+          AND g.game_date <= ?
+        GROUP BY g.game_date
+        ORDER BY g.game_date DESC
+        """,
+        (start.isoformat(), end.isoformat()),
+    ).fetchall()
+
+    missing_games = conn.execute(
+        """
+        SELECT
+            g.game_date,
+            g.id AS game_id,
+            ht.abbreviation AS home_team,
+            at.abbreviation AS away_team
+        FROM games g
+        JOIN teams ht ON ht.id = g.home_team_id
+        JOIN teams at ON at.id = g.away_team_id
+        WHERE g.status = 'final'
+          AND g.game_date >= ?
+          AND g.game_date <= ?
+          AND NOT EXISTS (SELECT 1 FROM player_game_stats s WHERE s.game_id = g.id)
+        ORDER BY g.game_date DESC, g.id DESC
+        LIMIT ?
+        """,
+        (start.isoformat(), end.isoformat(), int(limit_missing_games)),
+    ).fetchall()
+
+    latest_final = conn.execute(
+        """
+        SELECT MAX(game_date) AS latest_final_date
+        FROM games
+        WHERE status = 'final' AND game_date <= ?
+        """,
+        (today.isoformat(),),
+    ).fetchone()
+    latest_stats = conn.execute(
+        """
+        SELECT MAX(g.game_date) AS latest_stats_date
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        WHERE g.game_date <= ?
+        """,
+        (today.isoformat(),),
+    ).fetchone()
+
+    latest_final_date = latest_final["latest_final_date"] if latest_final else None
+    latest_stats_date = latest_stats["latest_stats_date"] if latest_stats else None
+    lag_days = None
+    if latest_final_date and latest_stats_date:
+        lag_days = (datetime.strptime(latest_final_date, "%Y-%m-%d").date() - datetime.strptime(latest_stats_date, "%Y-%m-%d").date()).days
+
+    missing_dates = sorted({str(row["game_date"]) for row in missing_games})
+    strict_ok = len(missing_dates) == 0 and (lag_days is None or lag_days <= 0)
+    return {
+        "window_start": start.isoformat(),
+        "window_end": end.isoformat(),
+        "latest_final_game_date": latest_final_date,
+        "latest_stats_game_date": latest_stats_date,
+        "stats_lag_days": lag_days,
+        "missing_dates": missing_dates,
+        "missing_dates_count": len(missing_dates),
+        "missing_games_count": len(missing_games),
+        "missing_games": [dict(row) for row in missing_games],
+        "coverage_by_date": [dict(row) for row in coverage_rows],
+        "strict_ok": strict_ok,
+    }
+
+
+def _backfill_espn_stats_gaps(conn, missing_dates: list[str], *, force_refresh: bool = True) -> dict:
+    dates = sorted({date for date in missing_dates if date})
+    scoreboards = []
+    boxscores = []
+    errors = []
+    for date_text in dates:
+        season = _season_for_date(date_text)
+        try:
+            scoreboards.append(
+                import_espn_scoreboard(
+                    conn,
+                    season,
+                    force_refresh=force_refresh,
+                    selected_date=date_text,
+                )
+            )
+        except Exception as exc:
+            errors.append({"stage": "scoreboard", "selected_date": date_text, "season": season, "error": str(exc)})
+            continue
+        try:
+            boxscores.append(
+                import_espn_player_boxscores(
+                    conn,
+                    season,
+                    force_refresh=force_refresh,
+                    missing_only=True,
+                    selected_date=date_text,
+                )
+            )
+        except Exception as exc:
+            errors.append({"stage": "boxscore", "selected_date": date_text, "season": season, "error": str(exc)})
+    return {
+        "dates_attempted": dates,
+        "dates_attempted_count": len(dates),
+        "scoreboards": scoreboards,
+        "player_stats": boxscores,
+        "errors": errors,
+    }
 
 
 def _recompute_team_results_from_game_lines(conn) -> dict:
@@ -1866,6 +2073,10 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
             away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
             game_id = int(game["id"])
             market_override = covers_market_odds.get(game_id, {})
+            group_covers_records = next(
+                (covers_records.get(int(candidate_id)) for candidate_id in game_ids if covers_records.get(int(candidate_id))),
+                covers_records.get(game_id),
+            )
             home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
             away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
             game_context = dict(game)
@@ -1899,7 +2110,7 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
                     **prediction,
                     "home": home_summary,
                     "away": away_summary,
-                    "covers_records": covers_records.get(game_id),
+                    "covers_records": group_covers_records,
                     "props": _value_board_payload_for_games(conn, game_ids),
                     "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
                     "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
@@ -2197,20 +2408,41 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
                         LEFT JOIN games hg ON hg.id = h.game_id
                         WHERE h.player_id = p.id
                           AND h.team_id IN (g.home_team_id, g.away_team_id)
-                          AND (
-                            h.game_id IS NULL
-                            OR hg.game_date IS NULL
-                            OR hg.game_date <= g.game_date
-                          )
+                          AND h.game_id IS NOT NULL
+                          AND hg.game_date IS NOT NULL
+                          AND hg.game_date <= g.game_date
                         ORDER BY hg.game_date DESC, h.id DESC
                         LIMIT 1
                     ),
                     (
+                        SELECT CASE
+                            WHEN SUM(CASE WHEN recent.home_team_id = g.home_team_id OR recent.away_team_id = g.home_team_id THEN 1 ELSE 0 END)
+                               > SUM(CASE WHEN recent.home_team_id = g.away_team_id OR recent.away_team_id = g.away_team_id THEN 1 ELSE 0 END)
+                            THEN g.home_team_id
+                            WHEN SUM(CASE WHEN recent.home_team_id = g.home_team_id OR recent.away_team_id = g.home_team_id THEN 1 ELSE 0 END)
+                               < SUM(CASE WHEN recent.home_team_id = g.away_team_id OR recent.away_team_id = g.away_team_id THEN 1 ELSE 0 END)
+                            THEN g.away_team_id
+                            ELSE NULL
+                        END
+                        FROM (
+                            SELECT rg.home_team_id, rg.away_team_id
+                            FROM player_game_stats s2
+                            JOIN games rg ON rg.id = s2.game_id
+                            WHERE s2.player_id = p.id
+                              AND (rg.game_date < g.game_date OR (rg.game_date = g.game_date AND s2.game_id < g.id))
+                            ORDER BY rg.game_date DESC, s2.game_id DESC
+                            LIMIT 8
+                        ) recent
+                    ),
+                    (
                         SELECT h.team_id
                         FROM player_team_history h
+                        LEFT JOIN games hg ON hg.id = h.game_id
                         WHERE h.player_id = p.id
                           AND h.team_id IN (g.home_team_id, g.away_team_id)
-                        ORDER BY h.id DESC
+                          AND h.game_id IS NOT NULL
+                          AND hg.game_date IS NOT NULL
+                        ORDER BY hg.game_date DESC, h.id DESC
                         LIMIT 1
                     ),
                     CASE
@@ -2252,12 +2484,28 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
         params,
     ).fetchall()
     payload = []
+    fallback_payload = []
+    freshness_cache: dict[tuple[int, int], dict[str, Any]] = {}
     for row in rows:
-        if game_id is None and not _is_active_game_time(row["start_time"]):
-            continue
+        is_active_time = _is_active_game_time(row["start_time"])
         item = dict(row)
         if not _include_value_board_pick(item):
             continue
+        if ENABLE_PLAYER_FRESHNESS_GATE:
+            freshness_key = (int(item["player_id"]), int(item["game_id"]))
+            freshness = freshness_cache.get(freshness_key)
+            if freshness is None:
+                freshness = _player_data_freshness(
+                    conn,
+                    player_id=freshness_key[0],
+                    game_id=freshness_key[1],
+                    max_lag_days=PLAYER_DATA_MAX_LAG_DAYS,
+                    min_recent_games=PLAYER_DATA_MIN_RECENT_GAMES,
+                    recent_window_days=PLAYER_DATA_RECENT_WINDOW_DAYS,
+                )
+                freshness_cache[freshness_key] = freshness
+            if not freshness["is_fresh"]:
+                continue
         item["recent_values"] = _recent_market_values(
             conn,
             player_id=int(item["player_id"]),
@@ -2272,8 +2520,13 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
             limit=5,
         )
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
+        fallback_payload.append(item)
+        if game_id is None and not is_active_time:
+            continue
         payload.append(item)
-    return payload
+    if payload:
+        return payload
+    return fallback_payload
 
 
 def _recent_market_values(conn, *, player_id: int, market: str, game_id: int, limit: int = 5) -> list[float]:
@@ -2319,6 +2572,60 @@ def _recent_minutes_played(conn, *, player_id: int, game_id: int, limit: int = 5
         (int(game_id), int(player_id), int(limit)),
     ).fetchall()
     return [round(float(row["minutes"] or 0.0), 1) for row in rows]
+
+
+def _player_data_freshness(
+    conn,
+    *,
+    player_id: int,
+    game_id: int,
+    max_lag_days: int,
+    min_recent_games: int,
+    recent_window_days: int,
+) -> dict[str, Any]:
+    target = conn.execute("SELECT game_date FROM games WHERE id = ?", (int(game_id),)).fetchone()
+    if not target or not target["game_date"]:
+        return {"is_fresh": False, "reason": "missing_target_game"}
+    target_date = datetime.strptime(str(target["game_date"]), "%Y-%m-%d").date()
+    latest_row = conn.execute(
+        """
+        SELECT MAX(g.game_date) AS latest_game_date
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        WHERE s.player_id = ?
+          AND (g.game_date < ? OR (g.game_date = ? AND s.game_id < ?))
+        """,
+        (int(player_id), target_date.isoformat(), target_date.isoformat(), int(game_id)),
+    ).fetchone()
+    if not latest_row or not latest_row["latest_game_date"]:
+        return {"is_fresh": False, "reason": "no_history"}
+    latest_date = datetime.strptime(str(latest_row["latest_game_date"]), "%Y-%m-%d").date()
+    lag_days = (target_date - latest_date).days
+    recent_count_row = conn.execute(
+        """
+        SELECT COUNT(*) AS c
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        WHERE s.player_id = ?
+          AND g.game_date >= ?
+          AND (g.game_date < ? OR (g.game_date = ? AND s.game_id < ?))
+        """,
+        (
+            int(player_id),
+            (target_date - timedelta(days=max(1, int(recent_window_days)))).isoformat(),
+            target_date.isoformat(),
+            target_date.isoformat(),
+            int(game_id),
+        ),
+    ).fetchone()
+    recent_games = int((recent_count_row["c"] if recent_count_row else 0) or 0)
+    is_fresh = lag_days <= max(0, int(max_lag_days)) and recent_games >= max(1, int(min_recent_games))
+    return {
+        "is_fresh": is_fresh,
+        "lag_days": lag_days,
+        "recent_games": recent_games,
+        "latest_game_date": latest_date.isoformat(),
+    }
 
 
 def _market_value_from_stats_row(row, market: str) -> float | None:
@@ -2390,20 +2697,41 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
                         LEFT JOIN games hg ON hg.id = h.game_id
                         WHERE h.player_id = p.id
                           AND h.team_id IN (g.home_team_id, g.away_team_id)
-                          AND (
-                            h.game_id IS NULL
-                            OR hg.game_date IS NULL
-                            OR hg.game_date <= g.game_date
-                          )
+                          AND h.game_id IS NOT NULL
+                          AND hg.game_date IS NOT NULL
+                          AND hg.game_date <= g.game_date
                         ORDER BY hg.game_date DESC, h.id DESC
                         LIMIT 1
                     ),
                     (
+                        SELECT CASE
+                            WHEN SUM(CASE WHEN recent.home_team_id = g.home_team_id OR recent.away_team_id = g.home_team_id THEN 1 ELSE 0 END)
+                               > SUM(CASE WHEN recent.home_team_id = g.away_team_id OR recent.away_team_id = g.away_team_id THEN 1 ELSE 0 END)
+                            THEN g.home_team_id
+                            WHEN SUM(CASE WHEN recent.home_team_id = g.home_team_id OR recent.away_team_id = g.home_team_id THEN 1 ELSE 0 END)
+                               < SUM(CASE WHEN recent.home_team_id = g.away_team_id OR recent.away_team_id = g.away_team_id THEN 1 ELSE 0 END)
+                            THEN g.away_team_id
+                            ELSE NULL
+                        END
+                        FROM (
+                            SELECT rg.home_team_id, rg.away_team_id
+                            FROM player_game_stats s2
+                            JOIN games rg ON rg.id = s2.game_id
+                            WHERE s2.player_id = p.id
+                              AND (rg.game_date < g.game_date OR (rg.game_date = g.game_date AND s2.game_id < g.id))
+                            ORDER BY rg.game_date DESC, s2.game_id DESC
+                            LIMIT 8
+                        ) recent
+                    ),
+                    (
                         SELECT h.team_id
                         FROM player_team_history h
+                        LEFT JOIN games hg ON hg.id = h.game_id
                         WHERE h.player_id = p.id
                           AND h.team_id IN (g.home_team_id, g.away_team_id)
-                        ORDER BY h.id DESC
+                          AND h.game_id IS NOT NULL
+                          AND hg.game_date IS NOT NULL
+                        ORDER BY hg.game_date DESC, h.id DESC
                         LIMIT 1
                     ),
                     CASE
@@ -2456,6 +2784,7 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
     value_board_prediction_ids = {int(item["id"]) for item in _value_board_payload(conn)}
     gem_prop_line_ids = {int(item["prop_line_id"]) for item in _build_current_gems(conn, "balanced")}
     payload = []
+    freshness_cache: dict[tuple[int, int], dict[str, Any]] = {}
     for row in rows:
         item = dict(row)
         if not _include_watchlist_pick(item):
@@ -2466,6 +2795,21 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
             continue
         if not _is_active_game_time(item["start_time"]):
             continue
+        if ENABLE_PLAYER_FRESHNESS_GATE:
+            freshness_key = (int(item["player_id"]), int(item["game_id"]))
+            freshness = freshness_cache.get(freshness_key)
+            if freshness is None:
+                freshness = _player_data_freshness(
+                    conn,
+                    player_id=freshness_key[0],
+                    game_id=freshness_key[1],
+                    max_lag_days=PLAYER_DATA_MAX_LAG_DAYS,
+                    min_recent_games=PLAYER_DATA_MIN_RECENT_GAMES,
+                    recent_window_days=PLAYER_DATA_RECENT_WINDOW_DAYS,
+                )
+                freshness_cache[freshness_key] = freshness
+            if not freshness["is_fresh"]:
+                continue
         item["recent_values"] = _recent_market_values(
             conn,
             player_id=int(item["player_id"]),
