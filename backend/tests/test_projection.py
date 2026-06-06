@@ -625,6 +625,35 @@ def test_game_projection_applies_injury_penalty_for_key_starter() -> None:
     assert "injury adjustment" in adjusted["game_reason"].lower()
 
 
+def test_game_projection_blends_market_prior_for_heavy_favorite() -> None:
+    load_test_history()
+    with connect() as conn:
+        game = conn.execute(
+            """
+            SELECT
+                g.*,
+                home.abbreviation AS home_team,
+                away.abbreviation AS away_team
+            FROM games g
+            JOIN teams home ON home.id = g.home_team_id
+            JOIN teams away ON away.id = g.away_team_id
+            WHERE g.id = 2010
+            """
+        ).fetchone()
+        conn.execute(
+            "UPDATE games SET spread_home = -11.5 WHERE id = 2010"
+        )
+        conn.execute(
+            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
+            (1001, "out", "test", datetime.now(timezone.utc).isoformat()),
+        )
+        adjusted = project_game(conn, game)
+
+    assert adjusted["winner_pick"] == "NY"
+    assert adjusted["projected_margin"] > 0
+    assert adjusted["ats_pick"] == "CON +11.5"
+
+
 def test_game_predictions_are_saved_and_settled() -> None:
     load_test_history()
     with connect() as conn:
