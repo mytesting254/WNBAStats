@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -43,6 +44,58 @@ MARKET_SIGMA_FLOORS = {
 CALIBRATION_MIN_SAMPLES = 120
 CALIBRATION_BIN_WIDTH = 0.05
 CALIBRATION_SHRINKAGE_K = 20.0
+
+
+def _is_db_locked(exc: sqlite3.OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()
+
+
+def _execute_with_lock_retry(
+    conn: sqlite3.Connection,
+    sql: str,
+    params: tuple | list = (),
+    *,
+    attempts: int = 20,
+    base_sleep: float = 0.15,
+) -> None:
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(attempts):
+        try:
+            conn.execute(sql, params)
+            return
+        except sqlite3.OperationalError as exc:
+            if not _is_db_locked(exc):
+                raise
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(base_sleep * (attempt + 1))
+    if last_error is not None:
+        raise last_error
+
+
+def _executemany_with_lock_retry(
+    conn: sqlite3.Connection,
+    sql: str,
+    seq_of_params,
+    *,
+    attempts: int = 20,
+    base_sleep: float = 0.15,
+) -> None:
+    last_error: sqlite3.OperationalError | None = None
+    for attempt in range(attempts):
+        try:
+            conn.executemany(sql, seq_of_params)
+            return
+        except sqlite3.OperationalError as exc:
+            if not _is_db_locked(exc):
+                raise
+            last_error = exc
+            if attempt == attempts - 1:
+                break
+            time.sleep(base_sleep * (attempt + 1))
+    if last_error is not None:
+        raise last_error
 
 
 @dataclass(frozen=True)
@@ -262,7 +315,8 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
     clear_model_cache()
     _refresh_scheduled_game_rest_days(conn)
     # Defensive cleanup for legacy partial-import states.
-    conn.execute(
+    _execute_with_lock_retry(
+        conn,
         """
         DELETE FROM watchlist_snapshot_items
         WHERE NOT EXISTS (
@@ -270,10 +324,11 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
             FROM prop_predictions pp
             WHERE pp.id = watchlist_snapshot_items.prediction_id
         )
-        """
+        """,
     )
     # Defensive cleanup in case legacy/orphaned rows exist from prior partial imports.
-    conn.execute(
+    _execute_with_lock_retry(
+        conn,
         """
         DELETE FROM prop_predictions
         WHERE NOT EXISTS (
@@ -281,7 +336,7 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
             FROM prop_lines pl
             WHERE pl.id = prop_predictions.prop_line_id
         )
-        """
+        """,
     )
     props = conn.execute(
         """
@@ -296,7 +351,8 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
     prop_ids = [p.prop_line_id for p in projections]
     if prop_ids:
         placeholders = ",".join("?" for _ in prop_ids)
-        conn.execute(
+        _execute_with_lock_retry(
+            conn,
             f"""
             DELETE FROM watchlist_snapshot_items
             WHERE prediction_id IN (
@@ -308,7 +364,8 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
             """,
             (MODEL_VERSION, *prop_ids),
         )
-        conn.execute(
+        _execute_with_lock_retry(
+            conn,
             f"""
             DELETE FROM prop_predictions
             WHERE model_version = ?
@@ -316,7 +373,8 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
             """,
             (MODEL_VERSION, *prop_ids),
         )
-    conn.executemany(
+    _executemany_with_lock_retry(
+        conn,
         """
         INSERT INTO prop_predictions (
             prop_line_id, model_version, prediction_time, projection, recommended_side,
@@ -366,7 +424,8 @@ def _refresh_scheduled_game_rest_days(conn: sqlite3.Connection) -> None:
             )
         )
     if updates:
-        conn.executemany(
+        _executemany_with_lock_retry(
+            conn,
             """
             UPDATE games
             SET rest_days_home = ?, rest_days_away = ?

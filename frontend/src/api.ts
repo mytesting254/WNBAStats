@@ -563,11 +563,18 @@ export async function importMissingEspnScores(
   return response.json();
 }
 
-export async function recalculate(): Promise<void> {
+export async function recalculate(): Promise<{
+  predictions: number;
+  settled: number;
+  game_settled: number;
+  status?: string;
+  message?: string;
+}> {
   const response = await apiFetch("/api/recalculate", { method: "POST", includeApiKey: true });
   if (!response.ok) {
     throw new Error("Failed to recalculate projections");
   }
+  return response.json();
 }
 
 export async function fetchModelRuns(): Promise<{ latest: ModelRun | null; runs: ModelRun[] }> {
