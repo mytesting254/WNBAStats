@@ -19,7 +19,7 @@ from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
 from .db import connect, init_db
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
-from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
+from .game_prediction_tracking import settle_completed_game_predictions
 from .game_predictions import project_game
 from .odds_import import RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME, import_the_odds_api_props, line_discrepancies, list_sportsbook_props, odds_cache_summary, sync_prop_lines_from_sportsbook
 from .projections import rebuild_predictions
@@ -2129,7 +2129,7 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
             return cached
     with connect() as conn:
         started = datetime.now(timezone.utc)
-        injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
+        injury_refresh = _rotowire_cache_meta()
         games = conn.execute(
             """
             SELECT
@@ -2180,11 +2180,10 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
             game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
             game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
             prediction = project_game(conn, game_context)
-            game_prediction_id = save_game_prediction(conn, game_context, prediction)
             payload.append(
                 {
                     "id": game["id"],
-                    "game_prediction_id": game_prediction_id,
+                    "game_prediction_id": None,
                     "game_date": game["game_date"],
                     "start_time": game["start_time"],
                     "home_team": game["home_team"],
@@ -2217,6 +2216,17 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
     compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
     _set_observability_headers(response, MATCHUPS_CACHE_NAME, "BYPASS" if force_refresh else "MISS", round(compute_ms, 2))
     return payload
+
+
+def _rotowire_cache_meta() -> dict[str, Any]:
+    payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
+    if not isinstance(payload, dict):
+        return {"source": None, "captured_at": None, "from_cache": False}
+    return {
+        "source": payload.get("source") or "cache",
+        "captured_at": payload.get("captured_at"),
+        "from_cache": True,
+    }
 
 
 def _start_prop_sync_if_needed(source: str) -> bool:
