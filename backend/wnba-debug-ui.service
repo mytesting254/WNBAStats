@@ -1,0 +1,23 @@
+[Unit]
+Description=WNBA Backend Debug UI
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/app-src/backend
+Environment=PORT=5174
+ExecStart=/usr/bin/python3 -m http.server ${PORT} --directory /root/app-src/backend/debug-ui
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/root/app-src/backend
+
+[Install]
+WantedBy=multi-user.target

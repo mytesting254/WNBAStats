@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WNBA Backend Debug UI</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f4f7fb;
+        --panel: #ffffff;
+        --ink: #152033;
+        --muted: #5e6b82;
+        --line: #d9e1ec;
+        --accent: #0f766e;
+        --accent-2: #1d4ed8;
+        --warn: #b45309;
+        --danger: #b91c1c;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+        background:
+          radial-gradient(circle at top right, #dbeafe 0, transparent 25%),
+          linear-gradient(180deg, #eef4ff 0, var(--bg) 100%);
+        color: var(--ink);
+      }
+      .shell {
+        max-width: 1400px;
+        margin: 0 auto;
+        padding: 24px;
+      }
+      .hero, .panel {
+        background: rgba(255, 255, 255, 0.88);
+        backdrop-filter: blur(10px);
+        border: 1px solid rgba(217, 225, 236, 0.9);
+        border-radius: 18px;
+        box-shadow: 0 20px 50px rgba(21, 32, 51, 0.08);
+      }
+      .hero {
+        padding: 20px;
+        margin-bottom: 18px;
+      }
+      h1, h2, h3, p { margin-top: 0; }
+      h1 { margin-bottom: 8px; font-size: 30px; }
+      .sub { color: var(--muted); margin-bottom: 0; }
+      .controls {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr 0.8fr 0.8fr;
+        gap: 12px;
+        margin-top: 18px;
+      }
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+      label {
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      input, select, button {
+        min-height: 42px;
+        border-radius: 12px;
+        border: 1px solid var(--line);
+        font: inherit;
+      }
+      input, select {
+        width: 100%;
+        padding: 0 12px;
+        background: #fff;
+      }
+      button {
+        padding: 0 14px;
+        background: #fff;
+        color: var(--ink);
+        cursor: pointer;
+        font-weight: 700;
+      }
+      button.primary {
+        background: var(--accent-2);
+        border-color: var(--accent-2);
+        color: #fff;
+      }
+      button.good {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      button.warn {
+        background: #fff7ed;
+        border-color: #fdba74;
+        color: var(--warn);
+      }
+      button:disabled { opacity: 0.6; cursor: wait; }
+      .action-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 14px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 14px;
+        margin-bottom: 18px;
+      }
+      .metric {
+        padding: 16px;
+      }
+      .metric span {
+        display: block;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .metric strong {
+        display: block;
+        margin-top: 10px;
+        font-size: 30px;
+      }
+      .status-bar {
+        margin: 0 0 18px;
+        padding: 14px 16px;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--muted);
+      }
+      .status-strip {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin: 0 0 18px;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        min-height: 36px;
+        padding: 0 12px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: #fff;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .pill.ok {
+        border-color: #86efac;
+        background: #f0fdf4;
+        color: #166534;
+      }
+      .pill.bad {
+        border-color: #fca5a5;
+        background: #fef2f2;
+        color: #991b1b;
+      }
+      .pill.warn {
+        border-color: #fdba74;
+        background: #fff7ed;
+        color: #9a3412;
+      }
+      .status-bar.error {
+        border-color: #fecaca;
+        background: #fff1f2;
+        color: var(--danger);
+      }
+      .status-bar.success {
+        border-color: #a7f3d0;
+        background: #ecfdf5;
+        color: #047857;
+      }
+      .workspace {
+        display: grid;
+        grid-template-columns: 0.9fr 1.1fr;
+        gap: 16px;
+      }
+      .panel {
+        overflow: hidden;
+      }
+      .panel-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--line);
+      }
+      .panel-body {
+        padding: 18px;
+      }
+      .list {
+        display: grid;
+        gap: 10px;
+      }
+      .row {
+        padding: 12px 14px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #fff;
+      }
+      .row strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+      .row span {
+        color: var(--muted);
+        font-size: 14px;
+      }
+      pre {
+        margin: 0;
+        max-height: 700px;
+        overflow: auto;
+        padding: 16px;
+        background: #101828;
+        color: #d1fae5;
+        font-size: 13px;
+        line-height: 1.5;
+      }
+      .tabs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .tabs button.active {
+        background: var(--accent-2);
+        border-color: var(--accent-2);
+        color: #fff;
+      }
+      @media (max-width: 1100px) {
+        .controls, .grid, .workspace {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <h1>WNBA Backend Debug UI</h1>
+        <p class="sub">Visual dev-only surface for inspecting backend changes before deploy.</p>
+        <div class="controls">
+          <div class="field">
+            <label for="baseUrl">API Base URL</label>
+            <input id="baseUrl" value="http://127.0.0.1:8001" />
+          </div>
+          <div class="field">
+            <label for="apiKey">Dev API Key</label>
+            <input id="apiKey" placeholder="Optional in dev mode" />
+          </div>
+          <div class="field">
+            <label for="importSource">Prop Source</label>
+            <select id="importSource">
+              <option value="covers">Covers</option>
+              <option value="odds">Odds API</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="forceRefresh">Force Refresh</label>
+            <select id="forceRefresh">
+              <option value="false">false</option>
+              <option value="true">true</option>
+            </select>
+          </div>
+        </div>
+        <div class="action-row">
+          <button id="reloadBtn" class="primary">Reload Dashboard</button>
+          <button id="importBtn" class="good">Import Props</button>
+          <button id="espnBtn" class="warn">Run ESPN Refresh</button>
+          <button id="settleBtn">Settle Props</button>
+        </div>
+      </section>
+
+      <div id="status" class="status-bar">Ready.</div>
+      <div class="status-strip">
+        <div id="backendBadge" class="pill warn">Backend: checking</div>
+        <div id="endpointBadge" class="pill">Base URL: http://127.0.0.1:8001</div>
+      </div>
+
+      <section class="grid">
+        <div class="panel metric"><span>Value Board Props</span><strong id="metricProps">0</strong></div>
+        <div class="panel metric"><span>Matchups</span><strong id="metricMatchups">0</strong></div>
+        <div class="panel metric"><span>Line Gaps</span><strong id="metricDiscrepancies">0</strong></div>
+        <div class="panel metric"><span>Sportsbook Props</span><strong id="metricSportsbook">0</strong></div>
+      </section>
+
+      <section class="workspace">
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>Visual Snapshot</h2>
+              <p class="sub">Top rows from the current dev backend state.</p>
+            </div>
+          </div>
+          <div class="panel-body">
+            <h3>Value Board</h3>
+            <div id="valueBoardList" class="list"></div>
+            <h3 style="margin-top: 18px;">Matchups</h3>
+            <div id="matchupList" class="list"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>JSON Inspector</h2>
+              <p class="sub">Switch between payloads to inspect exact backend output.</p>
+            </div>
+            <div class="tabs">
+              <button data-tab="value-board" class="active">Value Board</button>
+              <button data-tab="matchups">Matchups</button>
+              <button data-tab="line-discrepancies">Discrepancies</button>
+              <button data-tab="sportsbook-props">Sportsbook Props</button>
+              <button data-tab="last-action">Last Action</button>
+            </div>
+          </div>
+          <pre id="jsonView">{}</pre>
+        </div>
+      </section>
+    </main>
+
+    <script>
+      const state = {
+        payloads: {
+          "value-board": [],
+          "matchups": [],
+          "line-discrepancies": [],
+          "sportsbook-props": [],
+          "last-action": { message: "No actions yet." },
+        },
+        activeTab: "value-board",
+      };
+
+      const statusEl = document.getElementById("status");
+      const backendBadge = document.getElementById("backendBadge");
+      const endpointBadge = document.getElementById("endpointBadge");
+      const jsonView = document.getElementById("jsonView");
+      const valueBoardList = document.getElementById("valueBoardList");
+      const matchupList = document.getElementById("matchupList");
+
+      function setStatus(message, tone = "") {
+        statusEl.className = `status-bar ${tone}`.trim();
+        statusEl.textContent = message;
+      }
+
+      function headers() {
+        const apiKey = document.getElementById("apiKey").value.trim();
+        return apiKey ? { "X-API-Key": apiKey } : {};
+      }
+
+      function baseUrl() {
+        return document.getElementById("baseUrl").value.trim().replace(/\/+$/, "");
+      }
+
+      function renderEndpointBadge() {
+        endpointBadge.textContent = `Base URL: ${baseUrl() || "unset"}`;
+      }
+
+      function setBackendBadge(state, message) {
+        backendBadge.className = `pill ${state}`.trim();
+        backendBadge.textContent = `Backend: ${message}`;
+      }
+
+      async function apiGet(path) {
+        const response = await fetch(`${baseUrl()}${path}`, { headers: headers() });
+        if (!response.ok) {
+          throw new Error(`GET ${path} failed with ${response.status}`);
+        }
+        return response.json();
+      }
+
+      async function apiPost(path) {
+        const response = await fetch(`${baseUrl()}${path}`, {
+          method: "POST",
+          headers: headers(),
+        });
+        if (!response.ok) {
+          throw new Error(`POST ${path} failed with ${response.status}`);
+        }
+        return response.json();
+      }
+
+      function renderList(target, rows, format) {
+        target.innerHTML = "";
+        if (!rows.length) {
+          const empty = document.createElement("div");
+          empty.className = "row";
+          empty.innerHTML = "<strong>Empty</strong><span>No rows returned.</span>";
+          target.appendChild(empty);
+          return;
+        }
+        rows.slice(0, 6).forEach((row) => {
+          const card = document.createElement("div");
+          card.className = "row";
+          card.innerHTML = format(row);
+          target.appendChild(card);
+        });
+      }
+
+      function renderMetrics() {
+        document.getElementById("metricProps").textContent = state.payloads["value-board"].length;
+        document.getElementById("metricMatchups").textContent = state.payloads["matchups"].length;
+        document.getElementById("metricDiscrepancies").textContent = state.payloads["line-discrepancies"].length;
+        document.getElementById("metricSportsbook").textContent = state.payloads["sportsbook-props"].length;
+      }
+
+      function renderVisuals() {
+        renderList(valueBoardList, state.payloads["value-board"], (row) => `
+          <strong>${row.player ?? "Unknown"} | ${row.market ?? "?"} | ${row.recommended_side ?? "?"}</strong>
+          <span>Line ${Number(row.line ?? 0).toFixed(1)} | Projection ${Number(row.projection ?? 0).toFixed(1)} | EV ${((row.expected_value ?? 0) * 100).toFixed(1)}%</span>
+        `);
+        renderList(matchupList, state.payloads["matchups"], (row) => `
+          <strong>${row.away_team ?? "?"} @ ${row.home_team ?? "?"}</strong>
+          <span>${row.start_time ?? "No start"} | Total ${row.projected_total ?? row.game_total ?? "N/A"} | Spread ${row.spread_home ?? "N/A"}</span>
+        `);
+      }
+
+      function renderJson() {
+        jsonView.textContent = JSON.stringify(state.payloads[state.activeTab], null, 2);
+      }
+
+      function setActiveTab(name) {
+        state.activeTab = name;
+        document.querySelectorAll(".tabs button").forEach((button) => {
+          button.classList.toggle("active", button.dataset.tab === name);
+        });
+        renderJson();
+      }
+
+      async function probeBackend() {
+        renderEndpointBadge();
+        setBackendBadge("warn", "checking");
+        try {
+          const response = await fetch(`${baseUrl()}/api/health`, { headers: headers() });
+          if (!response.ok) {
+            setBackendBadge("bad", `http ${response.status}`);
+            return false;
+          }
+          const payload = await response.json();
+          if (payload?.status === "ok") {
+            setBackendBadge("ok", "reachable");
+            return true;
+          }
+          setBackendBadge("warn", "unexpected response");
+          return false;
+        } catch (error) {
+          setBackendBadge("bad", "offline");
+          return false;
+        }
+      }
+
+      async function reloadDashboard() {
+        renderEndpointBadge();
+        setStatus("Loading dev backend state...");
+        try {
+          const reachable = await probeBackend();
+          if (!reachable) {
+            throw new Error("Dev backend is not reachable at the configured base URL.");
+          }
+          const [valueBoard, matchups, discrepancies, sportsbookProps] = await Promise.all([
+            apiGet("/api/value-board"),
+            apiGet("/api/matchups"),
+            apiGet("/api/line-discrepancies"),
+            apiGet("/api/sportsbook-props"),
+          ]);
+          state.payloads["value-board"] = valueBoard;
+          state.payloads["matchups"] = matchups;
+          state.payloads["line-discrepancies"] = discrepancies;
+          state.payloads["sportsbook-props"] = sportsbookProps;
+          renderMetrics();
+          renderVisuals();
+          renderJson();
+          setStatus("Dashboard reloaded from dev backend.", "success");
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      }
+
+      async function runImport() {
+        const source = document.getElementById("importSource").value;
+        const force = document.getElementById("forceRefresh").value;
+        const path = source === "covers"
+          ? `/api/covers/import?force_refresh=${force}`
+          : `/api/odds/import?force_refresh=${force}`;
+        setStatus(`Running ${source} import...`);
+        try {
+          const payload = await apiPost(path);
+          state.payloads["last-action"] = payload;
+          setActiveTab("last-action");
+          await reloadDashboard();
+          setStatus(`${source} import complete.`, "success");
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      }
+
+      async function runEspnRefresh() {
+        setStatus("Running ESPN refresh...");
+        try {
+          const payload = await apiPost("/api/history/import/espn?force_refresh=false&include_player_stats=true&include_previous_season=false&missing_only=false");
+          state.payloads["last-action"] = payload;
+          setActiveTab("last-action");
+          await reloadDashboard();
+          setStatus("ESPN refresh complete.", "success");
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      }
+
+      async function runSettlement() {
+        setStatus("Running settlement...");
+        try {
+          const payload = await apiPost("/api/settle-props");
+          state.payloads["last-action"] = payload;
+          setActiveTab("last-action");
+          await reloadDashboard();
+          setStatus("Settlement complete.", "success");
+        } catch (error) {
+          setStatus(error.message, "error");
+        }
+      }
+
+      document.getElementById("reloadBtn").addEventListener("click", reloadDashboard);
+      document.getElementById("importBtn").addEventListener("click", runImport);
+      document.getElementById("espnBtn").addEventListener("click", runEspnRefresh);
+      document.getElementById("settleBtn").addEventListener("click", runSettlement);
+      document.getElementById("baseUrl").addEventListener("input", () => {
+        renderEndpointBadge();
+        probeBackend();
+      });
+      document.querySelectorAll(".tabs button").forEach((button) => {
+        button.addEventListener("click", () => setActiveTab(button.dataset.tab));
+      });
+
+      renderEndpointBadge();
+      probeBackend();
+      reloadDashboard();
+    </script>
+  </body>
+</html>
