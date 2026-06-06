@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from collections import Counter
@@ -15,12 +15,12 @@ from .ball_dont_lie import fetch_team_history
 from .accuracy_analysis import build_accuracy_report, build_accuracy_report_for_days
 from .bootstrap import ensure_teams
 from .cache import delete_json_cache, read_json_cache, write_json_cache
-from .covers_import import _game_market_from_page, import_covers_props
+from .covers_import import RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, import_covers_props
 from .db import connect, init_db
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
 from .game_predictions import project_game
-from .odds_import import import_the_odds_api_props, line_discrepancies, list_sportsbook_props, odds_cache_summary, sync_prop_lines_from_sportsbook
+from .odds_import import RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME, import_the_odds_api_props, line_discrepancies, list_sportsbook_props, odds_cache_summary, sync_prop_lines_from_sportsbook
 from .projections import rebuild_predictions
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
@@ -91,6 +91,7 @@ def on_startup() -> None:
     init_db()
     with connect() as conn:
         ensure_teams(conn)
+    _invalidate_read_caches()
 
 
 @app.get("/api/health")
@@ -311,6 +312,70 @@ def _invalidate_read_caches() -> None:
         ROSTER_CACHE_NAME,
     ):
         delete_json_cache(name)
+
+
+def _clear_scheduled_prop_state(conn, *, clear_source_rows: bool = False) -> None:
+    conn.execute(
+        """
+        DELETE FROM watchlist_snapshot_items
+        WHERE prop_line_id IN (
+            SELECT pl.id
+            FROM prop_lines pl
+            JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE sp.id IS NULL
+              AND g.status = 'scheduled'
+        )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM gem_snapshot_items
+        WHERE prop_line_id IN (
+            SELECT pl.id
+            FROM prop_lines pl
+            JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE sp.id IS NULL
+              AND g.status = 'scheduled'
+        )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM prop_predictions
+        WHERE prop_line_id IN (
+            SELECT pl.id
+            FROM prop_lines pl
+            JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE sp.id IS NULL
+              AND g.status = 'scheduled'
+        )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM prop_lines
+        WHERE id IN (
+            SELECT pl.id
+            FROM prop_lines pl
+            JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE sp.id IS NULL
+              AND g.status = 'scheduled'
+        )
+        """
+    )
+    if clear_source_rows:
+        conn.execute("DELETE FROM sportsbook_prop_lines")
+    conn.commit()
+
+
+def _clear_prop_scrape_caches() -> None:
+    delete_json_cache("sportsbook_props.json")
+    delete_json_cache(ODDS_RAW_CACHE_NAME)
+    delete_json_cache(COVERS_RAW_CACHE_NAME)
 
 
 def _set_observability_headers(response: Response, cache_name: str, cache_status: str, compute_ms: float) -> None:
@@ -1392,8 +1457,9 @@ def import_espn_history(
             game_settlements = settle_completed_game_predictions(conn)
             gem_settlements = _sync_gem_snapshot_settlements(conn)
             watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
-            synced_props = sync_prop_lines_from_sportsbook(conn)
-            projections = rebuild_predictions(conn)
+            _clear_scheduled_prop_state(conn, clear_source_rows=True)
+            synced_props = 0
+            projections = []
             watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
             gap_audit = _espn_stats_gap_audit(conn)
             backfill_result: dict[str, Any] | None = None
@@ -1416,6 +1482,8 @@ def import_espn_history(
                 ),
             ) from exc
         raise
+    _clear_prop_scrape_caches()
+    _invalidate_read_caches()
     return {
         "season": target_season,
         "seasons": unique_seasons,
@@ -1509,10 +1577,12 @@ def backfill_espn_history_gaps(
         game_settlements = settle_completed_game_predictions(conn)
         gem_settlements = _sync_gem_snapshot_settlements(conn)
         watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
-        synced_props = sync_prop_lines_from_sportsbook(conn)
-        projections = rebuild_predictions(conn)
+        _clear_scheduled_prop_state(conn, clear_source_rows=True)
+        synced_props = 0
+        projections = []
         watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
         after = _espn_stats_gap_audit(conn, start_date=start_date, end_date=end_date, limit_missing_games=1000)
+    _clear_prop_scrape_caches()
     _invalidate_read_caches()
     return {
         "source": "espn",
