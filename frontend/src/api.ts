@@ -126,6 +126,7 @@ async function apiFetch(input: string, init?: RequestInit & { includeApiKey?: bo
   const { includeApiKey = false, headers, ...rest } = init ?? {};
   return fetch(input, {
     ...rest,
+    cache: "no-store",
     headers: apiHeaders(headers, includeApiKey),
   });
 }
@@ -329,7 +330,7 @@ export type ModelTuningRun = {
 };
 
 export async function fetchValueBoard(): Promise<ValueProp[]> {
-  const response = await fetch("/api/value-board");
+  const response = await apiFetch("/api/value-board");
   if (!response.ok) {
     throw new Error("Failed to load value board");
   }
@@ -337,7 +338,7 @@ export async function fetchValueBoard(): Promise<ValueProp[]> {
 }
 
 export async function fetchWatchlist(): Promise<WatchlistProp[]> {
-  const response = await fetch("/api/watchlist");
+  const response = await apiFetch("/api/watchlist");
   if (!response.ok) {
     throw new Error("Failed to load watchlist");
   }
@@ -345,7 +346,7 @@ export async function fetchWatchlist(): Promise<WatchlistProp[]> {
 }
 
 export async function fetchPerformance(): Promise<ModelPerformance> {
-  const response = await fetch("/api/model-performance");
+  const response = await apiFetch("/api/model-performance");
   if (!response.ok) {
     throw new Error("Failed to load model performance");
   }
@@ -353,7 +354,7 @@ export async function fetchPerformance(): Promise<ModelPerformance> {
 }
 
 export async function fetchGemPerformance(): Promise<GemPerformance> {
-  const response = await fetch("/api/gem-performance");
+  const response = await apiFetch("/api/gem-performance");
   if (!response.ok) {
     throw new Error("Failed to load gem performance");
   }
@@ -361,7 +362,7 @@ export async function fetchGemPerformance(): Promise<GemPerformance> {
 }
 
 export async function fetchWatchlistPerformance(): Promise<WatchlistPerformance> {
-  const response = await fetch("/api/watchlist-performance");
+  const response = await apiFetch("/api/watchlist-performance");
   if (!response.ok) {
     throw new Error("Failed to load watchlist performance");
   }
@@ -369,7 +370,7 @@ export async function fetchWatchlistPerformance(): Promise<WatchlistPerformance>
 }
 
 export async function fetchMatchups(): Promise<Matchup[]> {
-  const response = await fetch("/api/matchups");
+  const response = await apiFetch("/api/matchups");
   if (!response.ok) {
     throw new Error("Failed to load matchups");
   }
@@ -377,7 +378,7 @@ export async function fetchMatchups(): Promise<Matchup[]> {
 }
 
 export async function fetchLineDiscrepancies(): Promise<LineDiscrepancy[]> {
-  const response = await fetch("/api/line-discrepancies");
+  const response = await apiFetch("/api/line-discrepancies");
   if (!response.ok) {
     throw new Error("Failed to load line discrepancies");
   }
@@ -385,7 +386,7 @@ export async function fetchLineDiscrepancies(): Promise<LineDiscrepancy[]> {
 }
 
 export async function fetchRoster(): Promise<RosterPlayer[]> {
-  const response = await fetch("/api/roster");
+  const response = await apiFetch("/api/roster");
   if (!response.ok) {
     throw new Error("Failed to load roster");
   }
