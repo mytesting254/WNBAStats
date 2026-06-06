@@ -5,7 +5,10 @@ services:
       dockerfile: Dockerfile.backend
     environment:
       USE_TURSO: ${USE_TURSO:-false}
-      WNBA_DB_PATH: ${WNBA_DB_PATH:-/app/data/wnba.sqlite}
+      WNBA_DATA_DIR: ${WNBA_DATA_DIR:-/data}
+      WNBA_DB_PATH: ${WNBA_DB_PATH:-/data/wnba.sqlite}
+      WNBA_CACHE_DIR: ${WNBA_CACHE_DIR:-/data/cache}
+      WNBA_SNAPSHOT_DIR: ${WNBA_SNAPSHOT_DIR:-/data/snapshots}
       TURSO_DATABASE_URL: ${TURSO_DATABASE_URL:-}
       TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
       ENV: ${ENV:-prod}
@@ -20,7 +23,7 @@ services:
       RATE_LIMIT_REFRESH_CAPACITY: ${RATE_LIMIT_REFRESH_CAPACITY:-6}
       RATE_LIMIT_REFRESH_REFILL_PER_SEC: ${RATE_LIMIT_REFRESH_REFILL_PER_SEC:-0.33}
     volumes:
-      - wnba_data:/app/data
+      - wnba_data:/data
     expose:
       - "8010"
     restart: unless-stopped
@@ -35,10 +38,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.frontend
-      args:
-        VITE_API_KEY: ${VITE_API_KEY:-}
     depends_on:
       - backend
+    environment:
+      API_KEY: ${API_KEY:-}
     expose:
       - "80"
     restart: unless-stopped

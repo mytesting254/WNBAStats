@@ -22,7 +22,10 @@ Minimum SQLite setup:
 
 ```dotenv
 USE_TURSO=false
-WNBA_DB_PATH=/app/data/wnba.sqlite
+WNBA_DATA_DIR=/data
+WNBA_DB_PATH=/data/wnba.sqlite
+WNBA_CACHE_DIR=/data/cache
+WNBA_SNAPSHOT_DIR=/data/snapshots
 ENV=prod
 API_KEY=replace_with_a_shared_key
 EXPOSE_DEBUG_HEADERS=false
@@ -41,27 +44,27 @@ If you want to use the browser UI for protected admin actions such as imports,
 recalculation, or training, also set:
 
 ```dotenv
-VITE_API_KEY=the_same_value_as_API_KEY
+API_KEY=the_same_value_as_backend_api_key
 ```
 
 Important:
 
-- `VITE_API_KEY` is embedded into the built frontend bundle.
+- The frontend reads its API key only from the frontend container's runtime
+  `API_KEY` env var.
 - Any user with access to the deployed app can inspect it in the browser.
 - This is acceptable only for a private/admin deployment.
-- If the site is public, leave `VITE_API_KEY` unset and treat the protected
+- If the site is public, leave frontend `API_KEY` unset and treat the protected
   POST endpoints as server/admin-only until real authentication is added.
-
-Because `VITE_API_KEY` is a build-time value, changing it requires a frontend
-rebuild/redeploy.
+- In Coolify, the simplest setup is to set the same `API_KEY` value on both the
+  `backend` and `frontend` services.
 
 ## 3. Attach Persistent Storage
 
 The backend writes to:
 
-- `/app/data/wnba.sqlite`
-- `/app/data/cache/`
-- `/app/data/snapshots/`
+- `/data/wnba.sqlite`
+- `/data/cache/`
+- `/data/snapshots/`
 
 Do not run this app on ephemeral storage if you use SQLite. In Coolify, keep
 the `wnba_data` volume persistent across redeploys.
@@ -73,7 +76,7 @@ right choice for multiple concurrent writer replicas.
 
 On the first deploy, the backend will:
 
-1. create `/app/data/` if it is missing
+1. create `/data/` if it is missing
 2. run `python scripts/init_db.py`
 3. start FastAPI on port `8010`
 
@@ -86,8 +89,9 @@ After deployment, verify:
 
 - `/` loads the React app
 - `/api/health` returns `{"status":"ok"}`
+- `/runtime-config.js` returns the current runtime config and is not cached
 - existing data persists after a redeploy/restart
-- imports work from the UI only if `VITE_API_KEY` is intentionally configured
+- imports work from the UI only if frontend and backend `API_KEY` match
 - the backend can reach external providers from the server network
 
 ## 6. Backup Requirement
