@@ -4,20 +4,23 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .paths import get_cache_dir
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
-CACHE_DIR = ROOT_DIR / "data" / "cache"
+
+def _cache_path(name: str):
+    return get_cache_dir() / name
 
 
 def write_json_cache(name: str, payload: Any) -> Path:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = CACHE_DIR / name
+    cache_dir = get_cache_dir()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    path = cache_dir / name
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
 
 def read_json_cache(name: str) -> Any | None:
-    path = CACHE_DIR / name
+    path = _cache_path(name)
     if not path.exists():
         return None
     try:
@@ -27,7 +30,7 @@ def read_json_cache(name: str) -> Any | None:
 
 
 def delete_json_cache(name: str) -> bool:
-    path = CACHE_DIR / name
+    path = _cache_path(name)
     if not path.exists():
         return False
     path.unlink()

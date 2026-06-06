@@ -6,13 +6,16 @@ import json
 import os
 import shutil
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_DB_PATH = ROOT_DIR / "data" / "wnba.sqlite"
-DEFAULT_SNAPSHOT_DIR = ROOT_DIR / "data" / "snapshots"
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from backend.app.paths import get_db_path, get_snapshot_dir
 
 
 def _sha256(path: Path) -> str:
@@ -93,8 +96,8 @@ def _resolve_snapshot_paths(snapshot: str, snapshot_dir: Path) -> tuple[Path, Pa
 def main() -> None:
     parser = argparse.ArgumentParser(description="Restore local SQLite DB from a snapshot with checksum/schema validation.")
     parser.add_argument("snapshot", help="Snapshot .sqlite file path (absolute or relative to --snapshot-dir).")
-    parser.add_argument("--db-path", default=os.getenv("WNBA_DB_PATH") or str(DEFAULT_DB_PATH))
-    parser.add_argument("--snapshot-dir", default=str(DEFAULT_SNAPSHOT_DIR))
+    parser.add_argument("--db-path", default=str(get_db_path()))
+    parser.add_argument("--snapshot-dir", default=str(get_snapshot_dir()))
     parser.add_argument("--force", action="store_true", help="Allow schema-version mismatch restore.")
     args = parser.parse_args()
 

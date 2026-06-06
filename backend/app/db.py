@@ -3,19 +3,14 @@ from __future__ import annotations
 import os
 import sqlite3
 from collections.abc import Mapping
-from pathlib import Path
 from typing import Any, Iterable, Sequence
 
 import requests
 from dotenv import load_dotenv
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+from .paths import ROOT_DIR, get_db_path
+
 load_dotenv(ROOT_DIR / ".env")
-DEFAULT_DB_PATH = ROOT_DIR / "data" / "wnba.sqlite"
-
-
-def get_db_path() -> Path:
-    return Path(os.getenv("WNBA_DB_PATH", DEFAULT_DB_PATH))
 
 
 def get_turso_database_url() -> str | None:
