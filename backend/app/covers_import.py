@@ -24,6 +24,7 @@ COVERS_MATCHUPS_URL = f"{COVERS_BASE_URL}/sports/wnba/matchups"
 COVERS_ODDS_URL = f"{COVERS_BASE_URL}/sport/basketball/wnba/odds"
 LOCAL_TZ = timezone(timedelta(hours=-4))
 FETCH_TIMEOUT_SECONDS = 12
+COVERS_CACHE_TTL_SECONDS = 15 * 60
 REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -960,7 +961,16 @@ def _covers_cache_is_current(payload: object) -> bool:
     rows = payload.get("rows")
     if not isinstance(rows, list) or not rows:
         return False
-    return payload.get("cache_date") == _today_local()
+    captured_at_raw = payload.get("captured_at")
+    if not isinstance(captured_at_raw, str):
+        return False
+    try:
+        captured_at = datetime.fromisoformat(captured_at_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if captured_at.tzinfo is None:
+        captured_at = captured_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - captured_at.astimezone(timezone.utc) <= timedelta(seconds=COVERS_CACHE_TTL_SECONDS)
 
 
 def _tuple_to_row(row: tuple) -> dict:

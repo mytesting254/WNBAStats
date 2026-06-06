@@ -384,6 +384,8 @@ def _begin_immediate_with_retry(
     attempts: int = 24,
     base_sleep: float = 0.20,
 ) -> None:
+    if conn.in_transaction:
+        return
     last_error: sqlite3.OperationalError | None = None
     for attempt in range(attempts):
         try:

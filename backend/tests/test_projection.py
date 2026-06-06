@@ -12,7 +12,9 @@ from backend.app import rotowire_import as rotowire_import_module
 from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
 from backend.app.covers_import import (
+    COVERS_CACHE_TTL_SECONDS,
     CoversGame,
+    _covers_cache_is_current,
     _covers_matchup_hrefs,
     _event_rows,
     _market_from_title,
@@ -1717,6 +1719,22 @@ def test_covers_market_title_aliases() -> None:
     assert _market_from_title("Total Steals + Blocks") == "total_steals_and_blocks"
     assert _market_from_title("Total Points + Rebounds") == "total_points_and_rebounds"
     assert _market_from_title("Total Points + Rebounds + Assists") == "total_points_rebounds_and_assists"
+
+
+def test_covers_cache_is_current_requires_recent_capture_time() -> None:
+    fresh_payload = {
+        "provider": "covers",
+        "rows": [{"provider_event_id": "fresh"}],
+        "captured_at": (datetime.now(timezone.utc) - timedelta(seconds=COVERS_CACHE_TTL_SECONDS - 30)).isoformat(),
+    }
+    stale_payload = {
+        "provider": "covers",
+        "rows": [{"provider_event_id": "stale"}],
+        "captured_at": (datetime.now(timezone.utc) - timedelta(seconds=COVERS_CACHE_TTL_SECONDS + 30)).isoformat(),
+    }
+
+    assert _covers_cache_is_current(fresh_payload) is True
+    assert _covers_cache_is_current(stale_payload) is False
 
 
 def test_covers_import_force_refresh_uses_cache_when_fresh_scrape_returns_no_rows(monkeypatch) -> None:
