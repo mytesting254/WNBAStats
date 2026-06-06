@@ -1,7 +1,6 @@
-import { BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+﻿import { BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  fetchCurrentUser,
   fetchMissingEspnScores,
   fetchLineDiscrepancies,
   fetchGemPerformance,
@@ -18,11 +17,8 @@ import {
   importMissingEspnScores,
   importOdds,
   importRotowireInjuries,
-  login,
-  logout,
   recalculate,
   trainModel,
-  type AuthUser,
   type CoversRecordRow,
   type GemPerformance,
   type LineDiscrepancy,
@@ -77,11 +73,6 @@ type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
 
 export function App() {
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
-  const [loginUsername, setLoginUsername] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
-  const [loginBusy, setLoginBusy] = useState(false);
   const [props, setProps] = useState<ValueProp[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
@@ -110,13 +101,11 @@ export function App() {
   const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
   const [missingEspnGames, setMissingEspnGames] = useState<MissingEspnGame[]>([]);
   const [loading, setLoading] = useState(true);
-  const canAccessDataTab = currentUser?.role === "admin";
 
   async function load() {
     setLoading(true);
     setError(null);
     const [
-      currentUserResult,
       boardResult,
       performanceResult,
       gemPerformanceResult,
@@ -127,7 +116,6 @@ export function App() {
       modelRunsResult,
       rosterResult
     ] = await Promise.allSettled([
-      fetchCurrentUser(),
       fetchValueBoard(),
       fetchPerformance(),
       fetchGemPerformance(),
@@ -148,12 +136,6 @@ export function App() {
       failures.push("value board");
       setProps([]);
       setSelected(null);
-    }
-
-    if (currentUserResult.status === "fulfilled") {
-      setCurrentUser(currentUserResult.value.user);
-    } else {
-      setCurrentUser(null);
     }
 
     if (performanceResult.status === "fulfilled") {
@@ -219,18 +201,11 @@ export function App() {
     }
 
     setLoading(false);
-    setAuthLoading(false);
   }
 
   useEffect(() => {
     load();
   }, []);
-
-  useEffect(() => {
-    if (activeTab === "data" && !canAccessDataTab) {
-      setActiveTab("matchups");
-    }
-  }, [activeTab, canAccessDataTab]);
 
   const filtered = useMemo(() => {
     return props
@@ -433,35 +408,6 @@ export function App() {
     }
   }
 
-  async function handleLogin(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setLoginBusy(true);
-    setError(null);
-    try {
-      const result = await login(loginUsername, loginPassword);
-      setCurrentUser(result.user);
-      setLoginPassword("");
-      setOperationStatus(`Signed in as ${result.user?.username ?? "user"}.`);
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to sign in");
-    } finally {
-      setLoginBusy(false);
-    }
-  }
-
-  async function handleLogout() {
-    setError(null);
-    try {
-      await logout();
-      setCurrentUser(null);
-      setActiveTab("matchups");
-      setOperationStatus("Signed out.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to sign out");
-    }
-  }
-
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -470,35 +416,6 @@ export function App() {
           <h1>{tabTitle(activeTab)}</h1>
         </div>
         <div className="topbar-actions">
-          {currentUser ? (
-            <>
-              <span className="status-chip">{currentUser.username} ({currentUser.role})</span>
-              <button className="icon-button text-button" onClick={handleLogout}>
-                Sign Out
-              </button>
-            </>
-          ) : (
-            <form className="inline-auth-form" onSubmit={handleLogin}>
-              <input
-                aria-label="Username"
-                placeholder="Username"
-                value={loginUsername}
-                onChange={(event) => setLoginUsername(event.target.value)}
-                disabled={loginBusy || authLoading}
-              />
-              <input
-                aria-label="Password"
-                type="password"
-                placeholder="Password"
-                value={loginPassword}
-                onChange={(event) => setLoginPassword(event.target.value)}
-                disabled={loginBusy || authLoading}
-              />
-              <button className="icon-button text-button" type="submit" disabled={loginBusy || authLoading || !loginUsername || !loginPassword}>
-                {loginBusy ? "Signing In" : "Sign In"}
-              </button>
-            </form>
-          )}
           <button className="icon-button text-button" onClick={load} disabled={loading} title="Reload dashboard data">
             <RefreshCw size={18} />
             {loading ? "Loading" : "Reload"}
@@ -539,12 +456,10 @@ export function App() {
           <ShieldCheck size={18} />
           Roster
         </button>
-        {canAccessDataTab ? (
-          <button className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>
-            <Database size={18} />
-            Data
-          </button>
-        ) : null}
+        <button className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>
+          <Database size={18} />
+          Data
+        </button>
       </nav>
 
       <section className="summary-grid">

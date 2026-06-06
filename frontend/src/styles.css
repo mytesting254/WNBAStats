@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   color: #1b1f29;
   background: #111827;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -47,43 +47,6 @@ select {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 10px;
-}
-
-.status-chip {
-  display: inline-flex;
-  align-items: center;
-  min-height: 42px;
-  padding: 0 12px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.1);
-  color: #ffffff;
-  font-size: 13px;
-  font-weight: 700;
-}
-
-.inline-auth-form {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.inline-auth-form input {
-  min-height: 42px;
-  min-width: 140px;
-  padding: 0 12px;
-  border: 1px solid rgba(255, 255, 255, 0.22);
-  border-radius: 8px;
-  background: rgba(10, 18, 32, 0.58);
-  color: #ffffff;
-}
-
-.inline-auth-form input::placeholder {
-  color: rgba(255, 255, 255, 0.6);
-}
-
-.inline-auth-form input:disabled {
-  opacity: 0.7;
 }
 
 .eyebrow {

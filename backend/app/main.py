@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from collections import Counter
@@ -10,12 +10,9 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from starlette.middleware.sessions import SessionMiddleware
 
 from .ball_dont_lie import fetch_team_history
 from .accuracy_analysis import build_accuracy_report, build_accuracy_report_for_days
-from .auth import hash_password, verify_password
 from .bootstrap import ensure_teams
 from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import _game_market_from_page, import_covers_props
@@ -69,22 +66,6 @@ _PROP_SYNC_STATE: dict[str, Any] = {
     "last_result": None,
 }
 
-
-class LoginPayload(BaseModel):
-    username: str = Field(min_length=1, max_length=100)
-    password: str = Field(min_length=1, max_length=200)
-
-
-class CreateUserPayload(BaseModel):
-    username: str = Field(min_length=3, max_length=100)
-    password: str = Field(min_length=8, max_length=200)
-    role: str = Field(default="member", pattern="^(admin|member)$")
-
-
-class BootstrapAdminPayload(BaseModel):
-    username: str = Field(min_length=3, max_length=100)
-    password: str = Field(min_length=8, max_length=200)
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -99,26 +80,17 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=(os.getenv("SESSION_SECRET") or "dev-session-secret-change-me").strip() or "dev-session-secret-change-me",
-    same_site="lax",
-    https_only=not os.getenv("ENV", "dev").strip().lower() in {"dev", "local", "test"},
-)
 
 
 @app.on_event("startup")
 def on_startup() -> None:
     if not _is_dev_env() and not _configured_api_key():
         raise RuntimeError("API_KEY is required when ENV is not dev/local/test.")
-    if not _is_dev_env() and os.getenv("SESSION_SECRET", "").strip() == "":
-        raise RuntimeError("SESSION_SECRET is required when ENV is not dev/local/test.")
     if _is_dev_env() and not _configured_api_key():
         print("[security] API_KEY not set; mutating endpoints are open in dev/test mode.")
     init_db()
     with connect() as conn:
         ensure_teams(conn)
-        _ensure_seed_admin(conn)
 
 
 @app.get("/api/health")
@@ -136,84 +108,6 @@ def ops_health() -> dict[str, Any]:
     }
 
 
-@app.get("/api/auth/me")
-def auth_me(request: Request) -> dict[str, Any]:
-    user = _get_current_user(request)
-    return {
-        "authenticated": bool(user),
-        "user": user,
-    }
-
-
-@app.post("/api/auth/login")
-def auth_login(payload: LoginPayload, request: Request) -> dict[str, Any]:
-    with connect() as conn:
-        row = _find_user_by_username(conn, payload.username)
-    if not row or not bool(row["is_active"]) or not verify_password(payload.password, str(row["password_hash"])):
-        raise HTTPException(status_code=401, detail="Invalid username or password.")
-    request.session.clear()
-    request.session["user_id"] = int(row["id"])
-    return {
-        "authenticated": True,
-        "user": _serialize_user(row),
-    }
-
-
-@app.post("/api/auth/logout")
-def auth_logout(request: Request) -> dict[str, bool]:
-    request.session.clear()
-    return {"ok": True}
-
-
-@app.post("/api/auth/bootstrap-admin")
-def bootstrap_admin(
-    payload: BootstrapAdminPayload,
-    request: Request,
-    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
-    authorization: Annotated[str | None, Header()] = None,
-) -> dict[str, Any]:
-    with connect() as conn:
-        existing_count = int(conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"])
-        if existing_count > 0:
-            if not _is_api_key_authorized(x_api_key, authorization):
-                _enforce_admin_session(request)
-            user = _create_user_record(conn, payload.username, payload.password, "admin")
-        else:
-            if not _is_dev_env() and not _is_api_key_authorized(x_api_key, authorization):
-                raise HTTPException(status_code=401, detail="API key required to bootstrap the first admin.")
-            user = _create_user_record(conn, payload.username, payload.password, "admin")
-    return {"user": user}
-
-
-@app.get("/api/admin/users", dependencies=[Depends(_protect_mutation)])
-def list_users(request: Request) -> list[dict[str, Any]]:
-    _enforce_admin_session(request)
-    with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT id, username, role, is_active, created_at, updated_at
-            FROM users
-            ORDER BY lower(username) ASC
-            """
-        ).fetchall()
-    return [
-        {
-            **_serialize_user(row),
-            "created_at": row["created_at"],
-            "updated_at": row["updated_at"],
-        }
-        for row in rows
-    ]
-
-
-@app.post("/api/admin/users", dependencies=[Depends(_protect_mutation)])
-def create_user(payload: CreateUserPayload, request: Request) -> dict[str, Any]:
-    _enforce_admin_session(request)
-    with connect() as conn:
-        user = _create_user_record(conn, payload.username, payload.password, payload.role)
-    return {"user": user}
-
-
 def _is_dev_env() -> bool:
     return os.getenv("ENV", "dev").strip().lower() in {"dev", "local", "test"}
 
@@ -228,95 +122,9 @@ def _configured_api_key() -> str | None:
 def _presented_api_key(x_api_key: str | None, authorization: str | None) -> str | None:
     if x_api_key and x_api_key.strip():
         return x_api_key.strip()
-    token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
-    return token or None
-
-
-def _normalized_role(value: str | None) -> str:
-    return "admin" if str(value or "").strip().lower() == "admin" else "member"
-
-
-def _serialize_user(row: Any) -> dict[str, Any]:
-    return {
-        "id": int(row["id"]),
-        "username": str(row["username"]),
-        "role": _normalized_role(row["role"]),
-        "is_active": bool(row["is_active"]),
-    }
-
-
-def _find_user_by_username(conn: Any, username: str) -> Any | None:
-    return conn.execute(
-        "SELECT id, username, password_hash, role, is_active FROM users WHERE lower(username) = lower(?) LIMIT 1",
-        (username.strip(),),
-    ).fetchone()
-
-
-def _get_current_user(request: Request) -> dict[str, Any] | None:
-    user_id = request.session.get("user_id")
-    if not user_id:
-        return None
-    with connect() as conn:
-        row = conn.execute(
-            "SELECT id, username, role, is_active FROM users WHERE id = ? LIMIT 1",
-            (int(user_id),),
-        ).fetchone()
-    if not row or not bool(row["is_active"]):
-        request.session.clear()
-        return None
-    return _serialize_user(row)
-
-
-def _enforce_admin_session(request: Request) -> dict[str, Any]:
-    user = _get_current_user(request)
-    if not user:
-        raise HTTPException(status_code=401, detail="Login required.")
-    if user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required.")
-    return user
-
-
-def _create_user_record(conn: Any, username: str, password: str, role: str = "member") -> dict[str, Any]:
-    normalized_username = username.strip()
-    if not normalized_username:
-        raise HTTPException(status_code=400, detail="Username is required.")
-    password_hash = hash_password(password)
-    try:
-        cursor = conn.execute(
-            """
-            INSERT INTO users (username, password_hash, role, is_active, created_at, updated_at)
-            VALUES (?, ?, ?, 1, ?, ?)
-            """,
-            (
-                normalized_username,
-                password_hash,
-                _normalized_role(role),
-                datetime.now(timezone.utc).isoformat(),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
-    except Exception as exc:
-        if "UNIQUE" in str(exc).upper():
-            raise HTTPException(status_code=409, detail="Username already exists.") from exc
-        raise
-    row = conn.execute(
-        "SELECT id, username, role, is_active FROM users WHERE id = ? LIMIT 1",
-        (int(cursor.lastrowid),),
-    ).fetchone()
-    return _serialize_user(row)
-
-
-def _ensure_seed_admin(conn: Any) -> None:
-    username = (os.getenv("ADMIN_USERNAME") or "").strip()
-    password = (os.getenv("ADMIN_PASSWORD") or "").strip()
-    if not username or not password:
-        return
-    row = _find_user_by_username(conn, username)
-    if row:
-        return
-    _create_user_record(conn, username, password, "admin")
+        return token or None
     return None
 
 
@@ -329,14 +137,6 @@ def _enforce_api_key(x_api_key: str | None, authorization: str | None) -> None:
     presented = _presented_api_key(x_api_key, authorization)
     if presented != configured:
         raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-def _is_api_key_authorized(x_api_key: str | None, authorization: str | None) -> bool:
-    configured = _configured_api_key()
-    if configured is None:
-        return _is_dev_env()
-    presented = _presented_api_key(x_api_key, authorization)
-    return presented == configured
 
 
 def _consume_rate_limit(client_key: str, scope: str, capacity: float, refill_per_sec: float) -> None:
@@ -364,9 +164,7 @@ def _protect_mutation(
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     _consume_rate_limit(_client_key(request), "mutation", RATE_LIMIT_MUTATION_CAPACITY, RATE_LIMIT_MUTATION_REFILL_PER_SEC)
-    if _is_api_key_authorized(x_api_key, authorization):
-        return
-    _enforce_admin_session(request)
+    _enforce_api_key(x_api_key, authorization)
 
 
 def _protect_force_refresh(
@@ -378,9 +176,7 @@ def _protect_force_refresh(
     if not force_refresh:
         return
     _consume_rate_limit(_client_key(request), "refresh", RATE_LIMIT_REFRESH_CAPACITY, RATE_LIMIT_REFRESH_REFILL_PER_SEC)
-    if _is_api_key_authorized(x_api_key, authorization):
-        return
-    _enforce_admin_session(request)
+    _enforce_api_key(x_api_key, authorization)
 
 
 @app.get("/api/admin/team-conflicts", dependencies=[Depends(_protect_mutation)])
