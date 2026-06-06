@@ -38,6 +38,7 @@ TEAM_ALIASES = {
     "was": "WSH",
     "gsv": "GS",
     "val": "GS",
+    "pdx": "POR",
     "por": "POR",
 }
 TEAM_NAME_BY_NORMALIZED_KEY = {
