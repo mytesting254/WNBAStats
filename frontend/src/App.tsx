@@ -1689,7 +1689,9 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
 function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
   const records = matchup.covers_records;
   const hasCovers = Boolean(records && (records.head_to_head.length || records.away_last_10.length || records.home_last_10.length));
-  const h2hRows = hasCovers ? records?.head_to_head.slice(0, 10) ?? [] : [];
+  const h2hRows = records?.head_to_head.length
+    ? records.head_to_head.slice(0, 10)
+    : buildFallbackH2HRows(matchup);
   const awayRows = hasCovers
     ? records?.away_last_10.slice(0, 10) ?? []
     : matchup.away.recent_games.slice(0, 10).map((game) => ({
@@ -1830,6 +1832,34 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
       </div>
     </div>
   );
+}
+
+function buildFallbackH2HRows(matchup: Matchup): CoversRecordRow[] {
+  const awayCode = normalizeTeamCode(matchup.away_team);
+  const homeCode = normalizeTeamCode(matchup.home_team);
+  if (!awayCode || !homeCode) {
+    return [];
+  }
+
+  return matchup.away.recent_games
+    .filter((game) => normalizeTeamCode(game.opponent) === homeCode)
+    .slice(0, 10)
+    .map((game) => {
+      const awayWasHome = Boolean(game.is_home);
+      const homeTeam = awayWasHome ? awayCode : homeCode;
+      const awayPoints = game.points;
+      const homePoints = game.opponent_points;
+      const winner =
+        awayPoints === homePoints ? null : awayPoints > homePoints ? awayCode : homeCode;
+      return {
+        date: formatGameDateShort(game.game_date),
+        home: homeTeam,
+        winner,
+        score: awayWasHome ? `${awayPoints} - ${homePoints}` : `${homePoints} - ${awayPoints}`,
+        ats: atsLabel(game.ats_result).replace("ATS ", ""),
+        total: totalLabel(game.total_result),
+      };
+    });
 }
 
 function h2hMatchupOwner(rows: CoversRecordRow[], matchup: Matchup): { owner: string; record: string } {
