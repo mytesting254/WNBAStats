@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 from fastapi import Response
@@ -1710,6 +1711,46 @@ def test_covers_records_parser_extracts_h2h_and_team_last_10() -> None:
         "total": "o172.5",
     }
     assert records["home_last_10"][0]["location"] == "home"
+
+
+def test_covers_records_by_game_falls_back_to_saved_pages(monkeypatch) -> None:
+    pages_payload = {
+        "cache_date": datetime.now(main_module.LOCAL_TZ).date().isoformat(),
+        "games": [
+            {
+                "event_id": "373916",
+                "odds_url": "https://example.test/odds",
+                "matchup_url": "https://example.test/matchup",
+                "matchup_page": "<html>saved matchup page</html>",
+                "odds_page": "<html>saved odds page</html>",
+            }
+        ],
+    }
+
+    def fake_read_json_cache(name: str):
+        if name == "covers_props_raw.json":
+            return None
+        if name == "covers_pages_raw.json":
+            return pages_payload
+        return None
+
+    monkeypatch.setattr(main_module, "read_json_cache", fake_read_json_cache)
+    monkeypatch.setattr(main_module, "delete_json_cache", lambda name: False)
+    monkeypatch.setattr(
+        main_module,
+        "_metadata_from_page",
+        lambda conn, game, page, fallback_page=None: SimpleNamespace(
+            game_id=401856966,
+            records={"head_to_head": [{"date": "Jun 1, '26"}], "away_last_10": [], "home_last_10": [], "team_table": []},
+        ),
+    )
+
+    with connect() as conn:
+        records = main_module._covers_records_by_game(conn)
+
+    assert records == {
+        401856966: {"head_to_head": [{"date": "Jun 1, '26"}], "away_last_10": [], "home_last_10": [], "team_table": []}
+    }
 
 
 def test_covers_market_title_aliases() -> None:

@@ -115,6 +115,7 @@ def import_covers_props(
     conn: sqlite3.Connection,
     selected_date: str | None = None,
     force_refresh: bool = False,
+    sync_props: bool = True,
 ) -> dict:
     captured_at = datetime.now(timezone.utc).isoformat()
     cached_payload = read_json_cache(RAW_CACHE_NAME)
@@ -122,10 +123,11 @@ def import_covers_props(
         result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
         synced = 0
         sync_error = None
-        try:
-            synced = sync_prop_lines_from_sportsbook(conn)
-        except sqlite3.OperationalError as exc:
-            sync_error = str(exc)
+        if sync_props:
+            try:
+                synced = sync_prop_lines_from_sportsbook(conn)
+            except sqlite3.OperationalError as exc:
+                sync_error = str(exc)
         return {
             **result,
             "synced_props": synced,
@@ -237,10 +239,11 @@ def import_covers_props(
     result = _replace_covers_rows(conn, row_payload, game_payload)
     synced = 0
     sync_error = None
-    try:
-        synced = sync_prop_lines_from_sportsbook(conn)
-    except sqlite3.OperationalError as exc:
-        sync_error = str(exc)
+    if sync_props:
+        try:
+            synced = sync_prop_lines_from_sportsbook(conn)
+        except sqlite3.OperationalError as exc:
+            sync_error = str(exc)
     return {
         **result,
         "synced_props": synced,

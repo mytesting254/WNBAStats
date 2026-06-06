@@ -15,7 +15,7 @@ from .ball_dont_lie import fetch_team_history
 from .accuracy_analysis import build_accuracy_report, build_accuracy_report_for_days
 from .bootstrap import ensure_teams
 from .cache import delete_json_cache, read_json_cache, write_json_cache
-from .covers_import import RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, import_covers_props
+from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
 from .db import connect, init_db
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
@@ -1342,9 +1342,15 @@ def import_odds(force_refresh: bool = False) -> dict:
 @app.post("/api/covers/import", dependencies=[Depends(_protect_mutation)])
 def import_covers(selected_date: str | None = None, force_refresh: bool = False) -> dict:
     with connect() as conn:
-        result = import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh)
-    if result.get("sync_error"):
-        _start_prop_sync_if_needed("covers_import")
+        result = import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh, sync_props=False)
+    sync_started = _start_prop_sync_if_needed("covers_import")
+    result["sync_started"] = sync_started
+    if sync_started:
+        base_message = str(result.get("message") or "").strip()
+        if base_message:
+            result["message"] = f"{base_message} Prop sync queued in background."
+        else:
+            result["message"] = "Covers import completed. Prop sync queued in background."
     _invalidate_read_caches()
     return result
 
@@ -2135,7 +2141,7 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
         ).fetchall()
         games = [game for game in games if _is_today_active_game_time(game["start_time"])]
         game_groups = _coalesce_matchup_games(games)
-        covers_records = _covers_records_by_game()
+        covers_records = _covers_records_by_game(conn)
         covers_market_odds = _covers_market_odds_by_game()
         payload = []
         for game, game_ids in game_groups:
@@ -2225,22 +2231,50 @@ def _start_prop_sync_if_needed(source: str) -> bool:
     return True
 
 
-def _covers_records_by_game() -> dict[int, dict]:
+def _covers_records_by_game(conn) -> dict[int, dict]:
     payload = read_json_cache("covers_props_raw.json")
-    if not isinstance(payload, dict):
-        return {}
-    cache_date = payload.get("cache_date")
     today_local = datetime.now(LOCAL_TZ).date().isoformat()
-    if cache_date != today_local:
+    if isinstance(payload, dict) and payload.get("cache_date") != today_local:
         delete_json_cache("covers_props_raw.json")
-        return {}
     records_by_game = {}
-    for item in payload.get("games", []):
-        if not isinstance(item, dict) or item.get("game_id") is None:
+    if isinstance(payload, dict):
+        for item in payload.get("games", []):
+            if not isinstance(item, dict) or item.get("game_id") is None:
+                continue
+            records = item.get("records")
+            if isinstance(records, dict):
+                records_by_game[int(item["game_id"])] = records
+    if records_by_game:
+        return records_by_game
+
+    pages_payload = read_json_cache("covers_pages_raw.json")
+    if not isinstance(pages_payload, dict):
+        return {}
+    if pages_payload.get("cache_date") != today_local:
+        delete_json_cache("covers_pages_raw.json")
+        return {}
+    for item in pages_payload.get("games", []):
+        if not isinstance(item, dict):
             continue
-        records = item.get("records")
-        if isinstance(records, dict):
-            records_by_game[int(item["game_id"])] = records
+        event_id = item.get("event_id")
+        matchup_page = item.get("matchup_page")
+        if event_id is None or not isinstance(matchup_page, str) or not matchup_page:
+            continue
+        try:
+            metadata = _metadata_from_page(
+                conn,
+                CoversGame(
+                    event_id=str(event_id),
+                    odds_url=str(item.get("odds_url") or ""),
+                    matchup_url=item.get("matchup_url"),
+                ),
+                matchup_page,
+                fallback_page=item.get("odds_page") if isinstance(item.get("odds_page"), str) else None,
+            )
+        except Exception:
+            continue
+        if metadata.game_id is not None and isinstance(metadata.records, dict):
+            records_by_game[int(metadata.game_id)] = metadata.records
     return records_by_game
 
 
