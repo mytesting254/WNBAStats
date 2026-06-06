@@ -1931,6 +1931,58 @@ def test_rotowire_import_force_refresh_falls_back_to_cached_rows_on_fetch_failur
     assert "timeout" in str(result["fetch_error"]).lower()
 
 
+def test_rotowire_import_returns_db_locked_status_when_injury_write_is_busy(monkeypatch) -> None:
+    monkeypatch.setattr(rotowire_import_module, "read_json_cache", lambda _: {"captured_at": "2026-05-22T20:00:00+00:00", "rows": []})
+    monkeypatch.setattr(
+        rotowire_import_module,
+        "_fetch_text",
+        lambda _: "<section><div>GSV IND</div><li>Confirmed Lineup</li><li>MAY NOT PLAY</li><li>Caitlin Clark GTD</li></section>",
+    )
+    monkeypatch.setattr(rotowire_import_module, "write_json_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr(rotowire_import_module, "_resolve_player_id", lambda conn, team_abbreviation, player_name: 1)
+
+    class DummyRow(dict):
+        pass
+
+    class DummyCursor:
+        def __init__(self, row=None, rows=None):
+            self._row = row
+            self._rows = rows or []
+
+        def fetchone(self):
+            return self._row
+
+        def fetchall(self):
+            return self._rows
+
+    class DummyConn:
+        def __init__(self) -> None:
+            self.rolled_back = False
+
+        def execute(self, sql, params=()):
+            normalized = " ".join(str(sql).split()).lower()
+            if "from games" in normalized:
+                return DummyCursor(rows=[])
+            if normalized.startswith("select captured_at from injuries"):
+                return DummyCursor(row=None)
+            if normalized.startswith("insert into injuries"):
+                raise sqlite3.OperationalError("database is locked")
+            return DummyCursor()
+
+        def commit(self):
+            return None
+
+        def rollback(self):
+            self.rolled_back = True
+
+    conn = DummyConn()
+    result = rotowire_import_module.import_rotowire_lineups(conn, force_refresh=True)
+
+    assert result["status"] == "db_locked"
+    assert "database is busy" in str(result["message"]).lower()
+    assert conn.rolled_back is True
+
+
 def test_espn_boxscore_missing_only_skips_games_with_stats(monkeypatch) -> None:
     load_test_history()
     fetched_game_ids: list[int] = []

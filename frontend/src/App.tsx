@@ -1,5 +1,5 @@
 ﻿import { BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchMissingEspnScores,
   fetchLineDiscrepancies,
@@ -101,8 +101,10 @@ export function App() {
   const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
   const [missingEspnGames, setMissingEspnGames] = useState<MissingEspnGame[]>([]);
   const [loading, setLoading] = useState(true);
+  const loadRequestIdRef = useRef(0);
 
   async function load() {
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     setError(null);
     const [
@@ -128,6 +130,10 @@ export function App() {
     ]);
 
     const failures: string[] = [];
+
+    if (requestId !== loadRequestIdRef.current) {
+      return;
+    }
 
     if (boardResult.status === "fulfilled") {
       setProps(boardResult.value);
@@ -200,7 +206,9 @@ export function App() {
       setError(`Some dashboard data failed to load: ${failures.join(", ")}.`);
     }
 
-    setLoading(false);
+    if (requestId === loadRequestIdRef.current) {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
@@ -352,9 +360,17 @@ export function App() {
     setOperationStatus(null);
     try {
       const result = await importRotowireInjuries(forceRefresh);
-      await load();
+      const refreshedRoster = await fetchRoster();
+      setRoster(refreshedRoster);
+      void load();
+      if (result.status === "db_locked") {
+        setOperationStatus(result.message ?? "Roster refresh skipped because the database is busy. Try again in a few seconds.");
+        return;
+      }
       setOperationStatus(
-        `${forceRefresh ? "Fresh" : "Cached"} Rotowire lineup pull complete. Parsed ${result.parsed_rows ?? 0} rows${result.captured_at ? ` (${result.captured_at})` : ""}.`
+        result.used_fallback_cache
+          ? `Rotowire refresh fell back to saved roster data. Parsed ${result.parsed_rows ?? 0} rows${result.captured_at ? ` (${result.captured_at})` : ""}.`
+          : `${forceRefresh ? "Fresh" : "Cached"} Rotowire lineup pull complete. Parsed ${result.parsed_rows ?? 0} rows${result.captured_at ? ` (${result.captured_at})` : ""}.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to refresh Rotowire lineup status");

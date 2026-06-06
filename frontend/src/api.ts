@@ -425,11 +425,15 @@ export async function importCoversOdds(forceRefresh = false): Promise<OddsImport
 }
 
 export async function importRotowireInjuries(forceRefresh = false): Promise<{
+  status?: string;
+  message?: string | null;
   source: string;
   captured_at: string;
   parsed_rows: number;
   inserted: number;
   from_cache: boolean;
+  used_fallback_cache?: boolean;
+  fetch_error?: string | null;
 }> {
   const response = await apiFetch(`/api/injuries/import/rotowire?force_refresh=${forceRefresh ? "true" : "false"}`, {
     method: "POST",

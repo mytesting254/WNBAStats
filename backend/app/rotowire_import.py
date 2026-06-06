@@ -68,37 +68,52 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
     unresolved = 0
     unresolved_names: list[str] = []
     skipped_stale = 0
-    for row in rows:
-        if row["status"] not in UNAVAILABLE_STATUSES:
-            continue
-        team_abbr = normalize_team_abbreviation(row["team"])
-        if not team_abbr:
-            unresolved += 1
-            unresolved_names.append(f"{row['team']}:{row['player_name']}")
-            continue
-        player_id = _resolve_player_id(conn, team_abbr, row["player_name"])
-        if not player_id:
-            unresolved += 1
-            unresolved_names.append(f"{team_abbr}:{row['player_name']}")
-            continue
-        latest = conn.execute(
-            "SELECT captured_at FROM injuries WHERE player_id = ? ORDER BY captured_at DESC LIMIT 1",
-            (player_id,),
-        ).fetchone()
-        if latest and str(latest["captured_at"]) >= captured_at:
-            skipped_stale += 1
-            continue
-        conn.execute(
-            """
-            INSERT INTO injuries (player_id, status, note, captured_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (player_id, row["status"].lower(), f"rotowire lineups ({row['team']})", captured_at),
-        )
-        inserted += 1
-    conn.commit()
+    status = "imported" if source == "rotowire" else "loaded_from_cache"
+    message = None
+    try:
+        for row in rows:
+            if row["status"] not in UNAVAILABLE_STATUSES:
+                continue
+            team_abbr = normalize_team_abbreviation(row["team"])
+            if not team_abbr:
+                unresolved += 1
+                unresolved_names.append(f"{row['team']}:{row['player_name']}")
+                continue
+            player_id = _resolve_player_id(conn, team_abbr, row["player_name"])
+            if not player_id:
+                unresolved += 1
+                unresolved_names.append(f"{team_abbr}:{row['player_name']}")
+                continue
+            latest = conn.execute(
+                "SELECT captured_at FROM injuries WHERE player_id = ? ORDER BY captured_at DESC LIMIT 1",
+                (player_id,),
+            ).fetchone()
+            if latest and str(latest["captured_at"]) >= captured_at:
+                skipped_stale += 1
+                continue
+            conn.execute(
+                """
+                INSERT INTO injuries (player_id, status, note, captured_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (player_id, row["status"].lower(), f"rotowire lineups ({row['team']})", captured_at),
+            )
+            inserted += 1
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if _is_db_locked(exc):
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                pass
+            status = "db_locked"
+            message = "Roster refresh skipped because the database is busy. Try again in a few seconds."
+        else:
+            raise
     return {
         "source": source,
+        "status": status,
+        "message": message,
         "captured_at": captured_at,
         "parsed_rows": len(rows),
         "inserted": inserted,
@@ -110,6 +125,10 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
         "ttl_seconds": _refresh_ttl_seconds(conn),
         "unresolved_examples": unresolved_names[:10],
     }
+
+
+def _is_db_locked(exc: sqlite3.OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()
 
 
 def _update_roster_snapshot_cache(rows: list[dict[str, str]], captured_at: str, source: str) -> None:
