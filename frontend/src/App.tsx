@@ -635,7 +635,14 @@ export function App() {
           canRefresh={Boolean(authState.authenticated && authState.user?.is_admin)}
         />
       ) : (
-        <ModelsView runs={modelRuns} latest={latestModelRun} loading={loading || training} error={error} onTrain={handleTrainModel} />
+        <ModelsView
+          runs={modelRuns}
+          latest={latestModelRun}
+          loading={loading || training}
+          error={error}
+          onTrain={handleTrainModel}
+          canTrain={Boolean(authState.authenticated && authState.user?.is_admin)}
+        />
       )}
     </main>
   );
@@ -1055,13 +1062,15 @@ function ModelsView({
   latest,
   loading,
   error,
-  onTrain
+  onTrain,
+  canTrain
 }: {
   runs: ModelRun[];
   latest: ModelRun | null;
   loading: boolean;
   error: string | null;
   onTrain: () => void;
+  canTrain: boolean;
 }) {
   const metrics = latest ? sortModelMetrics(latest.metrics) : [];
   const overallMetric = latest?.metrics.overall;
@@ -1074,10 +1083,12 @@ function ModelsView({
             <h2>Model Training</h2>
             <p>{loading ? "Training or loading model runs" : "Walk-forward evaluation using only prior games"}</p>
           </div>
-          <button className="icon-button text-button dark-button" onClick={onTrain} disabled={loading}>
-            <BrainCircuit size={18} />
-            Train
-          </button>
+          {canTrain && (
+            <button className="icon-button text-button dark-button" onClick={onTrain} disabled={loading}>
+              <BrainCircuit size={18} />
+              Train
+            </button>
+          )}
         </div>
         {error && <div className="error">{error}</div>}
         <div className="model-layout">
