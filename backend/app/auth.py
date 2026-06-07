@@ -137,6 +137,7 @@ def authenticate_user(conn: Any, username: str, password: str) -> SessionUser | 
         user_id=int(row["id"]),
         username=str(row["username"]),
         is_admin=bool(row["is_admin"]),
+        csrf_token="",
     )
 
 
