@@ -391,7 +391,7 @@ def _set_observability_headers(response: Response, cache_name: str, cache_status
     print(f"[cache] {cache_name} status={cache_status} compute_ms={compute_ms:.2f}")
 
 
-@app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
+@app.post("/api/recalculate")
 def recalculate() -> dict[str, Any]:
     try:
         with connect() as conn:
@@ -1338,7 +1338,7 @@ def tune_model() -> dict:
         return run_parameter_tuning(conn)
 
 
-@app.post("/api/odds/import", dependencies=[Depends(_protect_mutation)])
+@app.post("/api/odds/import")
 def import_odds(force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_the_odds_api_props(conn, force_refresh=force_refresh)
@@ -1364,7 +1364,7 @@ def import_covers(selected_date: str | None = None, force_refresh: bool = False)
     return result
 
 
-@app.post("/api/injuries/import/rotowire", dependencies=[Depends(_protect_mutation)])
+@app.post("/api/injuries/import/rotowire")
 def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_rotowire_lineups(conn, force_refresh=force_refresh)
@@ -1383,7 +1383,7 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     return result
 
 
-@app.post("/api/history/import/espn", dependencies=[Depends(_protect_mutation)])
+@app.post("/api/history/import/espn")
 def import_espn_history(
     season: int | None = None,
     force_refresh: bool = False,
@@ -1538,7 +1538,7 @@ def missing_espn_history_dates(limit: int = 30) -> dict:
     return payload
 
 
-@app.post("/api/history/import/espn-missing", dependencies=[Depends(_protect_mutation)])
+@app.post("/api/history/import/espn-missing")
 def import_missing_espn_history(
     force_refresh: bool = True,
     include_player_stats: bool = True,
