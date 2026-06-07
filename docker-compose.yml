@@ -53,6 +53,10 @@ services:
     init: true
   frontend:
     image: nginx:1.27-alpine
+    command:
+      - /bin/sh
+      - -c
+      - cp /workspace/deploy/nginx-compose.conf /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'
     depends_on:
       - backend
       - frontend-build
@@ -60,7 +64,7 @@ services:
       - "${FRONTEND_PORT:-8080}:80"
     volumes:
       - frontend_dist:/usr/share/nginx/html:ro
-      - ./deploy/nginx-compose.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./:/workspace:ro
     restart: unless-stopped
     init: true
 volumes:
