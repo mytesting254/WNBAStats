@@ -112,6 +112,14 @@ export type WatchlistPerformance = {
   message?: string;
 };
 
+export type AuthState = {
+  authenticated: boolean;
+  user: {
+    username: string;
+    is_admin: boolean;
+  } | null;
+};
+
 const RUNTIME_API_KEY = (window.__APP_CONFIG__?.apiKey ?? "").trim();
 const BUILD_API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
 const API_KEY = RUNTIME_API_KEY || BUILD_API_KEY;
@@ -129,8 +137,44 @@ async function apiFetch(input: string, init?: RequestInit & { includeApiKey?: bo
   return fetch(input, {
     ...rest,
     cache: "no-store",
+    credentials: "same-origin",
     headers: apiHeaders(headers, includeApiKey),
   });
+}
+
+export async function fetchAuthState(): Promise<AuthState> {
+  const response = await apiFetch("/api/auth/me");
+  if (!response.ok) {
+    throw new Error("Failed to load auth state");
+  }
+  return response.json();
+}
+
+export async function loginAdmin(username: string, password: string): Promise<AuthState> {
+  const response = await apiFetch("/api/auth/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password })
+  });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "Failed to sign in");
+  }
+  return response.json();
+}
+
+export async function logoutAdmin(): Promise<AuthState> {
+  const response = await apiFetch("/api/auth/logout", { method: "POST" });
+  if (!response.ok) {
+    throw new Error("Failed to sign out");
+  }
+  return response.json();
 }
 
 export async function createGemSnapshot(snapshotDate?: string, preset = "balanced"): Promise<{
@@ -147,7 +191,6 @@ export async function createGemSnapshot(snapshotDate?: string, preset = "balance
   }
   const response = await apiFetch(`/api/gems/snapshot?${params.toString()}`, {
     method: "POST",
-    includeApiKey: true,
   });
   if (!response.ok) {
     let detail = "";
@@ -407,7 +450,6 @@ export type OddsImportResult = {
 export async function importOdds(forceRefresh = false): Promise<OddsImportResult> {
   const response = await apiFetch(`/api/odds/import?force_refresh=${forceRefresh ? "true" : "false"}`, {
     method: "POST",
-    includeApiKey: true,
   });
   if (!response.ok) {
     throw new Error("Failed to import sportsbook odds");
@@ -418,7 +460,6 @@ export async function importOdds(forceRefresh = false): Promise<OddsImportResult
 export async function importCoversOdds(forceRefresh = false): Promise<OddsImportResult> {
   const response = await apiFetch(`/api/covers/import?force_refresh=${forceRefresh ? "true" : "false"}`, {
     method: "POST",
-    includeApiKey: true,
   });
   if (!response.ok) {
     throw new Error("Failed to import Covers odds");
@@ -439,7 +480,6 @@ export async function importRotowireInjuries(forceRefresh = false): Promise<{
 }> {
   const response = await apiFetch(`/api/injuries/import/rotowire?force_refresh=${forceRefresh ? "true" : "false"}`, {
     method: "POST",
-    includeApiKey: true,
   });
   if (!response.ok) {
     throw new Error("Failed to import Rotowire lineups");
@@ -481,7 +521,6 @@ export async function importEspnHistory(
   });
   const response = await apiFetch(`/api/history/import/espn?${params.toString()}`, {
     method: "POST",
-    includeApiKey: true,
   });
   if (!response.ok) {
     let detail = "";
@@ -543,7 +582,6 @@ export async function importMissingEspnScores(
   });
   const response = await apiFetch(`/api/history/import/espn-missing?${params.toString()}`, {
     method: "POST",
-    includeApiKey: true,
   });
   if (!response.ok) {
     let detail = "";
@@ -559,7 +597,7 @@ export async function importMissingEspnScores(
 }
 
 export async function recalculate(): Promise<void> {
-  const response = await apiFetch("/api/recalculate", { method: "POST", includeApiKey: true });
+  const response = await apiFetch("/api/recalculate", { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to recalculate projections");
   }
@@ -574,7 +612,7 @@ export async function fetchModelRuns(): Promise<{ latest: ModelRun | null; runs:
 }
 
 export async function trainModel(): Promise<ModelRun> {
-  const response = await apiFetch("/api/models/train", { method: "POST", includeApiKey: true });
+  const response = await apiFetch("/api/models/train", { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to train model");
   }
@@ -582,7 +620,7 @@ export async function trainModel(): Promise<ModelRun> {
 }
 
 export async function tuneModel(): Promise<ModelTuningRun> {
-  const response = await apiFetch("/api/models/tune", { method: "POST", includeApiKey: true });
+  const response = await apiFetch("/api/models/tune", { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to tune model");
   }

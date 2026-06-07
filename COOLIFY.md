@@ -29,6 +29,8 @@ WNBA_CACHE_DIR=/data/cache
 WNBA_SNAPSHOT_DIR=/data/snapshots
 ENV=prod
 API_KEY=replace_with_a_shared_key
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=replace_with_a_strong_password
 EXPOSE_DEBUG_HEADERS=false
 ```
 
@@ -41,23 +43,12 @@ ODDSPAPI_KEY=
 BALLDONTLIE_API_KEY=
 ```
 
-If you want to use the browser UI for protected admin actions such as imports,
-recalculation, or training, also set:
-
-```dotenv
-VITE_API_KEY=the_same_value_as_API_KEY
-```
-
 Important:
 
-- `VITE_API_KEY` is embedded into the built frontend bundle by the `frontend-build` service.
-- Any user with access to the deployed app can inspect it in the browser.
-- This is acceptable only for a private/admin deployment.
-- If the site is public, leave `VITE_API_KEY` unset and treat the protected
-  POST endpoints as server/admin-only until real authentication is added.
-
-Because `VITE_API_KEY` is a build-time value, changing it requires a frontend
-rebuild/redeploy.
+- `ADMIN_USERNAME` and `ADMIN_PASSWORD` bootstrap the admin account used by the Data tab login.
+- Leave `VITE_API_KEY` unset for public deployments so the browser does not receive a shared mutation secret.
+- `API_KEY` remains available as a fallback for server-to-server or manual admin requests that send `X-API-Key`.
+- If you intentionally use `VITE_API_KEY`, it is embedded into the frontend bundle and visible to any browser user.
 
 ## 3. Attach Persistent Storage
 
@@ -91,7 +82,7 @@ After deployment, verify:
 - `/` loads the React app
 - `/api/health` returns `{"status":"ok"}`
 - existing data persists after a redeploy/restart
-- imports work from the UI only if `VITE_API_KEY` is intentionally configured
+- Data tab login works with the configured admin credentials
 - the backend can reach external providers from the server network
 
 ## 6. Backup Requirement

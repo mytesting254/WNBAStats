@@ -1,6 +1,7 @@
 ﻿import { BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  fetchAuthState,
   fetchMissingEspnScores,
   fetchLineDiscrepancies,
   fetchGemPerformance,
@@ -17,8 +18,11 @@ import {
   importMissingEspnScores,
   importOdds,
   importRotowireInjuries,
+  loginAdmin,
+  logoutAdmin,
   recalculate,
   trainModel,
+  type AuthState,
   type CoversRecordRow,
   type GemPerformance,
   type LineDiscrepancy,
@@ -101,7 +105,12 @@ export function App() {
   const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
   const [missingEspnGames, setMissingEspnGames] = useState<MissingEspnGame[]>([]);
   const [loading, setLoading] = useState(true);
+  const [authState, setAuthState] = useState<AuthState>({ authenticated: false, user: null });
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const loadRequestIdRef = useRef(0);
+  const [adminUsername, setAdminUsername] = useState("");
+  const [adminPassword, setAdminPassword] = useState("");
 
   async function load() {
     const requestId = ++loadRequestIdRef.current;
@@ -215,6 +224,23 @@ export function App() {
     load();
   }, []);
 
+  async function loadAuth() {
+    setAuthLoading(true);
+    try {
+      const result = await fetchAuthState();
+      setAuthState(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to load auth state");
+      setAuthState({ authenticated: false, user: null });
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadAuth();
+  }, []);
+
   const filtered = useMemo(() => {
     return props
       .filter((prop) => {
@@ -273,6 +299,35 @@ export function App() {
       setError(err instanceof Error ? err.message : "Unable to train model");
     } finally {
       setTraining(false);
+    }
+  }
+
+  async function handleAdminLogin() {
+    setAuthSubmitting(true);
+    setError(null);
+    try {
+      const result = await loginAdmin(adminUsername, adminPassword);
+      setAuthState(result);
+      setAdminPassword("");
+      setOperationStatus("Admin session active.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to sign in");
+    } finally {
+      setAuthSubmitting(false);
+    }
+  }
+
+  async function handleAdminLogout() {
+    setAuthSubmitting(true);
+    setError(null);
+    try {
+      const result = await logoutAdmin();
+      setAuthState(result);
+      setOperationStatus("Signed out of admin session.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to sign out");
+    } finally {
+      setAuthSubmitting(false);
     }
   }
 
@@ -533,6 +588,11 @@ export function App() {
       ) : activeTab === "data" ? (
         <DataView
           loading={loading}
+          authLoading={authLoading}
+          authSubmitting={authSubmitting}
+          authState={authState}
+          adminUsername={adminUsername}
+          adminPassword={adminPassword}
           error={error}
           status={operationStatus}
           importingOdds={importingOdds}
@@ -551,6 +611,10 @@ export function App() {
           onRefreshResults={handleRefreshResults}
           onScanMissingScores={handleScanMissingScores}
           onImportMissingScores={handleImportMissingScores}
+          onAdminLogin={handleAdminLogin}
+          onAdminLogout={handleAdminLogout}
+          onAdminUsernameChange={setAdminUsername}
+          onAdminPasswordChange={setAdminPassword}
           onRecalculate={handleRecalculate}
           onSnapshotGems={handleSnapshotGems}
           onReload={load}
@@ -573,6 +637,11 @@ export function App() {
 
 function DataView({
   loading,
+  authLoading,
+  authSubmitting,
+  authState,
+  adminUsername,
+  adminPassword,
   error,
   status,
   importingOdds,
@@ -591,11 +660,20 @@ function DataView({
   onRefreshResults,
   onScanMissingScores,
   onImportMissingScores,
+  onAdminLogin,
+  onAdminLogout,
+  onAdminUsernameChange,
+  onAdminPasswordChange,
   onRecalculate,
   onSnapshotGems,
   onReload
 }: {
   loading: boolean;
+  authLoading: boolean;
+  authSubmitting: boolean;
+  authState: AuthState;
+  adminUsername: string;
+  adminPassword: string;
   error: string | null;
   status: string | null;
   importingOdds: boolean;
@@ -620,6 +698,10 @@ function DataView({
   ) => void;
   onScanMissingScores: () => void;
   onImportMissingScores: () => void;
+  onAdminLogin: () => void;
+  onAdminLogout: () => void;
+  onAdminUsernameChange: (value: string) => void;
+  onAdminPasswordChange: (value: string) => void;
   onRecalculate: () => void;
   onSnapshotGems: () => void;
   onReload: () => void;
@@ -635,6 +717,7 @@ function DataView({
   const missingSummary = !missingEspnGames.length
     ? "No missing-score scan loaded yet."
     : `Missing: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`;
+  const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
 
   return (
     <section className="matchup-list">
@@ -648,6 +731,43 @@ function DataView({
         </div>
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
+        {!isAdmin ? (
+          <article className="operation-card">
+            <div>
+              <p className="eyebrow">admin access</p>
+              <h3>Sign In Required</h3>
+              <p>Data operations are limited to authenticated admin users.</p>
+            </div>
+            {authLoading ? (
+              <p className="reason">Checking current session...</p>
+            ) : (
+              <>
+                <div className="operation-fields">
+                  <label>
+                    Username
+                    <input type="text" value={adminUsername} onChange={(event) => onAdminUsernameChange(event.target.value)} autoComplete="username" />
+                  </label>
+                  <label>
+                    Password
+                    <input type="password" value={adminPassword} onChange={(event) => onAdminPasswordChange(event.target.value)} autoComplete="current-password" />
+                  </label>
+                </div>
+                <div className="operation-actions">
+                  <button className="icon-button text-button dark-button" onClick={onAdminLogin} disabled={authSubmitting || !adminUsername || !adminPassword}>
+                    <ShieldCheck size={18} />
+                    {authSubmitting ? "Signing In" : "Sign In"}
+                  </button>
+                </div>
+              </>
+            )}
+          </article>
+        ) : (
+          <>
+            <div className="operation-actions">
+              <button className="secondary-button" onClick={onAdminLogout} disabled={authSubmitting}>
+                {authSubmitting ? "Signing Out" : `Sign Out (${authState.user?.username})`}
+              </button>
+            </div>
         <div className="data-layout">
           <OperationCard
             title="The Odds API"
@@ -755,6 +875,8 @@ function DataView({
             onSecondary={onScanMissingScores}
           />
         </div>
+          </>
+        )}
       </div>
     </section>
   );

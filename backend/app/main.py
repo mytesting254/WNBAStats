@@ -10,9 +10,19 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 from .ball_dont_lie import fetch_team_history
 from .accuracy_analysis import build_accuracy_report, build_accuracy_report_for_days
+from .auth import (
+    SESSION_COOKIE_NAME,
+    SessionUser,
+    authenticate_user,
+    create_session,
+    delete_session,
+    get_session_user,
+    session_cookie_max_age,
+)
 from .bootstrap import ensure_teams
 from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
@@ -66,6 +76,11 @@ _PROP_SYNC_STATE: dict[str, Any] = {
     "last_result": None,
 }
 
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -84,8 +99,8 @@ app.add_middleware(
 
 @app.on_event("startup")
 def on_startup() -> None:
-    if not _is_dev_env() and not _configured_api_key():
-        raise RuntimeError("API_KEY is required when ENV is not dev/local/test.")
+    if not _is_dev_env() and not (_configured_api_key() or _bootstrap_admin_configured()):
+        raise RuntimeError("Configure either API_KEY or ADMIN_USERNAME/ADMIN_PASSWORD when ENV is not dev/local/test.")
     if _is_dev_env() and not _configured_api_key():
         print("[security] API_KEY not set; mutating endpoints are open in dev/test mode.")
     init_db()
@@ -111,6 +126,10 @@ def ops_health() -> dict[str, Any]:
 
 def _is_dev_env() -> bool:
     return os.getenv("ENV", "dev").strip().lower() in {"dev", "local", "test"}
+
+
+def _bootstrap_admin_configured() -> bool:
+    return bool(os.getenv("ADMIN_USERNAME", "").strip() and os.getenv("ADMIN_PASSWORD", "").strip())
 
 
 def _configured_api_key() -> str | None:
@@ -140,6 +159,37 @@ def _enforce_api_key(x_api_key: str | None, authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
+def _session_cookie_secure() -> bool:
+    return not _is_dev_env()
+
+
+def _auth_payload(user: SessionUser | None) -> dict[str, Any]:
+    return {
+        "authenticated": user is not None,
+        "user": {
+            "username": user.username,
+            "is_admin": user.is_admin,
+        } if user is not None else None,
+    }
+
+
+def _current_session_user(request: Request) -> SessionUser | None:
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    with connect() as conn:
+        return get_session_user(conn, session_token)
+
+
+def _require_admin_session_or_api_key(
+    request: Request,
+    x_api_key: str | None,
+    authorization: str | None,
+) -> None:
+    user = _current_session_user(request)
+    if user is not None and user.is_admin:
+        return
+    _enforce_api_key(x_api_key, authorization)
+
+
 def _consume_rate_limit(client_key: str, scope: str, capacity: float, refill_per_sec: float) -> None:
     now = time.monotonic()
     bucket_key = (client_key, scope)
@@ -165,7 +215,7 @@ def _protect_mutation(
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     _consume_rate_limit(_client_key(request), "mutation", RATE_LIMIT_MUTATION_CAPACITY, RATE_LIMIT_MUTATION_REFILL_PER_SEC)
-    _enforce_api_key(x_api_key, authorization)
+    _require_admin_session_or_api_key(request, x_api_key, authorization)
 
 
 def _protect_force_refresh(
@@ -177,7 +227,50 @@ def _protect_force_refresh(
     if not force_refresh:
         return
     _consume_rate_limit(_client_key(request), "refresh", RATE_LIMIT_REFRESH_CAPACITY, RATE_LIMIT_REFRESH_REFILL_PER_SEC)
-    _enforce_api_key(x_api_key, authorization)
+    _require_admin_session_or_api_key(request, x_api_key, authorization)
+
+
+@app.get("/api/auth/me")
+def auth_me(request: Request) -> dict[str, Any]:
+    return _auth_payload(_current_session_user(request))
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: LoginRequest, response: Response) -> dict[str, Any]:
+    username = payload.username.strip()
+    password = payload.password
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password are required.")
+    with connect() as conn:
+        user = authenticate_user(conn, username, password)
+        if user is None or not user.is_admin:
+            raise HTTPException(status_code=401, detail="Invalid credentials.")
+        session_token = create_session(conn, user)
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=session_token,
+        max_age=session_cookie_max_age(),
+        httponly=True,
+        secure=_session_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
+    return _auth_payload(user)
+
+
+@app.post("/api/auth/logout")
+def auth_logout(request: Request, response: Response) -> dict[str, Any]:
+    session_token = request.cookies.get(SESSION_COOKIE_NAME)
+    with connect() as conn:
+        delete_session(conn, session_token)
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        httponly=True,
+        secure=_session_cookie_secure(),
+        samesite="lax",
+        path="/",
+    )
+    return _auth_payload(None)
 
 
 @app.get("/api/admin/team-conflicts", dependencies=[Depends(_protect_mutation)])

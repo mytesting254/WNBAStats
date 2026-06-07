@@ -8,6 +8,7 @@ from typing import Any, Iterable, Sequence
 import requests
 from dotenv import load_dotenv
 
+from .auth import ensure_auth_schema
 from .paths import ROOT_DIR, get_db_path
 
 load_dotenv(ROOT_DIR / ".env")
@@ -248,6 +249,7 @@ def _value(cell: Any) -> Any:
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        ensure_auth_schema(conn)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(teams)").fetchall()}
         if "logo_url" not in columns:
             conn.execute("ALTER TABLE teams ADD COLUMN logo_url TEXT")
