@@ -392,7 +392,7 @@ def _set_observability_headers(response: Response, cache_name: str, cache_status
 
 
 @app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
-def recalculate() -> dict[str, Any]:
+def recalculate() -> dict[str, int]:
     try:
         with connect() as conn:
             projections = rebuild_predictions(conn)
