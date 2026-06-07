@@ -551,11 +551,11 @@ export function App() {
       <section className="summary-grid">
         <Metric
           label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups, props).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
         />
         <Metric
           label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups, props).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={(performance?.total_settled ?? performance?.settled ?? 0).toString()} />
         <Metric
@@ -587,7 +587,7 @@ export function App() {
       ) : activeTab === "matchups" ? (
         <MatchupsView matchups={matchups} loading={loading} error={error} />
       ) : activeTab === "parlays" ? (
-        <ParlayCandidatesView matchups={matchups} loading={loading} error={error} />
+        <ParlayCandidatesView matchups={matchups} props={props} loading={loading} error={error} />
       ) : activeTab === "discrepancies" ? (
         <DiscrepanciesView discrepancies={discrepancies} loading={loading} error={error} />
       ) : activeTab === "data" ? (
@@ -2491,9 +2491,18 @@ function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp
   );
 }
 
-function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[]; loading: boolean; error: string | null }) {
+function ParlayCandidatesView({ matchups, props, loading, error }: { matchups: Matchup[]; props: ValueProp[]; loading: boolean; error: string | null }) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
-  const selectedMatchup = matchups.find((matchup) => matchup.id === selectedGameId) ?? matchups[0] ?? null;
+  const matchupCards = useMemo(
+    () =>
+      matchups.map((matchup) => ({
+        matchup,
+        props: propsForMatchup(matchup, props),
+      })),
+    [matchups, props]
+  );
+  const selectedCard = matchupCards.find(({ matchup }) => matchup.id === selectedGameId) ?? matchupCards[0] ?? null;
+  const selectedMatchup = selectedCard?.matchup ?? null;
 
   return (
     <section className="matchup-list">
@@ -2507,7 +2516,7 @@ function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[
         </div>
         {error && <div className="error">{error}</div>}
         <div className="game-tabs" aria-label="Parlay candidate matchup tabs">
-          {matchups.map((matchup) => (
+          {matchupCards.map(({ matchup, props: matchupProps }) => (
             <button
               key={matchup.id}
               className={selectedMatchup?.id === matchup.id ? "active" : ""}
@@ -2515,7 +2524,7 @@ function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[
             >
               <span>{formatDate(matchup.start_time)}</span>
               <strong>{matchup.away_team} at {matchup.home_team}</strong>
-              <em>{availableLabel(matchup)}</em>
+              <em>{parlayAvailabilityLabel(matchup, matchupProps)}</em>
             </button>
           ))}
         </div>
@@ -2523,7 +2532,7 @@ function ParlayCandidatesView({ matchups, loading, error }: { matchups: Matchup[
           {selectedMatchup ? (
             <MatchupProps
               matchup={selectedMatchup}
-              props={selectedMatchup.props ?? []}
+              props={selectedCard?.props ?? []}
               sportsbookProps={selectedMatchup.sportsbook_props ?? []}
               discrepancies={selectedMatchup.line_discrepancies ?? []}
             />
@@ -3321,15 +3330,50 @@ function confidenceRank(confidence: ValueProp["confidence"]) {
   return ranks[confidence];
 }
 
-function parlayCandidateCount(matchups: Matchup[]) {
+function matchupGameIds(matchup: Matchup) {
+  const gameIds = new Set<number>([matchup.id]);
+  for (const item of matchup.props ?? []) {
+    gameIds.add(item.game_id);
+  }
+  for (const item of matchup.sportsbook_props ?? []) {
+    if (item.game_id != null) {
+      gameIds.add(item.game_id);
+    }
+  }
+  for (const item of matchup.line_discrepancies ?? []) {
+    if (item.game_id != null) {
+      gameIds.add(item.game_id);
+    }
+  }
+  return gameIds;
+}
+
+function propsForMatchup(matchup: Matchup, props: ValueProp[]) {
+  const gameIds = matchupGameIds(matchup);
+  const persisted = props.filter((prop) => gameIds.has(prop.game_id));
+  return persisted.length ? persisted : (matchup.props ?? []);
+}
+
+function parlayAvailabilityLabel(matchup: Matchup, props: ValueProp[]) {
+  const parlayCount = props.filter((prop) => prop.expected_value > 0 && prop.edge > 0).length;
+  if (parlayCount > 0) {
+    return `${parlayCount} candidate${parlayCount === 1 ? "" : "s"}`;
+  }
+  if (props.length > 0) {
+    return `${props.length} model prop${props.length === 1 ? "" : "s"}`;
+  }
+  return availableLabel(matchup);
+}
+
+function parlayCandidateCount(matchups: Matchup[], props: ValueProp[]) {
   return matchups.reduce(
-    (count, matchup) => count + (matchup.props ?? []).filter((prop) => prop.expected_value > 0 && prop.edge > 0).length,
+    (count, matchup) => count + propsForMatchup(matchup, props).filter((prop) => prop.expected_value > 0 && prop.edge > 0).length,
     0
   );
 }
 
-function gamesWithParlayCandidates(matchups: Matchup[]) {
-  return matchups.filter((matchup) => (matchup.props ?? []).some((prop) => prop.expected_value > 0 && prop.edge > 0)).length;
+function gamesWithParlayCandidates(matchups: Matchup[], props: ValueProp[]) {
+  return matchups.filter((matchup) => propsForMatchup(matchup, props).some((prop) => prop.expected_value > 0 && prop.edge > 0)).length;
 }
 
 function countDiscrepancyBooks(discrepancies: LineDiscrepancy[]) {
