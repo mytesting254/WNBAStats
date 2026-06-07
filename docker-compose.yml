@@ -1,8 +1,20 @@
 services:
   backend:
-    image: python:3.12-slim
-    working_dir: /workspace
-    command: ["/bin/sh", "/workspace/deploy/backend-entrypoint.sh"]
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.12-slim
+        ENV PYTHONDONTWRITEBYTECODE=1 \
+            PYTHONUNBUFFERED=1 \
+            PIP_NO_CACHE_DIR=1
+        WORKDIR /app
+        RUN apt-get update \
+            && apt-get install -y --no-install-recommends curl ca-certificates \
+            && rm -rf /var/lib/apt/lists/*
+        COPY backend/requirements.txt backend/requirements.txt
+        RUN pip install -r backend/requirements.txt
+        COPY backend backend
+        COPY scripts scripts
     environment:
       USE_TURSO: ${USE_TURSO:-false}
       WNBA_DATA_DIR: ${WNBA_DATA_DIR:-/data}
@@ -23,10 +35,11 @@ services:
       RATE_LIMIT_REFRESH_CAPACITY: ${RATE_LIMIT_REFRESH_CAPACITY:-6}
       RATE_LIMIT_REFRESH_REFILL_PER_SEC: ${RATE_LIMIT_REFRESH_REFILL_PER_SEC:-0.33}
       PORT: ${BACKEND_PORT_INTERNAL:-8010}
+    command:
+      - /bin/sh
+      - -c
+      - mkdir -p "$$WNBA_DATA_DIR" "$$WNBA_CACHE_DIR" "$$WNBA_SNAPSHOT_DIR" && python scripts/init_db.py && exec python -m uvicorn backend.app.main:app --host 0.0.0.0 --port "$$PORT"
     volumes:
-      - ./:/workspace
-      - backend_venv:/workspace/.venv
-      - backend_pip_cache:/root/.cache/pip
       - wnba_data:/data
     expose:
       - "${BACKEND_PORT_INTERNAL:-8010}"
@@ -39,37 +52,29 @@ services:
       retries: 5
       start_period: 45s
 
-  frontend-build:
-    image: node:22-alpine
-    working_dir: /workspace/frontend
-    command: ["/bin/sh", "/workspace/deploy/frontend-build.sh"]
-    environment:
-      VITE_API_KEY: ${VITE_API_KEY:-}
-    volumes:
-      - ./:/workspace
-      - frontend_node_modules:/workspace/frontend/node_modules
-      - frontend_dist:/dist
-    restart: unless-stopped
-    init: true
   frontend:
-    image: nginx:1.27-alpine
-    command:
-      - /bin/sh
-      - -c
-      - cp /workspace/deploy/nginx-compose.conf /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'
+    build:
+      context: .
+      args:
+        VITE_API_KEY: ${VITE_API_KEY:-}
+      dockerfile_inline: |
+        FROM node:22-alpine AS build
+        WORKDIR /app/frontend
+        ARG VITE_API_KEY=""
+        ENV VITE_API_KEY=${VITE_API_KEY}
+        COPY frontend/package.json frontend/package-lock.json ./
+        RUN npm ci
+        COPY frontend ./
+        RUN npm run build
+
+        FROM nginx:1.27-alpine
+        COPY deploy/nginx-compose.conf /etc/nginx/conf.d/default.conf
+        COPY --from=build /app/frontend/dist /usr/share/nginx/html
     depends_on:
       - backend
-      - frontend-build
     ports:
       - "${FRONTEND_PORT:-8080}:80"
-    volumes:
-      - frontend_dist:/usr/share/nginx/html:ro
-      - ./:/workspace:ro
     restart: unless-stopped
     init: true
 volumes:
-  backend_pip_cache:
-  backend_venv:
-  frontend_dist:
-  frontend_node_modules:
   wnba_data:
