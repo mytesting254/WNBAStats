@@ -652,7 +652,7 @@ function DataView({
           <OperationCard
             title="The Odds API"
             description="Update prop prices, lines, line discrepancies, and current matchup markets from The Odds API."
-            metrics={`${propsCount} model props | ${discrepanciesCount} line gaps`}
+            metrics={`${discrepanciesCount} line gaps | ${matchupsCount} upcoming games`}
             primaryLabel={importingOdds ? "Loading" : "Load Saved Odds"}
             secondaryLabel="Refresh Odds"
             disabled={importingOdds || importingCoversOdds || refreshingResults || loading}
@@ -662,7 +662,7 @@ function DataView({
           <OperationCard
             title="Covers Odds"
             description="Import today's Covers matchup prop tables without using The Odds API credits."
-            metrics={`${propsCount} model props | ${discrepanciesCount} line gaps`}
+            metrics={`${discrepanciesCount} line gaps | ${matchupsCount} upcoming games`}
             primaryLabel={importingCoversOdds ? "Loading" : "Load Saved Covers"}
             secondaryLabel="Refresh Covers"
             disabled={importingOdds || importingCoversOdds || refreshingResults || loading}
@@ -737,7 +737,7 @@ function DataView({
           <OperationCard
             title="Projection Board"
             description="Rebuild model projections from the current prop lines and player history."
-            metrics={`${propsCount} current predictions`}
+            metrics={`${matchupsCount} upcoming games | ${missingEspnDates.length} missing score dates`}
             primaryLabel={recalculating ? "Recalculating" : "Recalculate"}
             secondaryLabel={snapshottingGems ? "Tracking Gems" : "Track Gems Daily"}
             disabled={refreshingResults || importingOdds || importingCoversOdds || loading || recalculating || snapshottingGems}
@@ -747,7 +747,7 @@ function DataView({
           <OperationCard
             title="Reload Views"
             description="Reload all boards and metrics from current backend state."
-            metrics={`${matchupsCount} games | ${propsCount} props`}
+            metrics={`${matchupsCount} games | ${missingEspnDates.length} missing score dates`}
             primaryLabel="Reload"
             secondaryLabel="Refresh Missing Scan"
             disabled={busy}
