@@ -26,8 +26,10 @@ def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
         metrics[market] = result
         total_rows += int(result["rows"])
 
+    _ensure_overall_metrics(metrics)
     settled_validation = _settled_validation_metrics(conn, TRAINING_MODEL_VERSION)
     _merge_validation_metrics(metrics, settled_validation)
+    _ensure_overall_metrics(metrics)
 
     finished_at = datetime.now(timezone.utc).isoformat()
     status = "completed" if total_rows > 0 else "no_data"
@@ -120,7 +122,7 @@ def list_model_runs(conn: sqlite3.Connection, limit: int = 10) -> list[dict]:
         """,
         (limit,),
     ).fetchall()
-    return [_serialize_run(row) for row in rows]
+    return [_serialize_run(conn, row) for row in rows]
 
 
 def latest_model_run(conn: sqlite3.Connection) -> dict | None:
@@ -132,7 +134,7 @@ def latest_model_run(conn: sqlite3.Connection) -> dict | None:
         LIMIT 1
         """
     ).fetchone()
-    return _serialize_run(row) if row else None
+    return _serialize_run(conn, row) if row else None
 
 
 def _run_component_benchmark(conn: sqlite3.Connection) -> dict:
@@ -143,6 +145,7 @@ def _run_component_benchmark(conn: sqlite3.Connection) -> dict:
         result = _evaluate_market(conn, market)
         metrics[market] = result
         total_rows += int(result["rows"])
+    _ensure_overall_metrics(metrics)
     finished_at = datetime.now(timezone.utc).isoformat()
     return {
         "model_version": COMPONENT_MODEL_VERSION,
@@ -243,6 +246,44 @@ def _merge_validation_metrics(base_metrics: dict[str, dict], validation_metrics:
             },
         )
         target.update(validation)
+
+
+def _ensure_overall_metrics(metrics: dict[str, dict]) -> None:
+    market_items = [(market, metric) for market, metric in metrics.items() if market != "overall"]
+    if not market_items:
+        return
+
+    total_rows = 0
+    mae_sum = 0.0
+    rmse_sum = 0.0
+    bias_sum = 0.0
+    directional_sum = 0.0
+    directional_rows = 0
+
+    for _, metric in market_items:
+        rows = int(metric.get("rows") or 0)
+        if rows <= 0:
+            continue
+        total_rows += rows
+        if metric.get("mae") is not None:
+            mae_sum += float(metric["mae"]) * rows
+        if metric.get("rmse") is not None:
+            rmse_sum += float(metric["rmse"]) * rows
+        if metric.get("bias") is not None:
+            bias_sum += float(metric["bias"]) * rows
+        if metric.get("directional_accuracy") is not None:
+            directional_sum += float(metric["directional_accuracy"]) * rows
+            directional_rows += rows
+
+    if total_rows <= 0:
+        return
+
+    overall = metrics.setdefault("overall", {})
+    overall.setdefault("rows", total_rows)
+    overall.setdefault("mae", round(mae_sum / total_rows, 3) if total_rows else None)
+    overall.setdefault("rmse", round(rmse_sum / total_rows, 3) if total_rows else None)
+    overall.setdefault("bias", round(bias_sum / total_rows, 3) if total_rows else None)
+    overall.setdefault("directional_accuracy", round(directional_sum / directional_rows, 3) if directional_rows else None)
 
 
 def _settled_validation_metrics(conn: sqlite3.Connection, model_version: str) -> dict[str, dict]:
@@ -456,8 +497,13 @@ def _market_value(row: sqlite3.Row, market: str) -> float:
     return float(row[market])
 
 
-def _serialize_run(row: sqlite3.Row) -> dict:
+def _serialize_run(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     payload = dict(row)
     payload["markets"] = json.loads(payload["markets"])
     payload["metrics"] = json.loads(payload.pop("metrics_json"))
+    _ensure_overall_metrics(payload["metrics"])
+    validation = _settled_validation_metrics(conn, str(payload.get("model_version") or ""))
+    if validation:
+        _merge_validation_metrics(payload["metrics"], validation)
+        _ensure_overall_metrics(payload["metrics"])
     return payload
