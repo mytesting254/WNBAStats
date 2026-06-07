@@ -1872,6 +1872,7 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
   const h2hRows = records?.head_to_head.length
     ? records.head_to_head.slice(0, 10)
     : buildFallbackH2HRows(matchup);
+  const singleH2HRow = h2hRows.length === 1 ? h2hRows[0] : null;
   const awayRows = hasCovers
     ? records?.away_last_10.slice(0, 10) ?? []
     : matchup.away.recent_games.slice(0, 10).map((game) => ({
@@ -1910,37 +1911,47 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
       </div>
       <div className="covers-records-list">
         <h4>H2H Last 10</h4>
-        <div className="table-wrap covers-records-table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Home</th>
-                <th>Result</th>
-                <th>ATS</th>
-                <th>O/U</th>
-              </tr>
-            </thead>
-            <tbody>
-              {h2hRows.map((row) => (
-                <tr key={`h2h-${row.date}-${row.score}-${row.home ?? ""}`}>
-                  <td>{row.date}</td>
-                  <td>{coversRecordOpponent(row, "h2h", matchup)}</td>
-                  <td>
-                    <RecordResultCell row={row} matchup={matchup} winnerOnly />
-                  </td>
-                  <td>{row.ats}</td>
-                  <td>{row.total}</td>
-                </tr>
-              ))}
-              {!h2hRows.length && (
+        {!h2hRows.length ? (
+          <p className="empty">No prior head-to-head meetings.</p>
+        ) : singleH2HRow ? (
+          <div className="board-panel compact-panel">
+            <p className="eyebrow">Only prior meeting</p>
+            <div className="prediction-strip">
+              <MiniStat label="Date" value={singleH2HRow.date} />
+              <MiniStat label="Home" value={singleH2HRow.home ?? "N/A"} />
+              <MiniStat label="Score" value={singleH2HRow.score} />
+              <MiniStat label="ATS" value={singleH2HRow.ats} />
+              <MiniStat label="O/U" value={singleH2HRow.total} />
+            </div>
+          </div>
+        ) : (
+          <div className="table-wrap covers-records-table-wrap">
+            <table>
+              <thead>
                 <tr>
-                  <td colSpan={5}>No head-to-head recent games available.</td>
+                  <th>Date</th>
+                  <th>Home</th>
+                  <th>Result</th>
+                  <th>ATS</th>
+                  <th>O/U</th>
                 </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {h2hRows.map((row) => (
+                  <tr key={`h2h-${row.date}-${row.score}-${row.home ?? ""}`}>
+                    <td>{row.date}</td>
+                    <td>{coversRecordOpponent(row, "h2h", matchup)}</td>
+                    <td>
+                      <RecordResultCell row={row} matchup={matchup} winnerOnly />
+                    </td>
+                    <td>{row.ats}</td>
+                    <td>{row.total}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
       <div className="covers-records-list">
         <h4>{matchup.away_team} Last 10</h4>
