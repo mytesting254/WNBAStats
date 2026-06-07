@@ -72,7 +72,7 @@ const WNBA_TEAM_LOGOS: Record<string, string> = {
   PDX: "/team-logos/por.png"
 };
 
-type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "discrepancies" | "roster" | "models" | "data";
+type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "discrepancies" | "models" | "data";
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
@@ -538,10 +538,6 @@ export function App() {
           <BrainCircuit size={18} />
           Models
         </button>
-        <button className={activeTab === "roster" ? "active" : ""} onClick={() => setActiveTab("roster")}>
-          <ShieldCheck size={18} />
-          Roster
-        </button>
         <button className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>
           <Database size={18} />
           Data
@@ -550,12 +546,12 @@ export function App() {
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "models" ? "Training rows" : "Missing score dates"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
         />
         <Metric
-          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={(performance?.total_settled ?? performance?.settled ?? 0).toString()} />
         <Metric
@@ -606,7 +602,8 @@ export function App() {
           refreshingMissingScores={refreshingMissingScores}
           recalculating={recalculating}
           snapshottingGems={snapshottingGems}
-          propsCount={props.length}
+          roster={roster}
+          refreshingRoster={refreshingRoster}
           matchupsCount={matchups.length}
           discrepanciesCount={discrepancies.length}
           missingEspnDates={missingEspnDates}
@@ -621,17 +618,9 @@ export function App() {
           onAdminUsernameChange={setAdminUsername}
           onAdminPasswordChange={setAdminPassword}
           onRecalculate={handleRecalculate}
+          onRefreshRoster={() => handleRefreshRoster(true)}
           onSnapshotGems={handleSnapshotGems}
           onReload={load}
-        />
-      ) : activeTab === "roster" ? (
-        <RosterView
-          roster={roster}
-          loading={loading}
-          error={error}
-          status={operationStatus}
-          refreshing={refreshingRoster}
-          onRefresh={() => handleRefreshRoster(true)}
         />
       ) : (
         <ModelsView runs={modelRuns} latest={latestModelRun} loading={loading || training} error={error} onTrain={handleTrainModel} />
@@ -655,7 +644,8 @@ function DataView({
   refreshingMissingScores,
   recalculating,
   snapshottingGems,
-  propsCount,
+  roster,
+  refreshingRoster,
   matchupsCount,
   discrepanciesCount,
   missingEspnDates,
@@ -670,6 +660,7 @@ function DataView({
   onAdminUsernameChange,
   onAdminPasswordChange,
   onRecalculate,
+  onRefreshRoster,
   onSnapshotGems,
   onReload
 }: {
@@ -687,7 +678,8 @@ function DataView({
   refreshingMissingScores: boolean;
   recalculating: boolean;
   snapshottingGems: boolean;
-  propsCount: number;
+  roster: RosterPlayer[];
+  refreshingRoster: boolean;
   matchupsCount: number;
   discrepanciesCount: number;
   missingEspnDates: string[];
@@ -708,6 +700,7 @@ function DataView({
   onAdminUsernameChange: (value: string) => void;
   onAdminPasswordChange: (value: string) => void;
   onRecalculate: () => void;
+  onRefreshRoster: () => void;
   onSnapshotGems: () => void;
   onReload: () => void;
 }) {
@@ -880,6 +873,15 @@ function DataView({
             onSecondary={onScanMissingScores}
           />
         </div>
+        <RosterView
+          roster={roster}
+          loading={loading}
+          error={null}
+          status={null}
+          refreshing={refreshingRoster}
+          onRefresh={onRefreshRoster}
+          embedded
+        />
           </>
         )}
       </div>
@@ -893,7 +895,8 @@ function RosterView({
   error,
   status,
   refreshing,
-  onRefresh
+  onRefresh,
+  embedded = false
 }: {
   roster: RosterPlayer[];
   loading: boolean;
@@ -901,6 +904,7 @@ function RosterView({
   status: string | null;
   refreshing: boolean;
   onRefresh: () => void;
+  embedded?: boolean;
 }) {
   const teams = useMemo(() => Array.from(new Set(roster.map((item) => item.team))).sort(), [roster]);
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
@@ -914,6 +918,68 @@ function RosterView({
     }
   }, [teams, selectedTeam]);
   const visibleRows = selectedTeam ? roster.filter((item) => item.team === selectedTeam) : roster;
+  const content = (
+    <>
+      <div className="operation-actions">
+        <button className="icon-button text-button dark-button" onClick={onRefresh} disabled={loading || refreshing}>
+          <RefreshCw size={18} />
+          {refreshing ? "Refreshing" : "Refresh Roster"}
+        </button>
+      </div>
+      {error && <div className="error">{error}</div>}
+      {status && <div className="success">{status}</div>}
+      <div className="game-tabs" aria-label="Roster team tabs">
+        {teams.map((team) => (
+          <button key={team} className={selectedTeam === team ? "active" : ""} onClick={() => setSelectedTeam(team)}>
+            <strong>{team}</strong>
+            <em>{roster.filter((item) => item.team === team).length} players</em>
+          </button>
+        ))}
+      </div>
+      <div className="props-table-wrapper">
+        <table className="props-table">
+          <thead>
+            <tr>
+              <th>Team</th>
+              <th>Player</th>
+              <th>Status</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visibleRows.map((item) => (
+              <tr key={`${item.team}-${item.player_name}-${item.status}`}>
+                <td>{item.team}</td>
+                <td>{item.player_name}</td>
+                <td><span className={`status-pill ${statusClass(item.status)}`}>{item.status}</span></td>
+                <td>{item.captured_at ? formatDate(item.captured_at) : "N/A"}</td>
+              </tr>
+            ))}
+            {!visibleRows.length && (
+              <tr>
+                <td colSpan={4}>No Rotowire lineup rows available yet. Run injury import or reload matchups to refresh lineups.</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </>
+  );
+
+  if (embedded) {
+    return (
+      <article className="operation-card">
+        <div className="panel-header">
+          <div>
+            <h3>Roster Status</h3>
+            <p>{loading ? "Loading lineup status" : "Rotowire lineup statuses grouped by team"}</p>
+          </div>
+          <ShieldCheck size={20} />
+        </div>
+        {content}
+      </article>
+    );
+  }
 
   return (
     <section className="matchup-list">
@@ -925,49 +991,7 @@ function RosterView({
           </div>
           <ShieldCheck size={20} />
         </div>
-        <div className="operation-actions">
-          <button className="icon-button text-button dark-button" onClick={onRefresh} disabled={loading || refreshing}>
-            <RefreshCw size={18} />
-            {refreshing ? "Refreshing" : "Refresh Roster"}
-          </button>
-        </div>
-        {error && <div className="error">{error}</div>}
-        {status && <div className="success">{status}</div>}
-        <div className="game-tabs" aria-label="Roster team tabs">
-          {teams.map((team) => (
-            <button key={team} className={selectedTeam === team ? "active" : ""} onClick={() => setSelectedTeam(team)}>
-              <strong>{team}</strong>
-              <em>{roster.filter((item) => item.team === team).length} players</em>
-            </button>
-          ))}
-        </div>
-        <div className="props-table-wrapper">
-          <table className="props-table">
-            <thead>
-              <tr>
-                <th>Team</th>
-                <th>Player</th>
-                <th>Status</th>
-                <th>Updated</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleRows.map((item) => (
-                <tr key={`${item.team}-${item.player_name}-${item.status}`}>
-                  <td>{item.team}</td>
-                  <td>{item.player_name}</td>
-                  <td><span className={`status-pill ${statusClass(item.status)}`}>{item.status}</span></td>
-                  <td>{item.captured_at ? formatDate(item.captured_at) : "N/A"}</td>
-                </tr>
-              ))}
-              {!visibleRows.length && (
-                <tr>
-                  <td colSpan={4}>No Rotowire lineup rows available yet. Run injury import or reload matchups to refresh lineups.</td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+        {content}
       </div>
     </section>
   );
@@ -3097,7 +3121,6 @@ function tabTitle(tab: DashboardTab) {
     matchups: "Pregame Matchups",
     parlays: "Parlay Candidates",
     discrepancies: "Line Discrepancies",
-    roster: "Roster Status",
     models: "Model Lab",
     data: "Data Operations"
   };
