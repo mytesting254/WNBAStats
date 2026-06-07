@@ -1348,7 +1348,7 @@ def import_odds(force_refresh: bool = False) -> dict:
     return result
 
 
-@app.post("/api/covers/import", dependencies=[Depends(_protect_mutation)])
+@app.post("/api/covers/import")
 def import_covers(selected_date: str | None = None, force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh, sync_props=False)
