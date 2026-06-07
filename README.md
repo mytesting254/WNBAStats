@@ -92,6 +92,10 @@ see [VM.md](VM.md).
 
 For a Coolify URL-based deployment using Docker Compose, see [COOLIFY.md](COOLIFY.md).
 
+## Troubleshooting
+
+For common deployment, auth, proxy, SQLite, and provider failure cases, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 ## First Run
 
 ### Docker Compose

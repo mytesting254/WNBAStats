@@ -7,6 +7,8 @@ This repo can be deployed on Coolify as a Docker Compose application with:
 - `backend`: FastAPI on the private Docker network
 - `wnba_data`: persistent volume for SQLite, caches, and snapshots
 
+For broader failure patterns and recovery notes, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
 ## 1. Use The Compose File
 
 In Coolify, create a new application from this repo and select:
