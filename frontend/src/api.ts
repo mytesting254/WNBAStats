@@ -118,16 +118,25 @@ export type AuthState = {
     username: string;
     is_admin: boolean;
   } | null;
+  csrf_token: string | null;
 };
 
 const RUNTIME_API_KEY = (window.__APP_CONFIG__?.apiKey ?? "").trim();
 const BUILD_API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
 const API_KEY = RUNTIME_API_KEY || BUILD_API_KEY;
+let csrfToken = "";
+
+export function setCsrfToken(nextToken: string | null | undefined) {
+  csrfToken = (nextToken ?? "").trim();
+}
 
 function apiHeaders(headers?: HeadersInit, includeApiKey = false): Headers {
   const merged = new Headers(headers);
   if (includeApiKey && API_KEY) {
     merged.set("X-API-Key", API_KEY);
+  }
+  if (csrfToken) {
+    merged.set("X-CSRF-Token", csrfToken);
   }
   return merged;
 }

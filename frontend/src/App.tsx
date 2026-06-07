@@ -21,6 +21,7 @@ import {
   loginAdmin,
   logoutAdmin,
   recalculate,
+  setCsrfToken,
   trainModel,
   type AuthState,
   type CoversRecordRow,
@@ -105,7 +106,7 @@ export function App() {
   const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
   const [missingEspnGames, setMissingEspnGames] = useState<MissingEspnGame[]>([]);
   const [loading, setLoading] = useState(true);
-  const [authState, setAuthState] = useState<AuthState>({ authenticated: false, user: null });
+  const [authState, setAuthState] = useState<AuthState>({ authenticated: false, user: null, csrf_token: null });
   const [authLoading, setAuthLoading] = useState(true);
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const loadRequestIdRef = useRef(0);
@@ -228,10 +229,12 @@ export function App() {
     setAuthLoading(true);
     try {
       const result = await fetchAuthState();
+      setCsrfToken(result.csrf_token);
       setAuthState(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to load auth state");
-      setAuthState({ authenticated: false, user: null });
+      setCsrfToken("");
+      setAuthState({ authenticated: false, user: null, csrf_token: null });
     } finally {
       setAuthLoading(false);
     }
@@ -307,6 +310,7 @@ export function App() {
     setError(null);
     try {
       const result = await loginAdmin(adminUsername, adminPassword);
+      setCsrfToken(result.csrf_token);
       setAuthState(result);
       setAdminPassword("");
       setOperationStatus("Admin session active.");
@@ -322,6 +326,7 @@ export function App() {
     setError(null);
     try {
       const result = await logoutAdmin();
+      setCsrfToken("");
       setAuthState(result);
       setOperationStatus("Signed out of admin session.");
     } catch (err) {

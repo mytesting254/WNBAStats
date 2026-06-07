@@ -19,6 +19,7 @@ class SessionUser:
     user_id: int
     username: str
     is_admin: bool
+    csrf_token: str
 
 
 def ensure_auth_schema(conn: Any) -> None:
@@ -41,12 +42,17 @@ def ensure_auth_schema(conn: Any) -> None:
             id INTEGER PRIMARY KEY,
             user_id INTEGER NOT NULL,
             session_token TEXT NOT NULL UNIQUE,
+            csrf_token TEXT NOT NULL,
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             FOREIGN KEY (user_id) REFERENCES auth_users(id)
         )
         """
     )
+    session_columns = {row["name"] for row in conn.execute("PRAGMA table_info(auth_sessions)").fetchall()}
+    if "csrf_token" not in session_columns:
+        conn.execute("ALTER TABLE auth_sessions ADD COLUMN csrf_token TEXT")
+        conn.execute("UPDATE auth_sessions SET csrf_token = '' WHERE csrf_token IS NULL")
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_auth_sessions_user
@@ -134,20 +140,21 @@ def authenticate_user(conn: Any, username: str, password: str) -> SessionUser | 
     )
 
 
-def create_session(conn: Any, user: SessionUser) -> str:
+def create_session(conn: Any, user: SessionUser) -> tuple[str, str]:
     prune_expired_sessions(conn)
     token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(24)
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(days=SESSION_TTL_DAYS)
     conn.execute(
         """
-        INSERT INTO auth_sessions (user_id, session_token, created_at, expires_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO auth_sessions (user_id, session_token, csrf_token, created_at, expires_at)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (user.user_id, token, now.isoformat(), expires_at.isoformat()),
+        (user.user_id, token, csrf_token, now.isoformat(), expires_at.isoformat()),
     )
     conn.commit()
-    return token
+    return token, csrf_token
 
 
 def delete_session(conn: Any, token: str | None) -> None:
@@ -163,7 +170,7 @@ def get_session_user(conn: Any, token: str | None) -> SessionUser | None:
     prune_expired_sessions(conn)
     row = conn.execute(
         """
-        SELECT u.id, u.username, u.is_admin
+        SELECT u.id, u.username, u.is_admin, s.csrf_token
         FROM auth_sessions s
         JOIN auth_users u ON u.id = s.user_id
         WHERE s.session_token = ?
@@ -178,6 +185,7 @@ def get_session_user(conn: Any, token: str | None) -> SessionUser | None:
         user_id=int(row["id"]),
         username=str(row["username"]),
         is_admin=bool(row["is_admin"]),
+        csrf_token=str(row["csrf_token"] or ""),
     )
 
 

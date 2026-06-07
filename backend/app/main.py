@@ -170,6 +170,7 @@ def _auth_payload(user: SessionUser | None) -> dict[str, Any]:
             "username": user.username,
             "is_admin": user.is_admin,
         } if user is not None else None,
+        "csrf_token": user.csrf_token if user is not None else None,
     }
 
 
@@ -179,13 +180,29 @@ def _current_session_user(request: Request) -> SessionUser | None:
         return get_session_user(conn, session_token)
 
 
+def _origin_allowed(request: Request) -> bool:
+    origin = request.headers.get("origin")
+    if not origin:
+        return True
+    try:
+        expected = str(request.base_url).rstrip("/")
+    except Exception:
+        return False
+    return origin.rstrip("/") == expected
+
+
 def _require_admin_session_or_api_key(
     request: Request,
     x_api_key: str | None,
     authorization: str | None,
+    x_csrf_token: str | None,
 ) -> None:
     user = _current_session_user(request)
     if user is not None and user.is_admin:
+        if not _origin_allowed(request):
+            raise HTTPException(status_code=403, detail="Invalid origin.")
+        if not x_csrf_token or x_csrf_token.strip() != user.csrf_token:
+            raise HTTPException(status_code=403, detail="Invalid CSRF token.")
         return
     _enforce_api_key(x_api_key, authorization)
 
@@ -212,22 +229,24 @@ def _client_key(request: Request) -> str:
 def _protect_mutation(
     request: Request,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    x_csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     _consume_rate_limit(_client_key(request), "mutation", RATE_LIMIT_MUTATION_CAPACITY, RATE_LIMIT_MUTATION_REFILL_PER_SEC)
-    _require_admin_session_or_api_key(request, x_api_key, authorization)
+    _require_admin_session_or_api_key(request, x_api_key, authorization, x_csrf_token)
 
 
 def _protect_force_refresh(
     request: Request,
     force_refresh: bool = False,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+    x_csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
     authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     if not force_refresh:
         return
     _consume_rate_limit(_client_key(request), "refresh", RATE_LIMIT_REFRESH_CAPACITY, RATE_LIMIT_REFRESH_REFILL_PER_SEC)
-    _require_admin_session_or_api_key(request, x_api_key, authorization)
+    _require_admin_session_or_api_key(request, x_api_key, authorization, x_csrf_token)
 
 
 @app.get("/api/auth/me")
@@ -245,7 +264,8 @@ def auth_login(payload: LoginRequest, response: Response) -> dict[str, Any]:
         user = authenticate_user(conn, username, password)
         if user is None or not user.is_admin:
             raise HTTPException(status_code=401, detail="Invalid credentials.")
-        session_token = create_session(conn, user)
+        session_token, csrf_token = create_session(conn, user)
+        user = SessionUser(user_id=user.user_id, username=user.username, is_admin=user.is_admin, csrf_token=csrf_token)
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=session_token,

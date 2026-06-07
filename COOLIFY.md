@@ -46,6 +46,7 @@ BALLDONTLIE_API_KEY=
 Important:
 
 - `ADMIN_USERNAME` and `ADMIN_PASSWORD` bootstrap the admin account used by the Data tab login.
+- Session-authenticated admin POST routes also require a CSRF token header, which the frontend now manages automatically.
 - Leave `VITE_API_KEY` unset for public deployments so the browser does not receive a shared mutation secret.
 - `API_KEY` remains available as a fallback for server-to-server or manual admin requests that send `X-API-Key`.
 - If you intentionally use `VITE_API_KEY`, it is embedded into the frontend bundle and visible to any browser user.
