@@ -184,10 +184,17 @@ def _origin_allowed(request: Request) -> bool:
     origin = request.headers.get("origin")
     if not origin:
         return True
-    try:
-        expected = str(request.base_url).rstrip("/")
-    except Exception:
-        return False
+    forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    host = forwarded_host or (request.headers.get("host") or "").strip()
+    scheme = forwarded_proto or request.url.scheme
+    if not host or not scheme:
+        try:
+            expected = str(request.base_url).rstrip("/")
+        except Exception:
+            return False
+        return origin.rstrip("/") == expected
+    expected = f"{scheme}://{host}".rstrip("/")
     return origin.rstrip("/") == expected
 
 
