@@ -138,21 +138,6 @@ async function apiFetch(input: string, init?: RequestInit & { includeApiKey?: bo
   });
 }
 
-async function apiError(response: Response, fallback: string): Promise<Error> {
-  let detail = "";
-  try {
-    const payload = await response.json();
-    if (typeof payload?.detail === "string" && payload.detail.trim()) {
-      detail = payload.detail.trim();
-    } else if (typeof payload?.message === "string" && payload.message.trim()) {
-      detail = payload.message.trim();
-    }
-  } catch {
-    detail = "";
-  }
-  return new Error(detail || fallback);
-}
-
 export async function createGemSnapshot(snapshotDate?: string, preset = "balanced"): Promise<{
   snapshot_id: number;
   snapshot_date: string;
@@ -430,7 +415,7 @@ export async function importOdds(forceRefresh = false): Promise<OddsImportResult
     includeApiKey: true,
   });
   if (!response.ok) {
-    throw await apiError(response, "Failed to import sportsbook odds");
+    throw new Error("Failed to import sportsbook odds");
   }
   return response.json();
 }
@@ -441,7 +426,7 @@ export async function importCoversOdds(forceRefresh = false): Promise<OddsImport
     includeApiKey: true,
   });
   if (!response.ok) {
-    throw await apiError(response, "Failed to import Covers odds");
+    throw new Error("Failed to import Covers odds");
   }
   return response.json();
 }
@@ -587,7 +572,7 @@ export async function recalculate(): Promise<{
 }> {
   const response = await apiFetch("/api/recalculate", { method: "POST", includeApiKey: true });
   if (!response.ok) {
-    throw await apiError(response, "Failed to recalculate projections");
+    throw new Error("Failed to recalculate projections");
   }
   return response.json();
 }
