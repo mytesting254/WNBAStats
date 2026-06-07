@@ -72,7 +72,7 @@ const WNBA_TEAM_LOGOS: Record<string, string> = {
   PDX: "/team-logos/por.png"
 };
 
-type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "discrepancies" | "models" | "data";
+type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "discrepancies" | "roster" | "models" | "data";
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
@@ -538,6 +538,10 @@ export function App() {
           <BrainCircuit size={18} />
           Models
         </button>
+        <button className={activeTab === "roster" ? "active" : ""} onClick={() => setActiveTab("roster")}>
+          <ShieldCheck size={18} />
+          Roster
+        </button>
         <button className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>
           <Database size={18} />
           Data
@@ -546,12 +550,12 @@ export function App() {
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "models" ? "Training rows" : "Missing score dates"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
         />
         <Metric
-          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={(performance?.total_settled ?? performance?.settled ?? 0).toString()} />
         <Metric
@@ -602,8 +606,6 @@ export function App() {
           refreshingMissingScores={refreshingMissingScores}
           recalculating={recalculating}
           snapshottingGems={snapshottingGems}
-          roster={roster}
-          refreshingRoster={refreshingRoster}
           matchupsCount={matchups.length}
           discrepanciesCount={discrepancies.length}
           missingEspnDates={missingEspnDates}
@@ -618,9 +620,18 @@ export function App() {
           onAdminUsernameChange={setAdminUsername}
           onAdminPasswordChange={setAdminPassword}
           onRecalculate={handleRecalculate}
-          onRefreshRoster={() => handleRefreshRoster(true)}
           onSnapshotGems={handleSnapshotGems}
           onReload={load}
+        />
+      ) : activeTab === "roster" ? (
+        <RosterView
+          roster={roster}
+          loading={loading}
+          error={error}
+          status={operationStatus}
+          refreshing={refreshingRoster}
+          onRefresh={() => handleRefreshRoster(true)}
+          canRefresh={Boolean(authState.authenticated && authState.user?.is_admin)}
         />
       ) : (
         <ModelsView runs={modelRuns} latest={latestModelRun} loading={loading || training} error={error} onTrain={handleTrainModel} />
@@ -644,8 +655,6 @@ function DataView({
   refreshingMissingScores,
   recalculating,
   snapshottingGems,
-  roster,
-  refreshingRoster,
   matchupsCount,
   discrepanciesCount,
   missingEspnDates,
@@ -660,7 +669,6 @@ function DataView({
   onAdminUsernameChange,
   onAdminPasswordChange,
   onRecalculate,
-  onRefreshRoster,
   onSnapshotGems,
   onReload
 }: {
@@ -678,8 +686,6 @@ function DataView({
   refreshingMissingScores: boolean;
   recalculating: boolean;
   snapshottingGems: boolean;
-  roster: RosterPlayer[];
-  refreshingRoster: boolean;
   matchupsCount: number;
   discrepanciesCount: number;
   missingEspnDates: string[];
@@ -700,7 +706,6 @@ function DataView({
   onAdminUsernameChange: (value: string) => void;
   onAdminPasswordChange: (value: string) => void;
   onRecalculate: () => void;
-  onRefreshRoster: () => void;
   onSnapshotGems: () => void;
   onReload: () => void;
 }) {
@@ -716,37 +721,6 @@ function DataView({
     ? "No missing-score scan loaded yet."
     : `Missing: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`;
   const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
-  const adminPrompt = (
-    <article className="operation-card">
-      <div>
-        <p className="eyebrow">admin access</p>
-        <h3>Sign In Required</h3>
-        <p>Data operations are limited to authenticated admin users.</p>
-      </div>
-      {authLoading ? (
-        <p className="reason">Checking current session...</p>
-      ) : (
-        <>
-          <div className="operation-fields">
-            <label>
-              Username
-              <input type="text" value={adminUsername} onChange={(event) => onAdminUsernameChange(event.target.value)} autoComplete="username" />
-            </label>
-            <label>
-              Password
-              <input type="password" value={adminPassword} onChange={(event) => onAdminPasswordChange(event.target.value)} autoComplete="current-password" />
-            </label>
-          </div>
-          <div className="operation-actions">
-            <button className="icon-button text-button dark-button" onClick={onAdminLogin} disabled={authSubmitting || !adminUsername || !adminPassword}>
-              <ShieldCheck size={18} />
-              {authSubmitting ? "Signing In" : "Sign In"}
-            </button>
-          </div>
-        </>
-      )}
-    </article>
-  );
 
   return (
     <section className="matchup-list">
@@ -761,19 +735,35 @@ function DataView({
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
         {!isAdmin ? (
-          <>
-            {adminPrompt}
-            <RosterView
-              roster={roster}
-              loading={loading}
-              error={null}
-              status={null}
-              refreshing={refreshingRoster}
-              onRefresh={onRefreshRoster}
-              canRefresh={false}
-              embedded
-            />
-          </>
+          <article className="operation-card">
+            <div>
+              <p className="eyebrow">admin access</p>
+              <h3>Sign In Required</h3>
+              <p>Data operations are limited to authenticated admin users.</p>
+            </div>
+            {authLoading ? (
+              <p className="reason">Checking current session...</p>
+            ) : (
+              <>
+                <div className="operation-fields">
+                  <label>
+                    Username
+                    <input type="text" value={adminUsername} onChange={(event) => onAdminUsernameChange(event.target.value)} autoComplete="username" />
+                  </label>
+                  <label>
+                    Password
+                    <input type="password" value={adminPassword} onChange={(event) => onAdminPasswordChange(event.target.value)} autoComplete="current-password" />
+                  </label>
+                </div>
+                <div className="operation-actions">
+                  <button className="icon-button text-button dark-button" onClick={onAdminLogin} disabled={authSubmitting || !adminUsername || !adminPassword}>
+                    <ShieldCheck size={18} />
+                    {authSubmitting ? "Signing In" : "Sign In"}
+                  </button>
+                </div>
+              </>
+            )}
+          </article>
         ) : (
           <>
             <div className="operation-actions">
@@ -888,16 +878,6 @@ function DataView({
             onSecondary={onScanMissingScores}
           />
         </div>
-        <RosterView
-          roster={roster}
-          loading={loading}
-          error={null}
-          status={null}
-          refreshing={refreshingRoster}
-          onRefresh={onRefreshRoster}
-          canRefresh
-          embedded
-        />
           </>
         )}
       </div>
@@ -3141,6 +3121,7 @@ function tabTitle(tab: DashboardTab) {
     matchups: "Pregame Matchups",
     parlays: "Parlay Candidates",
     discrepancies: "Line Discrepancies",
+    roster: "Roster Status",
     models: "Model Lab",
     data: "Data Operations"
   };
