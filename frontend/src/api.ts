@@ -121,6 +121,17 @@ export type AuthState = {
   csrf_token: string | null;
 };
 
+export type OpsHealth = {
+  status: string;
+  prop_sync: {
+    running: boolean;
+    started_at: string | null;
+    finished_at: string | null;
+    last_error: string | null;
+    last_result: Record<string, unknown> | null;
+  };
+};
+
 const RUNTIME_API_KEY = (window.__APP_CONFIG__?.apiKey ?? "").trim();
 const BUILD_API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
 const API_KEY = RUNTIME_API_KEY || BUILD_API_KEY;
@@ -182,6 +193,14 @@ export async function logoutAdmin(): Promise<AuthState> {
   const response = await apiFetch("/api/auth/logout", { method: "POST" });
   if (!response.ok) {
     throw new Error("Failed to sign out");
+  }
+  return response.json();
+}
+
+export async function fetchOpsHealth(): Promise<OpsHealth> {
+  const response = await apiFetch("/api/ops/health");
+  if (!response.ok) {
+    throw new Error("Failed to load operations health");
   }
   return response.json();
 }

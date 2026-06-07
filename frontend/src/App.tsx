@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   fetchAuthState,
   fetchMissingEspnScores,
+  fetchOpsHealth,
   fetchLineDiscrepancies,
   fetchGemPerformance,
   fetchMatchups,
@@ -31,6 +32,7 @@ import {
   type MissingEspnGame,
   type ModelPerformance,
   type ModelRun,
+  type OpsHealth,
   type RosterPlayer,
   type TeamLast10,
   type ValueProp,
@@ -109,6 +111,7 @@ export function App() {
   const [authState, setAuthState] = useState<AuthState>({ authenticated: false, user: null, csrf_token: null });
   const [authLoading, setAuthLoading] = useState(true);
   const [authSubmitting, setAuthSubmitting] = useState(false);
+  const [opsHealth, setOpsHealth] = useState<OpsHealth | null>(null);
   const loadRequestIdRef = useRef(0);
   const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
@@ -126,7 +129,8 @@ export function App() {
       matchupsResult,
       discrepanciesResult,
       modelRunsResult,
-      rosterResult
+      rosterResult,
+      opsHealthResult
     ] = await Promise.allSettled([
       fetchValueBoard(),
       fetchPerformance(),
@@ -136,7 +140,8 @@ export function App() {
       fetchMatchups(),
       fetchLineDiscrepancies(),
       fetchModelRuns(),
-      fetchRoster()
+      fetchRoster(),
+      fetchOpsHealth()
     ]);
 
     const failures: string[] = [];
@@ -212,6 +217,13 @@ export function App() {
       setRoster([]);
     }
 
+    if (opsHealthResult.status === "fulfilled") {
+      setOpsHealth(opsHealthResult.value);
+    } else {
+      failures.push("operations health");
+      setOpsHealth(null);
+    }
+
     if (failures.length > 0) {
       setError(`Some dashboard data failed to load: ${failures.join(", ")}.`);
     }
@@ -242,6 +254,13 @@ export function App() {
 
   useEffect(() => {
     loadAuth();
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      fetchOpsHealth().then(setOpsHealth).catch(() => {});
+    }, 15000);
+    return () => window.clearInterval(interval);
   }, []);
 
   const filtered = useMemo(() => {
@@ -596,6 +615,7 @@ export function App() {
           authLoading={authLoading}
           authSubmitting={authSubmitting}
           authState={authState}
+          opsHealth={opsHealth}
           adminUsername={adminUsername}
           adminPassword={adminPassword}
           error={error}
@@ -653,6 +673,7 @@ function DataView({
   authLoading,
   authSubmitting,
   authState,
+  opsHealth,
   adminUsername,
   adminPassword,
   error,
@@ -685,6 +706,7 @@ function DataView({
   authLoading: boolean;
   authSubmitting: boolean;
   authState: AuthState;
+  opsHealth: OpsHealth | null;
   adminUsername: string;
   adminPassword: string;
   error: string | null;
@@ -731,6 +753,13 @@ function DataView({
     ? "No missing-score scan loaded yet."
     : `Missing: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`;
   const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
+  const propSync = opsHealth?.prop_sync;
+  const queueLabel = propSync == null ? "Unknown" : propSync.running ? "Running" : "Clear";
+  const queueDetail = propSync == null
+    ? "Operations health unavailable."
+    : propSync.running
+      ? `Started ${formatDateTime(propSync.started_at)}`
+      : `Last finished ${formatDateTime(propSync.finished_at)}`;
 
   return (
     <section className="matchup-list">
@@ -744,6 +773,23 @@ function DataView({
         </div>
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
+        <article className="operation-card">
+          <div>
+            <p className="eyebrow">prop sync queue</p>
+            <h3>{queueLabel}</h3>
+            <p>{queueDetail}</p>
+            {propSync?.last_error ? <p className="reason">Last error: {propSync.last_error}</p> : null}
+          </div>
+          <div className="detail-grid">
+            <Metric label="Running" value={propSync?.running ? "Yes" : "No"} />
+            <Metric label="Started" value={formatDateTime(propSync?.started_at)} />
+            <Metric label="Finished" value={formatDateTime(propSync?.finished_at)} />
+            <Metric
+              label="Last result"
+              value={propSync?.last_result && Object.keys(propSync.last_result).length ? "Ready" : "None"}
+            />
+          </div>
+        </article>
         {!isAdmin ? (
           <article className="operation-card">
             <div>
@@ -3265,6 +3311,17 @@ function formatDate(value: string) {
     hour: "numeric",
     minute: "2-digit"
   }).format(new Date(value));
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) {
+    return "N/A";
+  }
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) {
+    return "N/A";
+  }
+  return formatDate(value);
 }
 
 function formatGameDateShort(value: string) {
