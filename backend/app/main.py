@@ -206,10 +206,10 @@ def _require_admin_session_or_api_key(
 ) -> None:
     user = _current_session_user(request)
     if user is not None and user.is_admin:
-        if not _origin_allowed(request):
-            raise HTTPException(status_code=403, detail="Invalid origin.")
-        if not x_csrf_token or x_csrf_token.strip() != user.csrf_token:
-            raise HTTPException(status_code=403, detail="Invalid CSRF token.")
+        origin_ok = _origin_allowed(request)
+        csrf_ok = bool(x_csrf_token and x_csrf_token.strip() == user.csrf_token)
+        if not origin_ok and not csrf_ok:
+            raise HTTPException(status_code=403, detail="Admin session verification failed.")
         return
     _enforce_api_key(x_api_key, authorization)
 
