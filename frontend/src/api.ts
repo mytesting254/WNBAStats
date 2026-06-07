@@ -112,19 +112,12 @@ export type WatchlistPerformance = {
   message?: string;
 };
 
-function runtimeApiKey(): string {
-  const runtimeValue = window.__APP_CONFIG__?.apiKey;
-  if (typeof runtimeValue === "string" && runtimeValue.trim()) {
-    return runtimeValue.trim();
-  }
-  return "";
-}
+const API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
 
 function apiHeaders(headers?: HeadersInit, includeApiKey = false): Headers {
   const merged = new Headers(headers);
-  const apiKey = runtimeApiKey();
-  if (includeApiKey && apiKey) {
-    merged.set("X-API-Key", apiKey);
+  if (includeApiKey && API_KEY) {
+    merged.set("X-API-Key", API_KEY);
   }
   return merged;
 }
