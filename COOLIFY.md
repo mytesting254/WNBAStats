@@ -82,11 +82,74 @@ After deployment, verify:
 
 - `/` loads the React app
 - `/api/health` returns `{"status":"ok"}`
+- `/api/matchups` returns JSON through the frontend domain
 - existing data persists after a redeploy/restart
 - Data tab login works with the configured admin credentials
+- protected admin POST actions work after login
 - the backend can reach external providers from the server network
 
-## 6. Backup Requirement
+Recommended first live checks:
+
+1. sign in on the `Data` tab
+2. run `Recalculate`
+3. run `Refresh ESPN`
+4. verify `Roster` tab loads and only shows `Refresh Roster` for admins
+
+## 6. Key Coolify Considerations
+
+### Public Routing
+
+- Attach the public domain to the frontend service only.
+- Do not expose the backend directly on the public domain for normal app traffic.
+- `/api/*` should flow:
+  - browser -> frontend nginx -> backend
+
+If `/api` responses come from `uvicorn` directly instead of `nginx`, check for:
+
+- stale Coolify/Traefik dynamic route files
+- leftover backend domain bindings
+- an old backend resource still attached to the same hostname
+
+### Reverse Proxy Headers
+
+- Admin POST routes depend on proxy-forwarded host/proto headers for origin validation.
+- If login succeeds but every admin POST returns `403`, verify that the request is reaching the app through the intended public hostname and proxy chain.
+
+### Persistent Storage
+
+- Keep the SQLite file, cache directory, and snapshots on persistent storage.
+- If you recreate the app or services, confirm the data volume is still mounted to `/data`.
+- Back up the database before destructive redeploy/rebuild work.
+
+### SQLite Expectations
+
+- Run one backend instance only.
+- `WAL` reduces read/write blocking, but does not support multi-writer scaling.
+- If you scale backend replicas or run many admin writes concurrently, expect lock contention or inconsistent behavior.
+
+### Provider Reality
+
+- `ODDS_API_KEY` must exist for live Odds API imports.
+- Covers imports depend on public HTML scraping and can fail because of:
+  - parser drift
+  - provider markup changes
+  - host/IP blocking
+
+## 7. Recommended Recovery Practices
+
+- Keep at least one recent copy of:
+  - `/data/wnba.sqlite`
+  - `/data/cache/`
+  - `/data/snapshots/`
+- Before changing auth/proxy/deploy shape, save a DB backup and note the current working commit.
+- If the frontend goes blank, check:
+  - `/api/health`
+  - `/api/matchups`
+  - backend logs
+  - Coolify domain bindings
+  - proxy overrides
+
+## 8. Backup Requirement
 
 If production uses SQLite, back up the volume contents regularly. At minimum,
 retain recent copies of:

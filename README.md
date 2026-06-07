@@ -18,6 +18,67 @@ The app is built around a provider-backed pregame workflow:
 - JSON/JSONL cache layer
 - pytest tests
 
+## Key Architecture Points
+
+- `frontend` is the only public surface. Browser traffic should go to nginx first, and nginx proxies `/api/*` to the backend.
+- `backend` owns all provider calls, projections, settlement flows, and admin enforcement.
+- SQLite is the default runtime store and is expected to live on persistent disk.
+- Raw provider pages and derived payloads are cached under `data/cache/` and are used for recovery, replay, and faster reloads.
+- The `Data` tab is an operations surface, not a public mutation surface.
+
+## Key Implementations
+
+### Admin Auth
+
+- The app now uses backend session auth for admin actions.
+- Admin credentials come from:
+  - `ADMIN_USERNAME`
+  - `ADMIN_PASSWORD`
+- Login endpoints:
+  - `GET /api/auth/me`
+  - `POST /api/auth/login`
+  - `POST /api/auth/logout`
+- The browser no longer needs a shared mutation secret for normal admin use.
+- `API_KEY` still exists as an optional fallback for server-to-server/manual calls.
+
+### CSRF And Proxy-Aware Admin Posts
+
+- Admin POST routes are protected by session validation plus CSRF/origin checks.
+- In reverse-proxy deployments, origin validation must respect forwarded headers.
+- This repo now accepts a valid admin session when either of these is true:
+  - request origin matches the forwarded public host/proto
+  - CSRF token matches the session token
+- This avoids false `403` failures behind Coolify/Traefik while still protecting browser-admin mutations.
+
+### SQLite Concurrency
+
+- SQLite now runs in `WAL` mode by default.
+- `WAL` helps when one admin write job is running and other users are still browsing read views.
+- `WAL` does not make SQLite multi-writer. It still assumes:
+  - one backend instance
+  - low concurrent admin mutation traffic
+- If multiple admins will run imports/recalculate at the same time, queueing or a database upgrade should be considered.
+
+### Matchups And Covers Records
+
+- The matchup payload is assembled in the backend and includes:
+  - projection output
+  - market overrides
+  - team last-10 summaries
+  - Covers records
+  - prop and sportsbook rows
+- H2H data can legitimately be sparse for expansion teams or first-time matchups.
+- The frontend now treats H2H states intentionally:
+  - `0` meetings: simple note
+  - `1` meeting: compact summary
+  - `2+` meetings: full table
+
+### Roster Surface
+
+- `Roster` remains a separate read tab.
+- Roster data is visible normally.
+- `Refresh Roster` is hidden unless the viewer has an active admin session.
+
 ## GitHub Codespaces
 
 For Codespaces setup, see [CODESPACES.md](CODESPACES.md).
@@ -116,7 +177,13 @@ POST /api/settle-props
 
 ## API Security
 
-Mutating endpoints are protected by a shared API key when `API_KEY` is configured.
+Mutating endpoints are protected by admin session auth or a shared API key fallback when `API_KEY` is configured.
+
+Preferred browser/admin path:
+
+- sign in through the `Data` tab
+- use the admin session cookie
+- let the frontend manage CSRF automatically
 
 - Send `X-API-Key: <API_KEY>` (or `Authorization: Bearer <API_KEY>`) for:
   - `POST /api/recalculate`
@@ -141,6 +208,11 @@ Environment behavior:
 - `ENV=dev|local|test` with no `API_KEY`: requests are allowed (dev convenience).
 - non-dev `ENV` with no `API_KEY`: API startup fails.
 
+Important:
+
+- Do not expose `VITE_API_KEY` in public deployments unless you explicitly want every browser to hold a shared admin secret.
+- If admin login works but protected POST routes return `403`, check proxy origin forwarding before assuming route/auth code is broken.
+
 Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed in API responses.
 
 ## App Tabs
@@ -155,6 +227,12 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history.
 - `Data`: operational controls for saved/fresh odds import, completed-game import, projection rebuilds, and reloads.
 - `Data`: includes `Track Gems Daily` and `Track Watchlist Daily` snapshot controls.
+
+Operational expectations:
+
+- Public viewers should be able to browse read tabs without admin credentials.
+- `Data` actions should require an admin session.
+- `Roster` display is public/readable, but its refresh action is admin-only.
 
 `Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
 
@@ -235,6 +313,34 @@ $env:ODDS_API_KEY="your_key_here"
 Click `Load Saved Odds` in the app to reload the most recent JSON file from `data/cache/sportsbook_props_raw.json` without calling the provider. The import still syncs `sportsbook_prop_lines -> prop_lines` and refreshes model predictions so value-board/watchlist/gem views update immediately.
 
 Click `Refresh Odds` only when you want a fresh provider call. Fresh calls merge by provider event id, so future events already saved in `sportsbook_props_raw.json` remain cached instead of being discarded.
+
+## Deployment Checklist
+
+Before treating a deployment as production-ready, verify all of the following:
+
+1. `https://<domain>/api/health` returns `200`.
+2. `https://<domain>/api/matchups` returns JSON through nginx, not directly from uvicorn.
+3. SQLite data survives container restarts and redeploys.
+4. Admin login works from the `Data` tab.
+5. A protected admin POST succeeds after login:
+   - `Recalculate`
+   - `Refresh ESPN`
+   - `Refresh Covers`
+6. `ODDS_API_KEY` is set if you expect The Odds API imports to work.
+7. Existing snapshots/backups are stored somewhere outside the live volume.
+
+## Troubleshooting Notes
+
+- `401 Unauthorized` on mutation routes usually means:
+  - bad/missing `API_KEY` on manual calls
+  - or no valid admin session
+- `403 Forbidden` after successful admin login usually means:
+  - CSRF/origin verification mismatch through the proxy
+- blank frontend with working backend often means:
+  - bad public `/api` routing
+  - stale proxy config
+- Covers refresh failures are often scraper/parser issues, not route issues.
+- H2H can be legitimately sparse for new matchups; that is not always a data bug.
 
 To inspect the cache without calling the provider:
 
