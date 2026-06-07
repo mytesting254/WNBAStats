@@ -606,6 +606,7 @@ export function App() {
           refreshingMissingScores={refreshingMissingScores}
           recalculating={recalculating}
           snapshottingGems={snapshottingGems}
+          propsCount={props.length}
           matchupsCount={matchups.length}
           discrepanciesCount={discrepancies.length}
           missingEspnDates={missingEspnDates}
@@ -655,6 +656,7 @@ function DataView({
   refreshingMissingScores,
   recalculating,
   snapshottingGems,
+  propsCount,
   matchupsCount,
   discrepanciesCount,
   missingEspnDates,
@@ -686,6 +688,7 @@ function DataView({
   refreshingMissingScores: boolean;
   recalculating: boolean;
   snapshottingGems: boolean;
+  propsCount: number;
   matchupsCount: number;
   discrepanciesCount: number;
   missingEspnDates: string[];
@@ -892,8 +895,7 @@ function RosterView({
   status,
   refreshing,
   onRefresh,
-  canRefresh = true,
-  embedded = false
+  canRefresh = true
 }: {
   roster: RosterPlayer[];
   loading: boolean;
@@ -902,7 +904,6 @@ function RosterView({
   refreshing: boolean;
   onRefresh: () => void;
   canRefresh?: boolean;
-  embedded?: boolean;
 }) {
   const teams = useMemo(() => Array.from(new Set(roster.map((item) => item.team))).sort(), [roster]);
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
@@ -916,70 +917,6 @@ function RosterView({
     }
   }, [teams, selectedTeam]);
   const visibleRows = selectedTeam ? roster.filter((item) => item.team === selectedTeam) : roster;
-  const content = (
-    <>
-      {canRefresh ? (
-        <div className="operation-actions">
-          <button className="icon-button text-button dark-button" onClick={onRefresh} disabled={loading || refreshing}>
-            <RefreshCw size={18} />
-            {refreshing ? "Refreshing" : "Refresh Roster"}
-          </button>
-        </div>
-      ) : null}
-      {error && <div className="error">{error}</div>}
-      {status && <div className="success">{status}</div>}
-      <div className="game-tabs" aria-label="Roster team tabs">
-        {teams.map((team) => (
-          <button key={team} className={selectedTeam === team ? "active" : ""} onClick={() => setSelectedTeam(team)}>
-            <strong>{team}</strong>
-            <em>{roster.filter((item) => item.team === team).length} players</em>
-          </button>
-        ))}
-      </div>
-      <div className="props-table-wrapper">
-        <table className="props-table">
-          <thead>
-            <tr>
-              <th>Team</th>
-              <th>Player</th>
-              <th>Status</th>
-              <th>Updated</th>
-            </tr>
-          </thead>
-          <tbody>
-            {visibleRows.map((item) => (
-              <tr key={`${item.team}-${item.player_name}-${item.status}`}>
-                <td>{item.team}</td>
-                <td>{item.player_name}</td>
-                <td><span className={`status-pill ${statusClass(item.status)}`}>{item.status}</span></td>
-                <td>{item.captured_at ? formatDate(item.captured_at) : "N/A"}</td>
-              </tr>
-            ))}
-            {!visibleRows.length && (
-              <tr>
-                <td colSpan={4}>No Rotowire lineup rows available yet. Run injury import or reload matchups to refresh lineups.</td>
-              </tr>
-            )}
-          </tbody>
-        </table>
-      </div>
-    </>
-  );
-
-  if (embedded) {
-    return (
-      <article className="operation-card">
-        <div className="panel-header">
-          <div>
-            <h3>Roster Status</h3>
-            <p>{loading ? "Loading lineup status" : "Rotowire lineup statuses grouped by team"}</p>
-          </div>
-          <ShieldCheck size={20} />
-        </div>
-        {content}
-      </article>
-    );
-  }
 
   return (
     <section className="matchup-list">
@@ -991,7 +928,51 @@ function RosterView({
           </div>
           <ShieldCheck size={20} />
         </div>
-        {content}
+        {canRefresh ? (
+          <div className="operation-actions">
+            <button className="icon-button text-button dark-button" onClick={onRefresh} disabled={loading || refreshing}>
+              <RefreshCw size={18} />
+              {refreshing ? "Refreshing" : "Refresh Roster"}
+            </button>
+          </div>
+        ) : null}
+        {error && <div className="error">{error}</div>}
+        {status && <div className="success">{status}</div>}
+        <div className="game-tabs" aria-label="Roster team tabs">
+          {teams.map((team) => (
+            <button key={team} className={selectedTeam === team ? "active" : ""} onClick={() => setSelectedTeam(team)}>
+              <strong>{team}</strong>
+              <em>{roster.filter((item) => item.team === team).length} players</em>
+            </button>
+          ))}
+        </div>
+        <div className="props-table-wrapper">
+          <table className="props-table">
+            <thead>
+              <tr>
+                <th>Team</th>
+                <th>Player</th>
+                <th>Status</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {visibleRows.map((item) => (
+                <tr key={`${item.team}-${item.player_name}-${item.status}`}>
+                  <td>{item.team}</td>
+                  <td>{item.player_name}</td>
+                  <td><span className={`status-pill ${statusClass(item.status)}`}>{item.status}</span></td>
+                  <td>{item.captured_at ? formatDate(item.captured_at) : "N/A"}</td>
+                </tr>
+              ))}
+              {!visibleRows.length && (
+                <tr>
+                  <td colSpan={4}>No Rotowire lineup rows available yet. Run injury import or reload matchups to refresh lineups.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </section>
   );
