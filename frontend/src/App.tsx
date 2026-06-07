@@ -3121,6 +3121,23 @@ function sortModelMetrics(metrics: ModelRun["metrics"]) {
     if (right === "overall") {
       return 1;
     }
+    const leftMetric = metrics[left];
+    const rightMetric = metrics[right];
+    const leftSettled = leftMetric?.settled_rows ?? 0;
+    const rightSettled = rightMetric?.settled_rows ?? 0;
+    if (leftSettled !== rightSettled) {
+      return rightSettled - leftSettled;
+    }
+    const leftRows = leftMetric?.rows ?? 0;
+    const rightRows = rightMetric?.rows ?? 0;
+    if (leftRows !== rightRows) {
+      return rightRows - leftRows;
+    }
+    const leftAccuracy = leftMetric?.side_accuracy ?? -1;
+    const rightAccuracy = rightMetric?.side_accuracy ?? -1;
+    if (leftAccuracy !== rightAccuracy) {
+      return rightAccuracy - leftAccuracy;
+    }
     return marketLabel(left).localeCompare(marketLabel(right));
   });
 }
