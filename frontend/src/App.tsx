@@ -344,9 +344,13 @@ export function App() {
       await load();
       const resultDates = result.selected_dates?.length ? result.selected_dates : result.selected_date ? [result.selected_date] : [];
       const scope = resultDates.length ? ` for ${resultDates.join(", ")}` : ` for ${result.seasons?.join(", ") ?? result.season}`;
-      setOperationStatus(
-        `${missingOnly ? "Missing" : forceRefresh ? "Fresh" : "Saved"} ESPN completed games and box scores loaded${scope}. Synced ${result.synced_props ?? 0} model prop lines, rebuilt ${result.predictions ?? 0} predictions, and settled ${result.settlements?.settled ?? 0} props.`
-      );
+      setOperationStatus(buildEspnOperationStatus({
+        mode: missingOnly ? "Missing" : forceRefresh ? "Fresh" : "Saved",
+        scope,
+        syncedProps: result.synced_props ?? 0,
+        predictions: result.predictions ?? 0,
+        settledProps: result.settlements?.settled ?? 0
+      }));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to refresh completed results");
     } finally {
@@ -414,7 +418,13 @@ export function App() {
         setOperationStatus(result.message);
       } else {
         setOperationStatus(
-          `Imported missing ESPN scores for ${usedDates.length} date(s). Synced ${result.synced_props ?? 0} model prop lines, rebuilt ${result.predictions ?? 0} predictions, and settled ${result.settlements?.settled ?? 0} props.`
+          buildEspnOperationStatus({
+            mode: "Imported missing ESPN scores",
+            scope: ` for ${usedDates.length} date(s)`,
+            syncedProps: result.synced_props ?? 0,
+            predictions: result.predictions ?? 0,
+            settledProps: result.settlements?.settled ?? 0
+          })
         );
       }
     } catch (err) {
@@ -480,8 +490,8 @@ export function App() {
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Model props"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : props.length.toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
         />
         <Metric
           label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
@@ -845,6 +855,28 @@ function statusClass(status: string) {
     return "gtd";
   }
   return "confirmed";
+}
+
+function buildEspnOperationStatus({
+  mode,
+  scope,
+  syncedProps,
+  predictions,
+  settledProps
+}: {
+  mode: string;
+  scope: string;
+  syncedProps: number;
+  predictions: number;
+  settledProps: number;
+}) {
+  const prefix = mode === "Imported missing ESPN scores"
+    ? `Imported missing ESPN scores${scope}.`
+    : `${mode} ESPN completed games and box scores loaded${scope}.`;
+  if (syncedProps === 0 && predictions === 0) {
+    return `${prefix} Settled ${settledProps} props.`;
+  }
+  return `${prefix} Synced ${syncedProps} model prop lines, rebuilt ${predictions} predictions, and settled ${settledProps} props.`;
 }
 
 function OperationCard({
