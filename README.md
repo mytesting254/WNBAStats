@@ -33,7 +33,30 @@ For a Coolify URL-based deployment using Docker Compose, see [COOLIFY.md](COOLIF
 
 ## First Run
 
+### Docker Compose
+
 From the repo root:
+
+```bash
+cp .env.example .env
+docker compose up -d
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080
+```
+
+Useful commands:
+
+```bash
+docker compose logs -f backend
+docker compose logs -f frontend-build
+docker compose down
+```
+
+### Manual
 
 ```powershell
 python -m venv .venv

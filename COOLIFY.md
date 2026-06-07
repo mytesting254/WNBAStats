@@ -2,6 +2,7 @@
 
 This repo can be deployed on Coolify as a Docker Compose application with:
 
+- `frontend-build`: Node building the Vite app into a shared volume
 - `frontend`: nginx serving the built Vite app on a public URL
 - `backend`: FastAPI on the private Docker network
 - `wnba_data`: persistent volume for SQLite, caches, and snapshots
@@ -11,7 +12,7 @@ This repo can be deployed on Coolify as a Docker Compose application with:
 In Coolify, create a new application from this repo and select:
 
 - `Docker Compose`
-- compose file: `docker-compose.coolify.yml`
+- compose file: `docker-compose.yml`
 
 Expose the `frontend` service publicly. The browser should only talk to the
 frontend URL. nginx proxies `/api/*` to the backend service internally.
@@ -22,7 +23,10 @@ Minimum SQLite setup:
 
 ```dotenv
 USE_TURSO=false
-WNBA_DB_PATH=/app/data/wnba.sqlite
+WNBA_DATA_DIR=/data
+WNBA_DB_PATH=/data/wnba.sqlite
+WNBA_CACHE_DIR=/data/cache
+WNBA_SNAPSHOT_DIR=/data/snapshots
 ENV=prod
 API_KEY=replace_with_a_shared_key
 EXPOSE_DEBUG_HEADERS=false
@@ -46,7 +50,7 @@ VITE_API_KEY=the_same_value_as_API_KEY
 
 Important:
 
-- `VITE_API_KEY` is embedded into the built frontend bundle.
+- `VITE_API_KEY` is embedded into the built frontend bundle by the `frontend-build` service.
 - Any user with access to the deployed app can inspect it in the browser.
 - This is acceptable only for a private/admin deployment.
 - If the site is public, leave `VITE_API_KEY` unset and treat the protected
@@ -59,9 +63,9 @@ rebuild/redeploy.
 
 The backend writes to:
 
-- `/app/data/wnba.sqlite`
-- `/app/data/cache/`
-- `/app/data/snapshots/`
+- `/data/wnba.sqlite`
+- `/data/cache/`
+- `/data/snapshots/`
 
 Do not run this app on ephemeral storage if you use SQLite. In Coolify, keep
 the `wnba_data` volume persistent across redeploys.
@@ -73,7 +77,7 @@ right choice for multiple concurrent writer replicas.
 
 On the first deploy, the backend will:
 
-1. create `/app/data/` if it is missing
+1. create `/data/` if it is missing
 2. run `python scripts/init_db.py`
 3. start FastAPI on port `8010`
 
