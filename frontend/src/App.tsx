@@ -716,6 +716,37 @@ function DataView({
     ? "No missing-score scan loaded yet."
     : `Missing: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`;
   const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
+  const adminPrompt = (
+    <article className="operation-card">
+      <div>
+        <p className="eyebrow">admin access</p>
+        <h3>Sign In Required</h3>
+        <p>Data operations are limited to authenticated admin users.</p>
+      </div>
+      {authLoading ? (
+        <p className="reason">Checking current session...</p>
+      ) : (
+        <>
+          <div className="operation-fields">
+            <label>
+              Username
+              <input type="text" value={adminUsername} onChange={(event) => onAdminUsernameChange(event.target.value)} autoComplete="username" />
+            </label>
+            <label>
+              Password
+              <input type="password" value={adminPassword} onChange={(event) => onAdminPasswordChange(event.target.value)} autoComplete="current-password" />
+            </label>
+          </div>
+          <div className="operation-actions">
+            <button className="icon-button text-button dark-button" onClick={onAdminLogin} disabled={authSubmitting || !adminUsername || !adminPassword}>
+              <ShieldCheck size={18} />
+              {authSubmitting ? "Signing In" : "Sign In"}
+            </button>
+          </div>
+        </>
+      )}
+    </article>
+  );
 
   return (
     <section className="matchup-list">
@@ -730,35 +761,19 @@ function DataView({
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
         {!isAdmin ? (
-          <article className="operation-card">
-            <div>
-              <p className="eyebrow">admin access</p>
-              <h3>Sign In Required</h3>
-              <p>Data operations are limited to authenticated admin users.</p>
-            </div>
-            {authLoading ? (
-              <p className="reason">Checking current session...</p>
-            ) : (
-              <>
-                <div className="operation-fields">
-                  <label>
-                    Username
-                    <input type="text" value={adminUsername} onChange={(event) => onAdminUsernameChange(event.target.value)} autoComplete="username" />
-                  </label>
-                  <label>
-                    Password
-                    <input type="password" value={adminPassword} onChange={(event) => onAdminPasswordChange(event.target.value)} autoComplete="current-password" />
-                  </label>
-                </div>
-                <div className="operation-actions">
-                  <button className="icon-button text-button dark-button" onClick={onAdminLogin} disabled={authSubmitting || !adminUsername || !adminPassword}>
-                    <ShieldCheck size={18} />
-                    {authSubmitting ? "Signing In" : "Sign In"}
-                  </button>
-                </div>
-              </>
-            )}
-          </article>
+          <>
+            {adminPrompt}
+            <RosterView
+              roster={roster}
+              loading={loading}
+              error={null}
+              status={null}
+              refreshing={refreshingRoster}
+              onRefresh={onRefreshRoster}
+              canRefresh={false}
+              embedded
+            />
+          </>
         ) : (
           <>
             <div className="operation-actions">
@@ -880,6 +895,7 @@ function DataView({
           status={null}
           refreshing={refreshingRoster}
           onRefresh={onRefreshRoster}
+          canRefresh
           embedded
         />
           </>
@@ -896,6 +912,7 @@ function RosterView({
   status,
   refreshing,
   onRefresh,
+  canRefresh = true,
   embedded = false
 }: {
   roster: RosterPlayer[];
@@ -904,6 +921,7 @@ function RosterView({
   status: string | null;
   refreshing: boolean;
   onRefresh: () => void;
+  canRefresh?: boolean;
   embedded?: boolean;
 }) {
   const teams = useMemo(() => Array.from(new Set(roster.map((item) => item.team))).sort(), [roster]);
@@ -920,12 +938,14 @@ function RosterView({
   const visibleRows = selectedTeam ? roster.filter((item) => item.team === selectedTeam) : roster;
   const content = (
     <>
-      <div className="operation-actions">
-        <button className="icon-button text-button dark-button" onClick={onRefresh} disabled={loading || refreshing}>
-          <RefreshCw size={18} />
-          {refreshing ? "Refreshing" : "Refresh Roster"}
-        </button>
-      </div>
+      {canRefresh ? (
+        <div className="operation-actions">
+          <button className="icon-button text-button dark-button" onClick={onRefresh} disabled={loading || refreshing}>
+            <RefreshCw size={18} />
+            {refreshing ? "Refreshing" : "Refresh Roster"}
+          </button>
+        </div>
+      ) : null}
       {error && <div className="error">{error}</div>}
       {status && <div className="success">{status}</div>}
       <div className="game-tabs" aria-label="Roster team tabs">
