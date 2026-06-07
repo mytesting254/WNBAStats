@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 import os
-import sqlite3
 import threading
 import time
 from typing import Any, Callable
@@ -393,18 +392,13 @@ def _set_observability_headers(response: Response, cache_name: str, cache_status
 
 @app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
 def recalculate() -> dict[str, int]:
-    try:
-        with connect() as conn:
-            projections = rebuild_predictions(conn)
-            settlements = settle_completed_props(conn)
-            game_settlements = settle_completed_game_predictions(conn)
-            _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
-    except sqlite3.OperationalError as exc:
-        if "database is locked" in str(exc).lower():
-            return {"predictions": 0, "settled": 0, "game_settled": 0, "status": "db_locked", "message": "Recalculate skipped because the database is busy. Try again in a few seconds."}
-        raise
+    with connect() as conn:
+        projections = rebuild_predictions(conn)
+        settlements = settle_completed_props(conn)
+        game_settlements = settle_completed_game_predictions(conn)
+        _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     _invalidate_read_caches()
-    return {"predictions": len(projections), "settled": settlements["settled"], "game_settled": game_settlements["settled"], "status": "ok"}
+    return {"predictions": len(projections), "settled": settlements["settled"], "game_settled": game_settlements["settled"]}
 
 
 @app.get("/api/props/sync-status")
@@ -1368,16 +1362,7 @@ def import_covers(selected_date: str | None = None, force_refresh: bool = False)
 def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_rotowire_lineups(conn, force_refresh=force_refresh)
-        try:
-            projections = rebuild_predictions(conn)
-        except sqlite3.OperationalError as exc:
-            if "database is locked" in str(exc).lower():
-                result["status"] = "db_locked"
-                result["message"] = "Roster refresh completed, but projection rebuild was skipped because the database is busy. Try again in a few seconds."
-                result["predictions"] = 0
-                _invalidate_read_caches()
-                return result
-            raise
+        projections = rebuild_predictions(conn)
     result["predictions"] = len(projections)
     _invalidate_read_caches()
     return result

@@ -234,12 +234,8 @@ export function App() {
     setRecalculating(true);
     setOperationStatus(null);
     try {
-      const result = await recalculate();
+      await recalculate();
       await load();
-      if (result.status === "db_locked") {
-        setOperationStatus(result.message ?? "Recalculate skipped because the database is busy. Try again in a few seconds.");
-        return;
-      }
       setOperationStatus("Projection board recalculated from the current prop lines and player history.");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to recalculate projections");
