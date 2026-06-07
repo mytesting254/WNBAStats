@@ -128,14 +128,10 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
         rest_days=int(game["rest_days_away"] or 2),
         injury_factor=float(away_injury["factor"]),
     )
+    projected_margin = home_projection - away_projection
+    projected_total = home_projection + away_projection
     spread_home = float(game["spread_home"]) if game["spread_home"] is not None else None
     game_total = float(game["game_total"]) if game["game_total"] is not None and float(game["game_total"]) > 0 else None
-    raw_margin = home_projection - away_projection
-    projected_total = home_projection + away_projection
-    projected_margin = _apply_market_margin_prior(raw_margin, spread_home)
-    if projected_margin != raw_margin:
-        home_projection = (projected_total + projected_margin) / 2
-        away_projection = projected_total - home_projection
 
     ats_edge = None
     ats_pick = "N/A"
@@ -180,15 +176,6 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
 
 def format_spread(value: float) -> str:
     return f"+{value:.1f}" if value > 0 else f"{value:.1f}"
-
-
-def _apply_market_margin_prior(raw_margin: float, spread_home: float | None) -> float:
-    if spread_home is None:
-        return raw_margin
-    market_margin = -float(spread_home)
-    spread_abs = abs(float(spread_home))
-    market_weight = _clamp(0.18 + (spread_abs / 12.0) * 0.28, 0.18, 0.46)
-    return (raw_margin * (1.0 - market_weight)) + (market_margin * market_weight)
 
 
 def _insufficient_history_payload(game: Mapping[str, Any], home_history_count: int, away_history_count: int) -> dict:
