@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import os
 import secrets
+import sqlite3
 from typing import Any
 
 
@@ -191,8 +192,12 @@ def get_session_user(conn: Any, token: str | None) -> SessionUser | None:
 
 
 def prune_expired_sessions(conn: Any) -> None:
-    conn.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (_utcnow(),))
-    conn.commit()
+    try:
+        conn.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (_utcnow(),))
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        if "database is locked" not in str(exc).lower():
+            raise
 
 
 def session_cookie_max_age() -> int:
