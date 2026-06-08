@@ -244,6 +244,13 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
         )
         not in tracked_keys
     ]
+    touched_game_ids = sorted({int(row["game_id"]) for row in rows if row["game_id"] is not None})
+    game_filter = ""
+    game_filter_params: tuple[int, ...] = ()
+    if touched_game_ids:
+        placeholders = ",".join("?" for _ in touched_game_ids)
+        game_filter = f" AND pl.game_id IN ({placeholders})"
+        game_filter_params = tuple(touched_game_ids)
 
     try:
         _begin_immediate_with_retry(
@@ -261,8 +268,12 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
                 LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
                 WHERE sp.id IS NULL
                   AND g.status = 'scheduled'
-            )
             """
+            + game_filter
+            + """
+            )
+            """,
+            game_filter_params,
         )
         conn.execute(
             """
@@ -274,8 +285,12 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
                 LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
                 WHERE sp.id IS NULL
                   AND g.status = 'scheduled'
-            )
             """
+            + game_filter
+            + """
+            )
+            """,
+            game_filter_params,
         )
         conn.execute(
             """
@@ -287,8 +302,12 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
                 LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
                 WHERE sp.id IS NULL
                   AND g.status = 'scheduled'
-            )
             """
+            + game_filter
+            + """
+            )
+            """,
+            game_filter_params,
         )
         conn.execute(
             """
@@ -300,8 +319,12 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
                 LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
                 WHERE sp.id IS NULL
                   AND g.status = 'scheduled'
-            )
             """
+            + game_filter
+            + """
+            )
+            """,
+            game_filter_params,
         )
         if insert_rows:
             conn.executemany(
@@ -312,7 +335,8 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
                 """,
                 insert_rows,
             )
-        rebuild_predictions(conn)
+        if touched_game_ids:
+            rebuild_predictions(conn, game_ids=touched_game_ids)
         conn.commit()
         return len(rows)
     except sqlite3.OperationalError as exc:

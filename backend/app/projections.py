@@ -258,9 +258,10 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
     )
 
 
-def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
+def rebuild_predictions(conn: sqlite3.Connection, game_ids: list[int] | None = None) -> list[PropProjection]:
     clear_model_cache()
-    _refresh_scheduled_game_rest_days(conn)
+    target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+    _refresh_scheduled_game_rest_days(conn, game_ids=target_game_ids or None)
     # Defensive cleanup for legacy partial-import states.
     conn.execute(
         """
@@ -283,14 +284,22 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
         )
         """
     )
+    game_filter = ""
+    game_filter_params: tuple[int, ...] = ()
+    if target_game_ids:
+        placeholders = ",".join("?" for _ in target_game_ids)
+        game_filter = f" AND pl.game_id IN ({placeholders})"
+        game_filter_params = tuple(target_game_ids)
     props = conn.execute(
         """
         SELECT pl.id
         FROM prop_lines pl
         JOIN games g ON g.id = pl.game_id
         WHERE g.status = 'scheduled'
+        """ + game_filter + """
         ORDER BY pl.captured_at DESC
-        """
+        """,
+        game_filter_params,
     ).fetchall()
     projections = [build_prop_projection(conn, int(row["id"])) for row in props]
     prop_ids = [p.prop_line_id for p in projections]
@@ -344,13 +353,20 @@ def rebuild_predictions(conn: sqlite3.Connection) -> list[PropProjection]:
     return projections
 
 
-def _refresh_scheduled_game_rest_days(conn: sqlite3.Connection) -> None:
+def _refresh_scheduled_game_rest_days(conn: sqlite3.Connection, game_ids: list[int] | None = None) -> None:
+    params: tuple[int, ...] = ()
+    game_filter = ""
+    if game_ids:
+        placeholders = ",".join("?" for _ in game_ids)
+        game_filter = f" AND id IN ({placeholders})"
+        params = tuple(game_ids)
     games = conn.execute(
         """
         SELECT id, home_team_id, away_team_id, start_time, game_date
         FROM games
         WHERE status = 'scheduled'
-        """
+        """ + game_filter,
+        params,
     ).fetchall()
     updates = []
     for game in games:
