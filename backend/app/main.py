@@ -528,14 +528,24 @@ def props_sync_status() -> dict:
 
 
 @app.post("/api/settle-props", dependencies=[Depends(_protect_mutation)])
-def settle_props() -> dict:
+def settle_props(
+    selected_date: str | None = None,
+    selected_dates: Annotated[list[str] | None, Query()] = None,
+) -> dict:
     with connect() as conn:
-        props = settle_completed_props(conn)
-        games = settle_completed_game_predictions(conn)
+        props = settle_completed_props(conn, selected_date=selected_date, selected_dates=selected_dates)
+        games = settle_completed_game_predictions(conn, selected_date=selected_date, selected_dates=selected_dates)
         gems = _sync_gem_snapshot_settlements(conn)
         watchlist = _sync_watchlist_snapshot_settlements(conn)
     _invalidate_read_caches()
-    return {"props": props, "games": games, "gems": gems, "watchlist": watchlist}
+    return {
+        "props": props,
+        "games": games,
+        "gems": gems,
+        "watchlist": watchlist,
+        "selected_date": selected_date,
+        "selected_dates": selected_dates or [],
+    }
 
 
 @app.get("/api/value-board", dependencies=[Depends(_protect_force_refresh)])
@@ -1582,8 +1592,8 @@ def import_espn_history(
                                 }
                             )
             ats_backfill = _recompute_team_results_from_game_lines(conn)
-            settlements = settle_completed_props(conn)
-            game_settlements = settle_completed_game_predictions(conn)
+            settlements = settle_completed_props(conn, selected_dates=daily_dates)
+            game_settlements = settle_completed_game_predictions(conn, selected_dates=daily_dates)
             gem_settlements = _sync_gem_snapshot_settlements(conn)
             watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
             _clear_scheduled_prop_state(conn, clear_source_rows=True)
@@ -1702,8 +1712,8 @@ def backfill_espn_history_gaps(
             force_refresh=force_refresh,
         )
         ats_backfill = _recompute_team_results_from_game_lines(conn)
-        settlements = settle_completed_props(conn)
-        game_settlements = settle_completed_game_predictions(conn)
+        settlements = settle_completed_props(conn, selected_dates=before["missing_dates"])
+        game_settlements = settle_completed_game_predictions(conn, selected_dates=before["missing_dates"])
         gem_settlements = _sync_gem_snapshot_settlements(conn)
         watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
         _clear_scheduled_prop_state(conn, clear_source_rows=True)

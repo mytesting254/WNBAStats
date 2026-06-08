@@ -6,7 +6,19 @@ from datetime import datetime, timezone
 from .projections import _market_value
 
 
-def settle_completed_props(conn: sqlite3.Connection) -> dict:
+def settle_completed_props(
+    conn: sqlite3.Connection,
+    *,
+    selected_date: str | None = None,
+    selected_dates: list[str] | None = None,
+) -> dict:
+    target_dates = _normalized_dates(selected_date, selected_dates)
+    date_filter = ""
+    params: tuple[str, ...] = ()
+    if target_dates:
+        placeholders = ",".join("?" for _ in target_dates)
+        date_filter = f" AND g.game_date IN ({placeholders})"
+        params = tuple(target_dates)
     rows = conn.execute(
         """
         SELECT
@@ -26,13 +38,17 @@ def settle_completed_props(conn: sqlite3.Connection) -> dict:
         JOIN player_game_stats pgs ON pgs.player_id = pl.player_id AND pgs.game_id = pl.game_id
         LEFT JOIN team_game_results tgr ON tgr.game_id = pl.game_id AND tgr.team_id = p.team_id
         WHERE g.status = 'final'
+        """
+        + date_filter
+        + """
           AND NOT EXISTS (
               SELECT 1
               FROM settled_props sp
               WHERE sp.prop_line_id = pl.id
           )
         ORDER BY g.game_date, pl.id
-        """
+        """,
+        params,
     ).fetchall()
 
     settled_at = datetime.now(timezone.utc).isoformat()
@@ -95,4 +111,13 @@ def settle_completed_props(conn: sqlite3.Connection) -> dict:
         "settled": len(settlements),
         "skipped": skipped,
         "settled_at": settled_at,
+        "selected_date": target_dates[0] if len(target_dates) == 1 else None,
+        "selected_dates": target_dates,
     }
+
+
+def _normalized_dates(selected_date: str | None, selected_dates: list[str] | None) -> list[str]:
+    values = [selected_date] if selected_date else []
+    values.extend(selected_dates or [])
+    cleaned = sorted({str(value).strip() for value in values if str(value).strip()})
+    return cleaned

@@ -64,7 +64,19 @@ def save_game_prediction(conn: sqlite3.Connection, game: Mapping, prediction: Ma
     return int(row["id"])
 
 
-def settle_completed_game_predictions(conn: sqlite3.Connection) -> dict:
+def settle_completed_game_predictions(
+    conn: sqlite3.Connection,
+    *,
+    selected_date: str | None = None,
+    selected_dates: list[str] | None = None,
+) -> dict:
+    target_dates = _normalized_dates(selected_date, selected_dates)
+    date_filter = ""
+    params: tuple[str, ...] = ()
+    if target_dates:
+        placeholders = ",".join("?" for _ in target_dates)
+        date_filter = f" AND g.game_date IN ({placeholders})"
+        params = tuple(target_dates)
     rows = conn.execute(
         """
         SELECT
@@ -82,13 +94,17 @@ def settle_completed_game_predictions(conn: sqlite3.Connection) -> dict:
         JOIN team_game_results home_result ON home_result.game_id = g.id AND home_result.team_id = g.home_team_id
         JOIN team_game_results away_result ON away_result.game_id = g.id AND away_result.team_id = g.away_team_id
         WHERE g.status = 'final'
+        """
+        + date_filter
+        + """
           AND NOT EXISTS (
               SELECT 1
               FROM settled_game_predictions settled
               WHERE settled.game_prediction_id = gp.id
           )
         ORDER BY g.game_date, gp.id
-        """
+        """,
+        params,
     ).fetchall()
 
     settled_at = datetime.now(timezone.utc).isoformat()
@@ -140,6 +156,8 @@ def settle_completed_game_predictions(conn: sqlite3.Connection) -> dict:
         "eligible": len(rows),
         "settled": len(settlements),
         "settled_at": settled_at,
+        "selected_date": target_dates[0] if len(target_dates) == 1 else None,
+        "selected_dates": target_dates,
     }
 
 
@@ -175,3 +193,10 @@ def _value(row: Mapping, key: str):
         return row[key]
     except (KeyError, IndexError):
         return None
+
+
+def _normalized_dates(selected_date: str | None, selected_dates: list[str] | None) -> list[str]:
+    values = [selected_date] if selected_date else []
+    values.extend(selected_dates or [])
+    cleaned = sorted({str(value).strip() for value in values if str(value).strip()})
+    return cleaned
