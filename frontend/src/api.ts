@@ -631,6 +631,39 @@ export async function recalculate(): Promise<void> {
   }
 }
 
+export async function settleProps(
+  selectedDate?: string,
+  selectedDates?: string[]
+): Promise<{
+  props: { settled: number; selected_date?: string | null; selected_dates?: string[] };
+  games: { settled: number; selected_date?: string | null; selected_dates?: string[] };
+  selected_date?: string | null;
+  selected_dates?: string[];
+}> {
+  const params = new URLSearchParams();
+  if (selectedDate) {
+    params.set("selected_date", selectedDate);
+  }
+  selectedDates?.forEach((date) => {
+    if (date) {
+      params.append("selected_dates", date);
+    }
+  });
+  const query = params.toString();
+  const response = await apiFetch(`/api/settle-props${query ? `?${query}` : ""}`, { method: "POST" });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "Failed to settle props");
+  }
+  return response.json();
+}
+
 export async function fetchModelRuns(): Promise<{ latest: ModelRun | null; runs: ModelRun[] }> {
   const response = await fetch("/api/models/runs");
   if (!response.ok) {

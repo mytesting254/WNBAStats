@@ -22,6 +22,7 @@ import {
   loginAdmin,
   logoutAdmin,
   recalculate,
+  settleProps,
   setCsrfToken,
   trainModel,
   type AuthState,
@@ -97,6 +98,7 @@ export function App() {
   const [refreshingMissingScores, setRefreshingMissingScores] = useState(false);
   const [refreshingRoster, setRefreshingRoster] = useState(false);
   const [recalculating, setRecalculating] = useState(false);
+  const [settlingProps, setSettlingProps] = useState(false);
   const [snapshottingGems, setSnapshottingGems] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("matchups");
   const [market, setMarket] = useState("all");
@@ -289,6 +291,29 @@ export function App() {
       setError(err instanceof Error ? err.message : "Unable to recalculate projections");
     } finally {
       setRecalculating(false);
+    }
+  }
+
+  async function handleSettleProps(selectedDates?: string[]) {
+    setSettlingProps(true);
+    setOperationStatus(null);
+    setError(null);
+    try {
+      const result = await settleProps(undefined, selectedDates);
+      await load();
+      const usedDates = result.selected_dates?.length
+        ? result.selected_dates
+        : result.selected_date
+          ? [result.selected_date]
+          : [];
+      const scope = usedDates.length ? ` for ${usedDates.join(", ")}` : "";
+      setOperationStatus(
+        `Settled ${result.props?.settled ?? 0} props and ${result.games?.settled ?? 0} game predictions${scope}.`
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to settle props");
+    } finally {
+      setSettlingProps(false);
     }
   }
 
@@ -625,6 +650,7 @@ export function App() {
           refreshingResults={refreshingResults}
           refreshingMissingScores={refreshingMissingScores}
           recalculating={recalculating}
+          settlingProps={settlingProps}
           snapshottingGems={snapshottingGems}
           propsCount={props.length}
           matchupsCount={matchups.length}
@@ -641,6 +667,7 @@ export function App() {
           onAdminUsernameChange={setAdminUsername}
           onAdminPasswordChange={setAdminPassword}
           onRecalculate={handleRecalculate}
+          onSettleProps={handleSettleProps}
           onSnapshotGems={handleSnapshotGems}
           onReload={load}
         />
@@ -683,6 +710,7 @@ function DataView({
   refreshingResults,
   refreshingMissingScores,
   recalculating,
+  settlingProps,
   snapshottingGems,
   propsCount,
   matchupsCount,
@@ -699,6 +727,7 @@ function DataView({
   onAdminUsernameChange,
   onAdminPasswordChange,
   onRecalculate,
+  onSettleProps,
   onSnapshotGems,
   onReload
 }: {
@@ -716,6 +745,7 @@ function DataView({
   refreshingResults: boolean;
   refreshingMissingScores: boolean;
   recalculating: boolean;
+  settlingProps: boolean;
   snapshottingGems: boolean;
   propsCount: number;
   matchupsCount: number;
@@ -738,6 +768,7 @@ function DataView({
   onAdminUsernameChange: (value: string) => void;
   onAdminPasswordChange: (value: string) => void;
   onRecalculate: () => void;
+  onSettleProps: (selectedDates?: string[]) => void;
   onSnapshotGems: () => void;
   onReload: () => void;
 }) {
@@ -745,7 +776,7 @@ function DataView({
   const [batchStartDate, setBatchStartDate] = useState(todayInputValue());
   const [batchEndDate, setBatchEndDate] = useState(todayInputValue());
   const parsedBatchDates = dateRangeValues(batchStartDate, batchEndDate);
-  const busy = refreshingResults || refreshingMissingScores || importingOdds || importingCoversOdds || loading;
+  const busy = refreshingResults || refreshingMissingScores || importingOdds || importingCoversOdds || loading || settlingProps;
   const today = todayInputValue();
   const missingPriorDateGames = missingEspnGames.filter((game) => game.game_date < today).length;
   const missingTodayGames = missingEspnGames.length - missingPriorDateGames;
@@ -834,7 +865,7 @@ function DataView({
             metrics={`${discrepanciesCount} line gaps | ${matchupsCount} upcoming games`}
             primaryLabel={importingOdds ? "Loading" : "Load Saved Odds"}
             secondaryLabel="Refresh Odds"
-            disabled={importingOdds || importingCoversOdds || refreshingResults || loading}
+            disabled={importingOdds || importingCoversOdds || refreshingResults || settlingProps || loading}
             onPrimary={() => onImportOdds(false)}
             onSecondary={() => onImportOdds(true)}
           />
@@ -844,7 +875,7 @@ function DataView({
             metrics={`${discrepanciesCount} line gaps | ${matchupsCount} upcoming games`}
             primaryLabel={importingCoversOdds ? "Loading" : "Load Saved Covers"}
             secondaryLabel="Refresh Covers"
-            disabled={importingOdds || importingCoversOdds || refreshingResults || loading}
+            disabled={importingOdds || importingCoversOdds || refreshingResults || settlingProps || loading}
             onPrimary={() => onImportCoversOdds(false)}
             onSecondary={() => onImportCoversOdds(true)}
           />
@@ -894,6 +925,20 @@ function DataView({
               >
                 Refresh Batch
               </button>
+              <button
+                className="secondary-button"
+                onClick={() => onSettleProps([resultDate])}
+                disabled={busy || !resultDate}
+              >
+                {settlingProps ? "Settling" : "Settle Date"}
+              </button>
+              <button
+                className="secondary-button"
+                onClick={() => onSettleProps(parsedBatchDates)}
+                disabled={busy || parsedBatchDates.length === 0}
+              >
+                Settle Batch
+              </button>
             </div>
           </article>
           <article className="operation-card">
@@ -919,7 +964,7 @@ function DataView({
             metrics={`${matchupsCount} upcoming games | ${missingEspnDates.length} missing score dates`}
             primaryLabel={recalculating ? "Recalculating" : "Recalculate"}
             secondaryLabel={snapshottingGems ? "Tracking Gems" : "Track Gems Daily"}
-            disabled={refreshingResults || importingOdds || importingCoversOdds || loading || recalculating || snapshottingGems}
+            disabled={refreshingResults || importingOdds || importingCoversOdds || loading || recalculating || settlingProps || snapshottingGems}
             onPrimary={onRecalculate}
             onSecondary={onSnapshotGems}
           />
