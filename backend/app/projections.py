@@ -785,19 +785,28 @@ def _confidence(
 ) -> str:
     sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
     normalized_margin = stat_margin / max(sigma, 1.0)
+    market_key = str(market).lower()
+    side_key = str(side).lower()
     base_confidence = "low"
     if sample_count < 7 or avg_minutes < 16:
-        if edge >= 0.10 and normalized_margin >= 1.15:
+        if edge >= 0.12 and normalized_margin >= 1.25:
             base_confidence = "medium"
-    elif edge >= 0.08 and normalized_margin >= 1.0:
+    elif edge >= 0.11 and normalized_margin >= 1.10:
         base_confidence = "high"
-    elif edge >= 0.04 and normalized_margin >= 0.65:
+    elif edge >= 0.07 and normalized_margin >= 0.85:
         base_confidence = "medium"
 
     if (
         base_confidence == "medium"
-        and str(side).lower() == "under"
-        and str(market).lower() in {"points", "rebounds"}
+        and side_key == "under"
+        and market_key in {"points", "rebounds", "threes"}
+        and (edge < 0.12 or normalized_margin < 1.05)
+    ):
+        return "low"
+    if (
+        base_confidence != "low"
+        and side_key == "over"
+        and market_key in {"points", "threes"}
         and (edge < 0.10 or normalized_margin < 1.0)
     ):
         return "low"
@@ -895,12 +904,12 @@ def _calibrated_probability(
 
 def _over_min_margin(market: str) -> float:
     by_market = {
-        "threes": 0.70,
-        "points": 0.45,
+        "threes": 1.10,
+        "points": 0.85,
         "rebounds": 0.40,
         "assists": 0.35,
-        "points_rebounds": 0.75,
-        "points_assists": 0.70,
+        "points_rebounds": 0.95,
+        "points_assists": 0.95,
         "rebounds_assists": 0.60,
         "points_rebounds_assists": 1.10,
     }
