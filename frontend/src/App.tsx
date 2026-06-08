@@ -1520,14 +1520,12 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
   const shown = useMemo(() => {
     const cfg = {
-      conservative: { minEv: 0.03, minEdge: 0.08, minScore: 0.55, allowLow: false, limit: 20 },
-      balanced: { minEv: 0.02, minEdge: 0.05, minScore: 0.42, allowLow: true, limit: 24 },
-      aggressive: { minEv: 0.01, minEdge: 0.035, minScore: 0.32, allowLow: true, limit: 30 }
+      conservative: { minScore: 0.55, limit: 20 },
+      balanced: { minScore: 0.42, limit: 24 },
+      aggressive: { minScore: 0.32, limit: 30 }
     }[preset];
     return gems
-      .filter((g) => g.expected_value >= cfg.minEv)
-      .filter((g) => Math.abs(g.edge) >= cfg.minEdge)
-      .filter((g) => cfg.allowLow || g.confidence !== "low")
+      .filter((g) => qualifiesForGem(g, preset))
       .filter((g) => g.gem_score >= cfg.minScore)
       .filter((g) => marketFilter === "all" || g.market === marketFilter)
       .filter((g) => confidenceFilter === "all" || g.confidence === confidenceFilter)
@@ -2674,7 +2672,7 @@ function MatchupProps({
       return marketMatch && sideMatch && confidenceMatch;
     })
     .sort((a, b) => compareCandidateProps(a, b, candidateSort, sortDirection));
-  const positiveProps = filteredProps.filter((prop) => prop.expected_value > 0 && prop.edge > 0);
+  const positiveProps = filteredProps.filter((prop) => qualifiesForParlayCandidate(prop));
   const visibleProps = candidateView === "positive" ? positiveProps : filteredProps;
   const shortlist = positiveProps.slice(0, 5);
   const filteredDiscrepancies = discrepancies
@@ -3274,6 +3272,85 @@ function buildGems(props: ValueProp[], discrepancies: LineDiscrepancy[]): GemPro
     .sort((a, b) => b.gem_score - a.gem_score || b.expected_value - a.expected_value || b.edge - a.edge);
 }
 
+function qualifiesForGem(prop: ValueProp, preset: GemPreset) {
+  const edge = Math.abs(prop.edge);
+  const ev = prop.expected_value;
+  const confidence = prop.confidence;
+  const market = prop.market;
+  const side = prop.recommended_side;
+  if (ev <= 0 || edge <= 0) {
+    return false;
+  }
+
+  const isCombo = ["points_rebounds", "points_assists", "rebounds_assists", "points_rebounds_assists"].includes(market);
+  const isFragileOver = side === "over" && ["points", "threes", "points_rebounds", "points_assists"].includes(market);
+  const presetFloor = preset === "conservative"
+    ? { edge: 0.08, ev: 0.03 }
+    : preset === "balanced"
+      ? { edge: 0.06, ev: 0.02 }
+      : { edge: 0.05, ev: 0.015 };
+
+  if (confidence === "high") {
+    if (isFragileOver) {
+      return edge >= Math.max(presetFloor.edge, 0.09) && ev >= Math.max(presetFloor.ev, 0.025);
+    }
+    if (isCombo) {
+      return edge >= Math.max(presetFloor.edge, 0.08) && ev >= Math.max(presetFloor.ev, 0.025);
+    }
+    return edge >= presetFloor.edge && ev >= presetFloor.ev;
+  }
+
+  if (confidence === "medium") {
+    if (isFragileOver) {
+      return edge >= Math.max(presetFloor.edge, 0.11) && ev >= Math.max(presetFloor.ev, 0.035);
+    }
+    if (isCombo || market === "assists") {
+      return edge >= Math.max(presetFloor.edge, 0.08) && ev >= Math.max(presetFloor.ev, 0.025);
+    }
+    return edge >= Math.max(presetFloor.edge, 0.07) && ev >= Math.max(presetFloor.ev, 0.02);
+  }
+
+  if (side === "over") {
+    return false;
+  }
+  if (!["rebounds", "points_rebounds", "rebounds_assists"].includes(market)) {
+    return false;
+  }
+  return edge >= Math.max(presetFloor.edge, 0.08) && ev >= Math.max(presetFloor.ev, 0.025);
+}
+
+function qualifiesForParlayCandidate(prop: ValueProp) {
+  const edge = Math.abs(prop.edge);
+  const ev = prop.expected_value;
+  const market = prop.market;
+  const side = prop.recommended_side;
+  if (ev <= 0 || edge <= 0) {
+    return false;
+  }
+  if (prop.confidence === "high") {
+    if (side === "over" && ["points", "threes"].includes(market)) {
+      return edge >= 0.10 && ev >= 0.03;
+    }
+    return edge >= 0.07 && ev >= 0.02;
+  }
+  if (prop.confidence === "medium") {
+    if (side === "over" && ["points", "threes", "points_rebounds", "points_assists"].includes(market)) {
+      return edge >= 0.12 && ev >= 0.04;
+    }
+    if (["points_rebounds_assists", "rebounds_assists", "assists"].includes(market)) {
+      return edge >= 0.09 && ev >= 0.03;
+    }
+    return edge >= 0.08 && ev >= 0.025;
+  }
+  if (side === "over") {
+    return false;
+  }
+  if (!["rebounds", "points_rebounds", "rebounds_assists"].includes(market)) {
+    return false;
+  }
+  return edge >= 0.10 && ev >= 0.03;
+}
+
 function normalizePropName(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -3407,7 +3484,7 @@ function dateRangeValues(startDate: string, endDate: string) {
 }
 
 function availableLabel(matchup: Matchup) {
-  const parlayCount = (matchup.props ?? []).filter((prop) => prop.expected_value > 0 && prop.edge > 0).length;
+  const parlayCount = (matchup.props ?? []).filter((prop) => qualifiesForParlayCandidate(prop)).length;
   const discrepancyCount = matchup.line_discrepancies?.length ?? 0;
   const sportsbookCount = matchup.sportsbook_props?.length ?? 0;
   return `${parlayCount} parlay | ${discrepancyCount} gaps | ${sportsbookCount} book`;
@@ -3485,7 +3562,7 @@ function propsForMatchup(matchup: Matchup, props: ValueProp[]) {
 }
 
 function parlayAvailabilityLabel(matchup: Matchup, props: ValueProp[]) {
-  const parlayCount = props.filter((prop) => prop.expected_value > 0 && prop.edge > 0).length;
+  const parlayCount = props.filter((prop) => qualifiesForParlayCandidate(prop)).length;
   if (parlayCount > 0) {
     return `${parlayCount} candidate${parlayCount === 1 ? "" : "s"}`;
   }
@@ -3497,13 +3574,13 @@ function parlayAvailabilityLabel(matchup: Matchup, props: ValueProp[]) {
 
 function parlayCandidateCount(matchups: Matchup[], props: ValueProp[]) {
   return matchups.reduce(
-    (count, matchup) => count + propsForMatchup(matchup, props).filter((prop) => prop.expected_value > 0 && prop.edge > 0).length,
+    (count, matchup) => count + propsForMatchup(matchup, props).filter((prop) => qualifiesForParlayCandidate(prop)).length,
     0
   );
 }
 
 function gamesWithParlayCandidates(matchups: Matchup[], props: ValueProp[]) {
-  return matchups.filter((matchup) => propsForMatchup(matchup, props).some((prop) => prop.expected_value > 0 && prop.edge > 0)).length;
+  return matchups.filter((matchup) => propsForMatchup(matchup, props).some((prop) => qualifiesForParlayCandidate(prop))).length;
 }
 
 function countDiscrepancyBooks(discrepancies: LineDiscrepancy[]) {
