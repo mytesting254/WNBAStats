@@ -1492,8 +1492,10 @@ def import_covers(selected_date: str | None = None, force_refresh: bool = False)
 def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_rotowire_lineups(conn, force_refresh=force_refresh)
-        projections = rebuild_predictions(conn)
+        game_ids = _scheduled_game_ids_for_teams(conn, result.get("affected_team_ids", []))
+        projections = rebuild_predictions(conn, game_ids=game_ids) if game_ids else []
     result["predictions"] = len(projections)
+    result["affected_game_ids"] = game_ids
     _invalidate_read_caches()
     return result
 
@@ -1813,6 +1815,24 @@ def _selected_espn_dates(selected_date: str | None, selected_dates: list[str] | 
                 dates.append(parsed)
                 seen.add(parsed)
     return dates
+
+
+def _scheduled_game_ids_for_teams(conn, team_ids: list[int] | tuple[int, ...]) -> list[int]:
+    normalized = sorted({int(team_id) for team_id in team_ids if int(team_id) > 0})
+    if not normalized:
+        return []
+    placeholders = ",".join("?" for _ in normalized)
+    rows = conn.execute(
+        f"""
+        SELECT id
+        FROM games
+        WHERE status = 'scheduled'
+          AND (home_team_id IN ({placeholders}) OR away_team_id IN ({placeholders}))
+        ORDER BY game_date, start_time, id
+        """,
+        tuple(normalized) + tuple(normalized),
+    ).fetchall()
+    return [int(row["id"]) for row in rows]
 
 
 def _default_espn_daily_dates(today_local=None) -> list[str]:

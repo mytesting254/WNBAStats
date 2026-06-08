@@ -68,6 +68,7 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
     unresolved = 0
     unresolved_names: list[str] = []
     skipped_stale = 0
+    affected_team_ids: set[int] = set()
     status = "imported" if source == "rotowire" else "loaded_from_cache"
     message = None
     try:
@@ -79,6 +80,9 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
                 unresolved += 1
                 unresolved_names.append(f"{row['team']}:{row['player_name']}")
                 continue
+            team_id = _resolve_team_id(conn, team_abbr)
+            if team_id:
+                affected_team_ids.add(team_id)
             player_id = _resolve_player_id(conn, team_abbr, row["player_name"])
             if not player_id:
                 unresolved += 1
@@ -124,6 +128,7 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
         "fetch_error": fetch_error,
         "ttl_seconds": _refresh_ttl_seconds(conn),
         "unresolved_examples": unresolved_names[:10],
+        "affected_team_ids": sorted(affected_team_ids),
     }
 
 
@@ -306,6 +311,19 @@ def _resolve_player_id(conn: sqlite3.Connection, team_abbreviation: str, player_
         if row:
             return int(row["id"])
     return None
+
+
+def _resolve_team_id(conn: sqlite3.Connection, team_abbreviation: str) -> int | None:
+    row = conn.execute(
+        """
+        SELECT id
+        FROM teams
+        WHERE upper(abbreviation) = ?
+        LIMIT 1
+        """,
+        (team_abbreviation.upper(),),
+    ).fetchone()
+    return int(row["id"]) if row else None
 
 
 def _fetch_text(url: str) -> str:
