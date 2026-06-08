@@ -1,5 +1,5 @@
 ﻿import { BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import {
   fetchAuthState,
   fetchMissingEspnScores,
@@ -79,6 +79,65 @@ type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "d
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
+
+type NormalizedCoversRecords = {
+  head_to_head: CoversRecordRow[];
+  away_last_10: CoversRecordRow[];
+  home_last_10: CoversRecordRow[];
+  team_table: Array<{
+    team: string;
+    record: string;
+    ats: string;
+    ou: string;
+    away: string;
+    home: string;
+  }>;
+};
+
+class DashboardErrorBoundary extends Component<
+  { children: ReactNode; onReset?: () => void },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Dashboard render error", error, info);
+  }
+
+  componentDidUpdate(prevProps: Readonly<{ children: ReactNode; onReset?: () => void }>) {
+    if (this.state.hasError && prevProps.children !== this.props.children) {
+      this.setState({ hasError: false });
+    }
+  }
+
+  render() {
+    if (!this.state.hasError) {
+      return this.props.children;
+    }
+    return (
+      <section className="board-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Dashboard Error</h2>
+            <p>A view failed to render. Existing API data is still available.</p>
+          </div>
+          <ShieldCheck size={20} />
+        </div>
+        <div className="error">A dashboard panel crashed while rendering refreshed data.</div>
+        {this.props.onReset ? (
+          <button className="icon-button text-button dark-button" onClick={this.props.onReset}>
+            <RefreshCw size={18} />
+            Reload
+          </button>
+        ) : null}
+      </section>
+    );
+  }
+}
 
 export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
@@ -605,87 +664,89 @@ export function App() {
       </section>
       {performance?.message ? <div className="summary-message">{performance.message}</div> : null}
 
-      {activeTab === "props" ? (
-        <PropsView
-          filtered={filtered}
-          loading={loading}
-          error={error}
-          market={market}
-          confidence={confidence}
-          modelProbabilityOrder={modelProbabilityOrder}
-          selected={selected}
-          setMarket={setMarket}
-          setConfidence={setConfidence}
-          setModelProbabilityOrder={setModelProbabilityOrder}
-          setSelected={setSelected}
-        />
-      ) : activeTab === "gems" ? (
-        <GemsView gems={gems} matchups={matchups} loading={loading} error={error} />
-      ) : activeTab === "watchlist" ? (
-        <WatchlistView watchlist={watchlist} loading={loading} error={error} />
-      ) : activeTab === "matchups" ? (
-        <MatchupsView matchups={matchups} loading={loading} error={error} />
-      ) : activeTab === "parlays" ? (
-        <ParlayCandidatesView matchups={matchups} props={props} loading={loading} error={error} />
-      ) : activeTab === "discrepancies" ? (
-        <DiscrepanciesView discrepancies={discrepancies} loading={loading} error={error} />
-      ) : activeTab === "data" ? (
-        <DataView
-          loading={loading}
-          authLoading={authLoading}
-          authSubmitting={authSubmitting}
-          authState={authState}
-          opsHealth={opsHealth}
-          adminUsername={adminUsername}
-          adminPassword={adminPassword}
-          error={error}
-          status={operationStatus}
-          importingOdds={importingOdds}
-          importingCoversOdds={importingCoversOdds}
-          refreshingResults={refreshingResults}
-          refreshingMissingScores={refreshingMissingScores}
-          recalculating={recalculating}
-          settlingProps={settlingProps}
-          snapshottingGems={snapshottingGems}
-          propsCount={props.length}
-          matchupsCount={matchups.length}
-          discrepanciesCount={discrepancies.length}
-          missingEspnDates={missingEspnDates}
-          missingEspnGames={missingEspnGames}
-          onImportOdds={handleImportOdds}
-          onImportCoversOdds={handleImportCoversOdds}
-          onRefreshResults={handleRefreshResults}
-          onScanMissingScores={handleScanMissingScores}
-          onImportMissingScores={handleImportMissingScores}
-          onAdminLogin={handleAdminLogin}
-          onAdminLogout={handleAdminLogout}
-          onAdminUsernameChange={setAdminUsername}
-          onAdminPasswordChange={setAdminPassword}
-          onRecalculate={handleRecalculate}
-          onSettleProps={handleSettleProps}
-          onSnapshotGems={handleSnapshotGems}
-          onReload={load}
-        />
-      ) : activeTab === "roster" ? (
-        <RosterView
-          roster={roster}
-          loading={loading}
-          error={error}
-          status={operationStatus}
-          refreshing={refreshingRoster}
-          onRefresh={() => handleRefreshRoster(true)}
-          canRefresh={Boolean(authState.authenticated && authState.user?.is_admin)}
-        />
-      ) : (
-        <ModelsView
-          runs={modelRuns}
-          latest={latestModelRun}
-          loading={loading || training}
-          error={error}
-          onTrain={handleTrainModel}
-          canTrain={Boolean(authState.authenticated && authState.user?.is_admin)}
-        />
-      )}
+      <DashboardErrorBoundary key={activeTab} onReset={load}>
+        {activeTab === "props" ? (
+          <PropsView
+            filtered={filtered}
+            loading={loading}
+            error={error}
+            market={market}
+            confidence={confidence}
+            modelProbabilityOrder={modelProbabilityOrder}
+            selected={selected}
+            setMarket={setMarket}
+            setConfidence={setConfidence}
+            setModelProbabilityOrder={setModelProbabilityOrder}
+            setSelected={setSelected}
+          />
+        ) : activeTab === "gems" ? (
+          <GemsView gems={gems} matchups={matchups} loading={loading} error={error} />
+        ) : activeTab === "watchlist" ? (
+          <WatchlistView watchlist={watchlist} loading={loading} error={error} />
+        ) : activeTab === "matchups" ? (
+          <MatchupsView matchups={matchups} loading={loading} error={error} />
+        ) : activeTab === "parlays" ? (
+          <ParlayCandidatesView matchups={matchups} props={props} loading={loading} error={error} />
+        ) : activeTab === "discrepancies" ? (
+          <DiscrepanciesView discrepancies={discrepancies} loading={loading} error={error} />
+        ) : activeTab === "data" ? (
+          <DataView
+            loading={loading}
+            authLoading={authLoading}
+            authSubmitting={authSubmitting}
+            authState={authState}
+            opsHealth={opsHealth}
+            adminUsername={adminUsername}
+            adminPassword={adminPassword}
+            error={error}
+            status={operationStatus}
+            importingOdds={importingOdds}
+            importingCoversOdds={importingCoversOdds}
+            refreshingResults={refreshingResults}
+            refreshingMissingScores={refreshingMissingScores}
+            recalculating={recalculating}
+            settlingProps={settlingProps}
+            snapshottingGems={snapshottingGems}
+            propsCount={props.length}
+            matchupsCount={matchups.length}
+            discrepanciesCount={discrepancies.length}
+            missingEspnDates={missingEspnDates}
+            missingEspnGames={missingEspnGames}
+            onImportOdds={handleImportOdds}
+            onImportCoversOdds={handleImportCoversOdds}
+            onRefreshResults={handleRefreshResults}
+            onScanMissingScores={handleScanMissingScores}
+            onImportMissingScores={handleImportMissingScores}
+            onAdminLogin={handleAdminLogin}
+            onAdminLogout={handleAdminLogout}
+            onAdminUsernameChange={setAdminUsername}
+            onAdminPasswordChange={setAdminPassword}
+            onRecalculate={handleRecalculate}
+            onSettleProps={handleSettleProps}
+            onSnapshotGems={handleSnapshotGems}
+            onReload={load}
+          />
+        ) : activeTab === "roster" ? (
+          <RosterView
+            roster={roster}
+            loading={loading}
+            error={error}
+            status={operationStatus}
+            refreshing={refreshingRoster}
+            onRefresh={() => handleRefreshRoster(true)}
+            canRefresh={Boolean(authState.authenticated && authState.user?.is_admin)}
+          />
+        ) : (
+          <ModelsView
+            runs={modelRuns}
+            latest={latestModelRun}
+            loading={loading || training}
+            error={error}
+            onTrain={handleTrainModel}
+            canTrain={Boolean(authState.authenticated && authState.user?.is_admin)}
+          />
+        )}
+      </DashboardErrorBoundary>
     </main>
   );
 }
@@ -1855,6 +1916,7 @@ function DiscrepanciesView({
 function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loading: boolean; error: string | null }) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const selectedMatchup = matchups.find((matchup) => matchup.id === selectedGameId) ?? matchups[0] ?? null;
+  const selectedCoversRecords = normalizeCoversRecords(selectedMatchup?.covers_records);
 
   return (
     <section className="matchup-list">
@@ -1926,8 +1988,8 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
                   restDays={selectedMatchup.away_rest_days}
                   summary={selectedMatchup.away}
                   context="away"
-                  coversTeamRow={selectedMatchup.covers_records?.team_table?.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.away_team))}
-                  coversLast10Rows={selectedMatchup.covers_records?.away_last_10}
+                  coversTeamRow={selectedCoversRecords.team_table.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.away_team))}
+                  coversLast10Rows={selectedCoversRecords.away_last_10}
                 />
                 <TeamSummary
                   label="Home"
@@ -1937,8 +1999,8 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
                   restDays={selectedMatchup.home_rest_days}
                   summary={selectedMatchup.home}
                   context="home"
-                  coversTeamRow={selectedMatchup.covers_records?.team_table?.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.home_team))}
-                  coversLast10Rows={selectedMatchup.covers_records?.home_last_10}
+                  coversTeamRow={selectedCoversRecords.team_table.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.home_team))}
+                  coversLast10Rows={selectedCoversRecords.home_last_10}
                 />
               </div>
               <div className="prediction-strip">
@@ -1962,14 +2024,14 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
 }
 
 function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
-  const records = matchup.covers_records;
-  const hasCovers = Boolean(records && (records.head_to_head.length || records.away_last_10.length || records.home_last_10.length));
-  const h2hRows = records?.head_to_head.length
+  const records = normalizeCoversRecords(matchup.covers_records);
+  const hasCovers = Boolean(records.head_to_head.length || records.away_last_10.length || records.home_last_10.length);
+  const h2hRows = records.head_to_head.length
     ? records.head_to_head.slice(0, 10)
     : buildFallbackH2HRows(matchup);
   const singleH2HRow = h2hRows.length === 1 ? h2hRows[0] : null;
   const awayRows = hasCovers
-    ? records?.away_last_10.slice(0, 10) ?? []
+    ? records.away_last_10.slice(0, 10)
     : matchup.away.recent_games.slice(0, 10).map((game) => ({
         date: formatGameDateShort(game.game_date),
         opponent: game.opponent,
@@ -1980,7 +2042,7 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         total: totalLabel(game.total_result)
       }));
   const homeRows = hasCovers
-    ? records?.home_last_10.slice(0, 10) ?? []
+    ? records.home_last_10.slice(0, 10)
     : matchup.home.recent_games.slice(0, 10).map((game) => ({
         date: formatGameDateShort(game.game_date),
         opponent: game.opponent,
@@ -2313,6 +2375,16 @@ function normalizeTeamCode(value: string | null | undefined) {
     PDX: "POR"
   };
   return aliases[cleaned] ?? cleaned;
+}
+
+function normalizeCoversRecords(records: Matchup["covers_records"] | null | undefined): NormalizedCoversRecords {
+  const source = records && typeof records === "object" ? records : null;
+  return {
+    head_to_head: Array.isArray(source?.head_to_head) ? source.head_to_head : [],
+    away_last_10: Array.isArray(source?.away_last_10) ? source.away_last_10 : [],
+    home_last_10: Array.isArray(source?.home_last_10) ? source.home_last_10 : [],
+    team_table: Array.isArray(source?.team_table) ? source.team_table : [],
+  };
 }
 
 function summarizeCoversTeamRows(rows: CoversRecordRow[] | undefined) {
