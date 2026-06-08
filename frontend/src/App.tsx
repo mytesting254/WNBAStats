@@ -122,116 +122,117 @@ export function App() {
     const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     setError(null);
-    const [
-      boardResult,
-      performanceResult,
-      gemPerformanceResult,
-      watchlistPerformanceResult,
-      watchlistResult,
-      matchupsResult,
-      discrepanciesResult,
-      modelRunsResult,
-      rosterResult,
-      opsHealthResult
-    ] = await Promise.allSettled([
-      fetchValueBoard(),
-      fetchPerformance(),
-      fetchGemPerformance(),
-      fetchWatchlistPerformance(),
-      fetchWatchlist(),
-      fetchMatchups(),
-      fetchLineDiscrepancies(),
-      fetchModelRuns(),
-      fetchRoster(),
-      fetchOpsHealth()
-    ]);
+    try {
+      const [
+        boardResult,
+        performanceResult,
+        gemPerformanceResult,
+        watchlistPerformanceResult,
+        watchlistResult,
+        matchupsResult,
+        discrepanciesResult,
+        modelRunsResult,
+        rosterResult,
+        opsHealthResult
+      ] = await Promise.allSettled([
+        fetchValueBoard(),
+        fetchPerformance(),
+        fetchGemPerformance(),
+        fetchWatchlistPerformance(),
+        fetchWatchlist(),
+        fetchMatchups(),
+        fetchLineDiscrepancies(),
+        fetchModelRuns(),
+        fetchRoster(),
+        fetchOpsHealth()
+      ]);
 
-    const failures: string[] = [];
+      const failures: string[] = [];
 
-    if (requestId !== loadRequestIdRef.current) {
-      return;
-    }
+      if (requestId !== loadRequestIdRef.current) {
+        return;
+      }
 
-    if (boardResult.status === "fulfilled") {
-      setProps(boardResult.value);
-      setSelected((current) => current ?? boardResult.value[0] ?? null);
-    } else {
-      failures.push("value board");
-      setProps([]);
-      setSelected(null);
-    }
+      if (boardResult.status === "fulfilled") {
+        setProps(boardResult.value);
+        setSelected((current) => {
+          if (boardResult.value.length === 0) {
+            return null;
+          }
+          if (current) {
+            const matchingProp = boardResult.value.find((item) => item.id === current.id);
+            if (matchingProp) {
+              return matchingProp;
+            }
+          }
+          return boardResult.value[0] ?? null;
+        });
+      } else {
+        failures.push("value board");
+      }
 
-    if (performanceResult.status === "fulfilled") {
-      setPerformance(performanceResult.value);
-    } else {
-      failures.push("model performance");
-      setPerformance(null);
-    }
+      if (performanceResult.status === "fulfilled") {
+        setPerformance(performanceResult.value);
+      } else {
+        failures.push("model performance");
+      }
 
-    if (gemPerformanceResult.status === "fulfilled") {
-      setGemPerformance(gemPerformanceResult.value);
-    } else {
-      failures.push("gem performance");
-      setGemPerformance(null);
-    }
+      if (gemPerformanceResult.status === "fulfilled") {
+        setGemPerformance(gemPerformanceResult.value);
+      } else {
+        failures.push("gem performance");
+      }
 
-    if (watchlistPerformanceResult.status === "fulfilled") {
-      setWatchlistPerformance(watchlistPerformanceResult.value);
-    } else {
-      failures.push("watchlist performance");
-      setWatchlistPerformance(null);
-    }
+      if (watchlistPerformanceResult.status === "fulfilled") {
+        setWatchlistPerformance(watchlistPerformanceResult.value);
+      } else {
+        failures.push("watchlist performance");
+      }
 
-    if (watchlistResult.status === "fulfilled") {
-      setWatchlist(watchlistResult.value);
-    } else {
-      failures.push("watchlist");
-      setWatchlist([]);
-    }
+      if (watchlistResult.status === "fulfilled") {
+        setWatchlist(watchlistResult.value);
+      } else {
+        failures.push("watchlist");
+      }
 
-    if (matchupsResult.status === "fulfilled") {
-      setMatchups(matchupsResult.value);
-    } else {
-      failures.push("matchups");
-      setMatchups([]);
-    }
+      if (matchupsResult.status === "fulfilled") {
+        setMatchups(matchupsResult.value);
+      } else {
+        failures.push("matchups");
+      }
 
-    if (discrepanciesResult.status === "fulfilled") {
-      setDiscrepancies(discrepanciesResult.value);
-    } else {
-      failures.push("line discrepancies");
-      setDiscrepancies([]);
-    }
+      if (discrepanciesResult.status === "fulfilled") {
+        setDiscrepancies(discrepanciesResult.value);
+      } else {
+        failures.push("line discrepancies");
+      }
 
-    if (modelRunsResult.status === "fulfilled") {
-      setModelRuns(modelRunsResult.value.runs);
-      setLatestModelRun(modelRunsResult.value.latest);
-    } else {
-      failures.push("model runs");
-      setModelRuns([]);
-      setLatestModelRun(null);
-    }
+      if (modelRunsResult.status === "fulfilled") {
+        setModelRuns(modelRunsResult.value.runs);
+        setLatestModelRun(modelRunsResult.value.latest);
+      } else {
+        failures.push("model runs");
+      }
 
-    if (rosterResult.status === "fulfilled") {
-      setRoster(rosterResult.value);
-    } else {
-      failures.push("roster");
-      setRoster([]);
-    }
+      if (rosterResult.status === "fulfilled") {
+        setRoster(rosterResult.value);
+      } else {
+        failures.push("roster");
+      }
 
-    if (opsHealthResult.status === "fulfilled") {
-      setOpsHealth(opsHealthResult.value);
-    } else {
-      failures.push("operations health");
-      setOpsHealth(null);
-    }
+      if (opsHealthResult.status === "fulfilled") {
+        setOpsHealth(opsHealthResult.value);
+      } else {
+        failures.push("operations health");
+      }
 
-    if (failures.length > 0) {
-      setError(`Some dashboard data failed to load: ${failures.join(", ")}.`);
-    }
-
-    if (requestId === loadRequestIdRef.current) {
-      setLoading(false);
+      if (failures.length > 0) {
+        setError(`Some dashboard data failed to load: ${failures.join(", ")}. Showing the last successful data.`);
+      }
+    } finally {
+      if (requestId === loadRequestIdRef.current) {
+        setLoading(false);
+      }
     }
   }
 
@@ -409,14 +410,8 @@ export function App() {
         setError(result.message ?? "Unable to import Covers odds");
         return;
       }
+      await load();
       setOperationStatus(result.message ?? `${forceRefresh ? "Fresh" : "Saved"} Covers odds loaded. Imported ${result.imported ?? 0} sportsbook rows from ${result.source ?? "covers"}.`);
-      void load().catch((err) => {
-        setError(
-          `Covers import succeeded, but dashboard reload failed: ${
-            err instanceof Error ? err.message : "unknown error"
-          }`
-        );
-      });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to import Covers odds");
     } finally {
