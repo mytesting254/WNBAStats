@@ -166,6 +166,7 @@ export function App() {
   const [selected, setSelected] = useState<ValueProp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [operationStatus, setOperationStatus] = useState<string | null>(null);
+  const [availabilityToast, setAvailabilityToast] = useState<string | null>(null);
   const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
   const [missingEspnGames, setMissingEspnGames] = useState<MissingEspnGame[]>([]);
   const [loading, setLoading] = useState(true);
@@ -174,8 +175,21 @@ export function App() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [opsHealth, setOpsHealth] = useState<OpsHealth | null>(null);
   const loadRequestIdRef = useRef(0);
+  const operationsBusyRef = useRef(false);
+  const toastTimerRef = useRef<number | null>(null);
   const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
+  const operationsBusy =
+    loading ||
+    training ||
+    importingOdds ||
+    importingCoversOdds ||
+    refreshingResults ||
+    refreshingMissingScores ||
+    refreshingRoster ||
+    recalculating ||
+    settlingProps ||
+    snapshottingGems;
 
   async function load() {
     const requestId = ++loadRequestIdRef.current;
@@ -316,6 +330,38 @@ export function App() {
 
   useEffect(() => {
     loadAuth();
+  }, []);
+
+  useEffect(() => {
+    if (operationsBusy) {
+      operationsBusyRef.current = true;
+      return;
+    }
+    if (!operationsBusyRef.current) return;
+
+    operationsBusyRef.current = false;
+    const message = error
+      ? "Previous job finished with an error. Buttons are available again."
+      : operationStatus
+        ? `Queue clear. ${operationStatus}`
+        : "Queue clear. Buttons are available again.";
+
+    setAvailabilityToast(message);
+    if (toastTimerRef.current != null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => {
+      setAvailabilityToast(null);
+      toastTimerRef.current = null;
+    }, 5000);
+
+    if (document.hidden && "Notification" in window && Notification.permission === "granted") {
+      new Notification("WNBA Stats ready", { body: message });
+    }
+  }, [operationsBusy, error, operationStatus]);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current != null) window.clearTimeout(toastTimerRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -662,6 +708,11 @@ export function App() {
           value={`Model ${performance?.win_rate == null ? "Pending" : formatPercent(performance.win_rate)} | Gems ${gemPerformance?.win_rate == null ? "Pending" : formatPercent(gemPerformance.win_rate)} | Watch ${watchlistPerformance?.win_rate == null ? "Pending" : formatPercent(watchlistPerformance.win_rate)}`}
         />
       </section>
+      {availabilityToast && (
+        <div className="availability-toast" role="status" aria-live="polite">
+          {availabilityToast}
+        </div>
+      )}
       {performance?.message ? <div className="summary-message">{performance.message}</div> : null}
 
       <DashboardErrorBoundary key={activeTab} onReset={load}>
