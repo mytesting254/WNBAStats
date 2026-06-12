@@ -732,6 +732,151 @@ def test_settle_completed_props_writes_actual_results() -> None:
     assert row["blowout_result"] == "no"
 
 
+def test_repair_current_slate_props_targets_only_active_games() -> None:
+    now_local = datetime.now(main_module.LOCAL_TZ)
+    active_start = (now_local + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+    stale_start = (now_local - timedelta(days=2)).replace(hour=19, minute=0, second=0, microsecond=0)
+    with connect() as conn:
+        conn.executemany(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            [
+                (9101, "Active Guard", 10, "G", "starter"),
+                (9102, "Stale Guard", 13, "G", "starter"),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)
+            """,
+            [
+                (
+                    9910,
+                    active_start.date().isoformat(),
+                    active_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    10,
+                    3,
+                    -4.5,
+                    160.5,
+                ),
+                (
+                    9920,
+                    stale_start.date().isoformat(),
+                    stale_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    13,
+                    14,
+                    -2.5,
+                    158.5,
+                ),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO player_game_stats (
+                player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (9101, 9910, 31.0, 17.0, 4.0, 5.0, 2.0, 1.0, 0.0, 2.0),
+                (9102, 9920, 30.0, 15.0, 3.0, 4.0, 1.0, 1.0, 0.0, 2.0),
+            ],
+        )
+        captured_at = datetime.now(timezone.utc).isoformat()
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "the_odds_api",
+                    "active-event",
+                    9910,
+                    active_start.date().isoformat(),
+                    active_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "New York Liberty",
+                    "Connecticut Sun",
+                    "draftkings",
+                    "DraftKings",
+                    "player_points",
+                    "points",
+                    "Active Guard",
+                    "over",
+                    16.5,
+                    -120,
+                    captured_at,
+                ),
+                (
+                    "the_odds_api",
+                    "active-event",
+                    9910,
+                    active_start.date().isoformat(),
+                    active_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "New York Liberty",
+                    "Connecticut Sun",
+                    "draftkings",
+                    "DraftKings",
+                    "player_points",
+                    "points",
+                    "Active Guard",
+                    "under",
+                    16.5,
+                    100,
+                    captured_at,
+                ),
+                (
+                    "the_odds_api",
+                    "stale-event",
+                    9920,
+                    stale_start.date().isoformat(),
+                    stale_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "Washington Mystics",
+                    "Toronto Tempo",
+                    "draftkings",
+                    "DraftKings",
+                    "player_points",
+                    "points",
+                    "Stale Guard",
+                    "over",
+                    14.5,
+                    -115,
+                    captured_at,
+                ),
+                (
+                    "the_odds_api",
+                    "stale-event",
+                    9920,
+                    stale_start.date().isoformat(),
+                    stale_start.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "Washington Mystics",
+                    "Toronto Tempo",
+                    "draftkings",
+                    "DraftKings",
+                    "player_points",
+                    "points",
+                    "Stale Guard",
+                    "under",
+                    14.5,
+                    -105,
+                    captured_at,
+                ),
+            ],
+        )
+
+        result = main_module._repair_current_slate_props(conn)
+        active_prop_lines = int(conn.execute("SELECT COUNT(*) FROM prop_lines WHERE game_id = 9910").fetchone()[0] or 0)
+        stale_prop_lines = int(conn.execute("SELECT COUNT(*) FROM prop_lines WHERE game_id = 9920").fetchone()[0] or 0)
+
+    assert result["target_game_ids"] == [9910]
+    assert result["synced_props"] >= 1
+    assert active_prop_lines >= 1
+    assert stale_prop_lines == 0
+
+
 def test_game_projection_returns_picks() -> None:
     load_test_history()
     with connect() as conn:
@@ -2131,6 +2276,39 @@ def test_rotowire_import_force_refresh_falls_back_to_cached_rows_on_fetch_failur
     assert result["used_fallback_cache"] is True
     assert result["source"] == "cache"
     assert "timeout" in str(result["fetch_error"]).lower()
+
+
+def test_odds_sync_can_skip_rebuild_inside_sync_transaction(monkeypatch) -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    rebuild_calls: list[list[int] | None] = []
+
+    def fake_rebuild_predictions(conn, game_ids=None, refresh_models=False):
+        rebuild_calls.append(list(game_ids) if game_ids is not None else None)
+        return []
+
+    monkeypatch.setattr("backend.app.odds_import.rebuild_predictions", fake_rebuild_predictions)
+
+    with connect() as conn:
+        conn.execute("DELETE FROM prop_predictions")
+        conn.execute("DELETE FROM prop_lines")
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 21.5, -110, captured_at),
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 21.5, -110, captured_at),
+            ],
+        )
+
+        synced = sync_prop_lines_from_sportsbook(conn, rebuild_predictions_after=False)
+
+    assert synced == 1
+    assert rebuild_calls == []
 
 
 def test_rotowire_import_returns_db_locked_status_when_injury_write_is_busy(monkeypatch) -> None:

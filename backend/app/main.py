@@ -74,6 +74,8 @@ _PROP_SYNC_STATE: dict[str, Any] = {
     "finished_at": None,
     "last_error": None,
     "last_result": None,
+    "scope": None,
+    "target_game_ids": [],
 }
 
 
@@ -510,6 +512,49 @@ def _set_observability_headers(response: Response, cache_name: str, cache_status
     print(f"[cache] {cache_name} status={cache_status} compute_ms={compute_ms:.2f}")
 
 
+def _active_slate_game_ids(conn) -> list[int]:
+    games = conn.execute(
+        """
+        SELECT g.*
+        FROM games g
+        WHERE g.status = 'scheduled'
+        ORDER BY g.start_time
+        """
+    ).fetchall()
+    return sorted(
+        {
+            int(game["id"])
+            for game in games
+            if int(game["id"]) > 0 and _is_today_active_game_time(game["start_time"])
+        }
+    )
+
+
+def _repair_current_slate_props(conn) -> dict[str, Any]:
+    target_game_ids = _active_slate_game_ids(conn)
+    if not target_game_ids:
+        return {
+            "scope": "current_slate",
+            "target_game_ids": [],
+            "synced_props": 0,
+            "rebuilt_predictions": 0,
+        }
+    synced = sync_prop_lines_from_sportsbook(
+        conn,
+        game_ids=target_game_ids,
+        fast_fail=True,
+        rebuild_predictions_after=False,
+    )
+    projections = rebuild_predictions(conn, game_ids=target_game_ids)
+    _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
+    return {
+        "scope": "current_slate",
+        "target_game_ids": target_game_ids,
+        "synced_props": int(synced),
+        "rebuilt_predictions": len(projections),
+    }
+
+
 @app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
 def recalculate() -> dict[str, int]:
     with connect() as conn:
@@ -525,6 +570,42 @@ def recalculate() -> dict[str, int]:
 def props_sync_status() -> dict:
     with _PROP_SYNC_LOCK:
         return dict(_PROP_SYNC_STATE)
+
+
+@app.post("/api/props/repair-current-slate", dependencies=[Depends(_protect_mutation)])
+def repair_current_slate_props() -> dict[str, Any]:
+    with _PROP_SYNC_LOCK:
+        if _PROP_SYNC_STATE["running"]:
+            return {
+                "status": "busy",
+                "started_at": _PROP_SYNC_STATE["started_at"],
+                "scope": _PROP_SYNC_STATE.get("scope"),
+                "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
+            }
+        _PROP_SYNC_STATE["running"] = True
+        _PROP_SYNC_STATE["started_at"] = datetime.now(timezone.utc).isoformat()
+        _PROP_SYNC_STATE["finished_at"] = None
+        _PROP_SYNC_STATE["last_error"] = None
+        _PROP_SYNC_STATE["last_result"] = None
+        _PROP_SYNC_STATE["scope"] = "current_slate"
+        _PROP_SYNC_STATE["target_game_ids"] = []
+
+    try:
+        with connect() as conn:
+            result = _repair_current_slate_props(conn)
+        _invalidate_read_caches()
+        with _PROP_SYNC_LOCK:
+            _PROP_SYNC_STATE["last_result"] = result
+            _PROP_SYNC_STATE["target_game_ids"] = list(result.get("target_game_ids") or [])
+        return {"status": "completed", **result}
+    except Exception as exc:
+        with _PROP_SYNC_LOCK:
+            _PROP_SYNC_STATE["last_error"] = str(exc)
+        raise
+    finally:
+        with _PROP_SYNC_LOCK:
+            _PROP_SYNC_STATE["running"] = False
+            _PROP_SYNC_STATE["finished_at"] = datetime.now(timezone.utc).isoformat()
 
 
 @app.post("/api/settle-props", dependencies=[Depends(_protect_mutation)])
@@ -2362,6 +2443,9 @@ def _start_prop_sync_if_needed(source: str) -> bool:
         _PROP_SYNC_STATE["started_at"] = datetime.now(timezone.utc).isoformat()
         _PROP_SYNC_STATE["finished_at"] = None
         _PROP_SYNC_STATE["last_error"] = None
+        _PROP_SYNC_STATE["last_result"] = None
+        _PROP_SYNC_STATE["scope"] = source
+        _PROP_SYNC_STATE["target_game_ids"] = []
 
     def _run() -> None:
         try:

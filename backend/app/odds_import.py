@@ -128,7 +128,20 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
     }
 
 
-def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool = False) -> int:
+def sync_prop_lines_from_sportsbook(
+    conn: sqlite3.Connection,
+    *,
+    fast_fail: bool = False,
+    game_ids: list[int] | tuple[int, ...] | None = None,
+    rebuild_predictions_after: bool = True,
+) -> int:
+    target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+    game_filter = ""
+    game_filter_params: tuple[int, ...] = ()
+    if target_game_ids:
+        placeholders = ",".join("?" for _ in target_game_ids)
+        game_filter = f" AND spl.game_id IN ({placeholders})"
+        game_filter_params = tuple(target_game_ids)
     rows = conn.execute(
         """
         SELECT
@@ -201,10 +214,14 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
               FROM player_game_stats stats
               WHERE stats.player_id = p.id
           )
+        """
+        + game_filter
+        + """
         GROUP BY spl.game_id, spl.player_name, p.id, spl.market, spl.line
         HAVING over_odds IS NOT NULL AND under_odds IS NOT NULL
         ORDER BY spl.game_id, spl.player_name, spl.market, spl.line
-        """
+        """,
+        game_filter_params,
     ).fetchall()
     tracked_keys = {
         (
@@ -222,6 +239,12 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
             WHERE sp.id IS NOT NULL
                OR g.status <> 'scheduled'
             """
+            + (
+                f" AND pl.game_id IN ({','.join('?' for _ in target_game_ids)})"
+                if target_game_ids
+                else ""
+            ),
+            tuple(target_game_ids) if target_game_ids else (),
         ).fetchall()
     }
     insert_rows = [
@@ -335,7 +358,7 @@ def sync_prop_lines_from_sportsbook(conn: sqlite3.Connection, *, fast_fail: bool
                 """,
                 insert_rows,
             )
-        if touched_game_ids:
+        if rebuild_predictions_after and touched_game_ids:
             rebuild_predictions(conn, game_ids=touched_game_ids)
         conn.commit()
         return len(rows)

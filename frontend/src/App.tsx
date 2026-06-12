@@ -21,7 +21,7 @@ import {
   importRotowireInjuries,
   loginAdmin,
   logoutAdmin,
-  recalculate,
+  repairCurrentSlateProps,
   settleProps,
   setCsrfToken,
   trainModel,
@@ -390,9 +390,15 @@ export function App() {
     setRecalculating(true);
     setOperationStatus(null);
     try {
-      await recalculate();
+      const result = await repairCurrentSlateProps();
       await load();
-      setOperationStatus("Projection board recalculated from the current prop lines and player history.");
+      if (result.status === "busy") {
+        setOperationStatus("Current-slate repair is already running.");
+      } else {
+        setOperationStatus(
+          `Current slate refreshed: ${result.synced_props ?? 0} prop lines synced, ${result.rebuilt_predictions ?? 0} projections rebuilt.`
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to recalculate projections");
     } finally {

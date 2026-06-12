@@ -624,8 +624,15 @@ export async function importMissingEspnScores(
   return response.json();
 }
 
-export async function recalculate(): Promise<void> {
-  const response = await apiFetch("/api/recalculate", { method: "POST" });
+export async function repairCurrentSlateProps(): Promise<{
+  status?: string;
+  started_at?: string | null;
+  scope?: string | null;
+  target_game_ids?: number[];
+  synced_props?: number;
+  rebuilt_predictions?: number;
+}> {
+  const response = await apiFetch("/api/props/repair-current-slate", { method: "POST" });
   if (!response.ok) {
     let detail = "";
     try {
@@ -634,8 +641,9 @@ export async function recalculate(): Promise<void> {
     } catch {
       detail = "";
     }
-    throw new Error(detail || "Failed to recalculate projections");
+    throw new Error(detail || "Failed to repair current slate projections");
   }
+  return response.json();
 }
 
 export async function settleProps(
