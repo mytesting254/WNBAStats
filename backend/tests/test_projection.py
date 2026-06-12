@@ -625,6 +625,51 @@ def test_game_projection_applies_injury_penalty_for_key_starter() -> None:
     assert "injury adjustment" in adjusted["game_reason"].lower()
 
 
+def test_game_projection_calibrates_low_totals_upward() -> None:
+    load_test_history()
+    with connect() as conn:
+        game = conn.execute(
+            """
+            SELECT
+                g.*,
+                home.abbreviation AS home_team,
+                away.abbreviation AS away_team
+            FROM games g
+            JOIN teams home ON home.id = g.home_team_id
+            JOIN teams away ON away.id = g.away_team_id
+            WHERE g.id = 2010
+            """
+        ).fetchone()
+        baseline = project_game(conn, game)
+        conn.execute("DELETE FROM game_predictions")
+        conn.execute("DELETE FROM settled_game_predictions")
+        captured_at = datetime.now(timezone.utc).isoformat()
+        for prediction_id in range(1, 13):
+            conn.execute(
+                """
+                INSERT INTO game_predictions (
+                    id, game_id, model_version, prediction_time, projected_total,
+                    winner_pick, ats_pick, total_pick, confidence, reason
+                ) VALUES (?, ?, ?, ?, 150.0, 'NY', 'NY -5.5', 'Under', 'medium', 'test calibration')
+                """,
+                (prediction_id, 2010, f"test-calibration-{prediction_id}", captured_at),
+            )
+            conn.execute(
+                """
+                INSERT INTO settled_game_predictions (
+                    game_prediction_id, game_id, home_score, away_score, actual_winner,
+                    actual_margin, actual_total, actual_ats_pick, actual_total_result,
+                    winner_correct, ats_correct, total_correct, settled_at
+                ) VALUES (?, 2010, 82, 80, 'NY', 2.0, 162.0, 'NY', 'Under', 1, 1, 1, ?)
+                """,
+                (prediction_id, captured_at),
+            )
+        calibrated = project_game(conn, game)
+
+    assert calibrated["projected_total"] > baseline["projected_total"]
+    assert calibrated["total_edge"] > baseline["total_edge"]
+
+
 def test_game_predictions_are_saved_and_settled() -> None:
     load_test_history()
     with connect() as conn:

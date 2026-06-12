@@ -3,6 +3,13 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Mapping
 
+TOTAL_CALIBRATION_MIN_SAMPLES = 12
+TOTAL_BIAS_CORRECTION_WEIGHT = 0.8
+TOTAL_MARKET_BLEND_WEIGHT = 0.3
+TOTAL_MARKET_EDGE_CAP = 12.0
+TOTAL_SCALE_MIN = 0.985
+TOTAL_SCALE_MAX = 1.03
+
 
 class _GamePredictionCache:
     def __init__(self, conn: sqlite3.Connection, team_ids: tuple[int, ...]):
@@ -132,6 +139,7 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     projected_total = home_projection + away_projection
     spread_home = float(game["spread_home"]) if game["spread_home"] is not None else None
     game_total = float(game["game_total"]) if game["game_total"] is not None and float(game["game_total"]) > 0 else None
+    calibrated_total = _calibrate_total_projection(conn, projected_total, game_total)
 
     ats_edge = None
     ats_pick = "N/A"
@@ -142,7 +150,7 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     total_edge = None
     total_pick = "N/A"
     if game_total is not None:
-        total_edge = projected_total - game_total
+        total_edge = calibrated_total - game_total
         total_pick = "Over" if total_edge > 0 else "Under"
 
     winner = game["home_team"] if projected_margin >= 0 else game["away_team"]
@@ -152,7 +160,7 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
         "home_projected_points": round(home_projection, 1),
         "away_projected_points": round(away_projection, 1),
         "projected_margin": round(projected_margin, 1),
-        "projected_total": round(projected_total, 1),
+        "projected_total": round(calibrated_total, 1),
         "winner_pick": winner,
         "ats_pick": ats_pick,
         "ats_edge": round(ats_edge, 1) if ats_edge is not None else None,
@@ -163,7 +171,7 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
             home_projection,
             away_projection,
             projected_margin,
-            projected_total,
+            calibrated_total,
             home_history_count,
             away_history_count,
             game["home_team"],
@@ -253,6 +261,51 @@ def _confidence(ats_edge: float, total_edge: float, margin: float) -> str:
     if strongest_edge >= 2.5 or margin >= 5:
         return "medium"
     return "low"
+
+
+def _calibrate_total_projection(
+    conn: sqlite3.Connection,
+    projected_total: float,
+    game_total: float | None,
+) -> float:
+    metrics = _historical_total_calibration_metrics(conn)
+    calibrated = projected_total
+    if metrics is not None:
+        calibrated *= float(metrics["scale"])
+        calibrated += float(metrics["bias_adjustment"])
+    if game_total is not None:
+        market_gap = _clamp(float(game_total) - calibrated, -TOTAL_MARKET_EDGE_CAP, TOTAL_MARKET_EDGE_CAP)
+        calibrated += market_gap * TOTAL_MARKET_BLEND_WEIGHT
+    return round(calibrated, 3)
+
+
+def _historical_total_calibration_metrics(conn: sqlite3.Connection) -> dict[str, float] | None:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS sample_count,
+            AVG(gp.projected_total) AS avg_projected_total,
+            AVG(sgp.actual_total) AS avg_actual_total,
+            AVG(gp.projected_total - sgp.actual_total) AS avg_bias
+        FROM settled_game_predictions sgp
+        JOIN game_predictions gp ON gp.id = sgp.game_prediction_id
+        WHERE gp.projected_total IS NOT NULL
+          AND sgp.actual_total IS NOT NULL
+        """
+    ).fetchone()
+    sample_count = int(row["sample_count"] or 0)
+    avg_projected_total = float(row["avg_projected_total"] or 0.0)
+    avg_actual_total = float(row["avg_actual_total"] or 0.0)
+    avg_bias = float(row["avg_bias"] or 0.0)
+    if sample_count < TOTAL_CALIBRATION_MIN_SAMPLES or avg_projected_total <= 0:
+        return None
+    scale = _clamp(avg_actual_total / avg_projected_total, TOTAL_SCALE_MIN, TOTAL_SCALE_MAX)
+    bias_adjustment = _clamp(-avg_bias * TOTAL_BIAS_CORRECTION_WEIGHT, -4.0, 4.0)
+    return {
+        "sample_count": float(sample_count),
+        "scale": scale,
+        "bias_adjustment": bias_adjustment,
+    }
 
 
 def _reason(
