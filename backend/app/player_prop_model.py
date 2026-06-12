@@ -43,6 +43,11 @@ FEATURE_NAMES = [
     "blowout_minutes_delta",
     "spread_abs",
     "game_total",
+    "arch_usage_scorer",
+    "arch_rebound_big",
+    "arch_assist_guard",
+    "arch_bench_gunner",
+    "arch_stocks_specialist",
 ]
 FEATURE_INDEX = {name: idx for idx, name in enumerate(FEATURE_NAMES)}
 MINUTES_FEATURE_NAMES = [
@@ -123,6 +128,38 @@ class MinutesRoleState:
     recent_drop: bool
     recent_spike: bool
     recent_absence_days: float | None = None
+
+
+@dataclass(frozen=True)
+class PlayerArchetypeProfile:
+    usage_scorer: bool
+    rebound_big: bool
+    assist_guard: bool
+    bench_gunner: bool
+    stocks_specialist: bool
+
+    def feature_values(self) -> list[float]:
+        return [
+            1.0 if self.usage_scorer else 0.0,
+            1.0 if self.rebound_big else 0.0,
+            1.0 if self.assist_guard else 0.0,
+            1.0 if self.bench_gunner else 0.0,
+            1.0 if self.stocks_specialist else 0.0,
+        ]
+
+    def labels(self) -> list[str]:
+        labels = []
+        if self.usage_scorer:
+            labels.append("usage scorer")
+        if self.rebound_big:
+            labels.append("rebound big")
+        if self.assist_guard:
+            labels.append("assist guard")
+        if self.bench_gunner:
+            labels.append("bench gunner")
+        if self.stocks_specialist:
+            labels.append("stocks specialist")
+        return labels
 
 
 def predict_player_prop(
@@ -311,6 +348,13 @@ def feature_snapshot(
     rest_factor = _rest_factor(context["rest_days"]) if context else 1.0
     usage_multiplier, adjustment_note = _manual_adjustment(conn, player_id)
     usage_multiplier *= injury["usage_multiplier"]
+    archetype = _player_archetype_profile(
+        conn,
+        player_id=player_id,
+        reference_game_date=reference_game_date,
+        exclude_game_id=game_id,
+        fallback_rotation_role=rotation_role,
+    )
 
     component_projection = (
         component_base
@@ -345,7 +389,9 @@ def feature_snapshot(
         blowout["minutes_delta"],
         spread_abs,
         game_total,
+        *archetype.feature_values(),
     ]
+    archetype_note = ", ".join(archetype.labels()) or "balanced"
     reason = (
         f"Weighted recent {weighted_recent:.1f}, EWMA {ewma_value:.1f}, last 5 {recent_avg:.1f}, "
         f"last 10 {last_10_avg:.1f}, rate x minutes {rate_projection:.1f} on {projected_minutes:.1f} projected minutes. "
@@ -357,6 +403,7 @@ def feature_snapshot(
         f"rest {rest_factor:.2f}, usage {usage_multiplier:.2f}; "
         f"injury {injury['status']} (avail {injury['availability_factor']:.2f}, "
         f"team usage {injury['usage_multiplier']:.2f}, min {injury['minutes_delta']:+.1f}); {adjustment_note}."
+        f" Archetype: {archetype_note}."
         f" Minutes projection: {minutes_note}."
     )
     return FeatureSnapshot(
@@ -512,12 +559,13 @@ def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[flo
             history = values[max(0, idx - 10):idx]
             minute_history = minutes[max(0, idx - 10):idx]
             previous_game_date = str(rows[idx - 1]["game_date"]) if idx > 0 else None
-            features = _historical_training_features(rows[idx], history, minute_history, market, previous_game_date)
+            features = _historical_training_features(conn, rows[idx], history, minute_history, market, previous_game_date)
             samples.append((features, values[idx]))
     return samples
 
 
 def _historical_training_features(
+    conn: sqlite3.Connection,
     row: sqlite3.Row,
     history: list[float],
     minutes: list[float],
@@ -571,6 +619,13 @@ def _historical_training_features(
     rest_days = int(context["rest_days"])
     team_spread = context["team_spread"]
     game_total = float(context["game_total"]) if context["game_total"] is not None and float(context["game_total"]) > 0 else 165.0
+    archetype = _player_archetype_profile(
+        conn,
+        player_id=int(row["player_id"]),
+        reference_game_date=str(row["game_date"]),
+        exclude_game_id=int(row["game_id"]),
+        fallback_rotation_role=str(row["rotation_role"] or "starter"),
+    )
     return [
         component_projection,
         weighted_recent,
@@ -591,6 +646,7 @@ def _historical_training_features(
         float(blowout["minutes_delta"]),
         abs(team_spread) if team_spread is not None else 0.0,
         game_total,
+        *archetype.feature_values(),
     ]
 
 
@@ -1380,6 +1436,76 @@ def _market_value(row: sqlite3.Row, market: str) -> float:
     if market == "blocks_steals":
         return float(row["blocks"] + row["steals"])
     return float(row[market])
+
+
+def _player_archetype_profile(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    reference_game_date: str | None,
+    exclude_game_id: int | None,
+    fallback_rotation_role: str,
+) -> PlayerArchetypeProfile:
+    params: list[object] = [player_id]
+    date_filter = ""
+    if reference_game_date:
+        date_filter = " AND g.game_date < ?"
+        params.append(reference_game_date)
+    exclude_filter = ""
+    if exclude_game_id is not None:
+        exclude_filter = " AND s.game_id <> ?"
+        params.append(exclude_game_id)
+    rows = conn.execute(
+        """
+        SELECT
+            s.minutes,
+            s.points,
+            s.rebounds,
+            s.assists,
+            s.threes,
+            s.steals,
+            s.blocks,
+            p.position,
+            p.rotation_role
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        JOIN players p ON p.id = s.player_id
+        WHERE s.player_id = ?
+        """
+        + date_filter
+        + exclude_filter
+        + """
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT 10
+        """,
+        tuple(params),
+    ).fetchall()
+    if not rows:
+        return PlayerArchetypeProfile(False, False, False, False, False)
+
+    sample_count = len(rows)
+    avg_minutes = sum(float(row["minutes"] or 0.0) for row in rows) / sample_count
+    avg_points = sum(float(row["points"] or 0.0) for row in rows) / sample_count
+    avg_rebounds = sum(float(row["rebounds"] or 0.0) for row in rows) / sample_count
+    avg_assists = sum(float(row["assists"] or 0.0) for row in rows) / sample_count
+    avg_threes = sum(float(row["threes"] or 0.0) for row in rows) / sample_count
+    avg_stocks = sum(float((row["steals"] or 0.0) + (row["blocks"] or 0.0)) for row in rows) / sample_count
+    position = str(rows[0]["position"] or "").upper()
+    rotation_role = str(rows[0]["rotation_role"] or fallback_rotation_role or "").lower()
+
+    usage_scorer = avg_points >= 16.5 and avg_assists <= 6.5 and avg_minutes >= 22.0
+    rebound_big = avg_rebounds >= 7.5 and position in {"F", "C"} and avg_minutes >= 20.0
+    assist_guard = avg_assists >= 5.5 and position in {"G", "PG", "SG"} and avg_minutes >= 22.0
+    bench_gunner = rotation_role in {"bench", "rotation"} and avg_points >= 11.5 and avg_threes >= 1.5 and avg_minutes <= 26.0
+    stocks_specialist = avg_stocks >= 2.0 and avg_minutes >= 18.0
+
+    return PlayerArchetypeProfile(
+        usage_scorer=usage_scorer,
+        rebound_big=rebound_big,
+        assist_guard=assist_guard,
+        bench_gunner=bench_gunner,
+        stocks_specialist=stocks_specialist,
+    )
 
 
 def _weighted_average(values: list[float]) -> float:

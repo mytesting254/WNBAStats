@@ -32,7 +32,7 @@ from backend.app.main import app, import_espn_history as import_espn_history_end
 from backend.app import main as main_module
 from backend.app.odds import american_to_implied_probability, expected_value
 from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies, sync_prop_lines_from_sportsbook
-from backend.app.player_prop_model import _classify_minutes_role, _project_minutes, clear_model_cache
+from backend.app.player_prop_model import _classify_minutes_role, _player_archetype_profile, _project_minutes, clear_model_cache, feature_snapshot
 from backend.app.player_prop_model import _market_value as learned_market_value
 from backend.app.player_prop_model import MODEL_VERSION
 from backend.app.player_prop_model import train_market_model, train_minutes_model
@@ -598,6 +598,37 @@ def test_train_minutes_model_returns_model_with_history() -> None:
 
     assert model is not None
     assert model.rows > 0
+
+
+def test_player_archetype_profile_classifies_usage_scorer_and_assist_guard() -> None:
+    load_test_history()
+    with connect() as conn:
+        usage_profile = _player_archetype_profile(
+            conn,
+            player_id=1001,
+            reference_game_date="2026-05-30",
+            exclude_game_id=2010,
+            fallback_rotation_role="star",
+        )
+        assist_profile = _player_archetype_profile(
+            conn,
+            player_id=1003,
+            reference_game_date="2026-05-30",
+            exclude_game_id=2010,
+            fallback_rotation_role="starter",
+        )
+
+    assert usage_profile.usage_scorer is True
+    assert usage_profile.rebound_big is True
+    assert assist_profile.assist_guard is True
+
+
+def test_feature_snapshot_reason_includes_archetype_note() -> None:
+    load_test_history()
+    with connect() as conn:
+        snapshot = feature_snapshot(conn, 1001, "points", 2010)
+
+    assert "Archetype:" in snapshot.reason
 
 
 def test_walk_forward_training_saves_model_run() -> None:
