@@ -32,9 +32,10 @@ from backend.app.main import app, import_espn_history as import_espn_history_end
 from backend.app import main as main_module
 from backend.app.odds import american_to_implied_probability, expected_value
 from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies, sync_prop_lines_from_sportsbook
+from backend.app.player_prop_model import _classify_minutes_role, _project_minutes, clear_model_cache
 from backend.app.player_prop_model import _market_value as learned_market_value
 from backend.app.player_prop_model import MODEL_VERSION
-from backend.app.player_prop_model import train_market_model
+from backend.app.player_prop_model import train_market_model, train_minutes_model
 from backend.app.projections import _market_value as component_market_value
 from backend.app.projections import rebuild_predictions
 from backend.app.rotowire_import import _parse_lineup_injuries
@@ -441,6 +442,162 @@ def test_fixture_builds_matchup_results() -> None:
         scheduled = conn.execute("SELECT * FROM games WHERE status = 'scheduled'").fetchall()
     assert len(rows) == 56
     assert len(scheduled) == 2
+
+
+def test_minutes_role_classification_identifies_core_starter_band() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=32.0,
+        last_10_minutes_avg=31.0,
+        ewma_minutes=31.5,
+        minutes_trend=1.2,
+        minute_volatility=3.8,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+    )
+
+    projected, note = _project_minutes(
+        None,
+        player_id=1001,
+        game_id=2010,
+        rotation_role="starter",
+        ewma_minutes=31.5,
+        minutes_trend=1.2,
+        recent_minutes_avg=32.0,
+        last_10_minutes_avg=31.0,
+        minute_volatility=3.8,
+        context={"is_home": True},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=None,
+        before_game_date=None,
+    )
+
+    assert role_state.bucket == "core_starter"
+    assert 28.0 <= projected <= 37.0
+    assert "core_starter" in note
+
+
+def test_minutes_projection_allows_fringe_role_below_old_generic_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="bench",
+        recent_minutes_avg=5.0,
+        last_10_minutes_avg=6.0,
+        ewma_minutes=6.5,
+        minutes_trend=-1.5,
+        minute_volatility=2.5,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+    )
+
+    projected, note = _project_minutes(
+        None,
+        player_id=1002,
+        game_id=2020,
+        rotation_role="bench",
+        ewma_minutes=6.5,
+        minutes_trend=-1.5,
+        recent_minutes_avg=5.0,
+        last_10_minutes_avg=6.0,
+        minute_volatility=2.5,
+        context={"is_home": False},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=None,
+        before_game_date=None,
+    )
+
+    assert role_state.bucket == "fringe"
+    assert projected < 8.0
+    assert "fringe" in note
+
+
+def test_minutes_projection_caps_return_from_absence_downside_case() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=27.0,
+        last_10_minutes_avg=31.0,
+        ewma_minutes=30.0,
+        minutes_trend=-4.5,
+        minute_volatility=7.2,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=10.0,
+    )
+
+    projected, note = _project_minutes(
+        None,
+        player_id=1003,
+        game_id=2030,
+        rotation_role="starter",
+        ewma_minutes=30.0,
+        minutes_trend=-4.5,
+        recent_minutes_avg=27.0,
+        last_10_minutes_avg=31.0,
+        minute_volatility=7.2,
+        context={"is_home": False},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=10.0,
+        before_game_date=None,
+    )
+
+    assert role_state.recent_absence_days == 10.0
+    assert projected <= 31.0
+    assert projected >= 18.0
+    assert "rotation" in note or "starter_volatile" in note
+
+
+def test_minutes_projection_expands_upside_for_injury_replacement_spike() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=24.0,
+        last_10_minutes_avg=19.0,
+        ewma_minutes=20.0,
+        minutes_trend=4.5,
+        minute_volatility=5.0,
+        injury_status="available",
+        injury_delta=2.0,
+        recent_absence_days=None,
+    )
+
+    projected, note = _project_minutes(
+        None,
+        player_id=1004,
+        game_id=2040,
+        rotation_role="rotation",
+        ewma_minutes=20.0,
+        minutes_trend=4.5,
+        recent_minutes_avg=24.0,
+        last_10_minutes_avg=19.0,
+        minute_volatility=5.0,
+        context={"is_home": True},
+        blowout_delta=0.0,
+        injury_delta=2.0,
+        injury_status="available",
+        recent_absence_days=None,
+        before_game_date=None,
+    )
+
+    assert role_state.recent_spike is True
+    assert projected >= 23.0
+    assert "starter_volatile" in note or "rotation" in note
+
+
+def test_train_minutes_model_returns_model_with_history() -> None:
+    load_test_history()
+    clear_model_cache()
+    with connect() as conn:
+        conn.commit()
+        model = train_minutes_model(conn)
+
+    assert model is not None
+    assert model.rows > 0
 
 
 def test_walk_forward_training_saves_model_run() -> None:

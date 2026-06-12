@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from functools import lru_cache
 
 from .odds import american_to_implied_probability
@@ -44,6 +45,23 @@ FEATURE_NAMES = [
     "game_total",
 ]
 FEATURE_INDEX = {name: idx for idx, name in enumerate(FEATURE_NAMES)}
+MINUTES_FEATURE_NAMES = [
+    "ewma_minutes",
+    "recent_minutes_avg",
+    "last_10_minutes_avg",
+    "minutes_trend",
+    "minute_volatility",
+    "rest_days",
+    "is_home",
+    "spread_abs",
+    "injury_delta",
+    "recent_absence_days",
+    "role_core_starter",
+    "role_starter_volatile",
+    "role_rotation",
+    "role_bench",
+    "role_fringe",
+]
 
 MARKET_VOLATILITY_FLOORS = {
     "points": 3.0,
@@ -73,6 +91,7 @@ class ModelTuningConfig:
 DEFAULT_TUNING_CONFIG = ModelTuningConfig()
 
 _CONNECTION_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | None] = {}
+_CONNECTION_MINUTES_MODEL_CACHE: dict[tuple[int, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_GAME_TOTAL_MEAN_CACHE: dict[int, float] = {}
 
 
@@ -93,6 +112,17 @@ class RidgeModel:
     coefficients: list[float]
     feature_means: list[float]
     feature_scales: list[float]
+
+
+@dataclass(frozen=True)
+class MinutesRoleState:
+    bucket: str
+    lower_bound: float
+    upper_bound: float
+    anchor_minutes: float
+    recent_drop: bool
+    recent_spike: bool
+    recent_absence_days: float | None = None
 
 
 def predict_player_prop(
@@ -240,20 +270,27 @@ def feature_snapshot(
     value_volatility = _ewma_volatility_newest_first(values, ewma_value, market)
     consistency_score = _consistency_score(ewma_value, value_volatility, market)
 
-    blowout = _blowout_adjustment(conn, context, history[0]["rotation_role"] if history else "starter")
-    injury = _injury_adjustment_for_prop(conn, player_id, context["team_id"], history[0]["rotation_role"] if history else "starter")
+    rotation_role = str(history[0]["rotation_role"] if history else "starter")
+    recent_minutes_avg = sum(minutes[:5]) / min(len(minutes), 5)
+    last_10_minutes_avg = sum(minutes) / len(minutes)
+    minute_volatility = _minute_volatility(minutes)
+    blowout = _blowout_adjustment(conn, context, rotation_role)
+    injury = _injury_adjustment_for_prop(conn, player_id, context["team_id"], rotation_role)
     projected_minutes, minutes_note = _project_minutes(
         conn,
         player_id=player_id,
         game_id=game_id,
-        rotation_role=str(history[0]["rotation_role"] if history else "starter"),
+        rotation_role=rotation_role,
         ewma_minutes=ewma_minutes,
         minutes_trend=minutes_trend,
-        recent_minutes_avg=sum(minutes[:5]) / min(len(minutes), 5),
-        last_10_minutes_avg=sum(minutes) / len(minutes),
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minute_volatility=minute_volatility,
         context=context,
         blowout_delta=float(blowout["minutes_delta"]),
         injury_delta=float(injury["minutes_delta"]),
+        injury_status=str(injury["status"]),
+        recent_absence_days=_recent_absence_days(history, before_game_date or context.get("game_date")),
         before_game_date=before_game_date,
     )
     rate_projection = weighted_rate * projected_minutes
@@ -312,7 +349,7 @@ def feature_snapshot(
     reason = (
         f"Weighted recent {weighted_recent:.1f}, EWMA {ewma_value:.1f}, last 5 {recent_avg:.1f}, "
         f"last 10 {last_10_avg:.1f}, rate x minutes {rate_projection:.1f} on {projected_minutes:.1f} projected minutes. "
-        f"Minutes trend {minutes_trend:+.1f}, volatility {value_volatility:.1f}, consistency {consistency_score:.2f}. "
+        f"Minutes trend {minutes_trend:+.1f}, minute volatility {minute_volatility:.1f}, value volatility {value_volatility:.1f}, consistency {consistency_score:.2f}. "
         f"Context: pace {pace_factor:.2f}, opponent {opponent_factor:.2f}, "
         f"common opponents {common_opponent_factor:.2f}, h2h {h2h_factor:.2f}, blowout {blowout['risk']} "
         f"({blowout['minutes_delta']:+.1f} min), "
@@ -359,6 +396,8 @@ def train_market_model(
 def clear_model_cache() -> None:
     _train_market_model_cached.cache_clear()
     _CONNECTION_MODEL_CACHE.clear()
+    _train_minutes_model_cached.cache_clear()
+    _CONNECTION_MINUTES_MODEL_CACHE.clear()
     _CONNECTION_GAME_TOTAL_MEAN_CACHE.clear()
 
 
@@ -457,7 +496,8 @@ def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[flo
                 g.rest_days_away,
                 g.spread_home,
                 g.game_total,
-                p.team_id
+                p.team_id,
+                p.rotation_role
             FROM player_game_stats s
             JOIN games g ON g.id = s.game_id
             JOIN players p ON p.id = s.player_id
@@ -471,12 +511,19 @@ def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[flo
         for idx in range(5, len(rows)):
             history = values[max(0, idx - 10):idx]
             minute_history = minutes[max(0, idx - 10):idx]
-            features = _historical_training_features(rows[idx], history, minute_history, market)
+            previous_game_date = str(rows[idx - 1]["game_date"]) if idx > 0 else None
+            features = _historical_training_features(rows[idx], history, minute_history, market, previous_game_date)
             samples.append((features, values[idx]))
     return samples
 
 
-def _historical_training_features(row: sqlite3.Row, history: list[float], minutes: list[float], market: str) -> list[float]:
+def _historical_training_features(
+    row: sqlite3.Row,
+    history: list[float],
+    minutes: list[float],
+    market: str,
+    previous_game_date: str | None,
+) -> list[float]:
     rates = [value / max(minute, 1.0) for value, minute in zip(history, minutes)]
     recent_avg = sum(history[-5:]) / min(len(history), 5)
     last_10_avg = sum(history) / len(history)
@@ -487,9 +534,30 @@ def _historical_training_features(row: sqlite3.Row, history: list[float], minute
     ewma_value = _ewma_newest_first(newest_values, alpha=0.42)
     ewma_minutes = _ewma_newest_first(newest_minutes, alpha=0.38)
     minutes_trend = _recent_trend(newest_minutes)
+    recent_minutes_avg = sum(newest_minutes[:5]) / min(len(newest_minutes), 5)
+    last_10_minutes_avg = sum(newest_minutes) / len(newest_minutes)
+    minute_volatility = _minute_volatility(newest_minutes)
     value_volatility = _ewma_volatility_newest_first(newest_values, ewma_value, market)
     consistency_score = _consistency_score(ewma_value, value_volatility, market)
-    projected_minutes = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
+    context = _historical_game_context(row)
+    blowout = _blowout_adjustment(None, context, str(row["rotation_role"] or "starter"))
+    projected_minutes, _minutes_note = _project_minutes(
+        None,
+        player_id=int(row["player_id"]),
+        game_id=int(row["game_id"]),
+        rotation_role=str(row["rotation_role"] or "starter"),
+        ewma_minutes=ewma_minutes,
+        minutes_trend=minutes_trend,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minute_volatility=minute_volatility,
+        context=context,
+        blowout_delta=float(blowout["minutes_delta"]),
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=_days_between_game_dates(previous_game_date, str(row["game_date"])),
+        before_game_date=str(row["game_date"]),
+    )
     rate_projection = weighted_rate * projected_minutes
     component_projection = _adaptive_component_projection(
         weighted_recent=weighted_recent,
@@ -499,11 +567,10 @@ def _historical_training_features(row: sqlite3.Row, history: list[float], minute
         rate_projection=rate_projection,
         consistency_score=consistency_score,
     )
-    is_home = int(row["team_id"]) == int(row["home_team_id"])
-    rest_days = int(row["rest_days_home"] if is_home else row["rest_days_away"] or 2)
-    spread_home = float(row["spread_home"]) if row["spread_home"] is not None else None
-    team_spread = spread_home if is_home else -spread_home if spread_home is not None else None
-    game_total = float(row["game_total"]) if row["game_total"] is not None and float(row["game_total"]) > 0 else 165.0
+    is_home = bool(context["is_home"])
+    rest_days = int(context["rest_days"])
+    team_spread = context["team_spread"]
+    game_total = float(context["game_total"]) if context["game_total"] is not None and float(context["game_total"]) > 0 else 165.0
     return [
         component_projection,
         weighted_recent,
@@ -521,14 +588,113 @@ def _historical_training_features(row: sqlite3.Row, history: list[float], minute
         1.0,
         1.0,
         1.0,
-        0.0,
+        float(blowout["minutes_delta"]),
         abs(team_spread) if team_spread is not None else 0.0,
         game_total,
     ]
 
 
-def _project_minutes(
+@lru_cache(maxsize=8)
+def _train_minutes_model_cached(db_path: str, config: ModelTuningConfig) -> RidgeModel | None:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return _train_minutes_model_uncached(conn, config=config)
+    finally:
+        conn.close()
+
+
+def train_minutes_model(
     conn: sqlite3.Connection,
+    config: ModelTuningConfig | None = None,
+) -> RidgeModel | None:
+    tuning = config or DEFAULT_TUNING_CONFIG
+    if not isinstance(conn, sqlite3.Connection):
+        key = (id(conn), tuning)
+        if key not in _CONNECTION_MINUTES_MODEL_CACHE:
+            _CONNECTION_MINUTES_MODEL_CACHE[key] = _train_minutes_model_uncached(conn, config=tuning)
+        return _CONNECTION_MINUTES_MODEL_CACHE[key]
+    db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    return _train_minutes_model_cached(db_path, tuning)
+
+
+def _train_minutes_model_uncached(
+    conn: sqlite3.Connection,
+    config: ModelTuningConfig | None = None,
+) -> RidgeModel | None:
+    rows = _minutes_training_rows(conn)
+    return _fit_model_from_rows("minutes", rows, config=config)
+
+
+def _minutes_training_rows(conn: sqlite3.Connection) -> list[tuple[list[float], float]]:
+    samples = []
+    players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
+    for player in players:
+        rows = conn.execute(
+            """
+            SELECT
+                s.*,
+                g.game_date,
+                g.home_team_id,
+                g.away_team_id,
+                g.rest_days_home,
+                g.rest_days_away,
+                g.spread_home,
+                g.game_total,
+                p.team_id,
+                p.rotation_role
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN players p ON p.id = s.player_id
+            WHERE s.player_id = ?
+            ORDER BY g.game_date ASC, s.game_id ASC
+            """,
+            (player["id"],),
+        ).fetchall()
+        minutes = [float(row["minutes"]) for row in rows]
+        for idx in range(5, len(rows)):
+            newest_minutes = list(reversed(minutes[max(0, idx - 10):idx]))
+            if len(newest_minutes) < 5:
+                continue
+            current = rows[idx]
+            previous_game_date = str(rows[idx - 1]["game_date"]) if idx > 0 else None
+            context = _historical_game_context(current)
+            minute_volatility = _minute_volatility(newest_minutes)
+            ewma_minutes = _ewma_newest_first(newest_minutes, alpha=0.38)
+            minutes_trend = _recent_trend(newest_minutes)
+            recent_minutes_avg = sum(newest_minutes[:5]) / min(len(newest_minutes), 5)
+            last_10_minutes_avg = sum(newest_minutes) / len(newest_minutes)
+            recent_absence_days = _days_between_game_dates(previous_game_date, str(current["game_date"]))
+            role_state = _classify_minutes_role(
+                rotation_role=str(current["rotation_role"] or "starter"),
+                recent_minutes_avg=recent_minutes_avg,
+                last_10_minutes_avg=last_10_minutes_avg,
+                ewma_minutes=ewma_minutes,
+                minutes_trend=minutes_trend,
+                minute_volatility=minute_volatility,
+                injury_status="available",
+                injury_delta=0.0,
+                recent_absence_days=recent_absence_days,
+            )
+            features = _minutes_feature_values(
+                role_state=role_state,
+                ewma_minutes=ewma_minutes,
+                recent_minutes_avg=recent_minutes_avg,
+                last_10_minutes_avg=last_10_minutes_avg,
+                minutes_trend=minutes_trend,
+                minute_volatility=minute_volatility,
+                rest_days=int(context["rest_days"]),
+                is_home=bool(context["is_home"]),
+                spread_abs=abs(float(context["team_spread"])) if context["team_spread"] is not None else 0.0,
+                injury_delta=0.0,
+                recent_absence_days=recent_absence_days,
+            )
+            samples.append((features, float(current["minutes"])))
+    return samples
+
+
+def _project_minutes(
+    conn: sqlite3.Connection | None,
     *,
     player_id: int,
     game_id: int,
@@ -537,30 +703,93 @@ def _project_minutes(
     minutes_trend: float,
     recent_minutes_avg: float,
     last_10_minutes_avg: float,
+    minute_volatility: float,
     context: dict,
     blowout_delta: float,
     injury_delta: float,
+    injury_status: str,
+    recent_absence_days: float | None,
     before_game_date: str | None,
 ) -> tuple[float, str]:
     base_heuristic = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
-    venue_delta = _venue_minutes_adjustment(
-        conn,
-        player_id=player_id,
-        is_home=bool(context.get("is_home")) if isinstance(context, dict) else False,
-        before_game_date=before_game_date,
-        exclude_game_id=game_id,
-    )
+    hard_statuses = {"out", "inactive", "suspended", "unavailable"}
+    if str(injury_status or "").strip().lower() in hard_statuses:
+        return 0.0, "hard rule out"
+    venue_delta = 0.0
+    if conn is not None:
+        venue_delta = _venue_minutes_adjustment(
+            conn,
+            player_id=player_id,
+            is_home=bool(context.get("is_home")) if isinstance(context, dict) else False,
+            before_game_date=before_game_date,
+            exclude_game_id=game_id,
+        )
     projected = max(base_heuristic + venue_delta + blowout_delta + injury_delta, 0.0)
-
-    # Keep minutes within plausible player-relative bounds.
-    lower_bound = max(8.0, last_10_minutes_avg * 0.60)
-    upper_bound = min(40.0, max(last_10_minutes_avg * 1.35, lower_bound + 4.0))
+    role_state = _classify_minutes_role(
+        rotation_role=rotation_role,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        ewma_minutes=ewma_minutes,
+        minutes_trend=minutes_trend,
+        minute_volatility=minute_volatility,
+        injury_status=injury_status,
+        injury_delta=injury_delta,
+        recent_absence_days=recent_absence_days,
+    )
+    learned_minutes = None
+    blend_note = "heuristic only"
+    if conn is not None:
+        minutes_model = train_minutes_model(conn)
+        if minutes_model is not None:
+            minutes_features = _minutes_feature_values(
+                role_state=role_state,
+                ewma_minutes=ewma_minutes,
+                recent_minutes_avg=recent_minutes_avg,
+                last_10_minutes_avg=last_10_minutes_avg,
+                minutes_trend=minutes_trend,
+                minute_volatility=minute_volatility,
+                rest_days=int(context.get("rest_days") or 2),
+                is_home=bool(context.get("is_home")),
+                spread_abs=abs(float(context.get("team_spread"))) if context.get("team_spread") is not None else 0.0,
+                injury_delta=injury_delta,
+                recent_absence_days=recent_absence_days,
+            )
+            learned_minutes = max(0.0, _predict(minutes_model, minutes_features))
+            blend_weight = _minutes_model_weight(
+                rows=minutes_model.rows,
+                role_bucket=role_state.bucket,
+                minute_volatility=minute_volatility,
+                recent_absence_days=recent_absence_days,
+            )
+            projected = ((1.0 - blend_weight) * projected) + (blend_weight * learned_minutes)
+            blend_note = f"learned blend {blend_weight:.0%}"
+    lower_bound, upper_bound = _role_aware_minutes_bounds(
+        role_state,
+        last_10_minutes_avg=last_10_minutes_avg,
+        recent_minutes_avg=recent_minutes_avg,
+        minutes_trend=minutes_trend,
+        injury_status=injury_status,
+        injury_delta=injury_delta,
+    )
+    projected = _clamp(projected, lower_bound, upper_bound)
+    projected, hard_rule_notes = _apply_minutes_hard_rules(
+        projected=projected,
+        role_state=role_state,
+        rotation_role=rotation_role,
+        injury_status=injury_status,
+        injury_delta=injury_delta,
+        blowout_delta=blowout_delta,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+    )
     projected = _clamp(projected, lower_bound, upper_bound)
     if abs(venue_delta) >= 0.05:
         venue_note = f", venue {venue_delta:+.1f}"
     else:
         venue_note = ""
-    return projected, f"heuristic minutes{venue_note}"
+    learned_note = f", learned {learned_minutes:.1f}" if learned_minutes is not None else ""
+    hard_rule_suffix = f", {'; '.join(hard_rule_notes)}" if hard_rule_notes else ""
+    return projected, f"{role_state.bucket} bounds {lower_bound:.1f}-{upper_bound:.1f}{venue_note}, {blend_note}{learned_note}{hard_rule_suffix}"
 
 
 def _venue_minutes_adjustment(
@@ -622,6 +851,262 @@ def _game_total_or_neutral(conn: sqlite3.Connection, game_total: float | None) -
     neutral = float(row["avg_total"]) if row and row["avg_total"] is not None else 165.0
     _CONNECTION_GAME_TOTAL_MEAN_CACHE[conn_key] = neutral
     return neutral
+
+
+def _historical_game_context(row: sqlite3.Row) -> dict[str, float | int | bool | str | None]:
+    is_home = int(row["team_id"]) == int(row["home_team_id"])
+    spread_home = float(row["spread_home"]) if row["spread_home"] is not None else None
+    return {
+        "team_id": int(row["team_id"]),
+        "opponent_id": int(row["away_team_id"] if is_home else row["home_team_id"]),
+        "is_home": is_home,
+        "rest_days": int(row["rest_days_home"] if is_home else row["rest_days_away"] or 2),
+        "team_spread": spread_home if is_home else -spread_home if spread_home is not None else None,
+        "game_total": float(row["game_total"]) if row["game_total"] is not None else None,
+        "game_date": str(row["game_date"]) if row["game_date"] is not None else None,
+    }
+
+
+def _recent_absence_days(history: list[dict], target_game_date: str | None) -> float | None:
+    if not history or not target_game_date:
+        return None
+    latest_game_date = str(history[0].get("game_date") or "").strip()
+    if not latest_game_date:
+        return None
+    try:
+        latest = datetime.fromisoformat(latest_game_date[:10]).date()
+        target = datetime.fromisoformat(str(target_game_date)[:10]).date()
+    except ValueError:
+        return None
+    gap = (target - latest).days
+    return float(gap) if gap >= 0 else None
+
+
+def _days_between_game_dates(previous_game_date: str | None, current_game_date: str | None) -> float | None:
+    if not previous_game_date or not current_game_date:
+        return None
+    try:
+        previous = datetime.fromisoformat(str(previous_game_date)[:10]).date()
+        current = datetime.fromisoformat(str(current_game_date)[:10]).date()
+    except ValueError:
+        return None
+    gap = (current - previous).days
+    return float(gap) if gap >= 0 else None
+
+
+def _classify_minutes_role(
+    *,
+    rotation_role: str,
+    recent_minutes_avg: float,
+    last_10_minutes_avg: float,
+    ewma_minutes: float,
+    minutes_trend: float,
+    minute_volatility: float,
+    injury_status: str,
+    injury_delta: float,
+    recent_absence_days: float | None,
+) -> MinutesRoleState:
+    recent_median = recent_minutes_avg if last_10_minutes_avg <= 0 else ((recent_minutes_avg * 0.65) + (last_10_minutes_avg * 0.35))
+    anchor = (0.45 * recent_minutes_avg) + (0.30 * recent_median) + (0.25 * ewma_minutes)
+    recent_drop = recent_minutes_avg < (last_10_minutes_avg * 0.78) or minutes_trend <= -4.0
+    recent_spike = recent_minutes_avg > (last_10_minutes_avg * 1.12) or minutes_trend >= 3.0
+    role_text = str(rotation_role or "starter").strip().lower()
+
+    if recent_drop:
+        anchor -= 2.5
+    if recent_spike:
+        anchor += 1.5
+    if minute_volatility >= 8.0:
+        anchor -= 1.0
+    if injury_delta > 0.0:
+        anchor += min(2.5, injury_delta * 1.2)
+    if recent_absence_days is not None and recent_absence_days >= 7:
+        anchor -= 3.0 if recent_absence_days >= 14 else 1.8
+    if role_text == "star":
+        anchor = max(anchor, 29.0)
+    elif role_text == "bench":
+        anchor = min(anchor, 20.0)
+
+    if anchor >= 30.0 and minute_volatility < 7.0 and role_text in {"star", "starter"}:
+        bucket = "core_starter"
+    elif anchor >= 24.0:
+        bucket = "starter_volatile"
+    elif anchor >= 18.0:
+        bucket = "rotation"
+    elif anchor >= 10.0:
+        bucket = "bench"
+    else:
+        bucket = "fringe"
+
+    if injury_status in {"doubtful", "questionable", "gtd"} and bucket == "core_starter":
+        bucket = "starter_volatile"
+
+    lower_bound, upper_bound = _minutes_bucket_bounds(bucket)
+    return MinutesRoleState(
+        bucket=bucket,
+        lower_bound=lower_bound,
+        upper_bound=upper_bound,
+        anchor_minutes=anchor,
+        recent_drop=recent_drop,
+        recent_spike=recent_spike,
+        recent_absence_days=recent_absence_days,
+    )
+
+
+def _minutes_bucket_bounds(bucket: str) -> tuple[float, float]:
+    bounds = {
+        "core_starter": (28.0, 37.0),
+        "starter_volatile": (22.0, 34.0),
+        "rotation": (16.0, 28.0),
+        "bench": (8.0, 22.0),
+        "fringe": (0.0, 14.0),
+    }
+    return bounds.get(bucket, (12.0, 30.0))
+
+
+def _role_aware_minutes_bounds(
+    role_state: MinutesRoleState,
+    *,
+    last_10_minutes_avg: float,
+    recent_minutes_avg: float,
+    minutes_trend: float,
+    injury_status: str,
+    injury_delta: float,
+) -> tuple[float, float]:
+    lower_bound = max(role_state.lower_bound, last_10_minutes_avg * 0.72)
+    upper_bound = min(role_state.upper_bound, max(last_10_minutes_avg * 1.18, lower_bound + 4.0))
+
+    if role_state.bucket in {"bench", "fringe"}:
+        lower_bound = role_state.lower_bound
+    if role_state.recent_drop:
+        lower_bound = max(role_state.lower_bound, lower_bound - 4.0)
+        upper_bound = min(upper_bound, max(recent_minutes_avg + 2.0, lower_bound + 3.0))
+    if role_state.recent_spike and injury_delta > 0:
+        upper_bound = min(40.0, upper_bound + min(4.0, injury_delta * 2.0))
+        lower_bound = min(upper_bound - 2.0, lower_bound + min(2.0, injury_delta))
+    if injury_status in {"doubtful", "questionable", "gtd"}:
+        upper_bound = max(lower_bound + 2.0, upper_bound - 2.0)
+    if role_state.recent_absence_days is not None:
+        if role_state.recent_absence_days >= 14:
+            upper_bound = min(upper_bound, max(lower_bound + 2.0, recent_minutes_avg + 3.0))
+            lower_bound = max(role_state.lower_bound, lower_bound - 4.0)
+        elif role_state.recent_absence_days >= 7:
+            upper_bound = min(upper_bound, max(lower_bound + 2.5, recent_minutes_avg + 4.0))
+    if minutes_trend <= -5.0:
+        lower_bound = max(role_state.lower_bound, lower_bound - 2.0)
+    return max(0.0, lower_bound), min(40.0, upper_bound)
+
+
+def _apply_minutes_hard_rules(
+    *,
+    projected: float,
+    role_state: MinutesRoleState,
+    rotation_role: str,
+    injury_status: str,
+    injury_delta: float,
+    blowout_delta: float,
+    recent_minutes_avg: float,
+    last_10_minutes_avg: float,
+) -> tuple[float, list[str]]:
+    notes: list[str] = []
+    status = str(injury_status or "").strip().lower()
+    role = str(rotation_role or "").strip().lower()
+
+    if status in {"questionable", "gtd"}:
+        cap = max(role_state.lower_bound + 2.0, min(role_state.upper_bound, recent_minutes_avg * 0.92))
+        if projected > cap:
+            projected = cap
+            notes.append("hard rule gtd cap")
+    elif status == "doubtful":
+        cap = max(role_state.lower_bound + 1.5, min(role_state.upper_bound, recent_minutes_avg * 0.82))
+        if projected > cap:
+            projected = cap
+            notes.append("hard rule doubtful cap")
+
+    if role in {"star", "starter"} and blowout_delta <= -1.0:
+        blowout_cap = max(role_state.lower_bound, min(role_state.upper_bound, last_10_minutes_avg + (blowout_delta * 0.85)))
+        if projected > blowout_cap:
+            projected = blowout_cap
+            notes.append("hard rule blowout star cap")
+
+    if injury_delta >= 1.5 and role_state.recent_spike:
+        floor = min(role_state.upper_bound, max(role_state.lower_bound, recent_minutes_avg + min(2.5, injury_delta * 1.25)))
+        if projected < floor:
+            projected = floor
+            notes.append("hard rule injury replacement floor")
+
+    return projected, notes
+
+
+def _minute_volatility(minutes: list[float]) -> float:
+    if len(minutes) < 2:
+        return 0.0
+    mean = sum(minutes) / len(minutes)
+    variance = sum((value - mean) ** 2 for value in minutes) / (len(minutes) - 1)
+    return math.sqrt(max(variance, 0.0))
+
+
+def _minutes_feature_values(
+    *,
+    role_state: MinutesRoleState,
+    ewma_minutes: float,
+    recent_minutes_avg: float,
+    last_10_minutes_avg: float,
+    minutes_trend: float,
+    minute_volatility: float,
+    rest_days: int,
+    is_home: bool,
+    spread_abs: float,
+    injury_delta: float,
+    recent_absence_days: float | None,
+) -> list[float]:
+    role_flags = {
+        "core_starter": 0.0,
+        "starter_volatile": 0.0,
+        "rotation": 0.0,
+        "bench": 0.0,
+        "fringe": 0.0,
+    }
+    role_flags[role_state.bucket] = 1.0
+    return [
+        ewma_minutes,
+        recent_minutes_avg,
+        last_10_minutes_avg,
+        minutes_trend,
+        minute_volatility,
+        float(rest_days),
+        1.0 if is_home else 0.0,
+        float(spread_abs),
+        float(injury_delta),
+        float(recent_absence_days or 0.0),
+        role_flags["core_starter"],
+        role_flags["starter_volatile"],
+        role_flags["rotation"],
+        role_flags["bench"],
+        role_flags["fringe"],
+    ]
+
+
+def _minutes_model_weight(
+    *,
+    rows: int,
+    role_bucket: str,
+    minute_volatility: float,
+    recent_absence_days: float | None,
+) -> float:
+    if rows >= 400:
+        weight = 0.42
+    elif rows >= 150:
+        weight = 0.32
+    else:
+        weight = 0.22
+    if role_bucket in {"bench", "fringe"}:
+        weight -= 0.06
+    if minute_volatility >= 8.0:
+        weight -= 0.05
+    if recent_absence_days is not None and recent_absence_days >= 7:
+        weight -= 0.08
+    return max(0.12, min(0.50, weight))
 
 
 def _training_rows_slow(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
@@ -877,6 +1362,7 @@ def _player_history(
             "value": _market_value(row, market),
             "minutes": float(row["minutes"]),
             "rotation_role": row["rotation_role"],
+            "game_date": str(row["game_date"]),
         }
         for row in rows
     ]

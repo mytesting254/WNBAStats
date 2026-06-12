@@ -1299,8 +1299,9 @@ tbody tr.selected {
 
 .availability-toast {
   position: fixed;
-  right: 24px;
-  bottom: 24px;
+  top: 24px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 1000;
   max-width: min(420px, calc(100vw - 32px));
   padding: 14px 16px;
@@ -1310,6 +1311,7 @@ tbody tr.selected {
   box-shadow: 0 18px 48px rgba(6, 24, 44, 0.18);
   color: #05603a;
   font-weight: 800;
+  text-align: center;
 }
 
 @media (max-width: 960px) {
