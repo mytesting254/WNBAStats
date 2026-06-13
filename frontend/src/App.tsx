@@ -3661,35 +3661,9 @@ function confidenceRank(confidence: ValueProp["confidence"]) {
   return ranks[confidence];
 }
 
-function matchupGameIds(matchup: Matchup) {
-  const gameIds = new Set<number>([matchup.id]);
-  for (const item of matchup.props ?? []) {
-    gameIds.add(item.game_id);
-  }
-  for (const item of matchup.sportsbook_props ?? []) {
-    if (item.game_id != null) {
-      gameIds.add(item.game_id);
-    }
-  }
-  for (const item of matchup.line_discrepancies ?? []) {
-    if (item.game_id != null) {
-      gameIds.add(item.game_id);
-    }
-  }
-  return gameIds;
-}
-
 function propsForMatchup(matchup: Matchup, props: ValueProp[]) {
-  const gameIds = matchupGameIds(matchup);
-  const persisted = props.filter((prop) => gameIds.has(prop.game_id));
-  const merged = new Map<number, ValueProp>();
-  for (const prop of matchup.props ?? []) {
-    merged.set(prop.id, prop);
-  }
-  for (const prop of persisted) {
-    merged.set(prop.id, prop);
-  }
-  return Array.from(merged.values());
+  void props;
+  return matchup.props ?? [];
 }
 
 function parlayAvailabilityLabel(matchup: Matchup, props: ValueProp[]) {
