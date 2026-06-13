@@ -3682,7 +3682,14 @@ function matchupGameIds(matchup: Matchup) {
 function propsForMatchup(matchup: Matchup, props: ValueProp[]) {
   const gameIds = matchupGameIds(matchup);
   const persisted = props.filter((prop) => gameIds.has(prop.game_id));
-  return persisted.length ? persisted : (matchup.props ?? []);
+  const merged = new Map<number, ValueProp>();
+  for (const prop of matchup.props ?? []) {
+    merged.set(prop.id, prop);
+  }
+  for (const prop of persisted) {
+    merged.set(prop.id, prop);
+  }
+  return Array.from(merged.values());
 }
 
 function parlayAvailabilityLabel(matchup: Matchup, props: ValueProp[]) {

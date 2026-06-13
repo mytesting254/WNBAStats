@@ -2421,7 +2421,7 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
                     "home": home_summary,
                     "away": away_summary,
                     "covers_records": group_covers_records,
-                    "props": _value_board_payload_for_games(conn, game_ids),
+                    "props": _value_board_payload_for_games(conn, game_ids, include_filtered_only=False),
                     "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
                     "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
                     "injury_source": injury_refresh.get("source"),
@@ -2656,10 +2656,10 @@ def _normalized_start_key(value: str | None) -> str | None:
     return parsed.astimezone(timezone.utc).replace(second=0, microsecond=0).isoformat()
 
 
-def _value_board_payload_for_games(conn, game_ids: list[int]) -> list[dict]:
+def _value_board_payload_for_games(conn, game_ids: list[int], include_filtered_only: bool = True) -> list[dict]:
     if not game_ids:
         return []
-    payload = _value_board_payload(conn, game_ids=game_ids)
+    payload = _value_board_payload(conn, game_ids=game_ids, include_filtered_only=include_filtered_only)
     best_by_leg = {}
     for item in payload:
         key = (
@@ -2697,7 +2697,12 @@ def _line_discrepancies_for_games(conn, game_ids: list[int]) -> list[dict]:
     return sorted(payload, key=lambda item: (item["line_gap"], item["price_gap"]), reverse=True)
 
 
-def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] | None = None) -> list[dict]:
+def _value_board_payload(
+    conn,
+    game_id: int | None = None,
+    game_ids: list[int] | None = None,
+    include_filtered_only: bool = True,
+) -> list[dict]:
     if game_ids:
         placeholders = ",".join("?" for _ in game_ids)
         game_filter = f"WHERE pl.game_id IN ({placeholders})"
@@ -2830,7 +2835,7 @@ def _value_board_payload(conn, game_id: int | None = None, game_ids: list[int] |
     for row in rows:
         is_active_time = _is_active_game_time(row["start_time"])
         item = dict(row)
-        if not _include_value_board_pick(item):
+        if include_filtered_only and not _include_value_board_pick(item):
             continue
         if ENABLE_PLAYER_FRESHNESS_GATE:
             freshness_key = (int(item["player_id"]), int(item["game_id"]))
