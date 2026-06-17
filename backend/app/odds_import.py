@@ -359,7 +359,7 @@ def sync_prop_lines_from_sportsbook(
                 insert_rows,
             )
         if rebuild_predictions_after and touched_game_ids:
-            rebuild_predictions(conn, game_ids=touched_game_ids)
+            rebuild_predictions(conn, game_ids=touched_game_ids, refresh_models=False)
         conn.commit()
         return len(rows)
     except sqlite3.OperationalError as exc:

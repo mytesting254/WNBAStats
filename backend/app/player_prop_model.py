@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import sqlite3
 from dataclasses import asdict, dataclass
@@ -10,6 +12,7 @@ from .odds import american_to_implied_probability
 
 
 MODEL_VERSION = "adaptive-context-v1"
+MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
     "points",
     "rebounds",
@@ -312,7 +315,13 @@ def feature_snapshot(
     last_10_minutes_avg = sum(minutes) / len(minutes)
     minute_volatility = _minute_volatility(minutes)
     blowout = _blowout_adjustment(conn, context, rotation_role)
-    injury = _injury_adjustment_for_prop(conn, player_id, context["team_id"], rotation_role)
+    injury = _injury_adjustment_for_prop(
+        conn,
+        player_id,
+        context["team_id"],
+        rotation_role,
+        as_of_date=before_game_date or context.get("game_date"),
+    )
     projected_minutes, minutes_note = _project_minutes(
         conn,
         player_id=player_id,
@@ -437,6 +446,10 @@ def train_market_model(
             _CONNECTION_MODEL_CACHE[key] = _train_market_model_uncached(conn, market, config=tuning)
         return _CONNECTION_MODEL_CACHE[key]
     db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    cache_key = _model_cache_key(conn, db_path, market, tuning, kind="market")
+    cached_model = _load_cached_model(cache_key)
+    if cached_model is not None:
+        return cached_model
     return _train_market_model_cached(db_path, market, tuning)
 
 
@@ -454,7 +467,12 @@ def _train_market_model_uncached(
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
     rows = _training_rows(conn, market)
-    return _fit_model_from_rows(market, rows, config=config)
+    model = _fit_model_from_rows(market, rows, config=config)
+    if model is not None:
+        db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+        cache_key = _model_cache_key(conn, db_path, market, config or DEFAULT_TUNING_CONFIG, kind="market")
+        _store_cached_model(cache_key, model, config or DEFAULT_TUNING_CONFIG)
+    return model
 
 
 def evaluate_market_model(
@@ -671,7 +689,22 @@ def train_minutes_model(
             _CONNECTION_MINUTES_MODEL_CACHE[key] = _train_minutes_model_uncached(conn, config=tuning)
         return _CONNECTION_MINUTES_MODEL_CACHE[key]
     db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    cache_key = _model_cache_key(conn, db_path, "minutes", tuning, kind="minutes")
+    cached_model = _load_cached_model(cache_key)
+    if cached_model is not None:
+        return cached_model
     return _train_minutes_model_cached(db_path, tuning)
+
+
+def prewarm_model_cache(conn: sqlite3.Connection, config: ModelTuningConfig | None = None) -> dict[str, int]:
+    tuning = config or DEFAULT_TUNING_CONFIG
+    warmed = {"minutes": 0, "markets": 0}
+    if train_minutes_model(conn, config=tuning) is not None:
+        warmed["minutes"] = 1
+    for market in TRAINING_MARKETS:
+        if train_market_model(conn, market, config=tuning) is not None:
+            warmed["markets"] += 1
+    return warmed
 
 
 def _train_minutes_model_uncached(
@@ -679,7 +712,12 @@ def _train_minutes_model_uncached(
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
     rows = _minutes_training_rows(conn)
-    return _fit_model_from_rows("minutes", rows, config=config)
+    model = _fit_model_from_rows("minutes", rows, config=config)
+    if model is not None:
+        db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+        cache_key = _model_cache_key(conn, db_path, "minutes", config or DEFAULT_TUNING_CONFIG, kind="minutes")
+        _store_cached_model(cache_key, model, config or DEFAULT_TUNING_CONFIG)
+    return model
 
 
 def _minutes_training_rows(conn: sqlite3.Connection) -> list[tuple[list[float], float]]:
@@ -1301,6 +1339,82 @@ def _market_price_nudge(market: str) -> float:
     return 1.0
 
 
+def _model_fingerprint(conn: sqlite3.Connection) -> str:
+    tables = [
+        "player_game_stats",
+        "games",
+        "injuries",
+        "manual_adjustments",
+        "player_team_history",
+        "team_game_results",
+        "players",
+    ]
+    parts: list[str] = []
+    for table in tables:
+        row = conn.execute(
+            f"SELECT COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id FROM {table}"
+        ).fetchone()
+        parts.append(f"{table}:{int(row['row_count'] or 0)}:{int(row['max_id'] or 0)}")
+    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _config_fingerprint(config: ModelTuningConfig) -> str:
+    payload = json.dumps(config.to_dict(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _model_cache_key(
+    conn: sqlite3.Connection,
+    db_path: str,
+    name: str,
+    config: ModelTuningConfig,
+    *,
+    kind: str,
+) -> str:
+    db_marker = hashlib.sha1(str(db_path).encode("utf-8")).hexdigest()[:12]
+    return f"{MODEL_CACHE_PREFIX}-{kind}-{name}-{db_marker}-{_model_fingerprint(conn)}-{_config_fingerprint(config)}.json"
+
+
+def _load_cached_model(cache_key: str) -> RidgeModel | None:
+    from .cache import read_json_cache
+
+    payload = read_json_cache(cache_key)
+    if not isinstance(payload, dict):
+        return None
+    model = payload.get("model")
+    if not isinstance(model, dict):
+        return None
+    try:
+        return RidgeModel(
+            market=str(model["market"]),
+            rows=int(model["rows"]),
+            intercept=float(model["intercept"]),
+            coefficients=[float(value) for value in model["coefficients"]],
+            feature_means=[float(value) for value in model["feature_means"]],
+            feature_scales=[float(value) for value in model["feature_scales"]],
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _store_cached_model(cache_key: str, model: RidgeModel, config: ModelTuningConfig) -> None:
+    from .cache import write_json_cache
+
+    try:
+        write_json_cache(
+            cache_key,
+            {
+                "model_version": MODEL_VERSION,
+                "config": config.to_dict(),
+                "model": asdict(model),
+            },
+        )
+    except OSError:
+        # Cache is a performance optimization; keep recalc working if the
+        # configured cache directory is unavailable or read-only.
+        return
+
+
 def _adaptive_component_projection(
     *,
     weighted_recent: float,
@@ -1584,8 +1698,9 @@ def _injury_adjustment_for_prop(
     player_id: int,
     team_id: int,
     rotation_role: str | None,
+    as_of_date: str | None = None,
 ) -> dict[str, float | str | bool]:
-    status = _latest_player_injury_status(conn, player_id)
+    status = _latest_player_injury_status(conn, player_id, as_of_date=as_of_date)
     status_weight = {
         "out": 0.0,
         "inactive": 0.0,
@@ -1599,8 +1714,10 @@ def _injury_adjustment_for_prop(
     availability_factor = status_weight.get(status, 1.0)
     hard_cap_zero = availability_factor == 0.0
 
+    injury_cutoff_clause = "AND DATE(i.captured_at) <= DATE(?)" if as_of_date else ""
+    injury_cutoff_params: tuple[object, ...] = (as_of_date,) if as_of_date else ()
     teammate_rows = conn.execute(
-        """
+        f"""
         SELECT
             p.id AS player_id,
             lower(trim(i.status)) AS status,
@@ -1624,13 +1741,15 @@ def _injury_adjustment_for_prop(
         JOIN players p ON p.id = i.player_id
         WHERE p.team_id = ?
           AND p.id != ?
+          {injury_cutoff_clause}
           AND i.captured_at = (
               SELECT MAX(i2.captured_at)
               FROM injuries i2
               WHERE i2.player_id = i.player_id
+                {"AND DATE(i2.captured_at) <= DATE(?)" if as_of_date else ""}
           )
         """,
-        (team_id, player_id),
+        (team_id, player_id, *injury_cutoff_params, *injury_cutoff_params),
     ).fetchall()
     miss_weight = {
         "out": 1.0,
@@ -1679,17 +1798,30 @@ def _injury_adjustment_for_prop(
     }
 
 
-def _latest_player_injury_status(conn: sqlite3.Connection, player_id: int) -> str:
-    row = conn.execute(
-        """
-        SELECT lower(trim(status)) AS status
-        FROM injuries
-        WHERE player_id = ?
-        ORDER BY captured_at DESC
-        LIMIT 1
-        """,
-        (player_id,),
-    ).fetchone()
+def _latest_player_injury_status(conn: sqlite3.Connection, player_id: int, as_of_date: str | None = None) -> str:
+    if as_of_date:
+        row = conn.execute(
+            """
+            SELECT lower(trim(status)) AS status
+            FROM injuries
+            WHERE player_id = ?
+              AND DATE(captured_at) <= DATE(?)
+            ORDER BY captured_at DESC
+            LIMIT 1
+            """,
+            (player_id, as_of_date),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            SELECT lower(trim(status)) AS status
+            FROM injuries
+            WHERE player_id = ?
+            ORDER BY captured_at DESC
+            LIMIT 1
+            """,
+            (player_id,),
+        ).fetchone()
     if not row or not row["status"]:
         return "available"
     return str(row["status"])

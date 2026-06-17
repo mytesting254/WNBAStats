@@ -258,8 +258,13 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
     )
 
 
-def rebuild_predictions(conn: sqlite3.Connection, game_ids: list[int] | None = None) -> list[PropProjection]:
-    clear_model_cache()
+def rebuild_predictions(
+    conn: sqlite3.Connection,
+    game_ids: list[int] | None = None,
+    refresh_models: bool = True,
+) -> list[PropProjection]:
+    if refresh_models:
+        clear_model_cache()
     target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
     _refresh_scheduled_game_rest_days(conn, game_ids=target_game_ids or None)
     # Defensive cleanup for legacy partial-import states.

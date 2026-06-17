@@ -1,19 +1,19 @@
 {
   "snapshot_file": "wnba-runtime.sqlite",
-  "created_at": "2026-06-05T21:00:52.422320+00:00",
+  "created_at": "2026-06-07T18:05:21.043320+00:00",
   "schema_version": 0,
-  "app_commit_sha": "7c78478",
+  "app_commit_sha": "eba7f81",
   "source_device": "codespaces-d6c128",
   "db_path_source": "/workspaces/WNBAStats/data/wnba.sqlite",
   "row_counts": {
     "games": 672,
     "players": 383,
     "player_game_stats": 8021,
-    "sportsbook_prop_lines": 2435,
-    "prop_lines": 1285,
-    "prop_predictions": 843,
+    "sportsbook_prop_lines": 1937,
+    "prop_lines": 1202,
+    "prop_predictions": 760,
     "settled_props": 1092,
     "model_runs": 4
   },
-  "sha256": "a8a0e3e6fbaca60339484b37d67ee037f2ce6492e1fc5a5a8f02e08f5cd65e04"
+  "sha256": "7614b3c4a1c2199d017ad70f5a7929796a25a82d4a1d6e97efe57c29e9b469c6"
 }

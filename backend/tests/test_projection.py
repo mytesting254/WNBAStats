@@ -270,6 +270,30 @@ def test_model_runs_endpoint_uses_read_cache(monkeypatch) -> None:
     assert calls == {"latest": 1, "runs": 1}
 
 
+def test_startup_prewarms_models(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "init_db", lambda: calls.append("init_db"))
+    monkeypatch.setattr(main_module, "ensure_teams", lambda conn: calls.append("ensure_teams"))
+    monkeypatch.setattr(main_module, "prewarm_model_cache", lambda conn: calls.append("prewarm"))
+    monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: calls.append("invalidate"))
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module, "_configured_api_key", lambda: None)
+    monkeypatch.setattr(main_module, "_bootstrap_admin_configured", lambda: False)
+    monkeypatch.setattr(main_module, "_is_dev_env", lambda: True)
+
+    main_module.on_startup()
+
+    assert calls == ["init_db", "ensure_teams", "prewarm", "invalidate"]
+
+
 def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
     cache_store: dict[str, object] = {}
     calls = {"import": 0}
@@ -304,6 +328,32 @@ def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
     assert calls["import"] == 1
     assert first[0]["team"] == "NY"
     assert first[0]["status"] == "GTD"
+
+
+def test_recalculate_endpoint_skips_model_refresh(monkeypatch) -> None:
+    calls: list[bool] = []
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(
+        main_module,
+        "rebuild_predictions",
+        lambda conn, game_ids=None, refresh_models=True: calls.append(refresh_models) or [],
+    )
+    monkeypatch.setattr(main_module, "settle_completed_props", lambda conn: {"settled": 0})
+    monkeypatch.setattr(main_module, "settle_completed_game_predictions", lambda conn: {"settled": 0})
+    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, snapshot_date: None)
+
+    result = main_module.recalculate()
+
+    assert result == {"predictions": 0, "settled": 0, "game_settled": 0}
+    assert calls == [False]
 
 
 def test_read_cache_invalidation_clears_new_cache_keys(monkeypatch) -> None:
@@ -631,6 +681,23 @@ def test_feature_snapshot_reason_includes_archetype_note() -> None:
     assert "Archetype:" in snapshot.reason
 
 
+def test_feature_snapshot_ignores_later_injury_rows() -> None:
+    load_test_history()
+    later_injury_time = datetime(2026, 5, 9, 12, 0, tzinfo=timezone.utc).isoformat()
+    with connect() as conn:
+        baseline = feature_snapshot(conn, 1002, "assists", 2020)
+        conn.execute(
+            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
+            (1002, "out", "later injury", later_injury_time),
+        )
+        adjusted = feature_snapshot(conn, 1002, "assists", 2020)
+
+    assert baseline.injury_status == "available"
+    assert adjusted.injury_status == "available"
+    assert adjusted.hard_cap_zero is False
+    assert adjusted.component_projection == baseline.component_projection
+
+
 def test_walk_forward_training_saves_model_run() -> None:
     load_test_history()
     with connect() as conn:
@@ -689,8 +756,8 @@ def test_train_market_model_uses_active_non_sqlite_connection(monkeypatch) -> No
 
     calls = []
 
-    def fake_uncached(conn, market):
-        calls.append((conn, market))
+    def fake_uncached(conn, market, config=None):
+        calls.append((conn, market, config))
         return None
 
     monkeypatch.setattr("backend.app.player_prop_model._train_market_model_uncached", fake_uncached)
@@ -699,7 +766,33 @@ def test_train_market_model_uses_active_non_sqlite_connection(monkeypatch) -> No
     result = train_market_model(conn, "points")
 
     assert result is None
-    assert calls == [(conn, "points")]
+    assert len(calls) == 1
+    assert calls[0][0] is conn
+    assert calls[0][1] == "points"
+    assert calls[0][2] is not None
+
+
+def test_train_market_model_uses_persistent_cache(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("WNBA_CACHE_DIR", str(tmp_path / "cache"))
+    load_test_history()
+    clear_model_cache()
+
+    with connect() as conn:
+        first = train_market_model(conn, "points")
+        assert first is not None
+
+    clear_model_cache()
+
+    def fail_uncached(*args, **kwargs):
+        raise AssertionError("should have loaded from persistent cache")
+
+    monkeypatch.setattr("backend.app.player_prop_model._train_market_model_uncached", fail_uncached)
+
+    with connect() as conn:
+        second = train_market_model(conn, "points")
+
+    assert second is not None
+    assert second.rows == first.rows
 
 
 def test_accuracy_analysis_uses_completed_player_stats() -> None:

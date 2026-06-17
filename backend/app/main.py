@@ -34,6 +34,7 @@ from .odds_import import RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME, import_the_odds_
 from .projections import rebuild_predictions
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
+from .player_prop_model import prewarm_model_cache
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
 
 
@@ -108,6 +109,10 @@ def on_startup() -> None:
     init_db()
     with connect() as conn:
         ensure_teams(conn)
+        try:
+            prewarm_model_cache(conn)
+        except Exception as exc:
+            print(f"[startup] model prewarm skipped: {exc}")
     _invalidate_read_caches()
 
 
@@ -545,7 +550,7 @@ def _repair_current_slate_props(conn) -> dict[str, Any]:
         fast_fail=True,
         rebuild_predictions_after=False,
     )
-    projections = rebuild_predictions(conn, game_ids=target_game_ids)
+    projections = rebuild_predictions(conn, game_ids=target_game_ids, refresh_models=False)
     _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     return {
         "scope": "current_slate",
@@ -558,7 +563,7 @@ def _repair_current_slate_props(conn) -> dict[str, Any]:
 @app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
 def recalculate() -> dict[str, int]:
     with connect() as conn:
-        projections = rebuild_predictions(conn)
+        projections = rebuild_predictions(conn, refresh_models=False)
         settlements = settle_completed_props(conn)
         game_settlements = settle_completed_game_predictions(conn)
         _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
