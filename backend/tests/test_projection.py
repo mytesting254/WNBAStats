@@ -273,18 +273,10 @@ def test_model_runs_endpoint_uses_read_cache(monkeypatch) -> None:
 def test_startup_prewarms_models(monkeypatch) -> None:
     calls: list[str] = []
 
-    class DummyConn:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return None
-
     monkeypatch.setattr(main_module, "init_db", lambda: calls.append("init_db"))
     monkeypatch.setattr(main_module, "ensure_teams", lambda conn: calls.append("ensure_teams"))
-    monkeypatch.setattr(main_module, "prewarm_model_cache", lambda conn: calls.append("prewarm"))
+    monkeypatch.setattr(main_module, "_start_model_prewarm", lambda: calls.append("prewarm"))
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: calls.append("invalidate"))
-    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
     monkeypatch.setattr(main_module, "_configured_api_key", lambda: None)
     monkeypatch.setattr(main_module, "_bootstrap_admin_configured", lambda: False)
     monkeypatch.setattr(main_module, "_is_dev_env", lambda: True)

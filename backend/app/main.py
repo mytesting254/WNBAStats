@@ -109,11 +109,20 @@ def on_startup() -> None:
     init_db()
     with connect() as conn:
         ensure_teams(conn)
+    _start_model_prewarm()
+    _invalidate_read_caches()
+
+
+def _start_model_prewarm() -> None:
+    def _worker() -> None:
         try:
-            prewarm_model_cache(conn)
+            with connect() as conn:
+                prewarm_model_cache(conn)
         except Exception as exc:
             print(f"[startup] model prewarm skipped: {exc}")
-    _invalidate_read_caches()
+
+    thread = threading.Thread(target=_worker, name="model-prewarm", daemon=True)
+    thread.start()
 
 
 @app.get("/api/health")
