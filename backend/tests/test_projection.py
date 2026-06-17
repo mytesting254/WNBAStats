@@ -2285,6 +2285,55 @@ def test_rotowire_import_force_refresh_fetches(monkeypatch) -> None:
     assert result["source"] == "rotowire"
 
 
+def test_rotowire_import_clears_resolved_injuries(monkeypatch) -> None:
+    load_test_history()
+    monkeypatch.setattr(rotowire_import_module, "write_json_cache", lambda *args, **kwargs: None)
+
+    first_html = """
+    <section>
+            <div>TOR CON</div>
+      <ul>
+        <li>Expected Lineup</li>
+        <li>MAY NOT PLAY</li>
+        <li>G</li>
+        <li>Sonia Citron</li>
+        <li>OUT</li>
+      </ul>
+    </section>
+    """
+    second_html = """
+    <section>
+            <div>TOR CON</div>
+      <ul>
+        <li>Confirmed Lineup</li>
+      </ul>
+    </section>
+    """
+
+    monkeypatch.setattr(rotowire_import_module, "_fetch_text", lambda _: first_html)
+    with connect() as conn:
+        result = rotowire_import_module.import_rotowire_lineups(conn, force_refresh=True)
+        row = conn.execute(
+            "SELECT status FROM injuries WHERE player_id = ? ORDER BY captured_at DESC LIMIT 1",
+            (1002,),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "out"
+    assert result["source"] == "rotowire"
+
+    monkeypatch.setattr(rotowire_import_module, "_fetch_text", lambda _: second_html)
+    with connect() as conn:
+        result = rotowire_import_module.import_rotowire_lineups(conn, force_refresh=True)
+        row = conn.execute(
+            "SELECT status, note FROM injuries WHERE player_id = ? ORDER BY captured_at DESC LIMIT 1",
+            (1002,),
+        ).fetchone()
+    assert row is not None
+    assert row["status"] == "available"
+    assert row["note"] == "rotowire lineup cleared"
+    assert "Cleared" in str(result["message"])
+
+
 def test_rotowire_import_force_refresh_falls_back_to_cached_rows_on_fetch_failure(monkeypatch) -> None:
     cached_payload = {
         "captured_at": "2026-05-22T20:00:00+00:00",

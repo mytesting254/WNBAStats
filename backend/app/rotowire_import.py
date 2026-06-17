@@ -71,7 +71,11 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
     affected_team_ids: set[int] = set()
     status = "imported" if source == "rotowire" else "loaded_from_cache"
     message = None
+    current_player_ids: set[int] = set()
+    lineup_team_ids: set[int] = set()
     try:
+        if source == "rotowire":
+            lineup_team_ids = _lineup_team_ids(conn, page)
         for row in rows:
             if row["status"] not in UNAVAILABLE_STATUSES:
                 continue
@@ -88,6 +92,7 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
                 unresolved += 1
                 unresolved_names.append(f"{team_abbr}:{row['player_name']}")
                 continue
+            current_player_ids.add(player_id)
             latest = conn.execute(
                 "SELECT captured_at FROM injuries WHERE player_id = ? ORDER BY captured_at DESC LIMIT 1",
                 (player_id,),
@@ -103,6 +108,15 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
                 (player_id, row["status"].lower(), f"rotowire lineups ({row['team']})", captured_at),
             )
             inserted += 1
+        if source == "rotowire":
+            cleared = _clear_resolved_rotowire_injuries(
+                conn,
+                affected_team_ids | lineup_team_ids,
+                current_player_ids,
+                captured_at,
+            )
+            if cleared:
+                message = (message or "Roster import completed.") + f" Cleared {cleared} resolved injury status(es)."
         conn.commit()
     except sqlite3.OperationalError as exc:
         if _is_db_locked(exc):
@@ -130,6 +144,70 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
         "unresolved_examples": unresolved_names[:10],
         "affected_team_ids": sorted(affected_team_ids),
     }
+
+
+def _clear_resolved_rotowire_injuries(
+    conn: sqlite3.Connection,
+    team_ids: set[int],
+    current_player_ids: set[int],
+    captured_at: str,
+) -> int:
+    if team_ids:
+        placeholders = ",".join("?" for _ in team_ids)
+        team_filter = f"AND p.team_id IN ({placeholders})"
+        params = tuple(team_ids)
+    else:
+        team_filter = ""
+        params = ()
+    rows = conn.execute(
+        f"""
+        SELECT i.player_id
+        FROM injuries i
+        JOIN players p ON p.id = i.player_id
+        WHERE lower(trim(i.status)) IN ('out', 'gtd', 'doubtful', 'questionable')
+          AND lower(i.note) LIKE 'rotowire lineups (%'
+          {team_filter}
+          AND i.captured_at = (
+              SELECT MAX(i2.captured_at)
+              FROM injuries i2
+              WHERE i2.player_id = i.player_id
+          )
+        """,
+        params,
+    ).fetchall()
+    to_clear = {int(row["player_id"]) for row in rows if int(row["player_id"]) not in current_player_ids}
+    cleared = 0
+    for player_id in to_clear:
+        conn.execute(
+            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
+            (player_id, "available", "rotowire lineup cleared", captured_at),
+        )
+        cleared += 1
+    return cleared
+
+
+def _lineup_team_ids(conn: sqlite3.Connection, page: str) -> set[int]:
+    team_ids: set[int] = set()
+    current_teams: tuple[str, str] | None = None
+    for line in _lineup_text_lines(page):
+        matchup = _matchup_pair(line)
+        if not matchup:
+            parts = line.split()
+            if len(parts) == 2 and _is_team_code(parts[0]) and _is_team_code(parts[1]):
+                matchup = (parts[0], parts[1])
+        if matchup:
+            current_teams = matchup
+            for team_abbr in matchup:
+                team_id = _resolve_team_id(conn, team_abbr)
+                if team_id:
+                    team_ids.add(team_id)
+            continue
+        if line in {"Confirmed Lineup", "Expected Lineup", "MAY NOT PLAY"} and current_teams is not None:
+            for team_abbr in current_teams:
+                team_id = _resolve_team_id(conn, team_abbr)
+                if team_id:
+                    team_ids.add(team_id)
+    return team_ids
 
 
 def _is_db_locked(exc: sqlite3.OperationalError) -> bool:
