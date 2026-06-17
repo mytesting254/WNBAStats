@@ -240,7 +240,31 @@ Operational expectations:
 
 `Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
 
-Minutes projections are computed directly from player game-history in the database (recency-weighted EWMA plus trend and context adjustments). The heuristic now includes a bounded home/away venue split adjustment from recent games. The previous minutes-model and minutes-precompute cache path is no longer used.
+Minutes projections are computed from a hybrid path:
+
+- recency-weighted heuristic (EWMA, trend, context, venue adjustment)
+- learned minutes model blend
+
+The learned minutes path is role-aware and trains separate models for:
+
+- `core_starter`
+- `starter_volatile`
+- `rotation`
+- `bench`
+- `fringe`
+
+Prediction uses the matching role model first and falls back to the global minutes model if a role model is unavailable.
+
+Recent holdout comparison (global-only minutes model vs role-aware minutes model):
+
+- MAE: `5.107 -> 5.033` (`-0.074`)
+- RMSE: `6.499 -> 6.393` (`-0.106`)
+- Bias: `0.329 -> 0.295` (`-0.034`)
+
+Recent accuracy hardening also includes:
+
+- date-aware teammate contribution cutoffs in injury-adjustment logic (prevents future-game leakage)
+- market-specific stabilization bands to curb implausible learned-output drift in noisier markets
 
 ## Gems Daily Tracking
 

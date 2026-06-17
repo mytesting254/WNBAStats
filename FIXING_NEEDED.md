@@ -8,6 +8,9 @@
 - [x] Restore player archetype feature flags.
 - [x] Restore top-center queue-clear toast.
 - [x] Show all modeled matchup/parlay props, not only value-board-qualified rows.
+- [x] Add role-aware minutes models with per-role fallback (core starter, starter volatile, rotation, bench, fringe).
+- [x] Add date-cutoff protection for teammate contribution sampling in injury adjustments.
+- [x] Add market-specific stabilization bands for noisier props.
 
 ## Current Known Operational Follow-Up
 
@@ -21,6 +24,7 @@
 - [ ] Review active-slate props after restoring minutes, total calibration, and archetypes to see whether outputs still look too aggressive or too weak.
 - [ ] Re-run before/after projection comparison after the archetype restore to quantify how many rows moved.
 - [ ] Check whether low-edge side flips are acceptable or whether probability calibration still needs tightening.
+- [ ] Re-run full settled-prop holdout after role-aware minutes rollout (early minutes-only holdout delta: MAE `-0.074`, RMSE `-0.106`, bias `-0.034`).
 
 ## Data / Evaluation Follow-Up
 

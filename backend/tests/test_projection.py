@@ -32,7 +32,7 @@ from backend.app.main import app, import_espn_history as import_espn_history_end
 from backend.app import main as main_module
 from backend.app.odds import american_to_implied_probability, expected_value
 from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies, sync_prop_lines_from_sportsbook
-from backend.app.player_prop_model import _classify_minutes_role, _player_archetype_profile, _project_minutes, clear_model_cache, feature_snapshot
+from backend.app.player_prop_model import _classify_minutes_role, _injury_adjustment_for_prop, _player_archetype_profile, _project_minutes, _stabilize_learned_projection, clear_model_cache, feature_snapshot, FeatureSnapshot, FEATURE_NAMES
 from backend.app.player_prop_model import _market_value as learned_market_value
 from backend.app.player_prop_model import MODEL_VERSION
 from backend.app.player_prop_model import train_market_model, train_minutes_model
@@ -690,6 +690,65 @@ def test_feature_snapshot_ignores_later_injury_rows() -> None:
     assert adjusted.component_projection == baseline.component_projection
 
 
+def test_injury_adjustment_ignores_teammate_games_after_as_of_date() -> None:
+    with connect() as conn:
+        team_id = int(conn.execute("SELECT id FROM teams ORDER BY id LIMIT 1").fetchone()["id"])
+        opp_id = int(conn.execute("SELECT id FROM teams WHERE id != ? ORDER BY id LIMIT 1", (team_id,)).fetchone()["id"])
+        conn.executemany(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            [
+                (9101, "Target Guard", team_id, "G", "starter"),
+                (9102, "Injured Teammate", team_id, "G", "starter"),
+            ],
+        )
+        game_rows = [
+            (9201, "2026-05-01", "2026-05-01T23:00:00Z"),
+            (9202, "2026-05-02", "2026-05-02T23:00:00Z"),
+            (9203, "2026-05-03", "2026-05-03T23:00:00Z"),
+            (9204, "2026-05-04", "2026-05-04T23:00:00Z"),
+            (9205, "2026-05-05", "2026-05-05T23:00:00Z"),
+            (9206, "2026-05-06", "2026-05-06T23:00:00Z"),
+            (9207, "2026-05-10", "2026-05-10T23:00:00Z"),
+        ]
+        for game_id, game_date, start_time in game_rows:
+            conn.execute(
+                """
+                INSERT INTO games (
+                    id, game_date, start_time, home_team_id, away_team_id, status,
+                    rest_days_home, rest_days_away, spread_home, game_total
+                ) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, -4.5, 162.0)
+                """,
+                (game_id, game_date, start_time, team_id, opp_id),
+            )
+            conn.executemany(
+                """
+                INSERT INTO player_game_stats (
+                    player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (9101, game_id, 32, 14, 4, 5, 1, 1, 0, 2),
+                    (9102, game_id, 28, 10 if game_id < 9207 else 40, 3, 2, 0, 0, 0, 1),
+                ],
+            )
+        conn.execute(
+            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
+            (9102, "out", "test injury", "2026-05-04T12:00:00Z"),
+        )
+
+        injury = _injury_adjustment_for_prop(
+            conn,
+            player_id=9101,
+            team_id=team_id,
+            rotation_role="starter",
+            as_of_date="2026-05-06",
+        )
+
+    assert injury["status"] == "available"
+    assert injury["minutes_delta"] == 0.8
+    assert injury["usage_multiplier"] == pytest.approx(1.1125)
+
+
 def test_walk_forward_training_saves_model_run() -> None:
     load_test_history()
     with connect() as conn:
@@ -740,6 +799,24 @@ def test_run_parameter_tuning_returns_ranked_candidates() -> None:
     assert result["candidates"][1]["rank"] == 2
     assert result["best_candidate"]["summary"]["avg_mae"] is not None
     assert result["best_candidate"]["summary"]["total_rows"] > 0
+
+
+def test_market_specific_stabilization_is_stricter_for_noisy_markets() -> None:
+    values = [0.0 for _ in FEATURE_NAMES]
+    values[FEATURE_NAMES.index("weighted_recent")] = 20.0
+    values[FEATURE_NAMES.index("last_10_avg")] = 20.0
+    values[FEATURE_NAMES.index("rate_projection")] = 20.0
+    values[FEATURE_NAMES.index("component_projection")] = 20.0
+    values[FEATURE_NAMES.index("ewma_minutes")] = 30.0
+    values[FEATURE_NAMES.index("minutes_trend")] = 0.0
+    snapshot = FeatureSnapshot(values=values, component_projection=20.0, reason="test")
+
+    points_projection, points_note = _stabilize_learned_projection(5.0, snapshot, "points")
+    blocks_projection, blocks_note = _stabilize_learned_projection(5.0, snapshot, "blocks")
+
+    assert points_note == "stabilized up (0.25x anchor)"
+    assert blocks_note == "stabilized up (0.25x anchor)"
+    assert blocks_projection > points_projection
 
 
 def test_train_market_model_uses_active_non_sqlite_connection(monkeypatch) -> None:

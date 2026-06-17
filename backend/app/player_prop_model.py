@@ -99,8 +99,10 @@ class ModelTuningConfig:
 DEFAULT_TUNING_CONFIG = ModelTuningConfig()
 
 _CONNECTION_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | None] = {}
-_CONNECTION_MINUTES_MODEL_CACHE: dict[tuple[int, ModelTuningConfig], RidgeModel | None] = {}
+_CONNECTION_MINUTES_MODEL_CACHE: dict[tuple[int, str | None, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_GAME_TOTAL_MEAN_CACHE: dict[int, float] = {}
+
+MINUTES_ROLE_BUCKETS = ["core_starter", "starter_volatile", "rotation", "bench", "fringe"]
 
 
 @dataclass(frozen=True)
@@ -268,6 +270,14 @@ def _stabilize_learned_projection(
     if minute_ratio > 1.08:
         high_guard = _scaled_high_guard(1.35, tuning.stabilization_scale)
 
+    market_low_guard, market_high_guard = _market_stabilization_profile(market)
+    low_guard = max(low_guard, market_low_guard)
+    high_guard = min(high_guard, market_high_guard)
+    if low_guard >= high_guard:
+        midpoint = (low_guard + high_guard) / 2.0
+        low_guard = midpoint - 0.02
+        high_guard = midpoint + 0.02
+
     adjusted = learned
     if ratio < low_guard:
         floor = anchor * low_guard
@@ -280,6 +290,20 @@ def _stabilize_learned_projection(
         adjusted = min(adjusted, cap)
         return max(0.0, adjusted), f"stabilized down ({ratio:.2f}x anchor)"
     return learned, "no stabilization"
+
+
+def _market_stabilization_profile(market: str) -> tuple[float, float]:
+    if market in {"points", "rebounds", "assists"}:
+        return 0.80, 1.28
+    if market == "threes":
+        return 0.82, 1.22
+    if market in {"points_rebounds", "points_assists", "rebounds_assists"}:
+        return 0.85, 1.18
+    if market == "points_rebounds_assists":
+        return 0.88, 1.15
+    if market in {"steals", "blocks", "blocks_steals"}:
+        return 0.90, 1.12
+    return 0.84, 1.20
 
 
 def feature_snapshot(
@@ -668,12 +692,16 @@ def _historical_training_features(
     ]
 
 
-@lru_cache(maxsize=8)
-def _train_minutes_model_cached(db_path: str, config: ModelTuningConfig) -> RidgeModel | None:
+@lru_cache(maxsize=32)
+def _train_minutes_model_cached(
+    db_path: str,
+    config: ModelTuningConfig,
+    role_bucket: str | None = None,
+) -> RidgeModel | None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        return _train_minutes_model_uncached(conn, config=config)
+        return _train_minutes_model_uncached(conn, config=config, role_bucket=role_bucket)
     finally:
         conn.close()
 
@@ -681,19 +709,22 @@ def _train_minutes_model_cached(db_path: str, config: ModelTuningConfig) -> Ridg
 def train_minutes_model(
     conn: sqlite3.Connection,
     config: ModelTuningConfig | None = None,
+    role_bucket: str | None = None,
 ) -> RidgeModel | None:
     tuning = config or DEFAULT_TUNING_CONFIG
+    bucket = role_bucket if role_bucket in set(MINUTES_ROLE_BUCKETS) else None
+    cache_market = f"minutes:{bucket or 'all'}"
     if not isinstance(conn, sqlite3.Connection):
-        key = (id(conn), tuning)
+        key = (id(conn), bucket, tuning)
         if key not in _CONNECTION_MINUTES_MODEL_CACHE:
-            _CONNECTION_MINUTES_MODEL_CACHE[key] = _train_minutes_model_uncached(conn, config=tuning)
+            _CONNECTION_MINUTES_MODEL_CACHE[key] = _train_minutes_model_uncached(conn, config=tuning, role_bucket=bucket)
         return _CONNECTION_MINUTES_MODEL_CACHE[key]
     db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
-    cache_key = _model_cache_key(conn, db_path, "minutes", tuning, kind="minutes")
+    cache_key = _model_cache_key(conn, db_path, cache_market, tuning, kind="minutes")
     cached_model = _load_cached_model(cache_key)
     if cached_model is not None:
         return cached_model
-    return _train_minutes_model_cached(db_path, tuning)
+    return _train_minutes_model_cached(db_path, tuning, bucket)
 
 
 def prewarm_model_cache(conn: sqlite3.Connection, config: ModelTuningConfig | None = None) -> dict[str, int]:
@@ -701,6 +732,9 @@ def prewarm_model_cache(conn: sqlite3.Connection, config: ModelTuningConfig | No
     warmed = {"minutes": 0, "markets": 0}
     if train_minutes_model(conn, config=tuning) is not None:
         warmed["minutes"] = 1
+    for bucket in MINUTES_ROLE_BUCKETS:
+        if train_minutes_model(conn, config=tuning, role_bucket=bucket) is not None:
+            warmed["minutes"] += 1
     for market in TRAINING_MARKETS:
         if train_market_model(conn, market, config=tuning) is not None:
             warmed["markets"] += 1
@@ -710,18 +744,25 @@ def prewarm_model_cache(conn: sqlite3.Connection, config: ModelTuningConfig | No
 def _train_minutes_model_uncached(
     conn: sqlite3.Connection,
     config: ModelTuningConfig | None = None,
+    role_bucket: str | None = None,
 ) -> RidgeModel | None:
-    rows = _minutes_training_rows(conn)
-    model = _fit_model_from_rows("minutes", rows, config=config)
+    bucket = role_bucket if role_bucket in set(MINUTES_ROLE_BUCKETS) else None
+    rows = _minutes_training_rows(conn, role_bucket=bucket)
+    model = _fit_model_from_rows(f"minutes:{bucket or 'all'}", rows, config=config)
     if model is not None:
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
-        cache_key = _model_cache_key(conn, db_path, "minutes", config or DEFAULT_TUNING_CONFIG, kind="minutes")
+        cache_market = f"minutes:{bucket or 'all'}"
+        cache_key = _model_cache_key(conn, db_path, cache_market, config or DEFAULT_TUNING_CONFIG, kind="minutes")
         _store_cached_model(cache_key, model, config or DEFAULT_TUNING_CONFIG)
     return model
 
 
-def _minutes_training_rows(conn: sqlite3.Connection) -> list[tuple[list[float], float]]:
+def _minutes_training_rows(
+    conn: sqlite3.Connection,
+    role_bucket: str | None = None,
+) -> list[tuple[list[float], float]]:
     samples = []
+    bucket_filter = role_bucket if role_bucket in set(MINUTES_ROLE_BUCKETS) else None
     players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
     for player in players:
         rows = conn.execute(
@@ -759,6 +800,13 @@ def _minutes_training_rows(conn: sqlite3.Connection) -> list[tuple[list[float], 
             recent_minutes_avg = sum(newest_minutes[:5]) / min(len(newest_minutes), 5)
             last_10_minutes_avg = sum(newest_minutes) / len(newest_minutes)
             recent_absence_days = _days_between_game_dates(previous_game_date, str(current["game_date"]))
+            injury = _injury_adjustment_for_prop(
+                conn,
+                player_id=int(current["player_id"]),
+                team_id=int(current["team_id"]),
+                rotation_role=str(current["rotation_role"] or "starter"),
+                as_of_date=str(current["game_date"]),
+            )
             role_state = _classify_minutes_role(
                 rotation_role=str(current["rotation_role"] or "starter"),
                 recent_minutes_avg=recent_minutes_avg,
@@ -766,10 +814,12 @@ def _minutes_training_rows(conn: sqlite3.Connection) -> list[tuple[list[float], 
                 ewma_minutes=ewma_minutes,
                 minutes_trend=minutes_trend,
                 minute_volatility=minute_volatility,
-                injury_status="available",
-                injury_delta=0.0,
+                injury_status=str(injury["status"]),
+                injury_delta=float(injury["minutes_delta"]),
                 recent_absence_days=recent_absence_days,
             )
+            if bucket_filter is not None and role_state.bucket != bucket_filter:
+                continue
             features = _minutes_feature_values(
                 role_state=role_state,
                 ewma_minutes=ewma_minutes,
@@ -780,7 +830,7 @@ def _minutes_training_rows(conn: sqlite3.Connection) -> list[tuple[list[float], 
                 rest_days=int(context["rest_days"]),
                 is_home=bool(context["is_home"]),
                 spread_abs=abs(float(context["team_spread"])) if context["team_spread"] is not None else 0.0,
-                injury_delta=0.0,
+                injury_delta=float(injury["minutes_delta"]),
                 recent_absence_days=recent_absence_days,
             )
             samples.append((features, float(current["minutes"])))
@@ -833,7 +883,11 @@ def _project_minutes(
     learned_minutes = None
     blend_note = "heuristic only"
     if conn is not None:
-        minutes_model = train_minutes_model(conn)
+        minutes_model = train_minutes_model(conn, role_bucket=role_state.bucket)
+        model_scope = f"role {role_state.bucket}"
+        if minutes_model is None:
+            minutes_model = train_minutes_model(conn)
+            model_scope = "global"
         if minutes_model is not None:
             minutes_features = _minutes_feature_values(
                 role_state=role_state,
@@ -856,7 +910,7 @@ def _project_minutes(
                 recent_absence_days=recent_absence_days,
             )
             projected = ((1.0 - blend_weight) * projected) + (blend_weight * learned_minutes)
-            blend_note = f"learned blend {blend_weight:.0%}"
+            blend_note = f"learned blend {blend_weight:.0%} ({model_scope})"
     lower_bound, upper_bound = _role_aware_minutes_bounds(
         role_state,
         last_10_minutes_avg=last_10_minutes_avg,
@@ -1731,6 +1785,7 @@ def _injury_adjustment_for_prop(
                         FROM player_game_stats s
                         JOIN games g ON g.id = s.game_id
                         WHERE s.player_id = p.id
+                          {"AND DATE(g.game_date) <= DATE(?)" if as_of_date else ""}
                         ORDER BY g.game_date DESC
                         LIMIT 10
                     ) sample
@@ -1749,7 +1804,7 @@ def _injury_adjustment_for_prop(
                 {"AND DATE(i2.captured_at) <= DATE(?)" if as_of_date else ""}
           )
         """,
-        (team_id, player_id, *injury_cutoff_params, *injury_cutoff_params),
+        (*injury_cutoff_params, team_id, player_id, *injury_cutoff_params, *injury_cutoff_params),
     ).fetchall()
     miss_weight = {
         "out": 1.0,
