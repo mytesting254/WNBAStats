@@ -31,8 +31,25 @@ from backend.app.history_import import determine_ats_result
 from backend.app.main import app, import_espn_history as import_espn_history_endpoint, model_performance
 from backend.app import main as main_module
 from backend.app.odds import american_to_implied_probability, expected_value
-from backend.app.odds_import import RAW_CACHE_NAME, _merge_event_cache, import_the_odds_api_props, line_discrepancies, sync_prop_lines_from_sportsbook
-from backend.app.player_prop_model import _classify_minutes_role, _injury_adjustment_for_prop, _player_archetype_profile, _project_minutes, _stabilize_learned_projection, clear_model_cache, feature_snapshot, FeatureSnapshot, FEATURE_NAMES
+from backend.app.odds_import import (
+    RAW_CACHE_NAME,
+    SyncPropLinesResult,
+    _merge_event_cache,
+    import_the_odds_api_props,
+    line_discrepancies,
+    sync_prop_lines_from_sportsbook,
+)
+from backend.app.player_prop_model import (
+    FEATURE_NAMES,
+    FeatureSnapshot,
+    _classify_minutes_role,
+    _injury_adjustment_for_prop,
+    _player_archetype_profile,
+    _project_minutes,
+    _stabilize_learned_projection,
+    clear_model_cache,
+    feature_snapshot,
+)
 from backend.app.player_prop_model import _market_value as learned_market_value
 from backend.app.player_prop_model import MODEL_VERSION
 from backend.app.player_prop_model import train_market_model, train_minutes_model
@@ -1068,6 +1085,41 @@ def test_repair_current_slate_props_targets_only_active_games() -> None:
     assert result["synced_props"] >= 1
     assert active_prop_lines >= 1
     assert stale_prop_lines == 0
+
+
+def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch) -> None:
+    rebuild_calls: list[tuple[list[int] | None, list[int] | None]] = []
+
+    def fake_sync(conn, **kwargs):
+        assert kwargs["game_ids"] == [9910]
+        assert kwargs["include_change_details"] is True
+        assert kwargs["rebuild_predictions_after"] is False
+        return SyncPropLinesResult(
+            synced_props=2,
+            changed_prop_line_ids=[501, 502],
+            touched_game_ids=[9910],
+        )
+
+    def fake_rebuild(conn, game_ids=None, prop_line_ids=None):
+        rebuild_calls.append(
+            (
+                list(game_ids) if game_ids is not None else None,
+                list(prop_line_ids) if prop_line_ids is not None else None,
+            )
+        )
+        return []
+
+    monkeypatch.setattr(main_module, "_active_slate_game_ids", lambda conn: [9910])
+    monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fake_sync)
+    monkeypatch.setattr(main_module, "rebuild_predictions", fake_rebuild)
+    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: None)
+
+    with connect() as conn:
+        result = main_module._repair_current_slate_props(conn)
+
+    assert rebuild_calls == [([9910], [501, 502])]
+    assert result["changed_prop_line_ids"] == [501, 502]
+    assert result["rebuilt_predictions"] == 0
 
 
 def test_game_projection_returns_picks() -> None:

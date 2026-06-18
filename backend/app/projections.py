@@ -262,10 +262,27 @@ def rebuild_predictions(
     conn: sqlite3.Connection,
     game_ids: list[int] | None = None,
     refresh_models: bool = True,
+    prop_line_ids: list[int] | None = None,
 ) -> list[PropProjection]:
     if refresh_models:
         clear_model_cache()
     target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+    target_prop_line_ids = sorted({int(prop_line_id) for prop_line_id in (prop_line_ids or []) if int(prop_line_id) > 0})
+    if target_prop_line_ids and not target_game_ids:
+        placeholders = ",".join("?" for _ in target_prop_line_ids)
+        target_game_ids = [
+            int(row["game_id"])
+            for row in conn.execute(
+                f"""
+                SELECT DISTINCT pl.game_id
+                FROM prop_lines pl
+                JOIN games g ON g.id = pl.game_id
+                WHERE g.status = 'scheduled'
+                  AND pl.id IN ({placeholders})
+                """,
+                tuple(target_prop_line_ids),
+            ).fetchall()
+        ]
     _refresh_scheduled_game_rest_days(conn, game_ids=target_game_ids or None)
     # Defensive cleanup for legacy partial-import states.
     conn.execute(
@@ -289,22 +306,29 @@ def rebuild_predictions(
         )
         """
     )
-    game_filter = ""
-    game_filter_params: tuple[int, ...] = ()
+    filters: list[str] = []
+    filter_params: list[int] = []
     if target_game_ids:
         placeholders = ",".join("?" for _ in target_game_ids)
-        game_filter = f" AND pl.game_id IN ({placeholders})"
-        game_filter_params = tuple(target_game_ids)
+        filters.append(f"pl.game_id IN ({placeholders})")
+        filter_params.extend(target_game_ids)
+    if target_prop_line_ids:
+        placeholders = ",".join("?" for _ in target_prop_line_ids)
+        filters.append(f"pl.id IN ({placeholders})")
+        filter_params.extend(target_prop_line_ids)
+    where_filters = ""
+    if filters:
+        where_filters = " AND " + " AND ".join(filters)
     props = conn.execute(
         """
         SELECT pl.id
         FROM prop_lines pl
         JOIN games g ON g.id = pl.game_id
         WHERE g.status = 'scheduled'
-        """ + game_filter + """
+        """ + where_filters + """
         ORDER BY pl.captured_at DESC
         """,
-        game_filter_params,
+        tuple(filter_params),
     ).fetchall()
     projections = [build_prop_projection(conn, int(row["id"])) for row in props]
     prop_ids = [p.prop_line_id for p in projections]

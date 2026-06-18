@@ -1127,7 +1127,20 @@ function RosterView({
       setSelectedTeam(teams[0]);
     }
   }, [teams, selectedTeam]);
-  const visibleRows = selectedTeam ? roster.filter((item) => item.team === selectedTeam) : roster;
+  const visibleRows = useMemo(() => {
+    const filtered = selectedTeam ? roster.filter((item) => item.team === selectedTeam) : roster;
+    return [...filtered].sort((left, right) => {
+      const impactDelta = (right.player_impact_score ?? -1) - (left.player_impact_score ?? -1);
+      if (impactDelta !== 0) {
+        return impactDelta;
+      }
+      return left.player_name.localeCompare(right.player_name);
+    });
+  }, [roster, selectedTeam]);
+  const teamSummary = visibleRows[0] ?? null;
+  const teamImpactPercent = teamSummary?.team_injury_factor != null
+    ? (1 - teamSummary.team_injury_factor) * 100
+    : null;
 
   return (
     <section className="matchup-list">
@@ -1157,28 +1170,42 @@ function RosterView({
             </button>
           ))}
         </div>
+        {teamSummary ? (
+          <section className="summary-grid">
+            <Metric label="Key absences" value={formatCount(teamSummary.team_missing_key_players)} className="metric-compact" />
+            <Metric label="Team impact" value={teamImpactPercent == null ? "N/A" : `-${teamImpactPercent.toFixed(1)}%`} className="metric-compact" />
+            <Metric label="Penalty score" value={formatMetricNumber(teamSummary.team_penalty_points)} className="metric-compact" />
+            <Metric label="Tracked players" value={formatCount(visibleRows.length)} className="metric-compact" />
+          </section>
+        ) : null}
         <div className="props-table-wrapper">
           <table className="props-table">
             <thead>
               <tr>
-                <th>Team</th>
                 <th>Player</th>
                 <th>Status</th>
+                <th>Role</th>
+                <th>MPG</th>
+                <th>Contrib</th>
+                <th>Impact</th>
                 <th>Updated</th>
               </tr>
             </thead>
             <tbody>
               {visibleRows.map((item) => (
                 <tr key={`${item.team}-${item.player_name}-${item.status}`}>
-                  <td>{item.team}</td>
                   <td>{item.player_name}</td>
                   <td><span className={`status-pill ${statusClass(item.status)}`}>{item.status}</span></td>
+                  <td>{formatRosterRole(item.rotation_role)}</td>
+                  <td>{formatMetricNumber(item.recent_minutes_avg, 1)}</td>
+                  <td>{formatMetricNumber(item.recent_contribution_avg, 1)}</td>
+                  <td>{formatMetricNumber(item.player_impact_score, 1)}</td>
                   <td>{item.captured_at ? formatDate(item.captured_at) : "N/A"}</td>
                 </tr>
               ))}
               {!visibleRows.length && (
                 <tr>
-                  <td colSpan={4}>No Rotowire lineup rows available yet. Run injury import or reload matchups to refresh lineups.</td>
+                  <td colSpan={7}>No Rotowire lineup rows available yet. Run injury import or reload matchups to refresh lineups.</td>
                 </tr>
               )}
             </tbody>
@@ -1198,6 +1225,16 @@ function statusClass(status: string) {
     return "gtd";
   }
   return "confirmed";
+}
+
+function formatRosterRole(role?: string | null) {
+  if (!role) {
+    return "N/A";
+  }
+  return role
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function buildEspnOperationStatus({

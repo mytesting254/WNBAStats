@@ -19,6 +19,13 @@
 - [ ] Measure live current-slate repair timing after the guarded repair restore.
 - [ ] Confirm Nyara Sabally rebounds and other weak-edge modeled props are visible in the live matchup/parlay UI after hard refresh.
 
+## Current Repair-Path Optimization Work
+
+- [x] Rebuild only changed `prop_lines` during current-slate repair instead of rebuilding every scheduled prop in the touched games.
+- [ ] Add per-run caching for repeated `feature_snapshot()` inputs during rebuild.
+- [ ] Batch current-slate rebuild work per game to reduce lock duration and improve recovery.
+- [ ] Investigate duplicate player identities that may create unnecessary joins and duplicate prop rows.
+
 ## Current Model Quality Follow-Up
 
 - [ ] Review active-slate props after restoring minutes, total calibration, and archetypes to see whether outputs still look too aggressive or too weak.

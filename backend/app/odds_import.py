@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -56,6 +57,13 @@ TEAM_ALIASES = {
     "toronto tempo": "TOR",
     "washington mystics": "WSH",
 }
+
+
+@dataclass(frozen=True)
+class SyncPropLinesResult:
+    synced_props: int
+    changed_prop_line_ids: list[int]
+    touched_game_ids: list[int]
 
 
 def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = False) -> dict:
@@ -134,7 +142,8 @@ def sync_prop_lines_from_sportsbook(
     fast_fail: bool = False,
     game_ids: list[int] | tuple[int, ...] | None = None,
     rebuild_predictions_after: bool = True,
-) -> int:
+    include_change_details: bool = False,
+) -> int | SyncPropLinesResult:
     target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
     game_filter = ""
     game_filter_params: tuple[int, ...] = ()
@@ -349,18 +358,37 @@ def sync_prop_lines_from_sportsbook(
             """,
             game_filter_params,
         )
+        changed_prop_line_ids: list[int] = []
         if insert_rows:
-            conn.executemany(
-                """
-                INSERT INTO prop_lines (
-                    game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                insert_rows,
-            )
+            if include_change_details:
+                for insert_row in insert_rows:
+                    cursor = conn.execute(
+                        """
+                        INSERT INTO prop_lines (
+                            game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        insert_row,
+                    )
+                    changed_prop_line_ids.append(int(cursor.lastrowid))
+            else:
+                conn.executemany(
+                    """
+                    INSERT INTO prop_lines (
+                        game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    insert_rows,
+                )
         if rebuild_predictions_after and touched_game_ids:
             rebuild_predictions(conn, game_ids=touched_game_ids, refresh_models=False)
         conn.commit()
+        if include_change_details:
+            return SyncPropLinesResult(
+                synced_props=len(rows),
+                changed_prop_line_ids=changed_prop_line_ids,
+                touched_game_ids=touched_game_ids,
+            )
         return len(rows)
     except sqlite3.OperationalError as exc:
         if "database is locked" in str(exc).lower():

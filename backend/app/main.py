@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 import os
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -29,8 +30,16 @@ from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, 
 from .db import connect, init_db
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
-from .game_predictions import project_game
-from .odds_import import RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME, import_the_odds_api_props, line_discrepancies, list_sportsbook_props, odds_cache_summary, sync_prop_lines_from_sportsbook
+from .game_predictions import _team_injury_impact, project_game
+from .odds_import import (
+    RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME,
+    SyncPropLinesResult,
+    import_the_odds_api_props,
+    line_discrepancies,
+    list_sportsbook_props,
+    odds_cache_summary,
+    sync_prop_lines_from_sportsbook,
+)
 from .projections import rebuild_predictions
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
@@ -247,6 +256,156 @@ def _client_key(request: Request) -> str:
     if request.client and request.client.host:
         return request.client.host
     return "unknown"
+
+
+def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT
+            p.id AS player_id,
+            p.full_name,
+            p.rotation_role
+        FROM players p
+        JOIN teams t ON t.id = p.team_id
+        WHERE lower(p.full_name) = lower(?)
+          AND upper(t.abbreviation) = ?
+        LIMIT 1
+        """,
+        (player_name, team_abbreviation.upper()),
+    ).fetchone()
+    if row:
+        return dict(row)
+
+    abbreviated = re.match(r"^(?P<initial>[A-Za-z])[.\s]+\s*(?P<last>[A-Za-z][A-Za-z' -]+)$", player_name)
+    if not abbreviated:
+        return None
+    like_pattern = f"{abbreviated.group('initial').upper()}% {abbreviated.group('last').strip()}"
+    row = conn.execute(
+        """
+        SELECT
+            p.id AS player_id,
+            p.full_name,
+            p.rotation_role
+        FROM players p
+        JOIN teams t ON t.id = p.team_id
+        WHERE p.full_name LIKE ?
+          AND upper(t.abbreviation) = ?
+        LIMIT 1
+        """,
+        (like_pattern, team_abbreviation.upper()),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def _player_recent_profile(conn: Any, player_id: int) -> dict[str, float | None]:
+    row = conn.execute(
+        """
+        SELECT
+            AVG(sample.minutes) AS recent_minutes_avg,
+            AVG(sample.contrib) AS recent_contribution_avg
+        FROM (
+            SELECT
+                s.minutes AS minutes,
+                (s.points + (0.70 * s.rebounds) + (0.70 * s.assists)) AS contrib
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            WHERE s.player_id = ?
+            ORDER BY g.game_date DESC
+            LIMIT 10
+        ) sample
+        """,
+        (player_id,),
+    ).fetchone()
+    if not row:
+        return {
+            "recent_minutes_avg": None,
+            "recent_contribution_avg": None,
+        }
+    return {
+        "recent_minutes_avg": round(float(row["recent_minutes_avg"]), 1) if row["recent_minutes_avg"] is not None else None,
+        "recent_contribution_avg": round(float(row["recent_contribution_avg"]), 1) if row["recent_contribution_avg"] is not None else None,
+    }
+
+
+def _roster_status_weight(status: str) -> float:
+    return {
+        "OUT": 1.0,
+        "INACTIVE": 1.0,
+        "SUSPENDED": 1.0,
+        "UNAVAILABLE": 1.0,
+        "DOUBTFUL": 0.75,
+        "QUESTIONABLE": 0.35,
+        "GTD": 0.35,
+        "PROBABLE": 0.10,
+    }.get(status.strip().upper(), 0.0)
+
+
+def _roster_role_weight(role: str | None) -> float:
+    return {
+        "star": 1.25,
+        "starter": 1.0,
+        "rotation": 0.75,
+        "bench": 0.5,
+    }.get(str(role or "starter").strip().lower(), 0.9)
+
+
+def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not hasattr(conn, "execute"):
+        return rows
+
+    team_impact_cache: dict[str, dict[str, float | int | str]] = {}
+    enriched: list[dict[str, Any]] = []
+    for row in rows:
+        team = str(row["team"])
+        if team not in team_impact_cache:
+            team_row = conn.execute(
+                """
+                SELECT id
+                FROM teams
+                WHERE upper(abbreviation) = ?
+                LIMIT 1
+                """,
+                (team,),
+            ).fetchone()
+            team_impact_cache[team] = (
+                _team_injury_impact(conn, int(team_row["id"]))
+                if team_row and team_row["id"] is not None
+                else {"factor": 1.0, "missing_key_players": 0, "penalty_points": 0.0}
+            )
+
+        player = _resolve_roster_player(conn, team, str(row["player_name"]))
+        if not player:
+            enriched.append(
+                {
+                    **row,
+                    "rotation_role": None,
+                    "recent_minutes_avg": None,
+                    "recent_contribution_avg": None,
+                    "player_impact_score": None,
+                    "team_injury_factor": team_impact_cache[team]["factor"],
+                    "team_missing_key_players": team_impact_cache[team]["missing_key_players"],
+                    "team_penalty_points": team_impact_cache[team]["penalty_points"],
+                }
+            )
+            continue
+
+        profile = _player_recent_profile(conn, int(player["player_id"]))
+        contribution = float(profile["recent_contribution_avg"] or 0.0)
+        impact_score = contribution * _roster_status_weight(str(row["status"])) * _roster_role_weight(player.get("rotation_role"))
+        enriched.append(
+            {
+                **row,
+                "player_id": int(player["player_id"]),
+                "rotation_role": player.get("rotation_role"),
+                "recent_minutes_avg": profile["recent_minutes_avg"],
+                "recent_contribution_avg": profile["recent_contribution_avg"],
+                "player_impact_score": round(impact_score, 1) if impact_score > 0 else None,
+                "team_injury_factor": team_impact_cache[team]["factor"],
+                "team_missing_key_players": team_impact_cache[team]["missing_key_players"],
+                "team_penalty_points": team_impact_cache[team]["penalty_points"],
+            }
+        )
+    return enriched
 
 
 def _protect_mutation(
@@ -553,18 +712,31 @@ def _repair_current_slate_props(conn) -> dict[str, Any]:
             "synced_props": 0,
             "rebuilt_predictions": 0,
         }
-    synced = sync_prop_lines_from_sportsbook(
+    sync_result = sync_prop_lines_from_sportsbook(
         conn,
         game_ids=target_game_ids,
         fast_fail=True,
         rebuild_predictions_after=False,
+        include_change_details=True,
     )
-    projections = rebuild_predictions(conn, game_ids=target_game_ids, refresh_models=False)
+    if isinstance(sync_result, SyncPropLinesResult):
+        synced = sync_result.synced_props
+        changed_prop_line_ids = sync_result.changed_prop_line_ids
+    else:
+        synced = int(sync_result)
+        changed_prop_line_ids = []
+    projections = rebuild_predictions(
+        conn,
+        game_ids=target_game_ids,
+        prop_line_ids=changed_prop_line_ids or None,
+        refresh_models=False,
+    )
     _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     return {
         "scope": "current_slate",
         "target_game_ids": target_game_ids,
         "synced_props": int(synced),
+        "changed_prop_line_ids": changed_prop_line_ids,
         "rebuilt_predictions": len(projections),
     }
 
@@ -2273,27 +2445,28 @@ def roster(response: Response) -> list[dict]:
             except Exception:
                 # Keep roster endpoint non-fatal so dashboard loads even if live Rotowire fetch fails.
                 pass
-        payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
-        rows = payload.get("rows", []) if isinstance(payload, dict) else []
-        captured_at = payload.get("captured_at") if isinstance(payload, dict) else None
-        normalized = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            team = str(row.get("team") or "").strip().upper()
-            player_name = str(row.get("player_name") or "").strip()
-            status = str(row.get("status") or "").strip().upper()
-            if not team or not player_name or not status:
-                continue
-            normalized.append(
-                {
-                    "team": team,
-                    "player_name": player_name,
-                    "status": status,
-                    "captured_at": captured_at,
-                }
-            )
-        return sorted(normalized, key=lambda item: (item["team"], item["player_name"]))
+            payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
+            rows = payload.get("rows", []) if isinstance(payload, dict) else []
+            captured_at = payload.get("captured_at") if isinstance(payload, dict) else None
+            normalized = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                team = str(row.get("team") or "").strip().upper()
+                player_name = str(row.get("player_name") or "").strip()
+                status = str(row.get("status") or "").strip().upper()
+                if not team or not player_name or not status:
+                    continue
+                normalized.append(
+                    {
+                        "team": team,
+                        "player_name": player_name,
+                        "status": status,
+                        "captured_at": captured_at,
+                    }
+                )
+            normalized.sort(key=lambda item: (item["team"], item["player_name"]))
+            return _build_roster_enrichment(conn, normalized)
 
     payload, status, compute_ms = _read_through_cache_with_meta(
         ROSTER_CACHE_NAME,
