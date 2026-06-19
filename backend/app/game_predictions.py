@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import sqlite3
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 TOTAL_CALIBRATION_MIN_SAMPLES = 12
@@ -9,6 +11,34 @@ TOTAL_MARKET_BLEND_WEIGHT = 0.3
 TOTAL_MARKET_EDGE_CAP = 12.0
 TOTAL_SCALE_MIN = 0.985
 TOTAL_SCALE_MAX = 1.03
+GAME_EDGE_MODEL_MIN_ROWS = 15
+GAME_EDGE_MODEL_MAX_ADJUSTMENT = 8.0
+GAME_MARGIN_BLEND_WEIGHT = 0.16
+GAME_TOTAL_BLEND_WEIGHT = 0.18
+GAME_MARGIN_FEATURE_NAMES = [
+    "projected_margin",
+    "market_edge",
+    "spread_home",
+    "rest_days_home",
+    "rest_days_away",
+]
+GAME_TOTAL_FEATURE_NAMES = [
+    "projected_total",
+    "market_edge",
+    "game_total",
+    "rest_days_home",
+    "rest_days_away",
+]
+
+
+@dataclass(frozen=True)
+class _GameEdgeModel:
+    edge_type: str
+    rows: int
+    intercept: float
+    coefficients: list[float]
+    feature_means: list[float]
+    feature_scales: list[float]
 
 
 class _GamePredictionCache:
@@ -140,27 +170,55 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     spread_home = float(game["spread_home"]) if game["spread_home"] is not None else None
     game_total = float(game["game_total"]) if game["game_total"] is not None and float(game["game_total"]) > 0 else None
     calibrated_total = _calibrate_total_projection(conn, projected_total, game_total)
+    residual_notes: list[str] = []
+
+    adjusted_margin = projected_margin
+    if spread_home is not None:
+        adjusted_margin, margin_note = _apply_game_margin_residual(
+            conn,
+            projected_margin,
+            spread_home,
+            int(game["rest_days_home"] or 2),
+            int(game["rest_days_away"] or 2),
+        )
+        if margin_note:
+            residual_notes.append(margin_note)
+
+    adjusted_total = calibrated_total
+    if game_total is not None:
+        adjusted_total, total_note = _apply_game_total_residual(
+            conn,
+            calibrated_total,
+            game_total,
+            int(game["rest_days_home"] or 2),
+            int(game["rest_days_away"] or 2),
+        )
+        if total_note:
+            residual_notes.append(total_note)
+
+    home_projection = max(0.0, (adjusted_total + adjusted_margin) / 2)
+    away_projection = max(0.0, adjusted_total - home_projection)
 
     ats_edge = None
     ats_pick = "N/A"
     if spread_home is not None:
-        ats_edge = projected_margin + spread_home
+        ats_edge = adjusted_margin + spread_home
         ats_pick = f"{game['home_team']} {format_spread(spread_home)}" if ats_edge > 0 else f"{game['away_team']} {format_spread(-spread_home)}"
 
     total_edge = None
     total_pick = "N/A"
     if game_total is not None:
-        total_edge = calibrated_total - game_total
+        total_edge = adjusted_total - game_total
         total_pick = "Over" if total_edge > 0 else "Under"
 
-    winner = game["home_team"] if projected_margin >= 0 else game["away_team"]
-    confidence = _confidence(abs(ats_edge or 0), abs(total_edge or 0), abs(projected_margin))
+    winner = game["home_team"] if adjusted_margin >= 0 else game["away_team"]
+    confidence = _confidence(abs(ats_edge or 0), abs(total_edge or 0), abs(adjusted_margin))
 
     return {
         "home_projected_points": round(home_projection, 1),
         "away_projected_points": round(away_projection, 1),
-        "projected_margin": round(projected_margin, 1),
-        "projected_total": round(calibrated_total, 1),
+        "projected_margin": round(adjusted_margin, 1),
+        "projected_total": round(adjusted_total, 1),
         "winner_pick": winner,
         "ats_pick": ats_pick,
         "ats_edge": round(ats_edge, 1) if ats_edge is not None else None,
@@ -170,14 +228,15 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
         "game_reason": _reason(
             home_projection,
             away_projection,
-            projected_margin,
-            calibrated_total,
+            adjusted_margin,
+            adjusted_total,
             home_history_count,
             away_history_count,
             game["home_team"],
             game["away_team"],
             home_injury,
             away_injury,
+            residual_notes,
         ),
     }
 
@@ -319,20 +378,428 @@ def _reason(
     away_team: str,
     home_injury: Mapping[str, float | int | str],
     away_injury: Mapping[str, float | int | str],
+    residual_notes: list[str] | None = None,
 ) -> str:
     injury_detail = _injury_reason_detail(home_team, away_team, home_injury, away_injury)
+    residual_detail = ""
+    if residual_notes:
+        residual_detail = " Residual adjustments: " + "; ".join(residual_notes) + "."
     if min(home_history_count, away_history_count) < 3:
         return (
             f"Projected score {home_projection:.1f}-{away_projection:.1f}; margin {margin:.1f}, total {total:.1f}. "
             f"Limited imported history for this matchup ({home_history_count} home-team rows, "
             f"{away_history_count} away-team rows), so treat this as a market/context view, not a model edge."
-            f"{injury_detail}"
+            f"{injury_detail}{residual_detail}"
         )
     return (
         f"Projected score {home_projection:.1f}-{away_projection:.1f}; "
         f"margin {margin:.1f}, total {total:.1f}. Built from recent scoring, season scoring, "
-        f"opponent points allowed, pace, home/away, rest, and injury availability.{injury_detail}"
+        f"opponent points allowed, pace, home/away, rest, injury availability, and settled game residuals.{injury_detail}{residual_detail}"
     )
+
+
+def _apply_game_margin_residual(
+    conn: sqlite3.Connection,
+    projected_margin: float,
+    spread_home: float,
+    rest_days_home: int,
+    rest_days_away: int,
+) -> tuple[float, str | None]:
+    model = _train_game_edge_model(conn, "margin")
+    if model is None:
+        return projected_margin, None
+    features = [
+        projected_margin,
+        projected_margin + spread_home,
+        spread_home,
+        float(rest_days_home),
+        float(rest_days_away),
+    ]
+    predicted_edge = _predict_game_edge(model, features)
+    margin_from_model = predicted_edge - spread_home
+    weight = _game_edge_blend_weight(model.rows, "margin")
+    adjusted = ((1 - weight) * projected_margin) + (weight * margin_from_model)
+    return adjusted, f"ATS residual blend {weight:.0%} ({model.rows} settled rows)"
+
+
+def _apply_game_total_residual(
+    conn: sqlite3.Connection,
+    projected_total: float,
+    game_total: float,
+    rest_days_home: int,
+    rest_days_away: int,
+) -> tuple[float, str | None]:
+    model = _train_game_edge_model(conn, "total")
+    if model is None:
+        return projected_total, None
+    features = [
+        projected_total,
+        projected_total - game_total,
+        game_total,
+        float(rest_days_home),
+        float(rest_days_away),
+    ]
+    predicted_edge = _predict_game_edge(model, features)
+    total_from_model = game_total + predicted_edge
+    weight = _game_edge_blend_weight(model.rows, "total")
+    adjusted = ((1 - weight) * projected_total) + (weight * total_from_model)
+    return adjusted, f"total residual blend {weight:.0%} ({model.rows} settled rows)"
+
+
+def _train_game_edge_model(conn: sqlite3.Connection, edge_type: str) -> _GameEdgeModel | None:
+    rows = _game_edge_training_rows(conn, edge_type)
+    if len(rows) < GAME_EDGE_MODEL_MIN_ROWS:
+        return None
+    return _fit_game_edge_model(edge_type, rows)
+
+
+def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
+    rows = conn.execute(
+        """
+        SELECT
+            g.game_date,
+            gp.id AS game_prediction_id,
+            gp.projected_margin,
+            gp.projected_total,
+            gp.spread_home,
+            gp.game_total,
+            gp.home_rest_days,
+            gp.away_rest_days,
+            sgp.actual_margin,
+            sgp.actual_total
+        FROM settled_game_predictions sgp
+        JOIN game_predictions gp ON gp.id = sgp.game_prediction_id
+        JOIN games g ON g.id = sgp.game_id
+        ORDER BY g.game_date ASC, gp.id ASC
+        """
+    ).fetchall()
+    if not rows:
+        empty = _empty_game_metric()
+        return {
+            "game_ats": empty.copy(),
+            "game_total": empty.copy(),
+            "game_overall": empty.copy(),
+        }
+
+    margin_training_rows: list[tuple[list[float], float]] = []
+    total_training_rows: list[tuple[list[float], float]] = []
+    ats_records: list[tuple[float, float, float]] = []
+    total_records: list[tuple[float, float, float]] = []
+
+    for row in rows:
+        spread_home = row["spread_home"]
+        if spread_home is not None and row["projected_margin"] is not None and row["actual_margin"] is not None:
+            projected_margin = float(row["projected_margin"])
+            spread_home_value = float(spread_home)
+            rest_days_home = int(row["home_rest_days"] or 2)
+            rest_days_away = int(row["away_rest_days"] or 2)
+            baseline_edge = projected_margin + spread_home_value
+            adjusted_margin = projected_margin
+            if len(margin_training_rows) >= GAME_EDGE_MODEL_MIN_ROWS:
+                model = _fit_game_edge_model("margin", margin_training_rows)
+                features = [
+                    projected_margin,
+                    baseline_edge,
+                    spread_home_value,
+                    float(rest_days_home),
+                    float(rest_days_away),
+                ]
+                predicted_edge = _predict_game_edge(model, features)
+                margin_from_model = predicted_edge - spread_home_value
+                weight = _game_edge_blend_weight(model.rows, "margin")
+                adjusted_margin = ((1 - weight) * projected_margin) + (weight * margin_from_model)
+            adjusted_edge = adjusted_margin + spread_home_value
+            actual_edge = float(row["actual_margin"]) + spread_home_value
+            ats_records.append((baseline_edge, adjusted_edge, actual_edge))
+            margin_training_rows.append(
+                (
+                    [
+                        projected_margin,
+                        baseline_edge,
+                        spread_home_value,
+                        float(rest_days_home),
+                        float(rest_days_away),
+                    ],
+                    actual_edge,
+                )
+            )
+
+        game_total = row["game_total"]
+        if game_total is not None and float(game_total) > 0 and row["projected_total"] is not None and row["actual_total"] is not None:
+            projected_total = float(row["projected_total"])
+            game_total_value = float(game_total)
+            rest_days_home = int(row["home_rest_days"] or 2)
+            rest_days_away = int(row["away_rest_days"] or 2)
+            baseline_edge = projected_total - game_total_value
+            adjusted_total = projected_total
+            if len(total_training_rows) >= GAME_EDGE_MODEL_MIN_ROWS:
+                model = _fit_game_edge_model("total", total_training_rows)
+                features = [
+                    projected_total,
+                    baseline_edge,
+                    game_total_value,
+                    float(rest_days_home),
+                    float(rest_days_away),
+                ]
+                predicted_edge = _predict_game_edge(model, features)
+                total_from_model = game_total_value + predicted_edge
+                weight = _game_edge_blend_weight(model.rows, "total")
+                adjusted_total = ((1 - weight) * projected_total) + (weight * total_from_model)
+            adjusted_edge = adjusted_total - game_total_value
+            actual_edge = float(row["actual_total"]) - game_total_value
+            total_records.append((baseline_edge, adjusted_edge, actual_edge))
+            total_training_rows.append(
+                (
+                    [
+                        projected_total,
+                        baseline_edge,
+                        game_total_value,
+                        float(rest_days_home),
+                        float(rest_days_away),
+                    ],
+                    actual_edge,
+                )
+            )
+
+    ats_metrics = _game_metric_from_records(ats_records)
+    total_metrics = _game_metric_from_records(total_records)
+    overall_metrics = _combine_game_metric_rows([ats_metrics, total_metrics])
+    return {
+        "game_ats": ats_metrics,
+        "game_total": total_metrics,
+        "game_overall": overall_metrics,
+    }
+
+
+def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[tuple[list[float], float]]:
+    if edge_type == "margin":
+        rows = conn.execute(
+            """
+            SELECT
+                gp.projected_margin,
+                gp.spread_home,
+                gp.home_rest_days,
+                gp.away_rest_days,
+                sgp.actual_margin
+            FROM settled_game_predictions sgp
+            JOIN game_predictions gp ON gp.id = sgp.game_prediction_id
+            WHERE gp.projected_margin IS NOT NULL
+              AND gp.spread_home IS NOT NULL
+              AND sgp.actual_margin IS NOT NULL
+            """
+        ).fetchall()
+        samples = []
+        for row in rows:
+            projected_margin = float(row["projected_margin"])
+            spread_home = float(row["spread_home"])
+            features = [
+                projected_margin,
+                projected_margin + spread_home,
+                spread_home,
+                float(row["home_rest_days"] or 2),
+                float(row["away_rest_days"] or 2),
+            ]
+            samples.append((features, float(row["actual_margin"]) + spread_home))
+        return samples
+
+    rows = conn.execute(
+        """
+        SELECT
+            gp.projected_total,
+            gp.game_total,
+            gp.home_rest_days,
+            gp.away_rest_days,
+            sgp.actual_total
+        FROM settled_game_predictions sgp
+        JOIN game_predictions gp ON gp.id = sgp.game_prediction_id
+        WHERE gp.projected_total IS NOT NULL
+          AND gp.game_total IS NOT NULL
+          AND gp.game_total > 0
+          AND sgp.actual_total IS NOT NULL
+        """
+    ).fetchall()
+    samples = []
+    for row in rows:
+        projected_total = float(row["projected_total"])
+        game_total = float(row["game_total"])
+        features = [
+            projected_total,
+            projected_total - game_total,
+            game_total,
+            float(row["home_rest_days"] or 2),
+            float(row["away_rest_days"] or 2),
+        ]
+        samples.append((features, float(row["actual_total"]) - game_total))
+    return samples
+
+
+def _fit_game_edge_model(
+    edge_type: str,
+    rows: list[tuple[list[float], float]],
+) -> _GameEdgeModel:
+    xs = [row[0] for row in rows]
+    ys = [row[1] for row in rows]
+    means = [sum(values) / len(values) for values in zip(*xs)]
+    scales = []
+    standardized = []
+    for features in xs:
+        standardized.append([])
+        for idx, value in enumerate(features):
+            if len(scales) <= idx:
+                variance = sum((item[idx] - means[idx]) ** 2 for item in xs) / max(len(xs) - 1, 1)
+                scales.append(max(variance ** 0.5, 1.0))
+            standardized[-1].append((value - means[idx]) / scales[idx])
+    coefficients = _ridge_regression(standardized, ys, penalty=1.0)
+    return _GameEdgeModel(
+        edge_type=edge_type,
+        rows=len(rows),
+        intercept=coefficients[0],
+        coefficients=coefficients[1:],
+        feature_means=means,
+        feature_scales=scales,
+    )
+
+
+def _predict_game_edge(model: _GameEdgeModel, features: list[float]) -> float:
+    standardized = [
+        (value - model.feature_means[idx]) / model.feature_scales[idx]
+        for idx, value in enumerate(features)
+    ]
+    prediction = model.intercept + sum(coef * value for coef, value in zip(model.coefficients, standardized))
+    return _clamp(prediction, -GAME_EDGE_MODEL_MAX_ADJUSTMENT, GAME_EDGE_MODEL_MAX_ADJUSTMENT)
+
+
+def _game_edge_blend_weight(rows: int, edge_type: str) -> float:
+    if edge_type == "margin":
+        if rows >= 40:
+            return GAME_MARGIN_BLEND_WEIGHT
+        return 0.10
+    if rows >= 40:
+        return GAME_TOTAL_BLEND_WEIGHT
+    return 0.12
+
+
+def _empty_game_metric() -> dict[str, float | int | None]:
+    return {
+        "rows": 0,
+        "mae": None,
+        "rmse": None,
+        "bias": None,
+        "directional_accuracy": None,
+        "baseline_mae": None,
+        "baseline_rmse": None,
+        "baseline_bias": None,
+        "baseline_directional_accuracy": None,
+        "mae_improvement": None,
+        "rmse_improvement": None,
+        "directional_accuracy_improvement": None,
+    }
+
+
+def _game_metric_from_records(records: list[tuple[float, float, float]]) -> dict[str, float | int | None]:
+    if not records:
+        return _empty_game_metric()
+
+    baseline_errors = [baseline - actual for baseline, _, actual in records]
+    blended_errors = [blended - actual for _, blended, actual in records]
+    baseline_direction_hits = 0
+    blended_direction_hits = 0
+    direction_rows = 0
+    for baseline, blended, actual in records:
+        actual_side = _edge_direction(actual)
+        if actual_side == 0:
+            continue
+        direction_rows += 1
+        if _edge_direction(baseline) == actual_side:
+            baseline_direction_hits += 1
+        if _edge_direction(blended) == actual_side:
+            blended_direction_hits += 1
+
+    row_count = len(records)
+    baseline_mae = sum(abs(error) for error in baseline_errors) / row_count
+    blended_mae = sum(abs(error) for error in blended_errors) / row_count
+    baseline_rmse = math.sqrt(sum(error * error for error in baseline_errors) / row_count)
+    blended_rmse = math.sqrt(sum(error * error for error in blended_errors) / row_count)
+    baseline_bias = sum(baseline_errors) / row_count
+    blended_bias = sum(blended_errors) / row_count
+    baseline_direction = baseline_direction_hits / direction_rows if direction_rows else None
+    blended_direction = blended_direction_hits / direction_rows if direction_rows else None
+    return {
+        "rows": row_count,
+        "mae": round(blended_mae, 3),
+        "rmse": round(blended_rmse, 3),
+        "bias": round(blended_bias, 3),
+        "directional_accuracy": round(blended_direction, 3) if blended_direction is not None else None,
+        "baseline_mae": round(baseline_mae, 3),
+        "baseline_rmse": round(baseline_rmse, 3),
+        "baseline_bias": round(baseline_bias, 3),
+        "baseline_directional_accuracy": round(baseline_direction, 3) if baseline_direction is not None else None,
+        "mae_improvement": round(baseline_mae - blended_mae, 3),
+        "rmse_improvement": round(baseline_rmse - blended_rmse, 3),
+        "directional_accuracy_improvement": (
+            round(blended_direction - baseline_direction, 3)
+            if blended_direction is not None and baseline_direction is not None
+            else None
+        ),
+    }
+
+
+def _combine_game_metric_rows(metrics: list[dict[str, float | int | None]]) -> dict[str, float | int | None]:
+    populated = [metric for metric in metrics if int(metric.get("rows") or 0) > 0]
+    if not populated:
+        return _empty_game_metric()
+    total_rows = sum(int(metric["rows"]) for metric in populated)
+    combined = {
+        "rows": total_rows,
+        "mae": 0.0,
+        "rmse": 0.0,
+        "bias": 0.0,
+        "directional_accuracy": 0.0,
+        "baseline_mae": 0.0,
+        "baseline_rmse": 0.0,
+        "baseline_bias": 0.0,
+        "baseline_directional_accuracy": 0.0,
+        "mae_improvement": 0.0,
+        "rmse_improvement": 0.0,
+        "directional_accuracy_improvement": 0.0,
+    }
+    direction_rows = 0
+    baseline_direction_rows = 0
+    for metric in populated:
+        rows = int(metric["rows"])
+        for key in ("mae", "rmse", "bias", "baseline_mae", "baseline_rmse", "baseline_bias", "mae_improvement", "rmse_improvement"):
+            if metric.get(key) is not None:
+                combined[key] += float(metric[key]) * rows
+        if metric.get("directional_accuracy") is not None:
+            combined["directional_accuracy"] += float(metric["directional_accuracy"]) * rows
+            direction_rows += rows
+        if metric.get("baseline_directional_accuracy") is not None:
+            combined["baseline_directional_accuracy"] += float(metric["baseline_directional_accuracy"]) * rows
+            baseline_direction_rows += rows
+        if metric.get("directional_accuracy_improvement") is not None:
+            combined["directional_accuracy_improvement"] += float(metric["directional_accuracy_improvement"]) * rows
+    return {
+        "rows": total_rows,
+        "mae": round(combined["mae"] / total_rows, 3),
+        "rmse": round(combined["rmse"] / total_rows, 3),
+        "bias": round(combined["bias"] / total_rows, 3),
+        "directional_accuracy": round(combined["directional_accuracy"] / direction_rows, 3) if direction_rows else None,
+        "baseline_mae": round(combined["baseline_mae"] / total_rows, 3),
+        "baseline_rmse": round(combined["baseline_rmse"] / total_rows, 3),
+        "baseline_bias": round(combined["baseline_bias"] / total_rows, 3),
+        "baseline_directional_accuracy": round(combined["baseline_directional_accuracy"] / baseline_direction_rows, 3) if baseline_direction_rows else None,
+        "mae_improvement": round(combined["mae_improvement"] / total_rows, 3),
+        "rmse_improvement": round(combined["rmse_improvement"] / total_rows, 3),
+        "directional_accuracy_improvement": round(combined["directional_accuracy_improvement"] / total_rows, 3) if total_rows else None,
+    }
+
+
+def _edge_direction(value: float) -> int:
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
 
 
 def _team_injury_impact(conn: sqlite3.Connection, team_id: int) -> dict[str, float | int | str]:
@@ -433,3 +900,36 @@ def _injury_reason_detail(
 
 def _clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def _ridge_regression(xs: list[list[float]], ys: list[float], penalty: float) -> list[float]:
+    feature_count = len(xs[0]) + 1
+    matrix = [[0.0 for _ in range(feature_count)] for _ in range(feature_count)]
+    vector = [0.0 for _ in range(feature_count)]
+    for features, target in zip(xs, ys):
+        row = [1.0, *features]
+        for i in range(feature_count):
+            vector[i] += row[i] * target
+            for j in range(feature_count):
+                matrix[i][j] += row[i] * row[j]
+    for i in range(1, feature_count):
+        matrix[i][i] += penalty
+    return _solve_linear_system(matrix, vector)
+
+
+def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
+    size = len(vector)
+    augmented = [row[:] + [vector[idx]] for idx, row in enumerate(matrix)]
+    for col in range(size):
+        pivot = max(range(col, size), key=lambda row: abs(augmented[row][col]))
+        if abs(augmented[pivot][col]) < 1e-9:
+            continue
+        augmented[col], augmented[pivot] = augmented[pivot], augmented[col]
+        divisor = augmented[col][col]
+        augmented[col] = [value / divisor for value in augmented[col]]
+        for row in range(size):
+            if row == col:
+                continue
+            factor = augmented[row][col]
+            augmented[row] = [value - (factor * augmented[col][idx]) for idx, value in enumerate(augmented[row])]
+    return [augmented[row][-1] for row in range(size)]

@@ -9,6 +9,7 @@ from fastapi import Response
 from backend.app import covers_import as covers_import_module
 from backend.app import cache as cache_module
 from backend.app import espn_history as espn_history_module
+from backend.app import projections as projections_module
 from backend.app import rotowire_import as rotowire_import_module
 from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
@@ -26,7 +27,7 @@ from backend.app.covers_import import (
 from backend.app.db import connect, init_db
 from backend.app.espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from backend.app.game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
-from backend.app.game_predictions import project_game
+from backend.app.game_predictions import evaluate_game_residual_models, project_game
 from backend.app.history_import import determine_ats_result
 from backend.app.main import app, import_espn_history as import_espn_history_endpoint, model_performance
 from backend.app import main as main_module
@@ -41,14 +42,18 @@ from backend.app.odds_import import (
 )
 from backend.app.player_prop_model import (
     FEATURE_NAMES,
+    FEATURE_INDEX,
     FeatureSnapshot,
+    RidgeModel,
     _classify_minutes_role,
+    _historical_training_features,
     _injury_adjustment_for_prop,
     _player_archetype_profile,
     _project_minutes,
     _stabilize_learned_projection,
     clear_model_cache,
     feature_snapshot,
+    predict_player_prop,
 )
 from backend.app.player_prop_model import _market_value as learned_market_value
 from backend.app.player_prop_model import MODEL_VERSION
@@ -786,6 +791,28 @@ def test_walk_forward_training_saves_model_run() -> None:
             """,
             (datetime.now(timezone.utc).isoformat(),),
         )
+        captured_at = datetime.now(timezone.utc).isoformat()
+        for prediction_id in range(8900, 8916):
+            conn.execute(
+                """
+                INSERT INTO game_predictions (
+                    id, game_id, model_version, prediction_time, projected_margin, projected_total,
+                    winner_pick, ats_pick, total_pick, confidence, reason,
+                    spread_home, game_total, home_rest_days, away_rest_days
+                ) VALUES (?, ?, ?, ?, 2.0, 154.0, 'NY', 'CON +5.5', 'Under', 'medium', 'training-eval', -5.5, 158.0, 2, 2)
+                """,
+                (prediction_id, 2010, f"training-test-{prediction_id}", captured_at),
+            )
+            conn.execute(
+                """
+                INSERT INTO settled_game_predictions (
+                    game_prediction_id, game_id, home_score, away_score, actual_winner,
+                    actual_margin, actual_total, actual_ats_pick, actual_total_result,
+                    winner_correct, ats_correct, total_correct, settled_at
+                ) VALUES (?, 2010, 88, 79, 'NY', 9.0, 166.0, 'NY', 'Over', 1, 1, 1, ?)
+                """,
+                (prediction_id, captured_at),
+            )
         result = run_walk_forward_training(conn)
         rows = conn.execute("SELECT * FROM model_runs").fetchall()
     assert result["status"] == "completed"
@@ -794,7 +821,13 @@ def test_walk_forward_training_saves_model_run() -> None:
     assert {row["model_version"] for row in rows} == {"adaptive-context-v1", "component-pregame-v2"}
     assert result["metrics"]["points"]["settled_rows"] >= 1
     assert "side_accuracy" in result["metrics"]["points"]
+    assert "residual_rows" in result["metrics"]["points"]
     assert result["metrics"]["overall"]["settled_rows"] >= 1
+    assert "residual_rows" in result["metrics"]["overall"]
+    assert result["metrics"]["game_ats"]["rows"] >= 1
+    assert result["metrics"]["game_total"]["rows"] >= 1
+    assert "baseline_mae" in result["metrics"]["game_ats"]
+    assert "mae_improvement" in result["metrics"]["game_total"]
 
 
 def test_run_parameter_tuning_returns_ranked_candidates() -> None:
@@ -940,6 +973,253 @@ def test_settle_completed_props_writes_actual_results() -> None:
     assert row["team_margin"] == 6.0
     assert row["team_spread"] == -4.5
     assert row["blowout_result"] == "no"
+
+
+def test_settle_completed_props_repairs_incomplete_rows() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    stale_settled_at = "2026-01-01T00:00:00+00:00"
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9102, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        conn.execute(
+            """
+            INSERT INTO settled_props (
+                prop_line_id, actual_result, winning_side, margin, player_minutes, game_margin, team_margin,
+                team_spread, blowout_result, blowout_threshold, settled_at
+            ) VALUES (9102, 19.0, 'under', -1.5, 32.0, NULL, NULL, NULL, 'unknown', NULL, ?)
+            """,
+            (stale_settled_at,),
+        )
+
+        result = settle_completed_props(conn)
+        row = conn.execute("SELECT * FROM settled_props WHERE prop_line_id = 9102").fetchone()
+
+    assert result["settled"] == 0
+    assert result["repaired"] == 1
+    assert row["actual_result"] == 19.0
+    assert row["winning_side"] == "under"
+    assert row["margin"] == -1.5
+    assert row["player_minutes"] == 32.0
+    assert row["game_margin"] == 6.0
+    assert row["team_margin"] == 6.0
+    assert row["team_spread"] == -4.5
+    assert row["blowout_result"] == "no"
+    assert row["blowout_threshold"] == 15.0
+    assert row["settled_at"] != stale_settled_at
+
+
+def test_settle_completed_props_uses_team_history_for_game_context() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute("UPDATE players SET team_id = 3 WHERE id = 1001")
+        conn.execute(
+            """
+            INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at)
+            VALUES (1001, 10, 100, 'test', 1.0, ?)
+            """,
+            (captured_at,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9103, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+
+        result = settle_completed_props(conn)
+        row = conn.execute("SELECT * FROM settled_props WHERE prop_line_id = 9103").fetchone()
+
+    assert result["settled"] == 1
+    assert row["game_margin"] == 6.0
+    assert row["team_margin"] == 6.0
+    assert row["team_spread"] == -4.5
+    assert row["blowout_result"] == "no"
+
+
+def test_historical_training_features_use_live_context_factors(monkeypatch) -> None:
+    load_test_history()
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                s.*,
+                g.game_date,
+                g.home_team_id,
+                g.away_team_id,
+                g.rest_days_home,
+                g.rest_days_away,
+                g.spread_home,
+                g.game_total,
+                p.team_id,
+                p.rotation_role
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN players p ON p.id = s.player_id
+            WHERE s.player_id = 1001
+            ORDER BY g.game_date ASC, s.game_id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+
+        monkeypatch.setattr("backend.app.player_prop_model._pace_factor", lambda *_args, **_kwargs: 1.05)
+        monkeypatch.setattr("backend.app.player_prop_model._opponent_factor", lambda *_args, **_kwargs: 0.94)
+        monkeypatch.setattr("backend.app.player_prop_model._common_opponent_factor", lambda *_args, **_kwargs: 1.03)
+        monkeypatch.setattr("backend.app.player_prop_model._h2h_factor", lambda *_args, **_kwargs: 0.97)
+        monkeypatch.setattr(
+            "backend.app.player_prop_model._blowout_adjustment",
+            lambda *_args, **_kwargs: {"risk": "medium", "minutes_delta": 2.5},
+        )
+        monkeypatch.setattr(
+            "backend.app.player_prop_model._project_minutes",
+            lambda *_args, **_kwargs: (30.0, "test minutes"),
+        )
+
+        features = _historical_training_features(
+            conn,
+            row,
+            history=[18.0, 19.0, 21.0, 20.0, 17.0],
+            minutes=[31.0, 32.0, 33.0, 31.0, 30.0],
+            market="points",
+            previous_game_date="2026-03-31",
+        )
+
+    assert features[FEATURE_INDEX["pace_factor"]] == 1.05
+    assert features[FEATURE_INDEX["opponent_factor"]] == 0.94
+    assert features[FEATURE_INDEX["common_opponent_factor"]] == 1.03
+    assert features[FEATURE_INDEX["h2h_factor"]] == 0.97
+    assert features[FEATURE_INDEX["blowout_minutes_delta"]] == 2.5
+
+
+def test_calibrated_probability_uses_settled_history_support(monkeypatch) -> None:
+    load_test_history()
+    monkeypatch.setattr(projections_module, "CALIBRATION_MIN_SAMPLES", 4)
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        line_rows = [
+            (9111, 100, 1001, 24.5, 0.58),
+            (9112, 101, 1001, 24.5, 0.67),
+            (9113, 102, 1001, 24.5, 0.57),
+            (9114, 103, 1001, 24.5, 0.66),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (?, ?, ?, 'DraftKings', 'points', ?, -110, -110, ?)
+            """,
+            [(prop_id, game_id, player_id, line, captured_at) for prop_id, game_id, player_id, line, _prob in line_rows],
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, 'adaptive-context-v1', ?, 18.5, 'under', ?, 0.52, 0.06, 0.03, 'medium', 'calibration-test')
+            """,
+            [(prop_id, captured_at, prob) for prop_id, _game_id, _player_id, _line, prob in line_rows],
+        )
+        settle_completed_props(conn)
+        calibrated = projections_module._calibrated_probability(
+            conn,
+            raw_probability=0.62,
+            market="points",
+            model_version="adaptive-context-v1",
+            side="under",
+        )
+
+    assert calibrated > 0.62
+    assert calibrated <= 0.95
+
+
+def test_build_prop_projection_applies_historical_market_bias_adjustment(monkeypatch) -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        projections_module,
+        "predict_player_prop",
+        lambda *_args, **_kwargs: (20.0, "base reason", "adaptive-context-v1"),
+    )
+    monkeypatch.setattr(projections_module, "_estimated_sigma", lambda *_args, **_kwargs: 3.0)
+    monkeypatch.setattr(projections_module, "PROJECTION_BIAS_MIN_SAMPLES", 4)
+
+    with connect() as conn:
+        line_rows = [
+            (9121, 100, 1001),
+            (9122, 101, 1001),
+            (9123, 102, 1001),
+            (9124, 103, 1001),
+            (9125, 104, 1001),
+        ]
+        conn.executemany(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (?, ?, ?, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            [(prop_id, game_id, player_id, captured_at) for prop_id, game_id, player_id in line_rows],
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, 'adaptive-context-v1', ?, 20.0, 'over', 0.56, 0.52, 0.04, 0.02, 'medium', 'bias-test')
+            """,
+            [(prop_id, captured_at) for prop_id, _game_id, _player_id in line_rows[:-1]],
+        )
+        settle_completed_props(conn)
+
+        projection = projections_module.build_prop_projection(conn, 9125)
+
+    assert projection.projection > 20.0
+    assert "Historical market bias adjustment" in projection.reason
+
+
+def test_predict_player_prop_blends_market_residual_model(monkeypatch) -> None:
+    feature_values = [0.0 for _ in FEATURE_NAMES]
+    snapshot = FeatureSnapshot(values=feature_values, component_projection=18.0, reason="snapshot reason")
+    learned_model = RidgeModel("points", 200, 0.0, [], [0.0 for _ in FEATURE_NAMES], [1.0 for _ in FEATURE_NAMES])
+    residual_model = RidgeModel("residual:points", 120, 0.0, [], [0.0 for _ in FEATURE_NAMES], [1.0 for _ in FEATURE_NAMES])
+
+    monkeypatch.setattr("backend.app.player_prop_model.feature_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr("backend.app.player_prop_model._player_sample_quality", lambda *_args, **_kwargs: (20, 30.0))
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_model", lambda *_args, **_kwargs: learned_model)
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_residual_model", lambda *_args, **_kwargs: residual_model)
+    monkeypatch.setattr(
+        "backend.app.player_prop_model._predict",
+        lambda model, _features: -1.0 if str(model.market).startswith("residual:") else 24.0,
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_combo_market_projection", lambda learned, *_args, **_kwargs: learned)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_learned_projection", lambda learned, *_args, **_kwargs: (learned, "no stabilization"))
+    monkeypatch.setattr("backend.app.player_prop_model._market_weight", lambda *_args, **_kwargs: 0.2)
+    monkeypatch.setattr("backend.app.player_prop_model._player_market_weight", lambda *_args, **_kwargs: 0.2)
+    monkeypatch.setattr("backend.app.player_prop_model._residual_market_weight", lambda *_args, **_kwargs: 0.3)
+    monkeypatch.setattr("backend.app.player_prop_model._market_price_nudge", lambda *_args, **_kwargs: 0.0)
+
+    with connect() as conn:
+        projection, reason, model_version = predict_player_prop(
+            conn,
+            player_id=1001,
+            market="points",
+            game_id=100,
+            line=20.0,
+            over_odds=-110,
+            under_odds=-110,
+        )
+
+    assert projection == pytest.approx(21.94, abs=0.01)
+    assert "residual blend 30%" in reason
+    assert model_version == "adaptive-context-v1"
 
 
 def test_repair_current_slate_props_targets_only_active_games() -> None:
@@ -1215,6 +1495,138 @@ def test_game_projection_calibrates_low_totals_upward() -> None:
 
     assert calibrated["projected_total"] > baseline["projected_total"]
     assert calibrated["total_edge"] > baseline["total_edge"]
+
+
+def test_game_projection_applies_margin_residual_adjustment() -> None:
+    load_test_history()
+    with connect() as conn:
+        game = conn.execute(
+            """
+            SELECT
+                g.*,
+                home.abbreviation AS home_team,
+                away.abbreviation AS away_team
+            FROM games g
+            JOIN teams home ON home.id = g.home_team_id
+            JOIN teams away ON away.id = g.away_team_id
+            WHERE g.id = 2010
+            """
+        ).fetchone()
+        baseline = project_game(conn, game)
+        conn.execute("DELETE FROM game_predictions")
+        conn.execute("DELETE FROM settled_game_predictions")
+        captured_at = datetime.now(timezone.utc).isoformat()
+        for prediction_id in range(200, 220):
+            conn.execute(
+                """
+                INSERT INTO game_predictions (
+                    id, game_id, model_version, prediction_time, projected_margin,
+                    winner_pick, ats_pick, total_pick, confidence, reason,
+                    spread_home, home_rest_days, away_rest_days
+                ) VALUES (?, ?, ?, ?, 2.0, 'NY', 'CON +5.5', 'N/A', 'medium', 'test margin residual', -5.5, 2, 2)
+                """,
+                (prediction_id, 2010, f"test-margin-{prediction_id}", captured_at),
+            )
+            conn.execute(
+                """
+                INSERT INTO settled_game_predictions (
+                    game_prediction_id, game_id, home_score, away_score, actual_winner,
+                    actual_margin, actual_total, actual_ats_pick, actual_total_result,
+                    winner_correct, ats_correct, total_correct, settled_at
+                ) VALUES (?, 2010, 88, 79, 'NY', 9.0, 167.0, 'NY', 'Over', 1, 1, 1, ?)
+                """,
+                (prediction_id, captured_at),
+            )
+        adjusted = project_game(conn, game)
+
+    assert adjusted["projected_margin"] > baseline["projected_margin"]
+    assert adjusted["ats_edge"] > baseline["ats_edge"]
+    assert "residual blend" in adjusted["game_reason"].lower()
+
+
+def test_game_projection_applies_total_residual_adjustment() -> None:
+    load_test_history()
+    with connect() as conn:
+        game = conn.execute(
+            """
+            SELECT
+                g.*,
+                home.abbreviation AS home_team,
+                away.abbreviation AS away_team
+            FROM games g
+            JOIN teams home ON home.id = g.home_team_id
+            JOIN teams away ON away.id = g.away_team_id
+            WHERE g.id = 2010
+            """
+        ).fetchone()
+        baseline = project_game(conn, game)
+        conn.execute("DELETE FROM game_predictions")
+        conn.execute("DELETE FROM settled_game_predictions")
+        captured_at = datetime.now(timezone.utc).isoformat()
+        for prediction_id in range(300, 320):
+            conn.execute(
+                """
+                INSERT INTO game_predictions (
+                    id, game_id, model_version, prediction_time, projected_total,
+                    winner_pick, ats_pick, total_pick, confidence, reason,
+                    game_total, home_rest_days, away_rest_days
+                ) VALUES (?, ?, ?, ?, 154.0, 'NY', 'N/A', 'Under', 'medium', 'test total residual', 158.0, 2, 2)
+                """,
+                (prediction_id, 2010, f"test-total-{prediction_id}", captured_at),
+            )
+            conn.execute(
+                """
+                INSERT INTO settled_game_predictions (
+                    game_prediction_id, game_id, home_score, away_score, actual_winner,
+                    actual_margin, actual_total, actual_ats_pick, actual_total_result,
+                    winner_correct, ats_correct, total_correct, settled_at
+                ) VALUES (?, 2010, 85, 81, 'NY', 4.0, 166.0, 'NY', 'Over', 1, 1, 1, ?)
+                """,
+                (prediction_id, captured_at),
+            )
+        adjusted = project_game(conn, game)
+
+    assert adjusted["projected_total"] > baseline["projected_total"]
+    assert adjusted["total_edge"] > baseline["total_edge"]
+    assert "residual blend" in adjusted["game_reason"].lower()
+
+
+def test_evaluate_game_residual_models_reports_baseline_and_blended_metrics() -> None:
+    load_test_history()
+    with connect() as conn:
+        conn.execute("DELETE FROM game_predictions")
+        conn.execute("DELETE FROM settled_game_predictions")
+        captured_at = datetime.now(timezone.utc).isoformat()
+        for prediction_id in range(400, 420):
+            conn.execute(
+                """
+                INSERT INTO game_predictions (
+                    id, game_id, model_version, prediction_time, projected_margin, projected_total,
+                    winner_pick, ats_pick, total_pick, confidence, reason,
+                    spread_home, game_total, home_rest_days, away_rest_days
+                ) VALUES (?, ?, ?, ?, 2.0, 154.0, 'NY', 'CON +5.5', 'Under', 'medium', 'test eval', -5.5, 158.0, 2, 2)
+                """,
+                (prediction_id, 2010, f"test-eval-{prediction_id}", captured_at),
+            )
+            conn.execute(
+                """
+                INSERT INTO settled_game_predictions (
+                    game_prediction_id, game_id, home_score, away_score, actual_winner,
+                    actual_margin, actual_total, actual_ats_pick, actual_total_result,
+                    winner_correct, ats_correct, total_correct, settled_at
+                ) VALUES (?, 2010, 88, 79, 'NY', 9.0, 166.0, 'NY', 'Over', 1, 1, 1, ?)
+                """,
+                (prediction_id, captured_at),
+            )
+        metrics = evaluate_game_residual_models(conn)
+
+    assert metrics["game_ats"]["rows"] == 20
+    assert metrics["game_total"]["rows"] == 20
+    assert metrics["game_ats"]["baseline_mae"] is not None
+    assert metrics["game_total"]["baseline_mae"] is not None
+    assert metrics["game_ats"]["mae"] <= metrics["game_ats"]["baseline_mae"]
+    assert metrics["game_total"]["mae"] <= metrics["game_total"]["baseline_mae"]
+    assert metrics["game_overall"]["rows"] == 40
 
 
 def test_game_predictions_are_saved_and_settled() -> None:
@@ -2026,6 +2438,45 @@ def test_covers_parser_handles_portland_fire_pdx_game_lines() -> None:
     assert metadata.game_total == 173.5
     assert game["spread_home"] == -4.5
     assert game["game_total"] == 173.5
+
+
+def test_covers_parser_reads_historical_betting_information_block() -> None:
+    html = """
+    <script type="application/ld+json">
+    {"startDate": "05/10/2026 20:30:00 &#x2B;00:00", "name": "Phoenix Mercury vs Golden State Valkyries"}
+    </script>
+    <section>
+      <div>Betting Information Team ATS (Margin) O/U (Margin)</div>
+      <div>PHO Phoenix +2.5 159.5o (14.5) GS Golden State -2.5 (13.5) 159.5u Line Movement</div>
+    </section>
+    """
+    with connect() as conn:
+        metadata = _metadata_from_page(conn, CoversGame("373853", "https://example.test/odds"), html)
+
+    assert metadata.away_team == "Phoenix Mercury"
+    assert metadata.home_team == "Golden State Valkyries"
+    assert metadata.spread_home == -2.5
+    assert metadata.game_total == 159.5
+
+
+def test_covers_parser_reads_historical_teams_without_structured_name() -> None:
+    html = """
+    <script type="application/ld+json">
+    {"startDate": "05/08/2026 23:30:00 &#x2B;00:00"}
+    </script>
+    <section>
+      <div>Connecticut vs New York Results, Match Player Stats &amp; Records</div>
+      <div>Betting Information Team ATS (Margin) O/U (Margin)</div>
+      <div>CON Connecticut +19.5 169.5o (11.5) NY New York -19.5 (11.5) 169.5u Line Movement</div>
+    </section>
+    """
+    with connect() as conn:
+        metadata = _metadata_from_page(conn, CoversGame("373844", "https://example.test/odds"), html)
+
+    assert metadata.away_team == "CON"
+    assert metadata.home_team == "NY"
+    assert metadata.spread_home == -19.5
+    assert metadata.game_total == 169.5
 
 
 def test_covers_metadata_prefers_odds_page_market_over_matchup_page_noise() -> None:

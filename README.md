@@ -449,6 +449,8 @@ POST /api/covers/import?selected_date=2026-05-10&force_refresh=true
 
 Covers supplies pregame market context and is the preferred source for player prop lines. When a game has Covers prop rows in `sportsbook_prop_lines`, the model prop-line sync builds `prop_lines` from Covers rows for that game and ignores overlapping The Odds API rows. Other providers are only used as a fallback for games without Covers props. ESPN remains the completed-game source for final scores and player box scores.
 
+Historical Covers matchup pages can differ from current pregame pages. The importer now supports older matchup layouts that expose only visible-text market blocks such as `Betting Information Team ATS (Margin) O/U (Margin)` and can backfill `games.spread_home` / `games.game_total` even when no player prop rows are present for that page. That historical backfill path is useful when early-season or repaired dates have completed box scores and settled props but are still missing matchup market context.
+
 On app load, Covers records shown in matchups are read from `data/cache/covers_props_raw.json` only when `cache_date` matches the current local date. If the cache date is stale, that cache file is deleted and Covers records are not displayed until a fresh Covers import runs.
 
 Covers team abbreviations can differ from the app's canonical team codes. The importer normalizes those provider-only codes before reading game lines, including Phoenix `PHO`, Portland `PDX`, and Washington `WAS`.
@@ -467,6 +469,8 @@ Use `Load Missing ESPN` as the normal in-season completed-game operation. It upd
 Use the `Date Results` operation when only one completed date, or a small batch of completed dates, needs to be repaired quickly. It fetches ESPN scoreboard and box score data only for the selected dates, settles saved player and game predictions, syncs model prop lines, and rebuilds current predictions.
 
 Use `Refresh ESPN` only for a larger hard refresh or backfill. That path fetches fresh ESPN data for the current season and previous season. Box score imports are idempotent in Turso: `player_game_stats` is unique by `(player_id, game_id)`, player upserts are batched, and stat inserts use `INSERT OR REPLACE`, so repeated missing-only fills can safely repair gaps without duplicating rows.
+
+Saved prop settlements are also repairable now. `settled_props` no longer behaves as insert-once-only state: rerunning settlement can backfill incomplete historical rows such as missing `game_margin`, `team_margin`, `team_spread`, and `blowout_result`, and it can resolve the player's team from `player_team_history` for that specific game when current roster state differs from historical roster state.
 
 Injury context is refreshed from RotoWire lineups via:
 
@@ -808,7 +812,15 @@ The app should write raw API responses into `data/cache/` or `data/raw/`, then n
 
 ## Model Notes
 
-Player prop projections use the `adaptive-context-v1` model. It starts with a transparent component projection, then uses an in-process ridge regression model trained from actual player game logs in the active runtime database. In normal app runs that database is Turso; local SQLite training is only used by tests or explicit commands that set `WNBA_DB_PATH`. The final pregame projection can also blend in sportsbook line context and no-vig price lean when a line is available.
+Player prop projections use the `adaptive-context-v1` model. It starts with a transparent component projection, then uses an in-process ridge regression model trained from actual player game logs in the active runtime database. In normal app runs that database is Turso; local SQLite training is only used by tests or explicit commands that set `WNBA_DB_PATH`.
+
+The live player-prop path now uses three historical layers when a sportsbook line is available:
+
+- a raw stat projection model trained on prior player game logs
+- a settled-history market-relative residual model trained on `actual_result - line`
+- a settled-history market calibration pass for recommendation probabilities
+
+The final pregame projection can blend raw projection, sportsbook line context, residual model output, and no-vig price lean when a line is available.
 
 Core features include:
 
@@ -851,7 +863,12 @@ adaptive-context-v1
   chronological 80/20 holdout for the learned history/context model
 ```
 
-Each training action saves both runs to Turso in `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. The comparison table shows the latest run for each model version side by side. Prediction-time learned models also train from the active connection when the app is using Turso, instead of reopening a local SQLite file. Once real settled prop lines are imported, the same model-run workflow can be extended to ROI, CLV, and edge calibration.
+Each training action saves both runs to Turso in `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. Learned-run payloads now also include game residual evaluation rows (`game_ats`, `game_total`, and `game_overall`) with both baseline and blended metrics so saved game predictions can be compared before and after the residual layer. The Model Lab now shows those game residual deltas directly alongside the existing player-market training tables. The comparison table shows the latest run for each model version side by side. Prediction-time learned models also train from the active connection when the app is using Turso, instead of reopening a local SQLite file.
+
+The player model now also supports a separate market-relative residual fit by market. That residual model is used only when a real sportsbook line exists, because its target is line-relative (`actual_result - line`) rather than raw stat outcome. Training/reporting metrics should therefore be read as two related layers:
+
+- raw stat projection quality
+- market-relative settled-line quality
 
 ## Accuracy Analysis
 
@@ -882,5 +899,11 @@ confidence
 ```
 
 The game model combines recent scoring, longer team scoring, opponent points allowed, pace, home/away, and rest. It compares projected margin to `spread_home` and projected total to `game_total`.
+
+Game projections now also include a first-pass settled-history residual layer:
+
+- ATS residual model: learns historical cover-margin outcome (`actual_margin + spread_home`) from saved game predictions.
+- Total residual model: learns historical total-vs-market outcome (`actual_total - game_total`) from saved game predictions.
+- Live output blends those learned residual edges back into the heuristic base projection with a low weight, so the market-relative history can correct recurring margin/total bias without discarding the existing team-form model.
 
 Matchup predictions are saved when `/api/matchups` is built. Recalculation and ESPN history imports call the game settlement flow, so final ESPN scores can be compared against the model's saved winner, ATS, and over/under predictions.

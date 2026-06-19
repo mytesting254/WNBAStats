@@ -99,6 +99,7 @@ class ModelTuningConfig:
 DEFAULT_TUNING_CONFIG = ModelTuningConfig()
 
 _CONNECTION_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | None] = {}
+_CONNECTION_RESIDUAL_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_MINUTES_MODEL_CACHE: dict[tuple[int, str | None, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_GAME_TOTAL_MEAN_CACHE: dict[int, float] = {}
 
@@ -195,14 +196,23 @@ def predict_player_prop(
         market_weight = _market_weight(model.rows, config=tuning)
         market_weight = max(market_weight, _player_market_weight(sample_count, avg_minutes, config=tuning))
         projection = ((1 - market_weight) * learned) + (market_weight * float(line))
+        residual_model = train_market_residual_model(conn, market, config=tuning)
+        if residual_model is not None:
+            residual_prediction = _predict(residual_model, snapshot.values)
+            residual_projection = float(line) + residual_prediction
+            residual_weight = _residual_market_weight(residual_model.rows, sample_count, avg_minutes, config=tuning)
+            projection = ((1 - residual_weight) * projection) + (residual_weight * residual_projection)
+            market_note = (
+                f"line blend {market_weight:.0%} at {float(line):.1f}; "
+                f"residual blend {residual_weight:.0%} ({residual_model.rows} settled rows)"
+            )
         if over_odds is not None and under_odds is not None:
             over_implied = american_to_implied_probability(int(over_odds))
             under_implied = american_to_implied_probability(int(under_odds))
             no_vig_mid = (over_implied / max(over_implied + under_implied, 0.01)) - 0.5
             projection += no_vig_mid * _market_price_nudge(market)
         market_note = (
-            f"sportsbook line blend {market_weight:.0%} at {float(line):.1f} "
-            f"(player sample {sample_count} games, {avg_minutes:.1f} avg minutes)"
+            f"{market_note} (player sample {sample_count} games, {avg_minutes:.1f} avg minutes)"
         )
 
     if snapshot.hard_cap_zero:
@@ -477,9 +487,41 @@ def train_market_model(
     return _train_market_model_cached(db_path, market, tuning)
 
 
+@lru_cache(maxsize=32)
+def _train_market_residual_model_cached(db_path: str, market: str, config: ModelTuningConfig) -> RidgeModel | None:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return _train_market_residual_model_uncached(conn, market, config=config)
+    finally:
+        conn.close()
+
+
+def train_market_residual_model(
+    conn: sqlite3.Connection,
+    market: str,
+    config: ModelTuningConfig | None = None,
+) -> RidgeModel | None:
+    tuning = config or DEFAULT_TUNING_CONFIG
+    cache_market = f"residual:{market}"
+    if not isinstance(conn, sqlite3.Connection):
+        key = (id(conn), market, tuning)
+        if key not in _CONNECTION_RESIDUAL_MODEL_CACHE:
+            _CONNECTION_RESIDUAL_MODEL_CACHE[key] = _train_market_residual_model_uncached(conn, market, config=tuning)
+        return _CONNECTION_RESIDUAL_MODEL_CACHE[key]
+    db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+    cache_key = _model_cache_key(conn, db_path, cache_market, tuning, kind="residual")
+    cached_model = _load_cached_model(cache_key)
+    if cached_model is not None:
+        return cached_model
+    return _train_market_residual_model_cached(db_path, market, tuning)
+
+
 def clear_model_cache() -> None:
     _train_market_model_cached.cache_clear()
     _CONNECTION_MODEL_CACHE.clear()
+    _train_market_residual_model_cached.cache_clear()
+    _CONNECTION_RESIDUAL_MODEL_CACHE.clear()
     _train_minutes_model_cached.cache_clear()
     _CONNECTION_MINUTES_MODEL_CACHE.clear()
     _CONNECTION_GAME_TOTAL_MEAN_CACHE.clear()
@@ -495,6 +537,20 @@ def _train_market_model_uncached(
     if model is not None:
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
         cache_key = _model_cache_key(conn, db_path, market, config or DEFAULT_TUNING_CONFIG, kind="market")
+        _store_cached_model(cache_key, model, config or DEFAULT_TUNING_CONFIG)
+    return model
+
+
+def _train_market_residual_model_uncached(
+    conn: sqlite3.Connection,
+    market: str,
+    config: ModelTuningConfig | None = None,
+) -> RidgeModel | None:
+    rows = _residual_training_rows(conn, market)
+    model = _fit_model_from_rows(f"residual:{market}", rows, config=config)
+    if model is not None:
+        db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
+        cache_key = _model_cache_key(conn, db_path, f"residual:{market}", config or DEFAULT_TUNING_CONFIG, kind="residual")
         _store_cached_model(cache_key, model, config or DEFAULT_TUNING_CONFIG)
     return model
 
@@ -535,6 +591,56 @@ def evaluate_market_model(
         "rmse": round(math.sqrt(sum(squared_errors) / row_count), 3),
         "bias": round(sum(errors) / row_count, 3),
         "directional_accuracy": round(direction_hits / row_count, 3),
+    }
+
+
+def evaluate_market_residual_model(
+    conn: sqlite3.Connection,
+    market: str,
+    config: ModelTuningConfig | None = None,
+) -> dict:
+    tuning = config or DEFAULT_TUNING_CONFIG
+    rows = _residual_training_rows(conn, market)
+    if len(rows) < 20:
+        return {
+            "residual_rows": 0,
+            "residual_mae": None,
+            "residual_rmse": None,
+            "residual_bias": None,
+            "residual_directional_accuracy": None,
+        }
+    split = max(int(len(rows) * 0.8), 10)
+    train_rows = rows[:split]
+    test_rows = rows[split:]
+    model = _fit_model_from_rows(f"residual:{market}", train_rows, config=tuning)
+    if not model or not test_rows:
+        return {
+            "residual_rows": 0,
+            "residual_mae": None,
+            "residual_rmse": None,
+            "residual_bias": None,
+            "residual_directional_accuracy": None,
+        }
+
+    errors = []
+    absolute_errors = []
+    squared_errors = []
+    direction_hits = 0
+    for features, actual_residual in test_rows:
+        prediction = _predict(model, features)
+        error = prediction - actual_residual
+        errors.append(error)
+        absolute_errors.append(abs(error))
+        squared_errors.append(error * error)
+        if (prediction >= 0 and actual_residual >= 0) or (prediction < 0 and actual_residual < 0):
+            direction_hits += 1
+    row_count = len(test_rows)
+    return {
+        "residual_rows": row_count,
+        "residual_mae": round(sum(absolute_errors) / row_count, 3),
+        "residual_rmse": round(math.sqrt(sum(squared_errors) / row_count), 3),
+        "residual_bias": round(sum(errors) / row_count, 3),
+        "residual_directional_accuracy": round(direction_hits / row_count, 3),
     }
 
 
@@ -606,6 +712,42 @@ def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[flo
     return samples
 
 
+def _residual_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
+    samples = []
+    rows = conn.execute(
+        """
+        SELECT
+            pl.id AS prop_line_id,
+            pl.player_id,
+            pl.game_id,
+            pl.market,
+            pl.line,
+            sp.actual_result,
+            g.game_date
+        FROM settled_props sp
+        JOIN prop_lines pl ON pl.id = sp.prop_line_id
+        JOIN games g ON g.id = pl.game_id
+        WHERE pl.market = ?
+          AND pl.line IS NOT NULL
+        ORDER BY g.game_date ASC, pl.id ASC
+        """,
+        (market,),
+    ).fetchall()
+    for row in rows:
+        snapshot = feature_snapshot(
+            conn,
+            int(row["player_id"]),
+            market,
+            int(row["game_id"]),
+            before_game_date=str(row["game_date"]) if row["game_date"] is not None else None,
+        )
+        if not snapshot.values:
+            continue
+        target = float(row["actual_result"]) - float(row["line"])
+        samples.append((snapshot.values, target))
+    return samples
+
+
 def _historical_training_features(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -614,6 +756,7 @@ def _historical_training_features(
     market: str,
     previous_game_date: str | None,
 ) -> list[float]:
+    current_game_date = str(row["game_date"]) if row["game_date"] is not None else None
     rates = [value / max(minute, 1.0) for value, minute in zip(history, minutes)]
     recent_avg = sum(history[-5:]) / min(len(history), 5)
     last_10_avg = sum(history) / len(history)
@@ -630,6 +773,22 @@ def _historical_training_features(
     value_volatility = _ewma_volatility_newest_first(newest_values, ewma_value, market)
     consistency_score = _consistency_score(ewma_value, value_volatility, market)
     context = _historical_game_context(row)
+    pace_factor = _pace_factor(conn, int(context["team_id"]), int(context["opponent_id"]))
+    opponent_factor = _opponent_factor(conn, int(context["opponent_id"]), market)
+    common_opponent_factor = _common_opponent_factor(
+        conn,
+        int(row["player_id"]),
+        market,
+        context,
+        current_game_date,
+    )
+    h2h_factor = _h2h_factor(
+        conn,
+        int(row["player_id"]),
+        market,
+        context,
+        current_game_date,
+    )
     blowout = _blowout_adjustment(None, context, str(row["rotation_role"] or "starter"))
     projected_minutes, _minutes_note = _project_minutes(
         None,
@@ -645,8 +804,8 @@ def _historical_training_features(
         blowout_delta=float(blowout["minutes_delta"]),
         injury_delta=0.0,
         injury_status="available",
-        recent_absence_days=_days_between_game_dates(previous_game_date, str(row["game_date"])),
-        before_game_date=str(row["game_date"]),
+        recent_absence_days=_days_between_game_dates(previous_game_date, current_game_date),
+        before_game_date=current_game_date,
     )
     rate_projection = weighted_rate * projected_minutes
     component_projection = _adaptive_component_projection(
@@ -681,10 +840,10 @@ def _historical_training_features(
         consistency_score,
         float(rest_days),
         1.0 if is_home else 0.0,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
+        pace_factor,
+        opponent_factor,
+        common_opponent_factor,
+        h2h_factor,
         float(blowout["minutes_delta"]),
         abs(team_spread) if team_spread is not None else 0.0,
         game_total,
@@ -729,7 +888,7 @@ def train_minutes_model(
 
 def prewarm_model_cache(conn: sqlite3.Connection, config: ModelTuningConfig | None = None) -> dict[str, int]:
     tuning = config or DEFAULT_TUNING_CONFIG
-    warmed = {"minutes": 0, "markets": 0}
+    warmed = {"minutes": 0, "markets": 0, "residuals": 0}
     if train_minutes_model(conn, config=tuning) is not None:
         warmed["minutes"] = 1
     for bucket in MINUTES_ROLE_BUCKETS:
@@ -738,6 +897,8 @@ def prewarm_model_cache(conn: sqlite3.Connection, config: ModelTuningConfig | No
     for market in TRAINING_MARKETS:
         if train_market_model(conn, market, config=tuning) is not None:
             warmed["markets"] += 1
+        if train_market_residual_model(conn, market, config=tuning) is not None:
+            warmed["residuals"] += 1
     return warmed
 
 
@@ -1351,6 +1512,24 @@ def _player_market_weight(
     if sample_count < 10:
         return _scaled_market_weight(0.38, tuning.player_weight_scale)
     return _scaled_market_weight(0.25, tuning.player_weight_scale)
+
+
+def _residual_market_weight(
+    rows: int,
+    sample_count: int,
+    avg_minutes: float,
+    config: ModelTuningConfig | None = None,
+) -> float:
+    tuning = config or DEFAULT_TUNING_CONFIG
+    base = 0.18
+    if rows >= 60:
+        base = 0.24
+    if rows >= 120:
+        base = 0.30
+    if rows >= 220:
+        base = 0.36
+    player_floor = 0.08 if sample_count < 8 or avg_minutes < 20.0 else 0.12 if sample_count < 15 else 0.16
+    return _scaled_market_weight(max(base, player_floor), tuning.market_weight_scale)
 
 
 def _scaled_market_weight(weight: float, scale: float) -> float:

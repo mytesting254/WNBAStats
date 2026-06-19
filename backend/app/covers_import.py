@@ -204,6 +204,19 @@ def import_covers_props(
     row_payload = [_tuple_to_row(row) for row in imported_rows]
     game_payload = [_metadata_to_row(row) for row in metadata_rows]
     if not row_payload:
+        if game_payload:
+            _update_covers_game_markets(conn, game_payload)
+            conn.commit()
+            return {
+                "events": len(game_payload),
+                "imported": 0,
+                "captured_at": captured_at,
+                "synced_props": 0,
+                "status": "imported_game_markets_only",
+                "source": PROVIDER,
+                "message": "Imported Covers matchup lines without player prop rows.",
+                "errors": errors,
+            }
         if isinstance(cached_payload, dict) and cached_payload.get("rows"):
             result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
             return {
@@ -323,17 +336,23 @@ def _metadata_from_page(conn: sqlite3.Connection, game: CoversGame, page: str, f
         teams_match = re.search(r"Game Odds\s+(?P<away>.+?)\s+vs\.\s+(?P<home>.+?)\s*</caption>", fallback_page, re.S)
         if not teams_match:
             teams_match = re.search(r'"name":\s*"(?P<away>.+?)\s+vs\s+(?P<home>.+?)"', fallback_page)
-    if not teams_match:
-        raise ValueError(f"Unable to read Covers teams for matchup {game.event_id}")
-
-    away_team = _clean_text(teams_match.group("away"))
-    home_team = _clean_text(teams_match.group("home"))
+    if teams_match:
+        away_team = _clean_text(teams_match.group("away"))
+        home_team = _clean_text(teams_match.group("home"))
+    else:
+        fallback_teams = _historical_teams_from_page(page) or (_historical_teams_from_page(fallback_page) if fallback_page else None)
+        if not fallback_teams:
+            raise ValueError(f"Unable to read Covers teams for matchup {game.event_id}")
+        away_team, home_team = fallback_teams
     start_match = re.search(r'"startDate":\s*"(?P<start>[^"]+)"', page)
     if not start_match and fallback_page:
         start_match = re.search(r'"startDate":\s*"(?P<start>[^"]+)"', fallback_page)
-    if not start_match:
+    if start_match:
+        commence_time = _parse_covers_start(start_match.group("start"))
+    else:
+        commence_time = _historical_start_from_page(page) or (_historical_start_from_page(fallback_page) if fallback_page else None)
+    if not commence_time:
         raise ValueError(f"Unable to read Covers start time for matchup {game.event_id}")
-    commence_time = _parse_covers_start(start_match.group("start"))
     game_date = commence_time[:10]
     market = _game_market_from_page(page, home_team, away_team)
     if fallback_page:
@@ -534,11 +553,15 @@ def _odds_from_player(player_html: str, market_key: str) -> list[tuple[str, floa
 
 
 def _game_market_from_page(page: str, home_team: str, away_team: str) -> dict[str, float | None]:
+    text = _visible_text(page)
+    historical_market = _historical_market_from_text(text, home_team, away_team)
+    if historical_market["spread_home"] is not None or historical_market["game_total"] is not None:
+        return historical_market
+
     structured_market = _game_market_from_odds_html(page, home_team, away_team)
     if any(value is not None for value in structured_market.values()):
         return structured_market
 
-    text = _visible_text(page)
     away_abbr = _covers_abbreviation(away_team)
     home_abbr = _covers_abbreviation(home_team)
     if not away_abbr or not home_abbr:
@@ -566,6 +589,112 @@ def _game_market_from_page(page: str, home_team: str, away_team: str) -> dict[st
         "home_moneyline": None,
         "away_moneyline": None,
     }
+
+
+def _historical_teams_from_page(page: str | None) -> tuple[str, str] | None:
+    if not page:
+        return None
+    text = _visible_text(page)
+    block = _historical_betting_block(text)
+    if block:
+        matchup = re.search(
+            r"(?P<away_abbr>[A-Z]{2,3})\s+(?P<away>[A-Za-z .'-]+?)\s+[+-]\d+(?:\.\d+)?[\s\S]*?"
+            r"(?P<home_abbr>[A-Z]{2,3})\s+(?P<home>[A-Za-z .'-]+?)\s+[+-]\d+(?:\.\d+)?",
+            block,
+        )
+        if matchup:
+            return matchup.group("away_abbr").upper(), matchup.group("home_abbr").upper()
+    heading = re.search(
+        r"(?P<away>[A-Za-z .'-]+?)\s+vs\s+(?P<home>[A-Za-z .'-]+?)\s+Results,\s+Match Player Stats\s*&\s*Records",
+        text,
+        re.I,
+    )
+    if not heading:
+        return None
+    away_team = _clean_text(heading.group("away"))
+    home_team = _clean_text(heading.group("home"))
+    return away_team, home_team
+
+
+def _historical_market_from_text(text: str, home_team: str, away_team: str) -> dict[str, float | None]:
+    away_abbr = _covers_abbreviation(away_team)
+    home_abbr = _covers_abbreviation(home_team)
+    if not away_abbr or not home_abbr:
+        return {"spread_home": None, "game_total": None, "home_moneyline": None, "away_moneyline": None}
+    block = _historical_betting_block(text)
+    if not block:
+        return {"spread_home": None, "game_total": None, "home_moneyline": None, "away_moneyline": None}
+
+    away_body = _team_market_body(block, away_abbr, home_abbr)
+    home_body = _team_market_body(block, home_abbr, None)
+    away_spread = _first_spread_value(away_body)
+    home_spread = _first_spread_value(home_body)
+    away_total = _first_total_value(away_body)
+    home_total = _first_total_value(home_body)
+    game_total = away_total if away_total == home_total else (away_total or home_total)
+    return {
+        "spread_home": home_spread,
+        "game_total": game_total,
+        "home_moneyline": None,
+        "away_moneyline": None,
+        "away_spread": away_spread,
+        "away_spread_price": None,
+        "home_spread_price": None,
+        "over_total": away_total,
+        "over_price": None,
+        "under_total": home_total,
+        "under_price": None,
+    }
+
+
+def _historical_betting_block(text: str) -> str | None:
+    match = re.search(
+        r"Betting Information Team ATS \(Margin\) O/U \(Margin\)\s+(?P<body>.*?)\s+Line Movement",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    return _clean_text(match.group("body"))
+
+
+def _historical_start_from_page(page: str | None) -> str | None:
+    if not page:
+        return None
+    text = _visible_text(page)
+    match = re.search(
+        r"(?P<time>\d{1,2}:\d{2}\s*[AP]M)\s+ET\s+·\s+(?P<date>[A-Za-z]{3,9}\s+\d{1,2},\s+\d{4})",
+        text,
+        re.I,
+    )
+    if not match:
+        return None
+    cleaned = f"{match.group('date')} {match.group('time').upper()}"
+    parsed = datetime.strptime(cleaned, "%B %d, %Y %I:%M%p").replace(tzinfo=LOCAL_TZ)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _team_market_body(block: str, team_abbr: str, next_team_abbr: str | None) -> str:
+    pattern = rf"\b{re.escape(team_abbr)}\b\s+[A-Za-z .'-]+?(?P<body>.*)"
+    match = re.search(pattern, block)
+    if not match:
+        return ""
+    body = match.group("body")
+    if next_team_abbr:
+        next_match = re.search(rf"\b{re.escape(next_team_abbr)}\b\s+[A-Za-z .'-]+", body)
+        if next_match:
+            body = body[: next_match.start()]
+    return _clean_text(body)
+
+
+def _first_spread_value(value: str) -> float | None:
+    match = re.search(r"([+-]\d+(?:\.\d+)?)", value)
+    return _parse_float(match.group(1)) if match else None
+
+
+def _first_total_value(value: str) -> float | None:
+    match = re.search(r"(\d+(?:\.\d+)?)[ou]\b", value, re.I)
+    return _parse_float(match.group(1)) if match else None
 
 
 def _game_market_from_odds_html(page: str, home_team: str, away_team: str) -> dict[str, float | None]:

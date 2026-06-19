@@ -360,6 +360,13 @@ export type ModelRunMetric = {
   rmse: number | null;
   bias: number | null;
   directional_accuracy: number | null;
+  baseline_mae?: number | null;
+  baseline_rmse?: number | null;
+  baseline_bias?: number | null;
+  baseline_directional_accuracy?: number | null;
+  mae_improvement?: number | null;
+  rmse_improvement?: number | null;
+  directional_accuracy_improvement?: number | null;
   settled_rows?: number;
   side_accuracy?: number | null;
   calibration_gap?: number | null;

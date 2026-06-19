@@ -1334,7 +1334,10 @@ function ModelsView({
   canTrain: boolean;
 }) {
   const metrics = latest ? sortModelMetrics(latest.metrics) : [];
+  const playerMetrics = metrics.filter(([market]) => !market.startsWith("game_"));
+  const gameMetrics = metrics.filter(([market]) => market.startsWith("game_"));
   const overallMetric = latest?.metrics.overall;
+  const overallGameMetric = latest?.metrics.game_overall;
   const comparisonRuns = latestRunsByModel(runs);
   return (
     <section className="matchup-list">
@@ -1371,6 +1374,12 @@ function ModelsView({
               <Metric label="Calibration gap" value={formatMetricPercent(overallMetric?.calibration_gap)} />
               <Metric label="Realized ROI" value={formatMetricPercent(overallMetric?.realized_roi)} />
             </div>
+            <div className="detail-grid model-validation-grid">
+              <Metric label="Game eval rows" value={formatCount(overallGameMetric?.rows)} />
+              <Metric label="Game MAE delta" value={formatMetricSigned(overallGameMetric?.mae_improvement, 3)} />
+              <Metric label="Game RMSE delta" value={formatMetricSigned(overallGameMetric?.rmse_improvement, 3)} />
+              <Metric label="Game dir delta" value={formatMetricPercent(overallGameMetric?.directional_accuracy_improvement)} />
+            </div>
           </div>
           <div className="model-card">
             <p className="eyebrow">Market metrics</p>
@@ -1394,7 +1403,7 @@ function ModelsView({
                   </tr>
                 </thead>
                 <tbody>
-                  {metrics.map(([market, metric]) => (
+                  {playerMetrics.map(([market, metric]) => (
                     <tr key={market} className={market === "overall" ? "model-summary-row" : undefined}>
                       <td>{marketLabel(market)}</td>
                       <td>{metric.rows}</td>
@@ -1411,9 +1420,53 @@ function ModelsView({
                       <td>{formatMetricPercent(metric.realized_roi)}</td>
                     </tr>
                   ))}
-                  {!metrics.length && (
+                  {!playerMetrics.length && (
                     <tr>
                       <td colSpan={13}>No model metrics yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="model-card">
+            <p className="eyebrow">Game residual metrics</p>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Market</th>
+                    <th>Rows</th>
+                    <th>Blend MAE</th>
+                    <th>Base MAE</th>
+                    <th>MAE delta</th>
+                    <th>Blend RMSE</th>
+                    <th>Base RMSE</th>
+                    <th>RMSE delta</th>
+                    <th>Blend Dir</th>
+                    <th>Base Dir</th>
+                    <th>Dir delta</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {gameMetrics.map(([market, metric]) => (
+                    <tr key={market} className={market === "game_overall" ? "model-summary-row" : undefined}>
+                      <td>{marketLabel(market)}</td>
+                      <td>{metric.rows}</td>
+                      <td>{formatNumber(metric.mae)}</td>
+                      <td>{formatNumber(metric.baseline_mae ?? null)}</td>
+                      <td>{formatMetricSigned(metric.mae_improvement, 3)}</td>
+                      <td>{formatNumber(metric.rmse)}</td>
+                      <td>{formatNumber(metric.baseline_rmse ?? null)}</td>
+                      <td>{formatMetricSigned(metric.rmse_improvement, 3)}</td>
+                      <td>{formatPercent(metric.directional_accuracy ?? undefined)}</td>
+                      <td>{formatPercent(metric.baseline_directional_accuracy ?? undefined)}</td>
+                      <td>{formatMetricPercent(metric.directional_accuracy_improvement)}</td>
+                    </tr>
+                  ))}
+                  {!gameMetrics.length && (
+                    <tr>
+                      <td colSpan={11}>No game residual metrics yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -1437,6 +1490,12 @@ function ModelsView({
                     <th>Direction</th>
                     <th>Val accuracy</th>
                     <th>Val ROI</th>
+                    <th>ATS MAE delta</th>
+                    <th>ATS Dir delta</th>
+                    <th>Total MAE delta</th>
+                    <th>Total Dir delta</th>
+                    <th>Game MAE delta</th>
+                    <th>Game Dir delta</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -1453,11 +1512,17 @@ function ModelsView({
                       <td>{formatAverageDirection(run)}</td>
                       <td>{formatOverallMetricPercent(run, "side_accuracy")}</td>
                       <td>{formatOverallMetricPercent(run, "realized_roi")}</td>
+                      <td>{formatMetricSigned(run.metrics.game_ats?.mae_improvement, 3)}</td>
+                      <td>{formatMetricPercent(run.metrics.game_ats?.directional_accuracy_improvement)}</td>
+                      <td>{formatMetricSigned(run.metrics.game_total?.mae_improvement, 3)}</td>
+                      <td>{formatMetricPercent(run.metrics.game_total?.directional_accuracy_improvement)}</td>
+                      <td>{formatMetricSigned(run.metrics.game_overall?.mae_improvement, 3)}</td>
+                      <td>{formatMetricPercent(run.metrics.game_overall?.directional_accuracy_improvement)}</td>
                     </tr>
                   ))}
                   {!comparisonRuns.length && (
                     <tr>
-                      <td colSpan={11}>No model runs saved yet.</td>
+                      <td colSpan={17}>No model runs saved yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -3377,8 +3442,9 @@ function formatLatestMae(run: ModelRun | null) {
   if (!run) {
     return "Pending";
   }
-  const values = Object.values(run.metrics)
-    .map((metric) => metric.mae)
+  const values = Object.entries(run.metrics)
+    .filter(([market]) => market !== "overall" && !market.startsWith("game_"))
+    .map(([, metric]) => metric.mae)
     .filter((value): value is number => value != null);
   if (!values.length) {
     return "N/A";
@@ -3404,8 +3470,9 @@ function formatMetricMae(run: ModelRun, market: string) {
 }
 
 function formatAverageDirection(run: ModelRun) {
-  const values = Object.values(run.metrics)
-    .map((metric) => metric.directional_accuracy)
+  const values = Object.entries(run.metrics)
+    .filter(([market]) => market !== "overall" && !market.startsWith("game_"))
+    .map(([, metric]) => metric.directional_accuracy)
     .filter((value): value is number => value != null);
   if (!values.length) {
     return "N/A";
@@ -3626,6 +3693,9 @@ function groupGemsByMatchup(gems: GemProp[], capPerMatchup: number, matchups: Ma
 function marketLabel(market: string) {
   const labels: Record<string, string> = {
     overall: "Overall",
+    game_ats: "Game ATS",
+    game_total: "Game Total",
+    game_overall: "Game Overall",
     points: "PTS",
     rebounds: "REB",
     assists: "AST",

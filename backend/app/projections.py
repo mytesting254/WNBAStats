@@ -43,6 +43,10 @@ MARKET_SIGMA_FLOORS = {
 CALIBRATION_MIN_SAMPLES = 120
 CALIBRATION_BIN_WIDTH = 0.05
 CALIBRATION_SHRINKAGE_K = 20.0
+CALIBRATION_NEIGHBOR_RADIUS = 0.075
+PROJECTION_BIAS_MIN_SAMPLES = 30
+PROJECTION_BIAS_BLEND_WEIGHT = 0.7
+PROJECTION_BIAS_MAX_ADJUSTMENT = 1.5
 
 
 @dataclass(frozen=True)
@@ -186,6 +190,10 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
         over_odds=int(prop["over_odds"]),
         under_odds=int(prop["under_odds"]),
     )
+    projection_bias = _market_projection_bias_adjustment(conn, prop["market"], model_version)
+    if projection_bias is not None:
+        projection = round(projection + projection_bias, 2)
+        reason = f"{reason} Historical market bias adjustment {projection_bias:+.2f}."
     line = float(prop["line"])
     stat_sigma = _estimated_sigma(conn, prop["player_id"], prop["market"], projection, prop["game_id"])
     over_probability = 1 - _normal_cdf(line, projection, stat_sigma)
@@ -919,16 +927,78 @@ def _calibrated_probability(
     calibration = _market_calibration(conn, market, model_version, side=side)
     if not calibration:
         return _clamp(raw_probability, 0.05, 0.95)
-    bin_key = _probability_bin(raw_probability)
     global_hit = float(calibration["global_hit"])
-    bucket = calibration["bins"].get(bin_key)
-    if not bucket:
+    support = _calibration_support(calibration["bins"], raw_probability)
+    if support["weighted_total"] <= 0:
         return _clamp((0.65 * raw_probability) + (0.35 * global_hit), 0.05, 0.95)
-    bucket_hits = float(bucket["hits"])
-    bucket_total = float(bucket["total"])
-    posterior = (bucket_hits + (CALIBRATION_SHRINKAGE_K * global_hit)) / (bucket_total + CALIBRATION_SHRINKAGE_K)
-    calibrated = (0.50 * raw_probability) + (0.50 * posterior)
+    posterior = (
+        support["weighted_hits"] + (CALIBRATION_SHRINKAGE_K * global_hit)
+    ) / (support["weighted_total"] + CALIBRATION_SHRINKAGE_K)
+    calibration_weight = _clamp(
+        support["weighted_total"] / (support["weighted_total"] + (CALIBRATION_SHRINKAGE_K * 0.5)),
+        0.35,
+        0.80,
+    )
+    calibrated = ((1 - calibration_weight) * raw_probability) + (calibration_weight * posterior)
     return _clamp(calibrated, 0.05, 0.95)
+
+
+def _market_projection_bias_adjustment(
+    conn: sqlite3.Connection,
+    market: str,
+    model_version: str,
+) -> float | None:
+    row = conn.execute(
+        """
+        WITH ranked AS (
+          SELECT
+            pp.prop_line_id,
+            pp.projection,
+            pl.market,
+            ROW_NUMBER() OVER (
+              PARTITION BY pp.prop_line_id
+              ORDER BY pp.prediction_time DESC, pp.id DESC
+            ) AS rn
+          FROM prop_predictions pp
+          JOIN prop_lines pl ON pl.id = pp.prop_line_id
+          WHERE pp.model_version = ?
+        )
+        SELECT
+          COUNT(*) AS sample_count,
+          AVG(sp.actual_result - r.projection) AS avg_bias
+        FROM ranked r
+        JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+        WHERE r.rn = 1
+          AND r.market = ?
+          AND r.projection IS NOT NULL
+          AND sp.actual_result IS NOT NULL
+        """,
+        (model_version, market),
+    ).fetchone()
+    sample_count = int(row["sample_count"] or 0)
+    if sample_count < PROJECTION_BIAS_MIN_SAMPLES:
+        return None
+    avg_bias = float(row["avg_bias"] or 0.0)
+    adjusted = _clamp(avg_bias * PROJECTION_BIAS_BLEND_WEIGHT, -PROJECTION_BIAS_MAX_ADJUSTMENT, PROJECTION_BIAS_MAX_ADJUSTMENT)
+    return round(adjusted, 3)
+
+
+def _calibration_support(bins: dict[str, dict[str, float]], raw_probability: float) -> dict[str, float]:
+    weighted_hits = 0.0
+    weighted_total = 0.0
+    for key, bucket in bins.items():
+        center = _probability_bin_center(key)
+        if center is None:
+            continue
+        distance = abs(center - raw_probability)
+        if distance > CALIBRATION_NEIGHBOR_RADIUS:
+            continue
+        weight = max(0.0, 1.0 - (distance / CALIBRATION_NEIGHBOR_RADIUS))
+        if weight <= 0:
+            continue
+        weighted_hits += weight * float(bucket["hits"])
+        weighted_total += weight * float(bucket["total"])
+    return {"weighted_hits": weighted_hits, "weighted_total": weighted_total}
 
 
 def _over_min_margin(market: str) -> float:
@@ -1012,3 +1082,13 @@ def _probability_bin(probability: float) -> str:
     lower = math.floor(bounded / CALIBRATION_BIN_WIDTH) * CALIBRATION_BIN_WIDTH
     upper = lower + CALIBRATION_BIN_WIDTH
     return f"{lower:.2f}-{upper:.2f}"
+
+
+def _probability_bin_center(bin_key: str) -> float | None:
+    try:
+        lower_text, upper_text = bin_key.split("-", 1)
+        lower = float(lower_text)
+        upper = float(upper_text)
+    except (ValueError, AttributeError):
+        return None
+    return (lower + upper) / 2.0

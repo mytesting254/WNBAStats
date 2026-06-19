@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Mapping
 
 
-MODEL_VERSION = "component-game-v1"
+MODEL_VERSION = "component-game-v2"
 
 
 def save_game_prediction(conn: sqlite3.Connection, game: Mapping, prediction: Mapping) -> int:
