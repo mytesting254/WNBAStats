@@ -2,6 +2,7 @@
   id: number;
   game_id: number;
   player: string;
+  position?: string | null;
   team: string;
   team_logo_url?: string | null;
   sportsbook: string;

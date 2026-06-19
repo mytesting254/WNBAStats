@@ -1173,7 +1173,11 @@ function RosterView({
         {teamSummary ? (
           <section className="summary-grid">
             <Metric label="Key absences" value={formatCount(teamSummary.team_missing_key_players)} className="metric-compact" />
-            <Metric label="Team impact" value={teamImpactPercent == null ? "N/A" : `-${teamImpactPercent.toFixed(1)}%`} className="metric-compact" />
+            <Metric
+              label="Team impact"
+              value={teamImpactPercent == null ? "N/A" : `-${teamImpactPercent.toFixed(1)}%`}
+              className={`metric-compact ${teamImpactMetricClass(teamImpactPercent)}`.trim()}
+            />
             <Metric label="Penalty score" value={formatMetricNumber(teamSummary.team_penalty_points)} className="metric-compact" />
             <Metric label="Tracked players" value={formatCount(visibleRows.length)} className="metric-compact" />
           </section>
@@ -1235,6 +1239,22 @@ function formatRosterRole(role?: string | null) {
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function teamImpactMetricClass(value: number | null) {
+  if (value == null || Number.isNaN(value)) {
+    return "";
+  }
+  if (value >= 7) {
+    return "metric-impact-severe";
+  }
+  if (value >= 4) {
+    return "metric-impact-moderate";
+  }
+  if (value >= 1.5) {
+    return "metric-impact-mild";
+  }
+  return "metric-impact-low";
 }
 
 function buildEspnOperationStatus({
@@ -1546,7 +1566,7 @@ function PropsView({
                     <div className="player-cell">
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
-                        <strong>{prop.player}</strong>
+                        <PlayerLabel name={prop.player} position={prop.position} />
                         <span>{prop.team} | {prop.sportsbook}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-l5`)}
                       </div>
@@ -2720,9 +2740,9 @@ function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp
                         <div className="player-cell">
                           <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                           <div>
-                            <strong>{prop.player}</strong>
-                            <span>{prop.team} | {prop.sportsbook}</span>
-                            {renderRecentFormWithMinutes(prop, `${prop.id}-watch-l5`)}
+                        <PlayerLabel name={prop.player} position={prop.position} />
+                        <span>{prop.team} | {prop.sportsbook}</span>
+                        {renderRecentFormWithMinutes(prop, `${prop.id}-watch-l5`)}
                           </div>
                         </div>
                       </td>
@@ -2997,7 +3017,7 @@ function MatchupProps({
           {shortlist.map((prop) => (
             <div key={`candidate-${prop.id}`} className="candidate-card">
               <span>{prop.team} | {marketLabel(prop.market)}</span>
-              <strong>{prop.player}</strong>
+              <PlayerLabel name={prop.player} position={prop.position} />
               <em className={`candidate-side-${prop.recommended_side}`}>
                 {prop.recommended_side.toUpperCase()} {prop.line.toFixed(1)} | EV {formatPercent(prop.expected_value)}
               </em>
@@ -3043,7 +3063,7 @@ function MatchupProps({
                     <div className="player-cell">
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
-                        <strong>{prop.player}</strong>
+                        <PlayerLabel name={prop.player} position={prop.position} />
                         <span>{prop.team} | {prop.sportsbook}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-matchup-l5`)}
                       </div>
@@ -3250,6 +3270,16 @@ function TeamLogo({ src, alt }: { src?: string | null; alt: string }) {
     return <div className="team-logo fallback" aria-hidden="true" />;
   }
   return <img className="team-logo" src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} />;
+}
+
+function PlayerLabel({ name, position }: { name: string; position?: string | null }) {
+  const pos = String(position || "").trim().toUpperCase();
+  return (
+    <strong className="player-label">
+      {name}
+      {pos ? <sup className="player-label-pos">{pos}</sup> : null}
+    </strong>
+  );
 }
 
 function MiniStat({ label, value }: { label: string; value: string }) {
