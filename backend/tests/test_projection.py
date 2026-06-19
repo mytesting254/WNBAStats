@@ -344,7 +344,7 @@ def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
     assert first[0]["status"] == "GTD"
 
 
-def test_recalculate_endpoint_skips_model_refresh(monkeypatch) -> None:
+def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) -> None:
     calls: list[bool] = []
 
     class DummyConn:
@@ -364,10 +364,13 @@ def test_recalculate_endpoint_skips_model_refresh(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "settle_completed_game_predictions", lambda conn: {"settled": 0})
     monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, snapshot_date: None)
 
-    result = main_module.recalculate()
+    response = Response()
+    result = main_module.recalculate(response)
 
     assert result == {"predictions": 0, "settled": 0, "game_settled": 0}
     assert calls == [False]
+    assert response.headers["Deprecation"] == "true"
+    assert response.headers["X-Legacy-Endpoint"] == "/api/recalculate"
 
 
 def test_read_cache_invalidation_clears_new_cache_keys(monkeypatch) -> None:

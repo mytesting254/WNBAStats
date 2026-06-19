@@ -231,6 +231,7 @@ Then open the site in a browser and verify:
 
 - frontend loads
 - `/api/health` returns `{"status":"ok"}`
+- `/index.html` and `/runtime-config.js` return `Cache-Control: no-store`
 - existing data from `data/wnba.sqlite` is visible
 - a protected mutation works only with `X-API-Key`
 
@@ -285,7 +286,7 @@ cd /opt/wnba-stats
 - The backend uses local cache files under `data/cache/`, so the service user
   must be able to write there.
 - If you rebuild the frontend, nginx serves the new files immediately after the
-  build completes.
+  build completes, and `index.html` / `runtime-config.js` should not be cached across deploys.
 - If the VM disk fills up, SQLite and cache writes will fail. Monitor disk use.
 
 ## 15. Recommended Cutover Checklist

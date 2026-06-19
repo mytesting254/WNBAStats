@@ -743,7 +743,12 @@ def _repair_current_slate_props(conn) -> dict[str, Any]:
 
 
 @app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
-def recalculate() -> dict[str, int]:
+def recalculate(response: Response) -> dict[str, int]:
+    # Keep the legacy route for backward compatibility, but make stale clients visible.
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "Wed, 31 Dec 2026 23:59:59 GMT"
+    response.headers["Link"] = '</api/props/repair-current-slate>; rel="successor-version"'
+    response.headers["X-Legacy-Endpoint"] = "/api/recalculate"
     with connect() as conn:
         projections = rebuild_predictions(conn, refresh_models=False)
         settlements = settle_completed_props(conn)

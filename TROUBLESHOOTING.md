@@ -14,6 +14,13 @@ Check these first:
 
 If `health` works but the app is blank, the problem is usually routing, payload shape, or frontend runtime behavior rather than backend startup.
 
+For stale-frontend suspicion, also check:
+
+1. `curl -I https://<domain>/index.html`
+2. `curl -I https://<domain>/runtime-config.js`
+3. confirm both return `Cache-Control: no-store`
+4. confirm `/assets/*` responses come from the current frontend image/build
+
 ## Public Routing Problems
 
 ### Symptom

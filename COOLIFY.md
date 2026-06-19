@@ -2,8 +2,7 @@
 
 This repo can be deployed on Coolify as a Docker Compose application with:
 
-- `frontend-build`: Node building the Vite app into a shared volume
-- `frontend`: nginx serving the built Vite app on a public URL
+- `frontend`: one multi-stage image that builds the Vite app, then serves the built files from nginx on the public URL
 - `backend`: FastAPI on the private Docker network
 - `wnba_data`: persistent volume for SQLite, caches, and snapshots
 
@@ -85,6 +84,7 @@ After deployment, verify:
 - `/` loads the React app
 - `/api/health` returns `{"status":"ok"}`
 - `/api/matchups` returns JSON through the frontend domain
+- `/index.html` and `/runtime-config.js` return `Cache-Control: no-store`
 - existing data persists after a redeploy/restart
 - Data tab login works with the configured admin credentials
 - protected admin POST actions work after login
@@ -97,6 +97,19 @@ Recommended first live checks:
 3. run `Refresh ESPN`
 4. verify `Roster` tab loads and only shows `Refresh Roster` for admins
 
+Recommended deploy-freshness checks:
+
+```bash
+curl -I https://YOUR_DOMAIN/
+curl -I https://YOUR_DOMAIN/index.html
+curl -I https://YOUR_DOMAIN/runtime-config.js
+```
+
+Expected result:
+
+- `index.html` and `runtime-config.js` should include `Cache-Control: no-store`
+- hashed files under `/assets/` can be cached aggressively because a new build gets new filenames
+
 ## 6. Key Coolify Considerations
 
 ### Public Routing
@@ -105,6 +118,7 @@ Recommended first live checks:
 - Do not expose the backend directly on the public domain for normal app traffic.
 - `/api/*` should flow:
   - browser -> frontend nginx -> backend
+- Do not mount a persistent volume over `/usr/share/nginx/html`; the built frontend files should come from the frontend image itself on each deploy.
 
 If `/api` responses come from `uvicorn` directly instead of `nginx`, check for:
 
@@ -147,6 +161,7 @@ If `/api` responses come from `uvicorn` directly instead of `nginx`, check for:
 - If the frontend goes blank, check:
   - `/api/health`
   - `/api/matchups`
+  - `/index.html` response headers
   - backend logs
   - Coolify domain bindings
   - proxy overrides

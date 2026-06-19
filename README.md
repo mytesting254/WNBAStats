@@ -117,7 +117,7 @@ Useful commands:
 
 ```bash
 docker compose logs -f backend
-docker compose logs -f frontend-build
+docker compose logs -f frontend
 docker compose down
 ```
 
@@ -175,7 +175,7 @@ POST /api/gems/sync-settlements
 POST /api/watchlist/snapshot
 POST /api/watchlist/sync-settlements
 POST /api/models/train
-POST /api/recalculate
+POST /api/props/repair-current-slate
 POST /api/settle-props
 ```
 
@@ -190,7 +190,7 @@ Preferred browser/admin path:
 - let the frontend manage CSRF automatically
 
 - Send `X-API-Key: <API_KEY>` (or `Authorization: Bearer <API_KEY>`) for:
-  - `POST /api/recalculate`
+  - `POST /api/props/repair-current-slate`
   - `POST /api/settle-props`
   - `POST /api/models/train`
   - `POST /api/odds/import`
@@ -350,12 +350,15 @@ Before treating a deployment as production-ready, verify all of the following:
 2. `https://<domain>/api/matchups` returns JSON through nginx, not directly from uvicorn.
 3. SQLite data survives container restarts and redeploys.
 4. Admin login works from the `Data` tab.
-5. A protected admin POST succeeds after login:
+5. `https://<domain>/index.html` and `https://<domain>/runtime-config.js` return `Cache-Control: no-store`.
+6. The frontend container/image, not a manual file sync, is the source of `/usr/share/nginx/html`.
+7. A hard refresh loads the latest UI and the `Recalculate` action calls `POST /api/props/repair-current-slate`.
+8. A protected admin POST succeeds after login:
    - `Recalculate`
    - `Refresh ESPN`
    - `Refresh Covers`
-6. `ODDS_API_KEY` is set if you expect The Odds API imports to work.
-7. Existing snapshots/backups are stored somewhere outside the live volume.
+9. `ODDS_API_KEY` is set if you expect The Odds API imports to work.
+10. Existing snapshots/backups are stored somewhere outside the live volume.
 
 ## Troubleshooting Notes
 
@@ -528,7 +531,7 @@ Normal clean-slate flow:
 ```text
 Refresh Odds / Refresh Covers before games
 Load Missing ESPN after games finish
-Recalculate
+Current-slate repair
 ```
 
 Raw provider responses and dashboard snapshots still use local JSON cache files under `data/cache/` so repeated loads are faster and avoid unnecessary provider calls. Turso stores the normalized records that must survive across devices: games, players, player stats, prop lines, predictions, settled results, and model runs.
