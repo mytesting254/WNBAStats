@@ -140,6 +140,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/api/ops/health")
+@app.get("/api/operations/health")
 def ops_health() -> dict[str, Any]:
     with _PROP_SYNC_LOCK:
         sync_state = dict(_PROP_SYNC_STATE)
@@ -2480,6 +2481,7 @@ def roster(response: Response) -> list[dict]:
 
 
 @app.get("/api/models/runs")
+@app.get("/api/model-runs")
 def model_runs(response: Response) -> dict:
     def compute() -> dict:
         with connect() as conn:
