@@ -159,7 +159,7 @@ export function App() {
   const [recalculating, setRecalculating] = useState(false);
   const [settlingProps, setSettlingProps] = useState(false);
   const [snapshottingGems, setSnapshottingGems] = useState(false);
-  const [activeTab, setActiveTab] = useState<DashboardTab>("matchups");
+  const [activeTab, setActiveTab] = useState<DashboardTab>("props");
   const [market, setMarket] = useState("all");
   const [confidence, setConfidence] = useState("all");
   const [modelProbabilityOrder, setModelProbabilityOrder] = useState<SortDirection>("desc");
@@ -2494,10 +2494,33 @@ function normalizeTeamCode(value: string | null | undefined) {
 function normalizeCoversRecords(records: Matchup["covers_records"] | null | undefined): NormalizedCoversRecords {
   const source = records && typeof records === "object" ? records : null;
   return {
-    head_to_head: Array.isArray(source?.head_to_head) ? source.head_to_head : [],
-    away_last_10: Array.isArray(source?.away_last_10) ? source.away_last_10 : [],
-    home_last_10: Array.isArray(source?.home_last_10) ? source.home_last_10 : [],
+    head_to_head: Array.isArray(source?.head_to_head) ? source.head_to_head.map(normalizeCoversRecordRow).filter((row): row is CoversRecordRow => row != null) : [],
+    away_last_10: Array.isArray(source?.away_last_10) ? source.away_last_10.map(normalizeCoversRecordRow).filter((row): row is CoversRecordRow => row != null) : [],
+    home_last_10: Array.isArray(source?.home_last_10) ? source.home_last_10.map(normalizeCoversRecordRow).filter((row): row is CoversRecordRow => row != null) : [],
     team_table: Array.isArray(source?.team_table) ? source.team_table : [],
+  };
+}
+
+function normalizeCoversRecordRow(row: unknown): CoversRecordRow | null {
+  if (!row || typeof row !== "object") {
+    return null;
+  }
+  const source = row as Partial<CoversRecordRow>;
+  const date = typeof source.date === "string" ? source.date : "";
+  const score = typeof source.score === "string" ? source.score : "";
+  if (!date || !score) {
+    return null;
+  }
+  return {
+    date,
+    score,
+    ats: typeof source.ats === "string" ? source.ats : "",
+    total: typeof source.total === "string" ? source.total : "",
+    home: typeof source.home === "string" ? source.home : undefined,
+    winner: typeof source.winner === "string" ? source.winner : source.winner ?? undefined,
+    opponent: typeof source.opponent === "string" ? source.opponent : undefined,
+    location: source.location === "home" || source.location === "away" ? source.location : undefined,
+    result: typeof source.result === "string" ? source.result : source.result ?? undefined,
   };
 }
 
@@ -3273,10 +3296,11 @@ function TeamLogo({ src, alt }: { src?: string | null; alt: string }) {
 }
 
 function PlayerLabel({ name, position }: { name: string; position?: string | null }) {
+  const safeName = String(name ?? "").trim() || "Unknown";
   const pos = String(position || "").trim().toUpperCase();
   return (
     <strong className="player-label">
-      {name}
+      {safeName}
       {pos ? <sup className="player-label-pos">{pos}</sup> : null}
     </strong>
   );
@@ -3618,12 +3642,16 @@ function marketLabel(market: string) {
 }
 
 function formatDate(value: string) {
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) {
+    return "Scheduled";
+  }
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit"
-  }).format(new Date(value));
+  }).format(new Date(time));
 }
 
 function formatDateTime(value?: string | null) {
