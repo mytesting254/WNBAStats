@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
+import json
 from types import SimpleNamespace
 
 import pytest
 from fastapi import Response
+from fastapi.responses import JSONResponse
+from starlette.requests import Request
 
 from backend.app import covers_import as covers_import_module
 from backend.app import cache as cache_module
@@ -198,11 +202,78 @@ def test_american_odds_helpers() -> None:
 
 
 def test_read_json_cache_returns_none_for_invalid_json(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(cache_module, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(cache_module, "get_cache_dir", lambda: tmp_path)
     bad_cache = tmp_path / "broken.json"
     bad_cache.write_text("", encoding="utf-8")
 
     assert cache_module.read_json_cache("broken.json") is None
+
+
+def test_read_through_cache_with_meta_serves_stale_payload_when_db_is_locked(monkeypatch) -> None:
+    stale_payload = [{"player_name": "Cached Player"}]
+    stale_cached_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    monkeypatch.setattr(
+        main_module,
+        "read_json_cache",
+        lambda name: {
+            "cache_key_version": main_module.READ_CACHE_VERSION,
+            "cached_at": stale_cached_at,
+            "ttl_seconds": 60,
+            "payload": stale_payload,
+        },
+    )
+
+    def locked_compute():
+        raise sqlite3.OperationalError("database is locked")
+
+    payload, status, compute_ms = main_module._read_through_cache_with_meta(
+        "test-read-cache.json",
+        60,
+        locked_compute,
+    )
+
+    assert payload == stale_payload
+    assert status == "STALE"
+    assert compute_ms >= 0
+
+
+@pytest.mark.anyio
+async def test_app_response_cache_serves_stale_payload_when_db_is_locked(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cache_module, "get_cache_dir", lambda: tmp_path)
+
+    async def _receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    request = Request(
+        {
+            "type": "http",
+            "http_version": "1.1",
+            "method": "GET",
+            "path": "/api/watchlist",
+            "raw_path": b"/api/watchlist",
+            "query_string": b"",
+            "headers": [],
+            "client": ("testclient", 123),
+            "server": ("testserver", 80),
+            "scheme": "http",
+        },
+        _receive,
+    )
+
+    async def first_call(_request):
+        return JSONResponse(content=[{"id": 1, "player_name": "Cached"}])
+
+    async def locked_call(_request):
+        raise sqlite3.OperationalError("database is locked")
+
+    first = await main_module.cache_api_get_responses(request, first_call)
+    assert first.status_code == 200
+    assert first.headers.get("x-app-cache") == "STORE"
+
+    second = await main_module.cache_api_get_responses(request, locked_call)
+    assert second.status_code == 200
+    assert second.headers.get("x-app-cache") == "STALE"
+    assert json.loads(second.body.decode("utf-8")) == [{"id": 1, "player_name": "Cached"}]
 
 
 def test_normalize_team_abbreviation_handles_covers_name_variants() -> None:

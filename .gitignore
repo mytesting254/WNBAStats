@@ -1,6 +1,7 @@
 __pycache__/
 .pytest_cache/
 .venv/
+.venv-linux/
 node_modules/
 dist/
 data/*.sqlite

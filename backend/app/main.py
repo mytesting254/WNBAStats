@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 import os
@@ -11,6 +14,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from .ball_dont_lie import fetch_team_history
@@ -62,9 +66,12 @@ LINE_DISCREPANCIES_CACHE_NAME = "line_discrepancies.json"
 MODEL_PERFORMANCE_CACHE_NAME = "model_performance.json"
 MODEL_RUNS_CACHE_NAME = "model_runs.json"
 ROSTER_CACHE_NAME = "roster.json"
+APP_RESPONSE_CACHE_PREFIX = "app_response_cache_"
 GEM_MIN_EV = float(os.getenv("GEM_MIN_EV", "0.02"))
 GEM_MIN_EDGE = float(os.getenv("GEM_MIN_EDGE", "0.05"))
 READ_CACHE_VERSION = 1
+APP_RESPONSE_CACHE_VERSION = 1
+APP_RESPONSE_CACHE_TTL_SECONDS = int(os.getenv("APP_RESPONSE_CACHE_TTL_SECONDS", "3600"))
 VALUE_BOARD_TTL_SECONDS = int(os.getenv("VALUE_BOARD_TTL_SECONDS", "300"))
 LINE_DISCREPANCIES_TTL_SECONDS = int(os.getenv("LINE_DISCREPANCIES_TTL_SECONDS", "300"))
 MATCHUPS_TTL_SECONDS = int(os.getenv("MATCHUPS_TTL_SECONDS", "300"))
@@ -92,6 +99,69 @@ _PROP_SYNC_STATE: dict[str, Any] = {
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+def _is_sqlite_locked_error(exc: sqlite3.OperationalError) -> bool:
+    return "locked" in str(exc).lower()
+
+
+def _should_cache_app_response(request: Request) -> bool:
+    if request.method.upper() != "GET":
+        return False
+    if not request.url.path.startswith("/api/"):
+        return False
+    if request.url.path.startswith("/api/auth/"):
+        return False
+    return True
+
+
+def _app_response_cache_name(request: Request) -> str:
+    cache_key = f"{request.url.path}?{request.url.query}"
+    digest = hashlib.sha256(cache_key.encode("utf-8")).hexdigest()
+    return f"{APP_RESPONSE_CACHE_PREFIX}{digest}.json"
+
+
+def _app_response_cache_envelope(status_code: int, payload: Any) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    return {
+        "cache_key_version": APP_RESPONSE_CACHE_VERSION,
+        "cached_at": now.isoformat(),
+        "ttl_seconds": APP_RESPONSE_CACHE_TTL_SECONDS,
+        "source": "app_response_cache",
+        "status_code": status_code,
+        "payload": payload,
+    }
+
+
+def _read_app_response_cache(cache_name: str, *, allow_stale: bool = False) -> dict[str, Any] | None:
+    cached = read_json_cache(cache_name)
+    if not isinstance(cached, dict):
+        return None
+    if cached.get("cache_key_version") != APP_RESPONSE_CACHE_VERSION:
+        return None
+    cached_at_raw = cached.get("cached_at")
+    ttl_seconds = cached.get("ttl_seconds")
+    status_code = cached.get("status_code")
+    if not isinstance(cached_at_raw, str) or not isinstance(ttl_seconds, int) or not isinstance(status_code, int):
+        return None
+    try:
+        cached_at = datetime.fromisoformat(cached_at_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if cached_at.tzinfo is None:
+        cached_at = cached_at.replace(tzinfo=timezone.utc)
+    if not allow_stale and datetime.now(timezone.utc) - cached_at > timedelta(seconds=ttl_seconds):
+        return None
+    return {
+        "status_code": status_code,
+        "payload": cached.get("payload"),
+    }
+
+
+def _cached_app_response(entry: dict[str, Any], cache_status: str) -> JSONResponse:
+    response = JSONResponse(content=entry.get("payload"), status_code=int(entry.get("status_code") or 200))
+    response.headers["X-App-Cache"] = cache_status
+    return response
 
 app.add_middleware(
     CORSMiddleware,
@@ -132,6 +202,46 @@ def _start_model_prewarm() -> None:
 
     thread = threading.Thread(target=_worker, name="model-prewarm", daemon=True)
     thread.start()
+
+
+@app.middleware("http")
+async def cache_api_get_responses(request: Request, call_next):
+    cache_name = _app_response_cache_name(request) if _should_cache_app_response(request) else None
+    try:
+        response = await call_next(request)
+    except sqlite3.OperationalError as exc:
+        if cache_name and _is_sqlite_locked_error(exc):
+            cached = _read_app_response_cache(cache_name, allow_stale=True)
+            if cached is not None:
+                print(f"[app-cache] {request.url.path} serving stale payload after sqlite lock: {exc}")
+                return _cached_app_response(cached, "STALE")
+        raise
+
+    if cache_name is None or response.status_code != 200:
+        return response
+
+    if response.headers.get("content-type", "").split(";")[0].strip().lower() != "application/json":
+        return response
+
+    if hasattr(response, "body_iterator"):
+        body = b""
+        async for chunk in response.body_iterator:
+            body += chunk
+    else:
+        body = getattr(response, "body", b"")
+    rebuilt = Response(
+        content=body,
+        status_code=response.status_code,
+        headers=dict(response.headers),
+        media_type=response.media_type,
+    )
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return rebuilt
+    write_json_cache(cache_name, _app_response_cache_envelope(response.status_code, payload))
+    rebuilt.headers["X-App-Cache"] = "STORE"
+    return rebuilt
 
 
 @app.get("/api/health")
@@ -557,7 +667,7 @@ def _cache_envelope(payload: Any, ttl_seconds: int) -> dict[str, Any]:
     }
 
 
-def _read_cached_payload(cache_name: str) -> Any | None:
+def _read_cached_payload(cache_name: str, *, allow_stale: bool = False) -> Any | None:
     cached = read_json_cache(cache_name)
     if not isinstance(cached, dict):
         return None
@@ -573,7 +683,7 @@ def _read_cached_payload(cache_name: str) -> Any | None:
         return None
     if cached_at.tzinfo is None:
         cached_at = cached_at.replace(tzinfo=timezone.utc)
-    if datetime.now(timezone.utc) - cached_at > timedelta(seconds=ttl_seconds):
+    if not allow_stale and datetime.now(timezone.utc) - cached_at > timedelta(seconds=ttl_seconds):
         return None
     return cached.get("payload")
 
@@ -592,7 +702,16 @@ def _read_through_cache_with_meta(cache_name: str, ttl_seconds: int, compute: Ca
     if cached_payload is not None:
         return cached_payload, "HIT", 0.0
     started = datetime.now(timezone.utc)
-    payload = compute()
+    try:
+        payload = compute()
+    except sqlite3.OperationalError as exc:
+        if _is_sqlite_locked_error(exc):
+            stale_payload = _read_cached_payload(cache_name, allow_stale=True)
+            if stale_payload is not None:
+                compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+                print(f"[cache] {cache_name} serving stale payload after sqlite lock: {exc}")
+                return stale_payload, "STALE", round(compute_ms, 2)
+        raise
     compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
     write_json_cache(cache_name, _cache_envelope(payload, ttl_seconds))
     return payload, "MISS", round(compute_ms, 2)
@@ -2534,101 +2653,110 @@ def ball_dont_lie_history(
 @app.get("/api/matchups", dependencies=[Depends(_protect_force_refresh)])
 def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
     if not force_refresh:
-        started = datetime.now(timezone.utc)
         cached = _read_cached_payload(MATCHUPS_CACHE_NAME)
         if cached is not None:
             _set_observability_headers(response, MATCHUPS_CACHE_NAME, "HIT", 0.0)
             return cached
-    with connect() as conn:
-        started = datetime.now(timezone.utc)
-        injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
-        games = conn.execute(
-            """
-            SELECT
-                g.id,
-                g.game_date,
-                g.start_time,
-                home.id AS home_team_id,
-                home.abbreviation AS home_team,
-                home.name AS home_team_name,
-                home.logo_url AS home_logo_url,
-                away.id AS away_team_id,
-                away.abbreviation AS away_team,
-                away.name AS away_team_name
-                ,away.logo_url AS away_logo_url
-                ,g.rest_days_home
-                ,g.rest_days_away
-                ,g.spread_home
-                ,g.game_total
-                ,g.home_moneyline
-                ,g.away_moneyline
-            FROM games g
-            JOIN teams home ON home.id = g.home_team_id
-            JOIN teams away ON away.id = g.away_team_id
-            WHERE g.status = 'scheduled'
-            ORDER BY g.start_time
-            """
-        ).fetchall()
-        games = [game for game in games if _is_today_active_game_time(game["start_time"])]
-        game_groups = _coalesce_matchup_games(games)
-        covers_records = _covers_records_by_game(conn)
-        covers_market_odds = _covers_market_odds_by_game()
-        payload = []
-        for game, game_ids in game_groups:
-            home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
-            away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
-            game_id = int(game["id"])
-            market_override = covers_market_odds.get(game_id, {})
-            group_covers_records = next(
-                (covers_records.get(int(candidate_id)) for candidate_id in game_ids if covers_records.get(int(candidate_id))),
-                covers_records.get(game_id),
-            )
-            home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
-            away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
-            game_context = dict(game)
-            for field in ("spread_home", "game_total", "home_moneyline", "away_moneyline"):
-                if market_override.get(field) is not None:
-                    game_context[field] = market_override[field]
-            game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
-            game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
-            prediction = project_game(conn, game_context)
-            game_prediction_id = save_game_prediction(conn, game_context, prediction)
-            payload.append(
-                {
-                    "id": game["id"],
-                    "game_prediction_id": game_prediction_id,
-                    "game_date": game["game_date"],
-                    "start_time": game["start_time"],
-                    "home_team": game["home_team"],
-                    "home_team_name": game["home_team_name"],
-                    "home_logo_url": game["home_logo_url"],
-                    "away_team": game["away_team"],
-                    "away_team_name": game["away_team_name"],
-                    "away_logo_url": game["away_logo_url"],
-                    "home_rest_days": home_rest_days,
-                    "away_rest_days": away_rest_days,
-                    "spread_home": game_context["spread_home"],
-                    "game_total": game_context["game_total"],
-                    "home_moneyline": game_context["home_moneyline"],
-                    "away_moneyline": game_context["away_moneyline"],
-                    **market_override,
-                    "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
-                    **prediction,
-                    "home": home_summary,
-                    "away": away_summary,
-                    "covers_records": group_covers_records,
-                    "props": _value_board_payload_for_games(conn, game_ids, include_filtered_only=False),
-                    "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
-                    "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
-                    "injury_source": injury_refresh.get("source"),
-                    "injury_captured_at": injury_refresh.get("captured_at"),
-                    "injury_from_cache": injury_refresh.get("from_cache"),
-                }
-            )
-    write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(payload, MATCHUPS_TTL_SECONDS))
-    compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
-    _set_observability_headers(response, MATCHUPS_CACHE_NAME, "BYPASS" if force_refresh else "MISS", round(compute_ms, 2))
-    return payload
+    started = datetime.now(timezone.utc)
+    try:
+        with connect() as conn:
+            injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
+            games = conn.execute(
+                """
+                SELECT
+                    g.id,
+                    g.game_date,
+                    g.start_time,
+                    home.id AS home_team_id,
+                    home.abbreviation AS home_team,
+                    home.name AS home_team_name,
+                    home.logo_url AS home_logo_url,
+                    away.id AS away_team_id,
+                    away.abbreviation AS away_team,
+                    away.name AS away_team_name
+                    ,away.logo_url AS away_logo_url
+                    ,g.rest_days_home
+                    ,g.rest_days_away
+                    ,g.spread_home
+                    ,g.game_total
+                    ,g.home_moneyline
+                    ,g.away_moneyline
+                FROM games g
+                JOIN teams home ON home.id = g.home_team_id
+                JOIN teams away ON away.id = g.away_team_id
+                WHERE g.status = 'scheduled'
+                ORDER BY g.start_time
+                """
+            ).fetchall()
+            games = [game for game in games if _is_today_active_game_time(game["start_time"])]
+            game_groups = _coalesce_matchup_games(games)
+            covers_records = _covers_records_by_game(conn)
+            covers_market_odds = _covers_market_odds_by_game()
+            payload = []
+            for game, game_ids in game_groups:
+                home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
+                away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
+                game_id = int(game["id"])
+                market_override = covers_market_odds.get(game_id, {})
+                group_covers_records = next(
+                    (covers_records.get(int(candidate_id)) for candidate_id in game_ids if covers_records.get(int(candidate_id))),
+                    covers_records.get(game_id),
+                )
+                home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
+                away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
+                game_context = dict(game)
+                for field in ("spread_home", "game_total", "home_moneyline", "away_moneyline"):
+                    if market_override.get(field) is not None:
+                        game_context[field] = market_override[field]
+                game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
+                game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
+                prediction = project_game(conn, game_context)
+                game_prediction_id = save_game_prediction(conn, game_context, prediction)
+                payload.append(
+                    {
+                        "id": game["id"],
+                        "game_prediction_id": game_prediction_id,
+                        "game_date": game["game_date"],
+                        "start_time": game["start_time"],
+                        "home_team": game["home_team"],
+                        "home_team_name": game["home_team_name"],
+                        "home_logo_url": game["home_logo_url"],
+                        "away_team": game["away_team"],
+                        "away_team_name": game["away_team_name"],
+                        "away_logo_url": game["away_logo_url"],
+                        "home_rest_days": home_rest_days,
+                        "away_rest_days": away_rest_days,
+                        "spread_home": game_context["spread_home"],
+                        "game_total": game_context["game_total"],
+                        "home_moneyline": game_context["home_moneyline"],
+                        "away_moneyline": game_context["away_moneyline"],
+                        **market_override,
+                        "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
+                        **prediction,
+                        "home": home_summary,
+                        "away": away_summary,
+                        "covers_records": group_covers_records,
+                        "props": _value_board_payload_for_games(conn, game_ids, include_filtered_only=False),
+                        "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
+                        "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
+                        "injury_source": injury_refresh.get("source"),
+                        "injury_captured_at": injury_refresh.get("captured_at"),
+                        "injury_from_cache": injury_refresh.get("from_cache"),
+                    }
+                )
+        write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(payload, MATCHUPS_TTL_SECONDS))
+        compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+        _set_observability_headers(response, MATCHUPS_CACHE_NAME, "BYPASS" if force_refresh else "MISS", round(compute_ms, 2))
+        return payload
+    except sqlite3.OperationalError as exc:
+        if _is_sqlite_locked_error(exc):
+            cached = _read_cached_payload(MATCHUPS_CACHE_NAME, allow_stale=True)
+            if cached is not None:
+                compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+                print(f"[cache] {MATCHUPS_CACHE_NAME} serving stale payload after sqlite lock: {exc}")
+                _set_observability_headers(response, MATCHUPS_CACHE_NAME, "STALE", round(compute_ms, 2))
+                return cached
+        raise
 
 
 def _start_prop_sync_if_needed(source: str) -> bool:
