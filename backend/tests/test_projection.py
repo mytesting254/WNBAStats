@@ -3543,6 +3543,46 @@ def test_value_board_filters_low_confidence_unless_edge_is_high() -> None:
     assert ("Sonia Citron", "assists") in player_market
 
 
+def test_value_board_excludes_settled_props() -> None:
+    now = datetime.now(timezone.utc)
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (2101, "Settled Value Board Player", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)",
+            (21001, "2026-06-04", "2026-06-04T19:00:00Z", 10, 3, -2.5, 158.5),
+        )
+        conn.execute(
+            "INSERT INTO team_game_results (team_id, game_id, is_home, points, opponent_points, possessions, closing_spread, closing_total, ats_result, total_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (10, 21001, 1, 84, 79, 79.0, -2.5, 158.5, "cover", "over"),
+        )
+        conn.execute(
+            "INSERT INTO player_game_stats (player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (2101, 21001, 35, 27, 5, 6, 2, 1, 0, 2),
+        )
+        conn.execute(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (210011, 21001, 2101, "DraftKings", "points", 24.5, -110, -110, now.isoformat()),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (210012, 210011, MODEL_VERSION, now.isoformat(), 26.1, "over", 0.58, 0.52, 0.06, 0.03, "medium", "settled-row-test"),
+        )
+
+        settled = settle_completed_props(conn)
+        rows = main_module._value_board_payload(conn, game_id=21001, include_filtered_only=False)
+
+    assert settled["settled"] == 1
+    assert rows == []
+
+
 def test_gems_keep_one_direction_per_player_market_game(monkeypatch) -> None:
     with connect() as conn:
         monkeypatch.setattr(

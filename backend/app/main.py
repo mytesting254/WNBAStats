@@ -3166,10 +3166,10 @@ def _value_board_payload(
 ) -> list[dict]:
     if game_ids:
         placeholders = ",".join("?" for _ in game_ids)
-        game_filter = f"WHERE pl.game_id IN ({placeholders})"
+        game_filter = f" AND pl.game_id IN ({placeholders})"
         params = tuple(game_ids)
     elif game_id is not None:
-        game_filter = "WHERE pl.game_id = ?"
+        game_filter = " AND pl.game_id = ?"
         params = (game_id,)
     else:
         game_filter = ""
@@ -3179,6 +3179,7 @@ def _value_board_payload(
         WITH raw_props AS (
             SELECT
                 pp.id,
+                pp.prop_line_id,
                 pl.game_id,
                 p.full_name AS player,
                 p.id AS player_id,
@@ -3208,6 +3209,7 @@ def _value_board_payload(
             JOIN prop_lines pl ON pl.id = pp.prop_line_id
             JOIN players p ON p.id = pl.player_id
             JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pp.prop_line_id
             JOIN teams rt ON rt.id = (
                 SELECT COALESCE(
                     (
@@ -3260,6 +3262,7 @@ def _value_board_payload(
                     g.home_team_id
                 )
             )
+            WHERE sp.id IS NULL
             {game_filter}
         ),
         ranked_props AS (
