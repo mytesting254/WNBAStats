@@ -68,6 +68,8 @@ MATCHUPS_CACHE_NAME = "current_matchups.json"
 WATCHLIST_CACHE_NAME = "current_watchlist.json"
 LINE_DISCREPANCIES_CACHE_NAME = "line_discrepancies.json"
 MODEL_PERFORMANCE_CACHE_NAME = "model_performance.json"
+GEM_PERFORMANCE_CACHE_NAME = "gem_performance.json"
+WATCHLIST_PERFORMANCE_CACHE_NAME = "watchlist_performance.json"
 MODEL_RUNS_CACHE_NAME = "model_runs.json"
 ROSTER_CACHE_NAME = "roster.json"
 APP_RESPONSE_CACHE_PREFIX = "app_response_cache_"
@@ -81,6 +83,8 @@ WATCHLIST_TTL_SECONDS = int(os.getenv("WATCHLIST_TTL_SECONDS", "300"))
 LINE_DISCREPANCIES_TTL_SECONDS = int(os.getenv("LINE_DISCREPANCIES_TTL_SECONDS", "300"))
 MATCHUPS_TTL_SECONDS = int(os.getenv("MATCHUPS_TTL_SECONDS", "300"))
 MODEL_PERFORMANCE_TTL_SECONDS = int(os.getenv("MODEL_PERFORMANCE_TTL_SECONDS", "300"))
+GEM_PERFORMANCE_TTL_SECONDS = int(os.getenv("GEM_PERFORMANCE_TTL_SECONDS", "300"))
+WATCHLIST_PERFORMANCE_TTL_SECONDS = int(os.getenv("WATCHLIST_PERFORMANCE_TTL_SECONDS", "300"))
 MODEL_RUNS_TTL_SECONDS = int(os.getenv("MODEL_RUNS_TTL_SECONDS", "300"))
 ROSTER_TTL_SECONDS = int(os.getenv("ROSTER_TTL_SECONDS", "300"))
 RATE_LIMIT_MUTATION_CAPACITY = float(os.getenv("RATE_LIMIT_MUTATION_CAPACITY", "10"))
@@ -320,7 +324,6 @@ def on_startup() -> None:
     with connect() as conn:
         ensure_teams(conn)
     _start_model_prewarm()
-    _invalidate_read_caches()
     _start_read_payload_prewarm()
 
 
@@ -953,6 +956,204 @@ def _model_runs_payload(conn) -> dict:
     }
 
 
+def _model_performance_payload(conn) -> dict:
+        total_settled_row = conn.execute(
+                "SELECT COUNT(*) AS count FROM settled_props"
+        ).fetchone()
+        total_settled = int(total_settled_row["count"] or 0)
+        rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        pp.*,
+                        pl.market,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY pp.prop_line_id
+                            ORDER BY pp.prediction_time DESC, pp.id DESC
+                        ) AS rn
+                    FROM prop_predictions pp
+                    JOIN prop_lines pl ON pl.id = pp.prop_line_id
+                )
+                SELECT
+                    r.recommended_side,
+                    r.expected_value,
+                    r.edge,
+                    r.confidence,
+                    r.market,
+                    sp.winning_side
+                FROM ranked r
+                JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+                WHERE r.rn = 1
+                """
+        ).fetchall()
+        qualified = [row for row in rows if _include_value_board_pick(dict(row))]
+        evaluated = len(qualified)
+        if total_settled == 0:
+                return {
+                        "total_settled": 0,
+                        "settled": 0,
+                        "wins": 0,
+                        "win_rate": None,
+                        "average_ev": None,
+                        "message": "No settled props yet. Settle completed games to evaluate the model.",
+                }
+        if evaluated == 0:
+                return {
+                        "total_settled": total_settled,
+                        "settled": 0,
+                        "wins": 0,
+                        "win_rate": None,
+                        "average_ev": None,
+                        "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but there are no matching model predictions.",
+                }
+        wins = sum(1 for row in qualified if row["recommended_side"] == row["winning_side"])
+        avg_ev = sum(float(row["expected_value"]) for row in qualified) / evaluated
+        return {
+                "total_settled": total_settled,
+                "settled": evaluated,
+                "wins": wins,
+                "win_rate": round(wins / evaluated, 4),
+                "average_ev": round(avg_ev, 4),
+                "message": f"Evaluated {evaluated} settled value-board pick{'s' if evaluated != 1 else ''}.",
+        }
+
+
+def _gem_performance_payload(conn) -> dict:
+        rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        pp.*,
+                        pl.market,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY pp.prop_line_id
+                            ORDER BY pp.prediction_time DESC, pp.id DESC
+                        ) AS rn
+                    FROM prop_predictions pp
+                    JOIN prop_lines pl ON pl.id = pp.prop_line_id
+                )
+                SELECT
+                    r.recommended_side,
+                    r.market,
+                    r.edge,
+                    r.expected_value,
+                    r.confidence,
+                    sp.winning_side
+                FROM ranked r
+                JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+                WHERE r.rn = 1
+                """
+        ).fetchall()
+        open_rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        pp.*,
+                        pl.game_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY pp.prop_line_id
+                            ORDER BY pp.prediction_time DESC, pp.id DESC
+                        ) AS rn
+                    FROM prop_predictions pp
+                    JOIN prop_lines pl ON pl.id = pp.prop_line_id
+                )
+                SELECT
+                    r.edge,
+                    r.expected_value,
+                    r.confidence
+                FROM ranked r
+                JOIN games g ON g.id = r.game_id
+                LEFT JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+                WHERE r.rn = 1
+                    AND g.status = 'scheduled'
+                    AND sp.id IS NULL
+                """
+        ).fetchall()
+        qualified = []
+        for row in rows:
+                edge = float(row["edge"] or 0.0)
+                ev = float(row["expected_value"] or 0.0)
+                confidence = str(row["confidence"] or "").strip().lower()
+                if ev >= GEM_MIN_EV and abs(edge) >= GEM_MIN_EDGE and confidence != "low":
+                        qualified.append(row)
+        current_open_conservative = 0
+        current_open_balanced = 0
+        current_open_aggressive = 0
+        for row in open_rows:
+                edge = float(row["edge"] or 0.0)
+                ev = float(row["expected_value"] or 0.0)
+                confidence = str(row["confidence"] or "").strip().lower()
+                if ev >= 0.03 and abs(edge) >= 0.08 and confidence != "low":
+                        current_open_conservative += 1
+                if ev >= 0.02 and abs(edge) >= 0.05:
+                        current_open_balanced += 1
+                if ev >= 0.01 and abs(edge) >= 0.035:
+                        current_open_aggressive += 1
+        if not qualified:
+                return {
+                        "qualified": 0,
+                        "wins": 0,
+                        "win_rate": None,
+                        "current_open_conservative": current_open_conservative,
+                        "current_open_balanced": current_open_balanced,
+                        "current_open_aggressive": current_open_aggressive,
+                        "message": "No settled picks currently meet gem thresholds.",
+                }
+        wins = sum(1 for row in qualified if str(row["recommended_side"]) == str(row["winning_side"]))
+        return {
+                "qualified": len(qualified),
+                "wins": wins,
+                "win_rate": round(wins / len(qualified), 4),
+                "current_open_conservative": current_open_conservative,
+                "current_open_balanced": current_open_balanced,
+                "current_open_aggressive": current_open_aggressive,
+                "message": f"Evaluated {len(qualified)} settled gem-qualified picks.",
+        }
+
+
+def _watchlist_performance_payload(conn) -> dict:
+        rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        pp.*,
+                        pl.market,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY pp.prop_line_id
+                            ORDER BY pp.prediction_time DESC, pp.id DESC
+                        ) AS rn
+                    FROM prop_predictions pp
+                    JOIN prop_lines pl ON pl.id = pp.prop_line_id
+                )
+                SELECT
+                    r.recommended_side,
+                    r.market,
+                    r.edge,
+                    r.expected_value,
+                    r.confidence,
+                    sp.winning_side
+                FROM ranked r
+                JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+                WHERE r.rn = 1
+                """
+        ).fetchall()
+        qualified = [row for row in rows if _include_watchlist_pick(dict(row))]
+        if not qualified:
+                return {
+                        "qualified": 0,
+                        "wins": 0,
+                        "win_rate": None,
+                        "message": "No settled watchlist-qualified picks yet.",
+                }
+        wins = sum(1 for row in qualified if str(row["recommended_side"]) == str(row["winning_side"]))
+        return {
+                "qualified": len(qualified),
+                "wins": wins,
+                "win_rate": round(wins / len(qualified), 4),
+                "message": f"Evaluated {len(qualified)} settled watchlist-qualified picks.",
+        }
+
+
 def _matchups_payload(conn) -> list[dict]:
     injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
     games = conn.execute(
@@ -1042,32 +1243,34 @@ def _matchups_payload(conn) -> list[dict]:
 
 
 def _publish_current_read_payloads(conn) -> dict[str, int]:
-    value_board = _value_board_payload(conn)
-    write_json_cache(VALUE_BOARD_CACHE_NAME, _cache_envelope(value_board, VALUE_BOARD_TTL_SECONDS))
+    published: dict[str, int] = {}
 
-    watchlist = _watchlist_payload(conn)
-    write_json_cache(WATCHLIST_CACHE_NAME, _cache_envelope(watchlist, WATCHLIST_TTL_SECONDS))
+    def publish(name: str, ttl_seconds: int, payload: Any, count: int) -> None:
+        write_json_cache(name, _cache_envelope(payload, ttl_seconds))
+        published[name] = count
 
-    discrepancies_payload = line_discrepancies(conn, None)
-    write_json_cache(LINE_DISCREPANCIES_CACHE_NAME, _cache_envelope(discrepancies_payload, LINE_DISCREPANCIES_TTL_SECONDS))
+    for name, ttl_seconds, compute in (
+        (VALUE_BOARD_CACHE_NAME, VALUE_BOARD_TTL_SECONDS, lambda: _value_board_payload(conn)),
+        (WATCHLIST_CACHE_NAME, WATCHLIST_TTL_SECONDS, lambda: _watchlist_payload(conn)),
+        (LINE_DISCREPANCIES_CACHE_NAME, LINE_DISCREPANCIES_TTL_SECONDS, lambda: line_discrepancies(conn, None)),
+        (ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn)),
+        (MODEL_RUNS_CACHE_NAME, MODEL_RUNS_TTL_SECONDS, lambda: _model_runs_payload(conn)),
+        (MODEL_PERFORMANCE_CACHE_NAME, MODEL_PERFORMANCE_TTL_SECONDS, lambda: _model_performance_payload(conn)),
+        (GEM_PERFORMANCE_CACHE_NAME, GEM_PERFORMANCE_TTL_SECONDS, lambda: _gem_performance_payload(conn)),
+        (WATCHLIST_PERFORMANCE_CACHE_NAME, WATCHLIST_PERFORMANCE_TTL_SECONDS, lambda: _watchlist_performance_payload(conn)),
+        (MATCHUPS_CACHE_NAME, MATCHUPS_TTL_SECONDS, lambda: _matchups_payload(conn)),
+    ):
+        try:
+            payload = compute()
+            if isinstance(payload, dict):
+                count = len(payload.get("runs", [])) if "runs" in payload else 1
+            else:
+                count = len(payload)
+            publish(name, ttl_seconds, payload, count)
+        except Exception as exc:
+            print(f"[startup] {name} prewarm skipped: {exc}")
 
-    roster_payload = _roster_payload(conn)
-    write_json_cache(ROSTER_CACHE_NAME, _cache_envelope(roster_payload, ROSTER_TTL_SECONDS))
-
-    model_runs_payload = _model_runs_payload(conn)
-    write_json_cache(MODEL_RUNS_CACHE_NAME, _cache_envelope(model_runs_payload, MODEL_RUNS_TTL_SECONDS))
-
-    matchups_payload = _matchups_payload(conn)
-    write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(matchups_payload, MATCHUPS_TTL_SECONDS))
-
-    return {
-        "value_board": len(value_board),
-        "watchlist": len(watchlist),
-        "line_discrepancies": len(discrepancies_payload),
-        "roster": len(roster_payload),
-        "model_runs": len(model_runs_payload.get("runs", [])),
-        "matchups": len(matchups_payload),
-    }
+    return published
 
 
 def _clear_scheduled_prop_state(conn, *, clear_source_rows: bool = False) -> None:
@@ -1329,65 +1532,7 @@ def watchlist(response: Response) -> list[dict]:
 def model_performance(response=None) -> dict:
     def compute() -> dict:
         with connect() as conn:
-            total_settled_row = conn.execute(
-                "SELECT COUNT(*) AS count FROM settled_props"
-            ).fetchone()
-            total_settled = int(total_settled_row["count"] or 0)
-            rows = conn.execute(
-                """
-                WITH ranked AS (
-                  SELECT
-                    pp.*,
-                    pl.market,
-                    ROW_NUMBER() OVER (
-                      PARTITION BY pp.prop_line_id
-                      ORDER BY pp.prediction_time DESC, pp.id DESC
-                    ) AS rn
-                  FROM prop_predictions pp
-                  JOIN prop_lines pl ON pl.id = pp.prop_line_id
-                )
-                SELECT
-                    r.recommended_side,
-                    r.expected_value,
-                    r.edge,
-                    r.confidence,
-                    r.market,
-                    sp.winning_side
-                FROM ranked r
-                JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
-                WHERE r.rn = 1
-                """
-            ).fetchall()
-        qualified = [row for row in rows if _include_value_board_pick(dict(row))]
-        evaluated = len(qualified)
-        if total_settled == 0:
-            return {
-                "total_settled": 0,
-                "settled": 0,
-                "wins": 0,
-                "win_rate": None,
-                "average_ev": None,
-                "message": "No settled props yet. Settle completed games to evaluate the model.",
-            }
-        if evaluated == 0:
-            return {
-                "total_settled": total_settled,
-                "settled": 0,
-                "wins": 0,
-                "win_rate": None,
-                "average_ev": None,
-                "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but there are no matching model predictions.",
-            }
-        wins = sum(1 for row in qualified if row["recommended_side"] == row["winning_side"])
-        avg_ev = sum(float(row["expected_value"]) for row in qualified) / evaluated
-        return {
-            "total_settled": total_settled,
-            "settled": evaluated,
-            "wins": wins,
-            "win_rate": round(wins / evaluated, 4),
-            "average_ev": round(avg_ev, 4),
-            "message": f"Evaluated {evaluated} settled value-board pick{'s' if evaluated != 1 else ''}.",
-        }
+            return _model_performance_payload(conn)
 
     if response is None:
         return compute()
@@ -1402,144 +1547,33 @@ def model_performance(response=None) -> dict:
 
 
 @app.get("/api/gem-performance")
-def gem_performance() -> dict:
-    with connect() as conn:
-        rows = conn.execute(
-            """
-            WITH ranked AS (
-              SELECT
-                pp.*,
-                pl.market,
-                ROW_NUMBER() OVER (
-                  PARTITION BY pp.prop_line_id
-                  ORDER BY pp.prediction_time DESC, pp.id DESC
-                ) AS rn
-              FROM prop_predictions pp
-              JOIN prop_lines pl ON pl.id = pp.prop_line_id
-            )
-            SELECT
-              r.recommended_side,
-              r.market,
-              r.edge,
-              r.expected_value,
-              r.confidence,
-              sp.winning_side
-            FROM ranked r
-            JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
-            WHERE r.rn = 1
-            """
-        ).fetchall()
-        open_rows = conn.execute(
-            """
-            WITH ranked AS (
-              SELECT
-                pp.*,
-                pl.game_id,
-                ROW_NUMBER() OVER (
-                  PARTITION BY pp.prop_line_id
-                  ORDER BY pp.prediction_time DESC, pp.id DESC
-                ) AS rn
-              FROM prop_predictions pp
-              JOIN prop_lines pl ON pl.id = pp.prop_line_id
-            )
-            SELECT
-              r.edge,
-              r.expected_value,
-              r.confidence
-            FROM ranked r
-            JOIN games g ON g.id = r.game_id
-            LEFT JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
-            WHERE r.rn = 1
-              AND g.status = 'scheduled'
-              AND sp.id IS NULL
-            """
-        ).fetchall()
-    qualified = []
-    for row in rows:
-        edge = float(row["edge"] or 0.0)
-        ev = float(row["expected_value"] or 0.0)
-        confidence = str(row["confidence"] or "").strip().lower()
-        # Settled historical baseline (current metric)
-        if ev >= GEM_MIN_EV and abs(edge) >= GEM_MIN_EDGE and confidence != "low":
-            qualified.append(row)
-    current_open_conservative = 0
-    current_open_balanced = 0
-    current_open_aggressive = 0
-    for row in open_rows:
-        edge = float(row["edge"] or 0.0)
-        ev = float(row["expected_value"] or 0.0)
-        confidence = str(row["confidence"] or "").strip().lower()
-        if ev >= 0.03 and abs(edge) >= 0.08 and confidence != "low":
-            current_open_conservative += 1
-        if ev >= 0.02 and abs(edge) >= 0.05:
-            current_open_balanced += 1
-        if ev >= 0.01 and abs(edge) >= 0.035:
-            current_open_aggressive += 1
-    if not qualified:
-        return {
-            "qualified": 0,
-            "wins": 0,
-            "win_rate": None,
-            "current_open_conservative": current_open_conservative,
-            "current_open_balanced": current_open_balanced,
-            "current_open_aggressive": current_open_aggressive,
-            "message": "No settled picks currently meet gem thresholds.",
-        }
-    wins = sum(1 for row in qualified if str(row["recommended_side"]) == str(row["winning_side"]))
-    return {
-        "qualified": len(qualified),
-        "wins": wins,
-        "win_rate": round(wins / len(qualified), 4),
-        "current_open_conservative": current_open_conservative,
-        "current_open_balanced": current_open_balanced,
-        "current_open_aggressive": current_open_aggressive,
-        "message": f"Evaluated {len(qualified)} settled gem-qualified picks.",
-    }
+def gem_performance(response: Response) -> dict:
+        def compute() -> dict:
+                with connect() as conn:
+                        return _gem_performance_payload(conn)
+
+        payload, status, compute_ms = _read_through_cache_with_meta(
+                GEM_PERFORMANCE_CACHE_NAME,
+                GEM_PERFORMANCE_TTL_SECONDS,
+                compute,
+        )
+        _set_observability_headers(response, GEM_PERFORMANCE_CACHE_NAME, status, compute_ms)
+        return payload
 
 
 @app.get("/api/watchlist-performance")
-def watchlist_performance() -> dict:
-    with connect() as conn:
-        rows = conn.execute(
-            """
-            WITH ranked AS (
-              SELECT
-                pp.*,
-                pl.market,
-                ROW_NUMBER() OVER (
-                  PARTITION BY pp.prop_line_id
-                  ORDER BY pp.prediction_time DESC, pp.id DESC
-                ) AS rn
-              FROM prop_predictions pp
-              JOIN prop_lines pl ON pl.id = pp.prop_line_id
-            )
-            SELECT
-              r.recommended_side,
-              r.market,
-              r.edge,
-              r.expected_value,
-              r.confidence,
-              sp.winning_side
-            FROM ranked r
-            JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
-            WHERE r.rn = 1
-            """
-        ).fetchall()
-    qualified = [row for row in rows if _include_watchlist_pick(dict(row))]
-    if not qualified:
-        return {
-            "qualified": 0,
-            "wins": 0,
-            "win_rate": None,
-            "message": "No settled watchlist-qualified picks yet.",
-        }
-    wins = sum(1 for row in qualified if str(row["recommended_side"]) == str(row["winning_side"]))
-    return {
-        "qualified": len(qualified),
-        "wins": wins,
-        "win_rate": round(wins / len(qualified), 4),
-        "message": f"Evaluated {len(qualified)} settled watchlist-qualified picks.",
-    }
+def watchlist_performance(response: Response) -> dict:
+    def compute() -> dict:
+        with connect() as conn:
+            return _watchlist_performance_payload(conn)
+
+    payload, status, compute_ms = _read_through_cache_with_meta(
+        WATCHLIST_PERFORMANCE_CACHE_NAME,
+        WATCHLIST_PERFORMANCE_TTL_SECONDS,
+        compute,
+    )
+    _set_observability_headers(response, WATCHLIST_PERFORMANCE_CACHE_NAME, status, compute_ms)
+    return payload
 
 
 def _snapshot_watchlist(conn, snapshot_date: str) -> dict:

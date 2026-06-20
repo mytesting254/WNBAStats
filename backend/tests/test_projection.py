@@ -239,6 +239,65 @@ def test_read_through_cache_with_meta_serves_stale_payload_when_db_is_locked(mon
     assert compute_ms >= 0
 
 
+def test_publish_current_read_payloads_continues_after_single_failure(monkeypatch) -> None:
+    published: list[str] = []
+
+    monkeypatch.setattr(main_module, "_value_board_payload", lambda conn: [1, 2])
+    monkeypatch.setattr(main_module, "_watchlist_payload", lambda conn: [3])
+    monkeypatch.setattr(main_module, "line_discrepancies", lambda conn, game_id=None: [4])
+    monkeypatch.setattr(main_module, "_roster_payload", lambda conn: [5])
+    monkeypatch.setattr(main_module, "_model_runs_payload", lambda conn: {"latest": {}, "runs": [1, 2, 3]})
+    monkeypatch.setattr(main_module, "_model_performance_payload", lambda conn: {"model": 1})
+    monkeypatch.setattr(main_module, "_gem_performance_payload", lambda conn: {"gem": 1})
+    monkeypatch.setattr(main_module, "_watchlist_performance_payload", lambda conn: {"watchlist": 1})
+
+    def failing_matchups(conn):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(main_module, "_matchups_payload", failing_matchups)
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: published.append(name))
+
+    result = main_module._publish_current_read_payloads(SimpleNamespace())
+
+    assert main_module.MATCHUPS_CACHE_NAME not in published
+    assert main_module.GEM_PERFORMANCE_CACHE_NAME in published
+    assert main_module.WATCHLIST_PERFORMANCE_CACHE_NAME in published
+    assert result[main_module.GEM_PERFORMANCE_CACHE_NAME] == 1
+    assert result[main_module.WATCHLIST_PERFORMANCE_CACHE_NAME] == 1
+
+
+def test_watchlist_performance_uses_read_cache(monkeypatch) -> None:
+    payload = {
+        "qualified": 1,
+        "wins": 1,
+        "win_rate": 1.0,
+        "message": "cached",
+    }
+    cached_at = datetime.now(timezone.utc).isoformat()
+    cache_name = main_module.WATCHLIST_PERFORMANCE_CACHE_NAME
+    monkeypatch.setattr(
+        main_module,
+        "read_json_cache",
+        lambda name: {
+            "cache_key_version": main_module.READ_CACHE_VERSION,
+            "cached_at": cached_at,
+            "cache_date": datetime.now(main_module.LOCAL_TZ).date().isoformat(),
+            "ttl_seconds": 300,
+            "payload": payload,
+        } if name == cache_name else None,
+    )
+
+    def fail_connect():
+        raise AssertionError("connect should not be called for a cached response")
+
+    monkeypatch.setattr(main_module, "connect", fail_connect)
+
+    response = Response()
+    result = main_module.watchlist_performance(response)
+
+    assert result == payload
+
+
 @pytest.mark.anyio
 async def test_app_response_cache_serves_stale_payload_when_db_is_locked(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(cache_module, "get_cache_dir", lambda: tmp_path)
