@@ -45,7 +45,7 @@ from .odds_import import (
     odds_cache_summary,
     sync_prop_lines_from_sportsbook,
 )
-from .projections import build_prop_projection, rebuild_predictions
+from .projections import rebuild_predictions
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
 from .player_prop_model import prewarm_model_cache
@@ -839,51 +839,17 @@ def _prediction_side_conflicts_with_projection(item: Mapping[str, Any]) -> bool:
     return (projection > line and side == "under") or (projection < line and side == "over")
 
 
-def _persist_projection(conn, projection) -> None:
-    conn.execute(
-        """
-        INSERT INTO prop_predictions (
-            prop_line_id, model_version, prediction_time, projection, recommended_side,
-            model_probability, implied_probability, edge, expected_value, confidence, reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            projection.prop_line_id,
-            projection.model_version,
-            projection.prediction_time,
-            projection.projection,
-            projection.recommended_side,
-            projection.model_probability,
-            projection.implied_probability,
-            projection.edge,
-            projection.expected_value,
-            projection.confidence,
-            projection.reason,
-        ),
-    )
-
-
 def _repair_prediction_item_if_needed(conn, item: dict[str, Any]) -> dict[str, Any]:
+    del conn
     if not _prediction_side_conflicts_with_projection(item):
         return item
-    prop_line_id = int(item["prop_line_id"] if "prop_line_id" in item else item["id"])
-    repaired = build_prop_projection(conn, prop_line_id)
-    _persist_projection(conn, repaired)
-    item.update(
-        {
-            "id": prop_line_id,
-            "prop_line_id": prop_line_id,
-            "projection": repaired.projection,
-            "recommended_side": repaired.recommended_side,
-            "model_probability": repaired.model_probability,
-            "implied_probability": repaired.implied_probability,
-            "edge": repaired.edge,
-            "expected_value": repaired.expected_value,
-            "confidence": repaired.confidence,
-            "reason": repaired.reason,
-            "prediction_time": repaired.prediction_time,
-        }
-    )
+    projection = float(item.get("projection") or 0.0)
+    line = float(item.get("line") or 0.0)
+    corrected_side = "over" if projection > line else "under"
+    item["recommended_side"] = corrected_side
+    reason = str(item.get("reason") or "").strip()
+    if "[display-corrected side]" not in reason:
+        item["reason"] = f"{reason} [display-corrected side]".strip()
     return item
 
 
