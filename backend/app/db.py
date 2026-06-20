@@ -34,7 +34,7 @@ def connect() -> Any:
 
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30)
     _configure_connection(conn)
     return conn
 
@@ -46,7 +46,7 @@ def _configure_connection(conn: Any) -> None:
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA cache_size = -8000")
     conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA busy_timeout = 30000")
 
 
 class TursoRow(Mapping):

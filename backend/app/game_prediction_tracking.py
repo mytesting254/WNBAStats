@@ -57,6 +57,7 @@ def save_game_prediction(conn: sqlite3.Connection, game: Mapping, prediction: Ma
             _value(game, "rest_days_away"),
         ),
     )
+    conn.commit()
     row = conn.execute(
         "SELECT id FROM game_predictions WHERE game_id = ? AND model_version = ?",
         (int(game["id"]), MODEL_VERSION),
