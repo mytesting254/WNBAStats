@@ -6,6 +6,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -44,11 +45,12 @@ from .odds_import import (
     odds_cache_summary,
     sync_prop_lines_from_sportsbook,
 )
-from .projections import rebuild_predictions
+from .projections import build_prop_projection, rebuild_predictions
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
 from .player_prop_model import prewarm_model_cache
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
+from .paths import get_cache_dir
 
 
 app = FastAPI(title="WNBA Prop Value API")
@@ -94,11 +96,24 @@ _PROP_SYNC_STATE: dict[str, Any] = {
     "scope": None,
     "target_game_ids": [],
 }
+DELETE_STALE_PAYLOAD_ACK = "DELETE STALE PAYLOAD"
+READ_CACHE_FILES = {
+    VALUE_BOARD_CACHE_NAME,
+    MATCHUPS_CACHE_NAME,
+    LINE_DISCREPANCIES_CACHE_NAME,
+    MODEL_PERFORMANCE_CACHE_NAME,
+    MODEL_RUNS_CACHE_NAME,
+    ROSTER_CACHE_NAME,
+}
 
 
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class DeleteStalePayloadRequest(BaseModel):
+    acknowledgement: str
 
 
 def _is_sqlite_locked_error(exc: sqlite3.OperationalError) -> bool:
@@ -162,6 +177,90 @@ def _cached_app_response(entry: dict[str, Any], cache_status: str) -> JSONRespon
     response = JSONResponse(content=entry.get("payload"), status_code=int(entry.get("status_code") or 200))
     response.headers["X-App-Cache"] = cache_status
     return response
+
+
+def _local_today_iso() -> str:
+    return datetime.now(LOCAL_TZ).date().isoformat()
+
+
+def _parse_cache_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _cache_file_is_stale(path: Path, today_iso: str) -> bool:
+    if path.suffix != ".json":
+        return False
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+
+    if not isinstance(payload, dict):
+        return False
+
+    if path.name.startswith(APP_RESPONSE_CACHE_PREFIX) or path.name in READ_CACHE_FILES:
+        cached_at = _parse_cache_timestamp(payload.get("cached_at"))
+        ttl_seconds = payload.get("ttl_seconds")
+        if cached_at is None or not isinstance(ttl_seconds, int):
+            return True
+        return datetime.now(timezone.utc) - cached_at > timedelta(seconds=ttl_seconds)
+
+    cache_date = payload.get("cache_date")
+    if isinstance(cache_date, str) and cache_date and cache_date != today_iso:
+        return True
+
+    captured_at = _parse_cache_timestamp(payload.get("captured_at"))
+    if captured_at is not None and captured_at.astimezone(LOCAL_TZ).date().isoformat() != today_iso:
+        return True
+
+    return False
+
+
+def _audit_stale_payloads() -> dict[str, Any]:
+    cache_dir = get_cache_dir()
+    if not cache_dir.exists():
+        return {"stale": 0, "checked": 0, "files": [], "message": "No cache directory found."}
+    today_iso = _local_today_iso()
+    stale_files: list[str] = []
+    checked = 0
+    for path in sorted(cache_dir.iterdir()):
+        if not path.is_file():
+            continue
+        checked += 1
+        if _cache_file_is_stale(path, today_iso):
+            stale_files.append(path.name)
+    return {
+        "stale": len(stale_files),
+        "checked": checked,
+        "files": stale_files,
+        "message": "Stale cache payloads found." if stale_files else "No stale cache payloads found.",
+    }
+
+
+def _delete_stale_payloads() -> dict[str, Any]:
+    audit = _audit_stale_payloads()
+    deleted: list[str] = []
+    for name in audit["files"]:
+        path = get_cache_dir() / name
+        try:
+            path.unlink()
+            deleted.append(name)
+        except OSError:
+            continue
+    return {
+        "deleted": len(deleted),
+        "checked": int(audit["checked"]),
+        "files": deleted,
+        "message": "Deleted stale cache payloads." if deleted else "No stale cache payloads found.",
+    }
 
 app.add_middleware(
     CORSMiddleware,
@@ -547,6 +646,19 @@ def auth_me(request: Request) -> dict[str, Any]:
     return _auth_payload(_current_session_user(request))
 
 
+@app.get("/api/cache/stale-payloads", dependencies=[Depends(_protect_mutation)])
+def audit_stale_payloads() -> dict[str, Any]:
+    return _audit_stale_payloads()
+
+
+@app.post("/api/cache/stale-payloads/delete", dependencies=[Depends(_protect_mutation)])
+def delete_stale_payloads(payload: DeleteStalePayloadRequest) -> dict[str, Any]:
+    if payload.acknowledgement.strip() != DELETE_STALE_PAYLOAD_ACK:
+        raise HTTPException(status_code=400, detail=f"Type {DELETE_STALE_PAYLOAD_ACK!r} to confirm stale payload deletion.")
+    result = _delete_stale_payloads()
+    return result
+
+
 @app.post("/api/auth/login")
 def auth_login(payload: LoginRequest, response: Response) -> dict[str, Any]:
     username = payload.username.strip()
@@ -715,6 +827,64 @@ def _read_through_cache_with_meta(cache_name: str, ttl_seconds: int, compute: Ca
     compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
     write_json_cache(cache_name, _cache_envelope(payload, ttl_seconds))
     return payload, "MISS", round(compute_ms, 2)
+
+
+def _prediction_side_conflicts_with_projection(item: Mapping[str, Any]) -> bool:
+    try:
+        projection = float(item.get("projection") or 0.0)
+        line = float(item.get("line") or 0.0)
+    except (TypeError, ValueError):
+        return False
+    side = str(item.get("recommended_side") or "").strip().lower()
+    return (projection > line and side == "under") or (projection < line and side == "over")
+
+
+def _persist_projection(conn, projection) -> None:
+    conn.execute(
+        """
+        INSERT INTO prop_predictions (
+            prop_line_id, model_version, prediction_time, projection, recommended_side,
+            model_probability, implied_probability, edge, expected_value, confidence, reason
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            projection.prop_line_id,
+            projection.model_version,
+            projection.prediction_time,
+            projection.projection,
+            projection.recommended_side,
+            projection.model_probability,
+            projection.implied_probability,
+            projection.edge,
+            projection.expected_value,
+            projection.confidence,
+            projection.reason,
+        ),
+    )
+
+
+def _repair_prediction_item_if_needed(conn, item: dict[str, Any]) -> dict[str, Any]:
+    if not _prediction_side_conflicts_with_projection(item):
+        return item
+    prop_line_id = int(item["prop_line_id"] if "prop_line_id" in item else item["id"])
+    repaired = build_prop_projection(conn, prop_line_id)
+    _persist_projection(conn, repaired)
+    item.update(
+        {
+            "id": prop_line_id,
+            "prop_line_id": prop_line_id,
+            "projection": repaired.projection,
+            "recommended_side": repaired.recommended_side,
+            "model_probability": repaired.model_probability,
+            "implied_probability": repaired.implied_probability,
+            "edge": repaired.edge,
+            "expected_value": repaired.expected_value,
+            "confidence": repaired.confidence,
+            "reason": repaired.reason,
+            "prediction_time": repaired.prediction_time,
+        }
+    )
+    return item
 
 
 def _invalidate_read_caches() -> None:
@@ -3160,6 +3330,8 @@ def _value_board_payload(
     for row in rows:
         is_active_time = _is_active_game_time(row["start_time"])
         item = dict(row)
+        item["prop_line_id"] = int(item["id"])
+        item = _repair_prediction_item_if_needed(conn, item)
         if include_filtered_only and not _include_value_board_pick(item):
             continue
         if ENABLE_PLAYER_FRESHNESS_GATE:
@@ -3459,6 +3631,7 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
     freshness_cache: dict[tuple[int, int], dict[str, Any]] = {}
     for row in rows:
         item = dict(row)
+        item = _repair_prediction_item_if_needed(conn, item)
         if not _include_watchlist_pick(item):
             continue
         if int(item["id"]) in value_board_prediction_ids:

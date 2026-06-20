@@ -228,7 +228,19 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
     if projection < line and (line - projection) < _under_min_margin(prop["market"]):
         edge_under -= 0.03
 
-    if edge_over >= edge_under:
+    if projection > line:
+        side = "over"
+        model_probability = over_model_probability
+        implied = over_implied
+        edge = edge_over
+        odds = over_odds
+    elif projection < line:
+        side = "under"
+        model_probability = under_model_probability
+        implied = under_implied
+        edge = edge_under
+        odds = under_odds
+    elif edge_over >= edge_under:
         side = "over"
         model_probability = over_model_probability
         implied = over_implied

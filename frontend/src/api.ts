@@ -133,6 +133,13 @@ export type OpsHealth = {
   };
 };
 
+export type StalePayloadAudit = {
+  stale: number;
+  checked: number;
+  files: string[];
+  message: string;
+};
+
 const RUNTIME_API_KEY = (window.__APP_CONFIG__?.apiKey ?? "").trim();
 const BUILD_API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
 const API_KEY = RUNTIME_API_KEY || BUILD_API_KEY;
@@ -202,6 +209,45 @@ export async function fetchOpsHealth(): Promise<OpsHealth> {
   const response = await apiFetch("/api/ops/health");
   if (!response.ok) {
     throw new Error("Failed to load operations health");
+  }
+  return response.json();
+}
+
+export async function auditStalePayloads(): Promise<StalePayloadAudit> {
+  const response = await apiFetch("/api/cache/stale-payloads");
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "Failed to audit stale payloads");
+  }
+  return response.json();
+}
+
+export async function deleteStalePayloads(acknowledgement: string): Promise<{
+  deleted: number;
+  checked: number;
+  files: string[];
+  message: string;
+}> {
+  const response = await apiFetch("/api/cache/stale-payloads/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ acknowledgement }),
+  });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "Failed to delete stale payloads");
   }
   return response.json();
 }

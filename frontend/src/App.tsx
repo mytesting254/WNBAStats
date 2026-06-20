@@ -10,6 +10,8 @@ import {
   fetchModelRuns,
   fetchPerformance,
   fetchRoster,
+  auditStalePayloads,
+  deleteStalePayloads,
   fetchValueBoard,
   fetchWatchlistPerformance,
   fetchWatchlist,
@@ -35,6 +37,7 @@ import {
   type ModelRun,
   type OpsHealth,
   type RosterPlayer,
+  type StalePayloadAudit,
   type TeamLast10,
   type ValueProp,
   type WatchlistPerformance,
@@ -159,6 +162,8 @@ export function App() {
   const [recalculating, setRecalculating] = useState(false);
   const [settlingProps, setSettlingProps] = useState(false);
   const [snapshottingGems, setSnapshottingGems] = useState(false);
+  const [auditingStalePayloads, setAuditingStalePayloads] = useState(false);
+  const [deletingStalePayloads, setDeletingStalePayloads] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("props");
   const [market, setMarket] = useState("all");
   const [confidence, setConfidence] = useState("all");
@@ -166,6 +171,8 @@ export function App() {
   const [selected, setSelected] = useState<ValueProp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [operationStatus, setOperationStatus] = useState<string | null>(null);
+  const [stalePayloadAudit, setStalePayloadAudit] = useState<StalePayloadAudit | null>(null);
+  const [stalePayloadAck, setStalePayloadAck] = useState("");
   const [availabilityToast, setAvailabilityToast] = useState<string | null>(null);
   const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
   const [missingEspnGames, setMissingEspnGames] = useState<MissingEspnGame[]>([]);
@@ -189,7 +196,9 @@ export function App() {
     refreshingRoster ||
     recalculating ||
     settlingProps ||
-    snapshottingGems;
+    snapshottingGems ||
+    auditingStalePayloads ||
+    deletingStalePayloads;
 
   async function load() {
     const requestId = ++loadRequestIdRef.current;
@@ -644,6 +653,52 @@ export function App() {
     }
   }
 
+  async function handleAuditStalePayloads() {
+    setAuditingStalePayloads(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await auditStalePayloads();
+      setStalePayloadAudit(result);
+      setStalePayloadAck("");
+      setOperationStatus(
+        result.stale
+          ? `Audit complete. Found ${result.stale} stale payload${result.stale === 1 ? "" : "s"} out of ${result.checked} cache file${result.checked === 1 ? "" : "s"}.`
+          : result.message
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to audit stale payloads");
+    } finally {
+      setAuditingStalePayloads(false);
+    }
+  }
+
+  async function handleDeleteStalePayloads() {
+    setDeletingStalePayloads(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await deleteStalePayloads(stalePayloadAck);
+      setStalePayloadAudit({
+        stale: 0,
+        checked: result.checked,
+        files: [],
+        message: result.message,
+      });
+      setStalePayloadAck("");
+      await load();
+      setOperationStatus(
+        result.deleted
+          ? `Deleted ${result.deleted} stale payload${result.deleted === 1 ? "" : "s"}.`
+          : result.message
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to delete stale payloads");
+    } finally {
+      setDeletingStalePayloads(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -764,11 +819,15 @@ export function App() {
             recalculating={recalculating}
             settlingProps={settlingProps}
             snapshottingGems={snapshottingGems}
+            auditingStalePayloads={auditingStalePayloads}
+            deletingStalePayloads={deletingStalePayloads}
             propsCount={props.length}
             matchupsCount={matchups.length}
             discrepanciesCount={discrepancies.length}
             missingEspnDates={missingEspnDates}
             missingEspnGames={missingEspnGames}
+            stalePayloadAudit={stalePayloadAudit}
+            stalePayloadAck={stalePayloadAck}
             onImportOdds={handleImportOdds}
             onImportCoversOdds={handleImportCoversOdds}
             onRefreshResults={handleRefreshResults}
@@ -781,6 +840,9 @@ export function App() {
             onRecalculate={handleRecalculate}
             onSettleProps={handleSettleProps}
             onSnapshotGems={handleSnapshotGems}
+            onAuditStalePayloads={handleAuditStalePayloads}
+            onDeleteStalePayloads={handleDeleteStalePayloads}
+            onStalePayloadAckChange={setStalePayloadAck}
             onReload={load}
           />
         ) : activeTab === "roster" ? (
@@ -825,11 +887,15 @@ function DataView({
   recalculating,
   settlingProps,
   snapshottingGems,
+  auditingStalePayloads,
+  deletingStalePayloads,
   propsCount,
   matchupsCount,
   discrepanciesCount,
   missingEspnDates,
   missingEspnGames,
+  stalePayloadAudit,
+  stalePayloadAck,
   onImportOdds,
   onImportCoversOdds,
   onRefreshResults,
@@ -842,6 +908,9 @@ function DataView({
   onRecalculate,
   onSettleProps,
   onSnapshotGems,
+  onAuditStalePayloads,
+  onDeleteStalePayloads,
+  onStalePayloadAckChange,
   onReload
 }: {
   loading: boolean;
@@ -860,11 +929,15 @@ function DataView({
   recalculating: boolean;
   settlingProps: boolean;
   snapshottingGems: boolean;
+  auditingStalePayloads: boolean;
+  deletingStalePayloads: boolean;
   propsCount: number;
   matchupsCount: number;
   discrepanciesCount: number;
   missingEspnDates: string[];
   missingEspnGames: MissingEspnGame[];
+  stalePayloadAudit: StalePayloadAudit | null;
+  stalePayloadAck: string;
   onImportOdds: (forceRefresh: boolean) => void;
   onImportCoversOdds: (forceRefresh: boolean) => void;
   onRefreshResults: (
@@ -883,13 +956,24 @@ function DataView({
   onRecalculate: () => void;
   onSettleProps: (selectedDates?: string[]) => void;
   onSnapshotGems: () => void;
+  onAuditStalePayloads: () => void;
+  onDeleteStalePayloads: () => void;
+  onStalePayloadAckChange: (value: string) => void;
   onReload: () => void;
 }) {
   const [resultDate, setResultDate] = useState(todayInputValue());
   const [batchStartDate, setBatchStartDate] = useState(todayInputValue());
   const [batchEndDate, setBatchEndDate] = useState(todayInputValue());
   const parsedBatchDates = dateRangeValues(batchStartDate, batchEndDate);
-  const busy = refreshingResults || refreshingMissingScores || importingOdds || importingCoversOdds || loading || settlingProps;
+  const busy =
+    refreshingResults ||
+    refreshingMissingScores ||
+    importingOdds ||
+    importingCoversOdds ||
+    loading ||
+    settlingProps ||
+    auditingStalePayloads ||
+    deletingStalePayloads;
   const today = todayInputValue();
   const missingPriorDateGames = missingEspnGames.filter((game) => game.game_date < today).length;
   const missingTodayGames = missingEspnGames.length - missingPriorDateGames;
@@ -1081,6 +1165,50 @@ function DataView({
             onPrimary={onRecalculate}
             onSecondary={onSnapshotGems}
           />
+          <article className="operation-card">
+            <div>
+              <p className="eyebrow">{stalePayloadAudit ? `${stalePayloadAudit.stale} stale of ${stalePayloadAudit.checked} checked` : "cache housekeeping"}</p>
+              <h3>Stale Payload Audit</h3>
+              <p>Audit cached payload files first, then choose whether to delete the stale ones. Type the acknowledgement exactly before delete is enabled.</p>
+              <p className="reason">Acknowledgement: <strong>{`DELETE STALE PAYLOAD`}</strong></p>
+              {stalePayloadAudit ? (
+                <p className="reason">
+                  {stalePayloadAudit.files.length
+                    ? `Pending delete: ${stalePayloadAudit.files.join(", ")}`
+                    : stalePayloadAudit.message}
+                </p>
+              ) : null}
+            </div>
+            <div className="operation-fields">
+              <label>
+                Acknowledgement
+                <input
+                  type="text"
+                  value={stalePayloadAck}
+                  onChange={(event) => onStalePayloadAckChange(event.target.value)}
+                  placeholder="Type DELETE STALE PAYLOAD"
+                />
+              </label>
+            </div>
+            <div className="operation-actions">
+              <button className="icon-button text-button dark-button" onClick={onAuditStalePayloads} disabled={busy}>
+                <RefreshCw size={18} />
+                {auditingStalePayloads ? "Auditing" : "Audit Stale Payloads"}
+              </button>
+              <button
+                className="secondary-button"
+                onClick={onDeleteStalePayloads}
+                disabled={
+                  busy ||
+                  !stalePayloadAudit ||
+                  stalePayloadAudit.stale === 0 ||
+                  stalePayloadAck.trim() !== "DELETE STALE PAYLOAD"
+                }
+              >
+                {deletingStalePayloads ? "Deleting" : "Delete Audited Payloads"}
+              </button>
+            </div>
+          </article>
           <OperationCard
             title="Reload Views"
             description="Reload all boards and metrics from current backend state."

@@ -276,6 +276,66 @@ async def test_app_response_cache_serves_stale_payload_when_db_is_locked(tmp_pat
     assert json.loads(second.body.decode("utf-8")) == [{"id": 1, "player_name": "Cached"}]
 
 
+def test_audit_stale_payloads_flags_expired_and_old_cache_files(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "get_cache_dir", lambda: tmp_path)
+
+    expired = {
+        "cache_key_version": main_module.APP_RESPONSE_CACHE_VERSION,
+        "cached_at": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+        "ttl_seconds": 60,
+        "status_code": 200,
+        "payload": [],
+    }
+    fresh = {
+        "cache_key_version": main_module.APP_RESPONSE_CACHE_VERSION,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+        "ttl_seconds": 3600,
+        "status_code": 200,
+        "payload": [],
+    }
+    old_raw = {
+        "cache_date": "2026-01-01",
+        "captured_at": "2026-01-01T12:00:00+00:00",
+        "rows": [],
+    }
+    (tmp_path / "app_response_cache_test.json").write_text(json.dumps(expired), encoding="utf-8")
+    (tmp_path / "current_value_board.json").write_text(json.dumps(fresh), encoding="utf-8")
+    (tmp_path / "covers_props_raw.json").write_text(json.dumps(old_raw), encoding="utf-8")
+
+    result = main_module._audit_stale_payloads()
+
+    assert result["stale"] == 2
+    assert "app_response_cache_test.json" in result["files"]
+    assert "covers_props_raw.json" in result["files"]
+    assert "current_value_board.json" not in result["files"]
+
+
+def test_delete_stale_payloads_removes_only_audited_files(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "get_cache_dir", lambda: tmp_path)
+
+    stale = {
+        "cache_date": "2026-01-01",
+        "captured_at": "2026-01-01T12:00:00+00:00",
+        "rows": [],
+    }
+    fresh = {
+        "cache_date": datetime.now(main_module.LOCAL_TZ).date().isoformat(),
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "rows": [],
+    }
+    stale_path = tmp_path / "sportsbook_props_raw.json"
+    fresh_path = tmp_path / "covers_pages_raw.json"
+    stale_path.write_text(json.dumps(stale), encoding="utf-8")
+    fresh_path.write_text(json.dumps(fresh), encoding="utf-8")
+
+    result = main_module._delete_stale_payloads()
+
+    assert result["deleted"] == 1
+    assert result["files"] == ["sportsbook_props_raw.json"]
+    assert not stale_path.exists()
+    assert fresh_path.exists()
+
+
 def test_normalize_team_abbreviation_handles_covers_name_variants() -> None:
     assert normalize_team_abbreviation("No. 1 Phoenix Mercury") == "PHX"
     assert normalize_team_abbreviation("Washington Mystics (W)") == "WSH"
@@ -1257,6 +1317,40 @@ def test_build_prop_projection_applies_historical_market_bias_adjustment(monkeyp
 
     assert projection.projection > 20.0
     assert "Historical market bias adjustment" in projection.reason
+
+
+def test_build_prop_projection_prefers_over_when_projection_exceeds_line(monkeypatch) -> None:
+    captured_at = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        projections_module,
+        "predict_player_prop",
+        lambda *_args, **_kwargs: (22.8, "base reason", "adaptive-context-v1"),
+    )
+    monkeypatch.setattr(projections_module, "_estimated_sigma", lambda *_args, **_kwargs: 3.0)
+    monkeypatch.setattr(
+        projections_module,
+        "_calibrated_probability",
+        lambda _conn, raw_probability, _market, _model_version, side: 0.40 if side == "over" else 0.65,
+    )
+
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (9911, "Olivia Miles", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)",
+            (9911, "2026-06-20", "2026-06-20T19:00:00Z", 10, 3, -2.5, 159.5),
+        )
+        conn.execute(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (9911, 9911, 9911, "DraftKings", "points_rebounds", 21.5, -110, -110, captured_at),
+        )
+
+        projection = projections_module.build_prop_projection(conn, 9911)
+
+    assert projection.projection == 22.8
+    assert projection.recommended_side == "over"
 
 
 def test_predict_player_prop_blends_market_residual_model(monkeypatch) -> None:
