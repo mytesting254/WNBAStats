@@ -27,6 +27,7 @@
 - [ ] Verify the recalculate button is hitting `POST /api/props/repair-current-slate` on live, not stale `/api/recalculate`.
 - [ ] Measure live current-slate repair timing after the guarded repair restore.
 - [ ] Confirm Nyara Sabally rebounds and other weak-edge modeled props are visible in the live matchup/parlay UI after hard refresh.
+- [ ] Make `current_*` read caches and `app_response_cache_*.json` expire on local date rollover, not only TTL, so previous-day payloads cannot survive past midnight ET.
 
 ## Current Repair-Path Optimization Work
 

@@ -65,6 +65,7 @@ PLAYER_DATA_RECENT_WINDOW_DAYS = int(os.getenv("PLAYER_DATA_RECENT_WINDOW_DAYS",
 ENABLE_PLAYER_FRESHNESS_GATE = os.getenv("ENABLE_PLAYER_FRESHNESS_GATE", "0").strip().lower() in {"1", "true", "yes"}
 VALUE_BOARD_CACHE_NAME = "current_value_board.json"
 MATCHUPS_CACHE_NAME = "current_matchups.json"
+WATCHLIST_CACHE_NAME = "current_watchlist.json"
 LINE_DISCREPANCIES_CACHE_NAME = "line_discrepancies.json"
 MODEL_PERFORMANCE_CACHE_NAME = "model_performance.json"
 MODEL_RUNS_CACHE_NAME = "model_runs.json"
@@ -76,6 +77,7 @@ READ_CACHE_VERSION = 1
 APP_RESPONSE_CACHE_VERSION = 1
 APP_RESPONSE_CACHE_TTL_SECONDS = int(os.getenv("APP_RESPONSE_CACHE_TTL_SECONDS", "3600"))
 VALUE_BOARD_TTL_SECONDS = int(os.getenv("VALUE_BOARD_TTL_SECONDS", "300"))
+WATCHLIST_TTL_SECONDS = int(os.getenv("WATCHLIST_TTL_SECONDS", "300"))
 LINE_DISCREPANCIES_TTL_SECONDS = int(os.getenv("LINE_DISCREPANCIES_TTL_SECONDS", "300"))
 MATCHUPS_TTL_SECONDS = int(os.getenv("MATCHUPS_TTL_SECONDS", "300"))
 MODEL_PERFORMANCE_TTL_SECONDS = int(os.getenv("MODEL_PERFORMANCE_TTL_SECONDS", "300"))
@@ -101,6 +103,7 @@ DELETE_STALE_PAYLOAD_ACK = "DELETE STALE PAYLOAD"
 READ_CACHE_FILES = {
     VALUE_BOARD_CACHE_NAME,
     MATCHUPS_CACHE_NAME,
+    WATCHLIST_CACHE_NAME,
     LINE_DISCREPANCIES_CACHE_NAME,
     MODEL_PERFORMANCE_CACHE_NAME,
     MODEL_RUNS_CACHE_NAME,
@@ -142,6 +145,7 @@ def _app_response_cache_envelope(status_code: int, payload: Any) -> dict[str, An
     return {
         "cache_key_version": APP_RESPONSE_CACHE_VERSION,
         "cached_at": now.isoformat(),
+        "cache_date": _local_today_iso(),
         "ttl_seconds": APP_RESPONSE_CACHE_TTL_SECONDS,
         "source": "app_response_cache",
         "status_code": status_code,
@@ -156,9 +160,17 @@ def _read_app_response_cache(cache_name: str, *, allow_stale: bool = False) -> d
     if cached.get("cache_key_version") != APP_RESPONSE_CACHE_VERSION:
         return None
     cached_at_raw = cached.get("cached_at")
+    cache_date = cached.get("cache_date")
     ttl_seconds = cached.get("ttl_seconds")
     status_code = cached.get("status_code")
-    if not isinstance(cached_at_raw, str) or not isinstance(ttl_seconds, int) or not isinstance(status_code, int):
+    if (
+        not isinstance(cached_at_raw, str)
+        or not isinstance(cache_date, str)
+        or not isinstance(ttl_seconds, int)
+        or not isinstance(status_code, int)
+    ):
+        return None
+    if not allow_stale and cache_date != _local_today_iso():
         return None
     try:
         cached_at = datetime.fromisoformat(cached_at_raw.replace("Z", "+00:00"))
@@ -209,9 +221,13 @@ def _cache_file_is_stale(path: Path, today_iso: str) -> bool:
 
     if path.name.startswith(APP_RESPONSE_CACHE_PREFIX) or path.name in READ_CACHE_FILES:
         cached_at = _parse_cache_timestamp(payload.get("cached_at"))
+        cache_date = payload.get("cache_date")
         ttl_seconds = payload.get("ttl_seconds")
         if cached_at is None or not isinstance(ttl_seconds, int):
             return True
+        if isinstance(cache_date, str) and cache_date:
+            if cache_date != today_iso:
+                return True
         return datetime.now(timezone.utc) - cached_at > timedelta(seconds=ttl_seconds)
 
     captured_at = _parse_cache_timestamp(payload.get("captured_at"))
@@ -263,6 +279,21 @@ def _delete_stale_payloads() -> dict[str, Any]:
         "message": "Deleted stale cache payloads." if deleted else "No stale cache payloads found.",
     }
 
+
+def _delete_app_response_caches() -> None:
+    cache_dir = get_cache_dir()
+    if not cache_dir.exists():
+        return
+    for path in cache_dir.iterdir():
+        if not path.is_file():
+            continue
+        if not path.name.startswith(APP_RESPONSE_CACHE_PREFIX):
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -290,6 +321,7 @@ def on_startup() -> None:
         ensure_teams(conn)
     _start_model_prewarm()
     _invalidate_read_caches()
+    _start_read_payload_prewarm()
 
 
 def _start_model_prewarm() -> None:
@@ -301,6 +333,18 @@ def _start_model_prewarm() -> None:
             print(f"[startup] model prewarm skipped: {exc}")
 
     thread = threading.Thread(target=_worker, name="model-prewarm", daemon=True)
+    thread.start()
+
+
+def _start_read_payload_prewarm() -> None:
+    def _worker() -> None:
+        try:
+            with connect() as conn:
+                _publish_current_read_payloads(conn)
+        except Exception as exc:
+            print(f"[startup] read payload prewarm skipped: {exc}")
+
+    thread = threading.Thread(target=_worker, name="read-payload-prewarm", daemon=True)
     thread.start()
 
 
@@ -774,6 +818,7 @@ def _cache_envelope(payload: Any, ttl_seconds: int) -> dict[str, Any]:
     return {
         "cache_key_version": READ_CACHE_VERSION,
         "cached_at": now.isoformat(),
+        "cache_date": _local_today_iso(),
         "ttl_seconds": ttl_seconds,
         "source": "api_read_cache",
         "payload": payload,
@@ -787,8 +832,11 @@ def _read_cached_payload(cache_name: str, *, allow_stale: bool = False) -> Any |
     if cached.get("cache_key_version") != READ_CACHE_VERSION:
         return None
     cached_at_raw = cached.get("cached_at")
+    cache_date = cached.get("cache_date")
     ttl_seconds = cached.get("ttl_seconds")
-    if not isinstance(cached_at_raw, str) or not isinstance(ttl_seconds, int):
+    if not isinstance(cached_at_raw, str) or not isinstance(cache_date, str) or not isinstance(ttl_seconds, int):
+        return None
+    if not allow_stale and cache_date != _local_today_iso():
         return None
     try:
         cached_at = datetime.fromisoformat(cached_at_raw.replace("Z", "+00:00"))
@@ -857,6 +905,7 @@ def _repair_prediction_item_if_needed(conn, item: dict[str, Any]) -> dict[str, A
 def _invalidate_read_caches() -> None:
     for name in (
         VALUE_BOARD_CACHE_NAME,
+        WATCHLIST_CACHE_NAME,
         LINE_DISCREPANCIES_CACHE_NAME,
         MATCHUPS_CACHE_NAME,
         MODEL_PERFORMANCE_CACHE_NAME,
@@ -864,6 +913,161 @@ def _invalidate_read_caches() -> None:
         ROSTER_CACHE_NAME,
     ):
         delete_json_cache(name)
+    _delete_app_response_caches()
+
+
+def _roster_payload(conn) -> list[dict]:
+    try:
+        import_rotowire_lineups(conn, force_refresh=False)
+    except Exception:
+        # Keep roster payload non-fatal so cache publication can proceed even if live fetch fails.
+        pass
+    payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
+    rows = payload.get("rows", []) if isinstance(payload, dict) else []
+    captured_at = payload.get("captured_at") if isinstance(payload, dict) else None
+    normalized = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        team = str(row.get("team") or "").strip().upper()
+        player_name = str(row.get("player_name") or "").strip()
+        status = str(row.get("status") or "").strip().upper()
+        if not team or not player_name or not status:
+            continue
+        normalized.append(
+            {
+                "team": team,
+                "player_name": player_name,
+                "status": status,
+                "captured_at": captured_at,
+            }
+        )
+    normalized.sort(key=lambda item: (item["team"], item["player_name"]))
+    return _build_roster_enrichment(conn, normalized)
+
+
+def _model_runs_payload(conn) -> dict:
+    return {
+        "latest": latest_model_run(conn),
+        "runs": list_model_runs(conn),
+    }
+
+
+def _matchups_payload(conn) -> list[dict]:
+    injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
+    games = conn.execute(
+        """
+        SELECT
+            g.id,
+            g.game_date,
+            g.start_time,
+            home.id AS home_team_id,
+            home.abbreviation AS home_team,
+            home.name AS home_team_name,
+            home.logo_url AS home_logo_url,
+            away.id AS away_team_id,
+            away.abbreviation AS away_team,
+            away.name AS away_team_name
+            ,away.logo_url AS away_logo_url
+            ,g.rest_days_home
+            ,g.rest_days_away
+            ,g.spread_home
+            ,g.game_total
+            ,g.home_moneyline
+            ,g.away_moneyline
+        FROM games g
+        JOIN teams home ON home.id = g.home_team_id
+        JOIN teams away ON away.id = g.away_team_id
+        WHERE g.status = 'scheduled'
+        ORDER BY g.start_time
+        """
+    ).fetchall()
+    games = [game for game in games if _is_today_active_game_time(game["start_time"])]
+    game_groups = _coalesce_matchup_games(games)
+    covers_records = _covers_records_by_game(conn)
+    covers_market_odds = _covers_market_odds_by_game()
+    payload = []
+    for game, game_ids in game_groups:
+        home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
+        away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
+        game_id = int(game["id"])
+        market_override = covers_market_odds.get(game_id, {})
+        group_covers_records = next(
+            (covers_records.get(int(candidate_id)) for candidate_id in game_ids if covers_records.get(int(candidate_id))),
+            covers_records.get(game_id),
+        )
+        home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
+        away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
+        game_context = dict(game)
+        for field in ("spread_home", "game_total", "home_moneyline", "away_moneyline"):
+            if market_override.get(field) is not None:
+                game_context[field] = market_override[field]
+        game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
+        game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
+        prediction = project_game(conn, game_context)
+        game_prediction_id = save_game_prediction(conn, game_context, prediction)
+        payload.append(
+            {
+                "id": game["id"],
+                "game_prediction_id": game_prediction_id,
+                "game_date": game["game_date"],
+                "start_time": game["start_time"],
+                "home_team": game["home_team"],
+                "home_team_name": game["home_team_name"],
+                "home_logo_url": game["home_logo_url"],
+                "away_team": game["away_team"],
+                "away_team_name": game["away_team_name"],
+                "away_logo_url": game["away_logo_url"],
+                "home_rest_days": home_rest_days,
+                "away_rest_days": away_rest_days,
+                "spread_home": game_context["spread_home"],
+                "game_total": game_context["game_total"],
+                "home_moneyline": game_context["home_moneyline"],
+                "away_moneyline": game_context["away_moneyline"],
+                **market_override,
+                "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
+                **prediction,
+                "home": home_summary,
+                "away": away_summary,
+                "covers_records": group_covers_records,
+                "props": _value_board_payload_for_games(conn, game_ids, include_filtered_only=False),
+                "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
+                "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
+                "injury_source": injury_refresh.get("source"),
+                "injury_captured_at": injury_refresh.get("captured_at"),
+                "injury_from_cache": injury_refresh.get("from_cache"),
+            }
+        )
+    return payload
+
+
+def _publish_current_read_payloads(conn) -> dict[str, int]:
+    value_board = _value_board_payload(conn)
+    write_json_cache(VALUE_BOARD_CACHE_NAME, _cache_envelope(value_board, VALUE_BOARD_TTL_SECONDS))
+
+    watchlist = _watchlist_payload(conn)
+    write_json_cache(WATCHLIST_CACHE_NAME, _cache_envelope(watchlist, WATCHLIST_TTL_SECONDS))
+
+    discrepancies_payload = line_discrepancies(conn, None)
+    write_json_cache(LINE_DISCREPANCIES_CACHE_NAME, _cache_envelope(discrepancies_payload, LINE_DISCREPANCIES_TTL_SECONDS))
+
+    roster_payload = _roster_payload(conn)
+    write_json_cache(ROSTER_CACHE_NAME, _cache_envelope(roster_payload, ROSTER_TTL_SECONDS))
+
+    model_runs_payload = _model_runs_payload(conn)
+    write_json_cache(MODEL_RUNS_CACHE_NAME, _cache_envelope(model_runs_payload, MODEL_RUNS_TTL_SECONDS))
+
+    matchups_payload = _matchups_payload(conn)
+    write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(matchups_payload, MATCHUPS_TTL_SECONDS))
+
+    return {
+        "value_board": len(value_board),
+        "watchlist": len(watchlist),
+        "line_discrepancies": len(discrepancies_payload),
+        "roster": len(roster_payload),
+        "model_runs": len(model_runs_payload.get("runs", [])),
+        "matchups": len(matchups_payload),
+    }
 
 
 def _clear_scheduled_prop_state(conn, *, clear_source_rows: bool = False) -> None:
@@ -1011,6 +1215,8 @@ def recalculate(response: Response) -> dict[str, int]:
         game_settlements = settle_completed_game_predictions(conn)
         _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     _invalidate_read_caches()
+    with connect() as conn:
+        _publish_current_read_payloads(conn)
     return {"predictions": len(projections), "settled": settlements["settled"], "game_settled": game_settlements["settled"]}
 
 
@@ -1042,6 +1248,8 @@ def repair_current_slate_props() -> dict[str, Any]:
         with connect() as conn:
             result = _repair_current_slate_props(conn)
         _invalidate_read_caches()
+        with connect() as conn:
+            result["published_payloads"] = _publish_current_read_payloads(conn)
         with _PROP_SYNC_LOCK:
             _PROP_SYNC_STATE["last_result"] = result
             _PROP_SYNC_STATE["target_game_ids"] = list(result.get("target_game_ids") or [])
@@ -1067,11 +1275,14 @@ def settle_props(
         gems = _sync_gem_snapshot_settlements(conn)
         watchlist = _sync_watchlist_snapshot_settlements(conn)
     _invalidate_read_caches()
+    with connect() as conn:
+        published_payloads = _publish_current_read_payloads(conn)
     return {
         "props": props,
         "games": games,
         "gems": gems,
         "watchlist": watchlist,
+        "published_payloads": published_payloads,
         "selected_date": selected_date,
         "selected_dates": selected_dates or [],
     }
@@ -1100,9 +1311,18 @@ def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
 
 
 @app.get("/api/watchlist")
-def watchlist() -> list[dict]:
-    with connect() as conn:
-        return _watchlist_payload(conn)
+def watchlist(response: Response) -> list[dict]:
+    def compute() -> list[dict]:
+        with connect() as conn:
+            return _watchlist_payload(conn)
+
+    payload, status, compute_ms = _read_through_cache_with_meta(
+        WATCHLIST_CACHE_NAME,
+        WATCHLIST_TTL_SECONDS,
+        compute,
+    )
+    _set_observability_headers(response, WATCHLIST_CACHE_NAME, status, compute_ms)
+    return payload
 
 
 @app.get("/api/model-performance")
@@ -2000,6 +2220,9 @@ def import_odds(force_refresh: bool = False) -> dict:
     if result.get("sync_error"):
         _start_prop_sync_if_needed("odds_import")
     _invalidate_read_caches()
+    if not result.get("sync_error"):
+        with connect() as conn:
+            result["published_payloads"] = _publish_current_read_payloads(conn)
     return result
 
 
@@ -2016,6 +2239,9 @@ def import_covers(selected_date: str | None = None, force_refresh: bool = False)
         else:
             result["message"] = "Covers import completed. Prop sync queued in background."
     _invalidate_read_caches()
+    if not sync_started:
+        with connect() as conn:
+            result["published_payloads"] = _publish_current_read_payloads(conn)
     return result
 
 
@@ -2028,6 +2254,8 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     result["predictions"] = len(projections)
     result["affected_game_ids"] = game_ids
     _invalidate_read_caches()
+    with connect() as conn:
+        result["published_payloads"] = _publish_current_read_payloads(conn)
     return result
 
 
@@ -2156,6 +2384,8 @@ def import_espn_history(
         raise
     _clear_prop_scrape_caches()
     _invalidate_read_caches()
+    with connect() as conn:
+        published_payloads = _publish_current_read_payloads(conn)
     return {
         "season": target_season,
         "seasons": unique_seasons,
@@ -2176,6 +2406,7 @@ def import_espn_history(
         "errors": errors,
         "gap_audit": gap_audit,
         "gap_backfill": backfill_result,
+        "published_payloads": published_payloads,
     }
 
 
@@ -2256,6 +2487,8 @@ def backfill_espn_history_gaps(
         after = _espn_stats_gap_audit(conn, start_date=start_date, end_date=end_date, limit_missing_games=1000)
     _clear_prop_scrape_caches()
     _invalidate_read_caches()
+    with connect() as conn:
+        published_payloads = _publish_current_read_payloads(conn)
     return {
         "source": "espn",
         "backfill": result,
@@ -2269,6 +2502,7 @@ def backfill_espn_history_gaps(
         "watchlist_snapshot": watchlist_snapshot,
         "synced_props": synced_props,
         "predictions": len(projections),
+        "published_payloads": published_payloads,
     }
 
 
@@ -2277,7 +2511,9 @@ def recompute_ats_from_game_lines() -> dict:
     with connect() as conn:
         result = _recompute_team_results_from_game_lines(conn)
     _invalidate_read_caches()
-    return {"source": "game_lines", **result}
+    with connect() as conn:
+        published_payloads = _publish_current_read_payloads(conn)
+    return {"source": "game_lines", "published_payloads": published_payloads, **result}
 
 
 @app.post("/api/history/backfill-covers-lines", dependencies=[Depends(_protect_mutation)])
@@ -2313,6 +2549,8 @@ def backfill_covers_lines(
                 errors.append({"date": day, "error": str(exc)})
         ats = _recompute_team_results_from_game_lines(conn)
     _invalidate_read_caches()
+    with connect() as conn:
+        published_payloads = _publish_current_read_payloads(conn)
     return {
         "source": "covers",
         "start_date": start.isoformat(),
@@ -2323,6 +2561,7 @@ def backfill_covers_lines(
         "synced_props": synced_props,
         "ats_backfill": ats,
         "errors": errors,
+        "published_payloads": published_payloads,
     }
 
 
@@ -2704,33 +2943,7 @@ def discrepancies(response: Response, game_id: int | None = None, force_refresh:
 def roster(response: Response) -> list[dict]:
     def compute() -> list[dict]:
         with connect() as conn:
-            try:
-                import_rotowire_lineups(conn, force_refresh=False)
-            except Exception:
-                # Keep roster endpoint non-fatal so dashboard loads even if live Rotowire fetch fails.
-                pass
-            payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
-            rows = payload.get("rows", []) if isinstance(payload, dict) else []
-            captured_at = payload.get("captured_at") if isinstance(payload, dict) else None
-            normalized = []
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                team = str(row.get("team") or "").strip().upper()
-                player_name = str(row.get("player_name") or "").strip()
-                status = str(row.get("status") or "").strip().upper()
-                if not team or not player_name or not status:
-                    continue
-                normalized.append(
-                    {
-                        "team": team,
-                        "player_name": player_name,
-                        "status": status,
-                        "captured_at": captured_at,
-                    }
-                )
-            normalized.sort(key=lambda item: (item["team"], item["player_name"]))
-            return _build_roster_enrichment(conn, normalized)
+            return _roster_payload(conn)
 
     payload, status, compute_ms = _read_through_cache_with_meta(
         ROSTER_CACHE_NAME,
@@ -2746,10 +2959,7 @@ def roster(response: Response) -> list[dict]:
 def model_runs(response: Response) -> dict:
     def compute() -> dict:
         with connect() as conn:
-            return {
-                "latest": latest_model_run(conn),
-                "runs": list_model_runs(conn),
-            }
+            return _model_runs_payload(conn)
 
     payload, status, compute_ms = _read_through_cache_with_meta(
         MODEL_RUNS_CACHE_NAME,
@@ -2797,90 +3007,7 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
     started = datetime.now(timezone.utc)
     try:
         with connect() as conn:
-            injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
-            games = conn.execute(
-                """
-                SELECT
-                    g.id,
-                    g.game_date,
-                    g.start_time,
-                    home.id AS home_team_id,
-                    home.abbreviation AS home_team,
-                    home.name AS home_team_name,
-                    home.logo_url AS home_logo_url,
-                    away.id AS away_team_id,
-                    away.abbreviation AS away_team,
-                    away.name AS away_team_name
-                    ,away.logo_url AS away_logo_url
-                    ,g.rest_days_home
-                    ,g.rest_days_away
-                    ,g.spread_home
-                    ,g.game_total
-                    ,g.home_moneyline
-                    ,g.away_moneyline
-                FROM games g
-                JOIN teams home ON home.id = g.home_team_id
-                JOIN teams away ON away.id = g.away_team_id
-                WHERE g.status = 'scheduled'
-                ORDER BY g.start_time
-                """
-            ).fetchall()
-            games = [game for game in games if _is_today_active_game_time(game["start_time"])]
-            game_groups = _coalesce_matchup_games(games)
-            covers_records = _covers_records_by_game(conn)
-            covers_market_odds = _covers_market_odds_by_game()
-            payload = []
-            for game, game_ids in game_groups:
-                home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
-                away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
-                game_id = int(game["id"])
-                market_override = covers_market_odds.get(game_id, {})
-                group_covers_records = next(
-                    (covers_records.get(int(candidate_id)) for candidate_id in game_ids if covers_records.get(int(candidate_id))),
-                    covers_records.get(game_id),
-                )
-                home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
-                away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
-                game_context = dict(game)
-                for field in ("spread_home", "game_total", "home_moneyline", "away_moneyline"):
-                    if market_override.get(field) is not None:
-                        game_context[field] = market_override[field]
-                game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
-                game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
-                prediction = project_game(conn, game_context)
-                game_prediction_id = save_game_prediction(conn, game_context, prediction)
-                payload.append(
-                    {
-                        "id": game["id"],
-                        "game_prediction_id": game_prediction_id,
-                        "game_date": game["game_date"],
-                        "start_time": game["start_time"],
-                        "home_team": game["home_team"],
-                        "home_team_name": game["home_team_name"],
-                        "home_logo_url": game["home_logo_url"],
-                        "away_team": game["away_team"],
-                        "away_team_name": game["away_team_name"],
-                        "away_logo_url": game["away_logo_url"],
-                        "home_rest_days": home_rest_days,
-                        "away_rest_days": away_rest_days,
-                        "spread_home": game_context["spread_home"],
-                        "game_total": game_context["game_total"],
-                        "home_moneyline": game_context["home_moneyline"],
-                        "away_moneyline": game_context["away_moneyline"],
-                        **market_override,
-                        "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
-                        **prediction,
-                        "home": home_summary,
-                        "away": away_summary,
-                        "covers_records": group_covers_records,
-                        "props": _value_board_payload_for_games(conn, game_ids, include_filtered_only=False),
-                        "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
-                        "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
-                        "injury_source": injury_refresh.get("source"),
-                        "injury_captured_at": injury_refresh.get("captured_at"),
-                        "injury_from_cache": injury_refresh.get("from_cache"),
-                    }
-                )
+            payload = _matchups_payload(conn)
         write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(payload, MATCHUPS_TTL_SECONDS))
         compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
         _set_observability_headers(response, MATCHUPS_CACHE_NAME, "BYPASS" if force_refresh else "MISS", round(compute_ms, 2))
@@ -2912,10 +3039,14 @@ def _start_prop_sync_if_needed(source: str) -> bool:
         try:
             with connect() as conn:
                 synced = sync_prop_lines_from_sportsbook(conn)
+            _invalidate_read_caches()
+            with connect() as conn:
+                published_payloads = _publish_current_read_payloads(conn)
             with _PROP_SYNC_LOCK:
                 _PROP_SYNC_STATE["last_result"] = {
                     "source": source,
                     "synced_props": int(synced),
+                    "published_payloads": published_payloads,
                 }
         except Exception as exc:
             with _PROP_SYNC_LOCK:

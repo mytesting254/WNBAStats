@@ -218,6 +218,7 @@ def test_read_through_cache_with_meta_serves_stale_payload_when_db_is_locked(mon
         lambda name: {
             "cache_key_version": main_module.READ_CACHE_VERSION,
             "cached_at": stale_cached_at,
+            "cache_date": datetime.now(main_module.LOCAL_TZ).date().isoformat(),
             "ttl_seconds": 60,
             "payload": stale_payload,
         },
@@ -282,6 +283,7 @@ def test_audit_stale_payloads_flags_expired_and_old_cache_files(tmp_path, monkey
     expired = {
         "cache_key_version": main_module.APP_RESPONSE_CACHE_VERSION,
         "cached_at": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
+        "cache_date": datetime.now(main_module.LOCAL_TZ).date().isoformat(),
         "ttl_seconds": 60,
         "status_code": 200,
         "payload": [],
@@ -289,6 +291,7 @@ def test_audit_stale_payloads_flags_expired_and_old_cache_files(tmp_path, monkey
     fresh = {
         "cache_key_version": main_module.APP_RESPONSE_CACHE_VERSION,
         "cached_at": datetime.now(timezone.utc).isoformat(),
+        "cache_date": datetime.now(main_module.LOCAL_TZ).date().isoformat(),
         "ttl_seconds": 3600,
         "status_code": 200,
         "payload": [],
@@ -308,6 +311,23 @@ def test_audit_stale_payloads_flags_expired_and_old_cache_files(tmp_path, monkey
     assert "app_response_cache_test.json" in result["files"]
     assert "covers_props_raw.json" in result["files"]
     assert "current_value_board.json" not in result["files"]
+
+
+def test_audit_stale_payloads_flags_previous_day_current_cache(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "get_cache_dir", lambda: tmp_path)
+
+    previous_day = {
+        "cache_key_version": main_module.READ_CACHE_VERSION,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+        "cache_date": "2026-06-19",
+        "ttl_seconds": 3600,
+        "payload": [],
+    }
+    (tmp_path / main_module.VALUE_BOARD_CACHE_NAME).write_text(json.dumps(previous_day), encoding="utf-8")
+
+    result = main_module._audit_stale_payloads()
+
+    assert main_module.VALUE_BOARD_CACHE_NAME in result["files"]
 
 
 def test_delete_stale_payloads_removes_only_audited_files(tmp_path, monkeypatch) -> None:
@@ -429,6 +449,7 @@ def test_startup_prewarms_models(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "init_db", lambda: calls.append("init_db"))
     monkeypatch.setattr(main_module, "ensure_teams", lambda conn: calls.append("ensure_teams"))
     monkeypatch.setattr(main_module, "_start_model_prewarm", lambda: calls.append("prewarm"))
+    monkeypatch.setattr(main_module, "_start_read_payload_prewarm", lambda: calls.append("publish"))
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: calls.append("invalidate"))
     monkeypatch.setattr(main_module, "_configured_api_key", lambda: None)
     monkeypatch.setattr(main_module, "_bootstrap_admin_configured", lambda: False)
@@ -436,7 +457,7 @@ def test_startup_prewarms_models(monkeypatch) -> None:
 
     main_module.on_startup()
 
-    assert calls == ["init_db", "ensure_teams", "prewarm", "invalidate"]
+    assert calls == ["init_db", "ensure_teams", "prewarm", "invalidate", "publish"]
 
 
 def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
@@ -473,6 +494,31 @@ def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
     assert calls["import"] == 1
     assert first[0]["team"] == "NY"
     assert first[0]["status"] == "GTD"
+
+
+def test_watchlist_endpoint_uses_read_cache(monkeypatch) -> None:
+    cache_store: dict[str, object] = {}
+    calls = {"watchlist": 0}
+
+    monkeypatch.setattr(main_module, "read_json_cache", lambda name: cache_store.get(name))
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: cache_store.__setitem__(name, payload))
+    monkeypatch.setattr(main_module, "delete_json_cache", lambda name: bool(cache_store.pop(name, None)))
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module, "_watchlist_payload", lambda conn: calls.__setitem__("watchlist", calls["watchlist"] + 1) or [{"id": calls["watchlist"]}])
+
+    first = main_module.watchlist(Response())
+    second = main_module.watchlist(Response())
+
+    assert first == second
+    assert calls["watchlist"] == 1
 
 
 def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) -> None:
@@ -513,6 +559,23 @@ def test_read_cache_invalidation_clears_new_cache_keys(monkeypatch) -> None:
     assert main_module.MODEL_PERFORMANCE_CACHE_NAME in deleted
     assert main_module.MODEL_RUNS_CACHE_NAME in deleted
     assert main_module.ROSTER_CACHE_NAME in deleted
+
+
+def test_read_cache_invalidation_clears_app_response_cache_files(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "get_cache_dir", lambda: tmp_path)
+    stale_app_cache = tmp_path / f"{main_module.APP_RESPONSE_CACHE_PREFIX}abc123.json"
+    retained_cache = tmp_path / main_module.VALUE_BOARD_CACHE_NAME
+    stale_app_cache.write_text("{}", encoding="utf-8")
+    retained_cache.write_text("{}", encoding="utf-8")
+
+    deleted: list[str] = []
+    monkeypatch.setattr(main_module, "delete_json_cache", lambda name: deleted.append(name) or True)
+
+    main_module._invalidate_read_caches()
+
+    assert not stale_app_cache.exists()
+    assert retained_cache.exists()
+    assert main_module.VALUE_BOARD_CACHE_NAME in deleted
 
 
 def test_espn_history_accepts_batch_dates(monkeypatch) -> None:
