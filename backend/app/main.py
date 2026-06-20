@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import json
-import sqlite3
-from datetime import datetime, timedelta, timezone
-from collections import Counter
 import os
 from pathlib import Path
 import re
+import sqlite3
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from typing import Annotated
 
@@ -50,12 +50,13 @@ from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_r
 from .settlement import settle_completed_props
 from .player_prop_model import prewarm_model_cache
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
+from .timezone_utils import APP_TIMEZONE, local_today_iso
 from .paths import get_cache_dir
 
 
 app = FastAPI(title="WNBA Prop Value API")
 COMPLETED_GAME_GRACE_HOURS = 4
-LOCAL_TZ = timezone(timedelta(hours=-4))
+LOCAL_TZ = APP_TIMEZONE
 LOW_CONFIDENCE_EDGE_MIN = float(os.getenv("LOW_CONFIDENCE_EDGE_MIN", "0.08"))
 LOW_CONFIDENCE_EDGE_MAX = float(os.getenv("LOW_CONFIDENCE_EDGE_MAX", "0.18"))
 PLAYER_DATA_MAX_LAG_DAYS = int(os.getenv("PLAYER_DATA_MAX_LAG_DAYS", "5"))
@@ -180,7 +181,7 @@ def _cached_app_response(entry: dict[str, Any], cache_status: str) -> JSONRespon
 
 
 def _local_today_iso() -> str:
-    return datetime.now(LOCAL_TZ).date().isoformat()
+    return local_today_iso()
 
 
 def _parse_cache_timestamp(value: Any) -> datetime | None:
@@ -213,13 +214,13 @@ def _cache_file_is_stale(path: Path, today_iso: str) -> bool:
             return True
         return datetime.now(timezone.utc) - cached_at > timedelta(seconds=ttl_seconds)
 
-    cache_date = payload.get("cache_date")
-    if isinstance(cache_date, str) and cache_date and cache_date != today_iso:
-        return True
-
     captured_at = _parse_cache_timestamp(payload.get("captured_at"))
-    if captured_at is not None and captured_at.astimezone(LOCAL_TZ).date().isoformat() != today_iso:
-        return True
+    if captured_at is not None:
+        return captured_at.astimezone(LOCAL_TZ).date().isoformat() != today_iso
+
+    cache_date = payload.get("cache_date")
+    if isinstance(cache_date, str) and cache_date:
+        return cache_date != today_iso
 
     return False
 

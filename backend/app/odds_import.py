@@ -15,12 +15,13 @@ from .bootstrap import ensure_team
 from .cache import read_json_cache, write_json_cache
 from .game_resolver import resolve_or_create_game
 from .projections import rebuild_predictions
+from .timezone_utils import APP_TIMEZONE
 
 
 SPORT_KEY = "basketball_wnba"
 PROVIDER = "the_odds_api"
 BASE_URL = "https://api.the-odds-api.com/v4"
-LOCAL_TZ = timezone(timedelta(hours=-4))
+LOCAL_TZ = APP_TIMEZONE
 DEFAULT_REGIONS = "us"
 DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars,espnbet,fanatics,betrivers"
 RAW_CACHE_NAME = "sportsbook_props_raw.json"

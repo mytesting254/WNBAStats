@@ -4,9 +4,10 @@ from datetime import datetime, timedelta, timezone
 import sqlite3
 
 from .bootstrap import ensure_team
+from .timezone_utils import APP_TIMEZONE
 
 
-LOCAL_TZ = timezone(timedelta(hours=-4))
+LOCAL_TZ = APP_TIMEZONE
 MATCH_TOLERANCE_SECONDS = 6 * 60 * 60
 TEAM_RECENT_WINDOW = 5
 H2H_WINDOW = 5

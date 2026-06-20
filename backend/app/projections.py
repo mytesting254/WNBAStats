@@ -8,10 +8,11 @@ from datetime import datetime, timedelta, timezone
 from .odds import american_to_implied_probability, expected_value
 from .player_prop_model import MODEL_VERSION as LEARNED_MODEL_VERSION
 from .player_prop_model import clear_model_cache, predict_player_prop
+from .timezone_utils import APP_TIMEZONE
 
 
 MODEL_VERSION = LEARNED_MODEL_VERSION
-LOCAL_TZ = timezone(timedelta(hours=-4))
+LOCAL_TZ = APP_TIMEZONE
 
 MARKET_COLUMNS = {
     "points": "points",

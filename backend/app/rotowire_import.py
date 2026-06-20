@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 from .bootstrap import normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
+from .timezone_utils import local_today_iso
 
 
 ROTOWIRE_LINEUPS_URL = "https://www.rotowire.com/wnba/lineups.php"
@@ -44,7 +45,7 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
                     "source": "rotowire",
                     "url": ROTOWIRE_LINEUPS_URL,
                     "captured_at": captured_at,
-                    "cache_date": datetime.now(timezone.utc).date().isoformat(),
+                    "cache_date": local_today_iso(),
                     "rows": rows,
                 },
             )
@@ -237,17 +238,21 @@ def _update_roster_snapshot_cache(rows: list[dict[str, str]], captured_at: str, 
     changed = normalized_rows != previous_rows
     changed_at = captured_at if changed else (previous_changed_at or captured_at)
 
-    write_json_cache(
-        ROSTER_SNAPSHOT_CACHE_NAME,
-        {
-            "provider": "rotowire",
-            "source": source,
-            "captured_at": captured_at,
-            "changed_at": changed_at,
-            "changed": changed,
-            "rows": normalized_rows,
-        },
-    )
+    try:
+        write_json_cache(
+            ROSTER_SNAPSHOT_CACHE_NAME,
+            {
+                "provider": "rotowire",
+                "source": source,
+                "captured_at": captured_at,
+                "changed_at": changed_at,
+                "changed": changed,
+                "rows": normalized_rows,
+            },
+        )
+    except OSError:
+        # Snapshot cache is a best-effort optimization and should not break lineup imports.
+        return
 
 
 def _parse_lineup_injuries(page: str) -> list[dict[str, str]]:

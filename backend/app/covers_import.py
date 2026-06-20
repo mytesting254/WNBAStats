@@ -14,6 +14,7 @@ from .bootstrap import ensure_team, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
 from .game_resolver import resolve_or_create_game
 from .odds_import import sync_prop_lines_from_sportsbook
+from .timezone_utils import APP_TIMEZONE, local_today_iso
 
 
 PROVIDER = "covers"
@@ -22,7 +23,7 @@ RAW_PAGE_CACHE_NAME = "covers_pages_raw.json"
 COVERS_BASE_URL = "https://www.covers.com"
 COVERS_MATCHUPS_URL = f"{COVERS_BASE_URL}/sports/wnba/matchups"
 COVERS_ODDS_URL = f"{COVERS_BASE_URL}/sport/basketball/wnba/odds"
-LOCAL_TZ = timezone(timedelta(hours=-4))
+LOCAL_TZ = APP_TIMEZONE
 FETCH_TIMEOUT_SECONDS = 12
 COVERS_CACHE_TTL_SECONDS = 15 * 60
 REQUEST_HEADERS = {
@@ -1137,7 +1138,7 @@ def _metadata_to_row(row: CoversMetadata) -> dict:
 
 
 def _today_local() -> str:
-    return datetime.now(LOCAL_TZ).date().isoformat()
+    return local_today_iso()
 
 
 def _fetch_text(url: str) -> str:

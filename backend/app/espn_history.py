@@ -12,11 +12,12 @@ from urllib.request import Request, urlopen
 from .bootstrap import ensure_team, ensure_teams
 from .cache import read_json_cache, write_json_cache
 from .game_resolver import resolve_or_create_game
+from .timezone_utils import APP_TIMEZONE
 
 
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary"
-LOCAL_TZ = timezone(timedelta(hours=-4))
+LOCAL_TZ = APP_TIMEZONE
 ESPN_TEAM_ALIASES = {
     "CONN": "CON",
     "CON": "CON",
