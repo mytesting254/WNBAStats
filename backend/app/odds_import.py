@@ -566,13 +566,26 @@ def _event_rows(conn: sqlite3.Connection, event_odds: dict, captured_at: str) ->
 
 
 def list_sportsbook_props(conn: sqlite3.Connection, game_id: int | None = None) -> list[dict]:
-    where = "WHERE game_id = ?" if game_id is not None else ""
+    where = "AND spl.game_id = ?" if game_id is not None else ""
     params = (game_id,) if game_id is not None else ()
     rows = conn.execute(
         f"""
-        SELECT *
-        FROM sportsbook_prop_lines
+        SELECT spl.*
+        FROM sportsbook_prop_lines spl
+        LEFT JOIN games g ON g.id = spl.game_id
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM prop_lines pl
+            JOIN players p ON p.id = pl.player_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE pl.game_id = spl.game_id
+              AND lower(p.full_name) = lower(spl.player_name)
+              AND lower(pl.market) = lower(spl.market)
+              AND CAST(pl.line AS REAL) = CAST(spl.line AS REAL)
+              AND (sp.id IS NOT NULL OR lower(COALESCE(g.status, '')) <> 'scheduled')
+        )
         {where}
+          AND lower(COALESCE(g.status, 'scheduled')) = 'scheduled'
         ORDER BY commence_time, player_name, market, side, sportsbook
         """,
         params,

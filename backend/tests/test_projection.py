@@ -42,6 +42,7 @@ from backend.app.odds_import import (
     _merge_event_cache,
     import_the_odds_api_props,
     line_discrepancies,
+    list_sportsbook_props,
     sync_prop_lines_from_sportsbook,
 )
 from backend.app.player_prop_model import (
@@ -2179,6 +2180,37 @@ def test_odds_sync_preserves_settled_prop_lines() -> None:
     assert synced == 1
     assert [row["id"] for row in matching_lines] == [9201]
     assert settled is not None
+
+
+def test_list_sportsbook_props_excludes_settled_or_completed_rows() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9251, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("test", "evt-final", 100, "2026-04-01", "2026-04-01T19:00:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 20.5, -110, captured_at),
+                ("test", "evt-final", 100, "2026-04-01", "2026-04-01T19:00:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 20.5, -110, captured_at),
+            ],
+        )
+        settled = settle_completed_props(conn)
+        payload = list_sportsbook_props(conn, 100)
+
+    assert settled["settled"] >= 1
+    assert payload == []
 
 
 def test_odds_sync_preserves_tracking_for_completed_unsettled_props() -> None:
