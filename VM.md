@@ -102,7 +102,6 @@ ENV=prod
 API_KEY=replace_with_a_real_shared_key
 ODDS_API_KEY=replace_if_used
 SPORTSDATAIO_API_KEY=replace_if_used
-ODDSPAPI_KEY=replace_if_used
 EXPOSE_DEBUG_HEADERS=false
 ```
 
