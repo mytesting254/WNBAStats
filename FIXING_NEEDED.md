@@ -28,6 +28,8 @@
 - [ ] Measure live current-slate repair timing after the guarded repair restore.
 - [ ] Confirm Nyara Sabally rebounds and other weak-edge modeled props are visible in the live matchup/parlay UI after hard refresh.
 - [ ] Make `current_*` read caches and `app_response_cache_*.json` expire on local date rollover, not only TTL, so previous-day payloads cannot survive past midnight ET.
+- [x] Remove the misleading unused `ODDSPAPI_KEY` deployment wiring so live Odds API imports only depend on `ODDS_API_KEY`.
+- [ ] Decide whether to expose current live provider-env status (`ODDS_API_KEY` present / missing) in an admin/debug surface.
 
 ## Current Repair-Path Optimization Work
 
@@ -35,6 +37,8 @@
 - [ ] Add per-run caching for repeated `feature_snapshot()` inputs during rebuild.
 - [ ] Batch current-slate rebuild work per game to reduce lock duration and improve recovery.
 - [ ] Investigate duplicate player identities that may create unnecessary joins and duplicate prop rows.
+- [x] Keep Odds API cache rehydration scoped to active upcoming events instead of blindly reloading stale cached provider rows.
+- [ ] Tighten merged provider dedupe rules so overlapping Covers and Odds API rows keep distinct lines without over-inflating effectively identical offers.
 
 ## Current Model Quality Follow-Up
 
@@ -76,4 +80,7 @@
   - first-pass line-relative residual player model
   - first-pass ATS/total game residual model
   - game residual evaluation rows in `model_runs` (`game_ats`, `game_total`, `game_overall`)
+  - live WNBA deployment/docs cleanup so The Odds API path uses `ODDS_API_KEY` only
+  - active-date filtering when replaying cached Odds API event payloads
+  - combined Covers + Odds API raw row inventory in `sportsbook_prop_lines` instead of game-level Covers-only suppression during sync
 - Nyara Sabally rebounds projection exists in the live DB and was being hidden by value-board gating, not missing from the model pipeline.

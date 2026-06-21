@@ -15,7 +15,7 @@ from .bootstrap import ensure_team
 from .cache import read_json_cache, write_json_cache
 from .game_resolver import resolve_or_create_game
 from .projections import rebuild_predictions
-from .timezone_utils import APP_TIMEZONE
+from .timezone_utils import APP_TIMEZONE, local_today_iso
 
 
 SPORT_KEY = "basketball_wnba"
@@ -210,15 +210,6 @@ def sync_prop_lines_from_sportsbook(
             )
         )
         WHERE spl.game_id IS NOT NULL
-          AND (
-              spl.provider = 'covers'
-              OR NOT EXISTS (
-                  SELECT 1
-                  FROM sportsbook_prop_lines covers
-                  WHERE covers.provider = 'covers'
-                    AND covers.game_id = spl.game_id
-              )
-          )
           AND EXISTS (
               SELECT 1
               FROM player_game_stats stats
@@ -492,8 +483,9 @@ def _merge_event_cache(cached_payload: object, fetched_payload: list[dict]) -> l
 
 
 def _replace_sportsbook_rows(conn: sqlite3.Connection, raw_payload: list[dict], captured_at: str) -> dict:
+    active_payload = _active_cached_events(raw_payload)
     imported_rows = []
-    for event_odds in raw_payload:
+    for event_odds in active_payload:
         imported_rows.extend(_event_rows(conn, event_odds, captured_at))
     conn.execute("DELETE FROM sportsbook_prop_lines WHERE provider = ?", (PROVIDER,))
     conn.executemany(
@@ -507,10 +499,27 @@ def _replace_sportsbook_rows(conn: sqlite3.Connection, raw_payload: list[dict], 
     )
     conn.commit()
     return {
-        "events": len(raw_payload),
+        "events": len(active_payload),
         "imported": len(imported_rows),
         "captured_at": captured_at,
     }
+
+
+def _active_cached_events(raw_payload: object) -> list[dict]:
+    if not isinstance(raw_payload, list):
+        return []
+    today = local_today_iso()
+    active_events: list[dict] = []
+    for event in raw_payload:
+        if not isinstance(event, dict):
+            continue
+        commence_time = event.get("commence_time")
+        if not commence_time:
+            continue
+        if _game_date(str(commence_time)) < today:
+            continue
+        active_events.append(event)
+    return active_events
 
 
 def _event_rows(conn: sqlite3.Connection, event_odds: dict, captured_at: str) -> list[tuple]:
