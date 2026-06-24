@@ -4,65 +4,68 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Mapping
 
+from .db import sqlite_write_lock
+
 
 MODEL_VERSION = "component-game-v2"
 
 
 def save_game_prediction(conn: sqlite3.Connection, game: Mapping, prediction: Mapping) -> int:
     prediction_time = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        """
-        INSERT INTO game_predictions (
-            game_id, model_version, prediction_time,
-            home_projected_points, away_projected_points, projected_margin, projected_total,
-            winner_pick, ats_pick, ats_edge, total_pick, total_edge,
-            confidence, reason, spread_home, game_total, home_rest_days, away_rest_days
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(game_id, model_version) DO UPDATE SET
-            prediction_time = excluded.prediction_time,
-            home_projected_points = excluded.home_projected_points,
-            away_projected_points = excluded.away_projected_points,
-            projected_margin = excluded.projected_margin,
-            projected_total = excluded.projected_total,
-            winner_pick = excluded.winner_pick,
-            ats_pick = excluded.ats_pick,
-            ats_edge = excluded.ats_edge,
-            total_pick = excluded.total_pick,
-            total_edge = excluded.total_edge,
-            confidence = excluded.confidence,
-            reason = excluded.reason,
-            spread_home = excluded.spread_home,
-            game_total = excluded.game_total,
-            home_rest_days = excluded.home_rest_days,
-            away_rest_days = excluded.away_rest_days
-        """,
-        (
-            int(game["id"]),
-            MODEL_VERSION,
-            prediction_time,
-            prediction.get("home_projected_points"),
-            prediction.get("away_projected_points"),
-            prediction.get("projected_margin"),
-            prediction.get("projected_total"),
-            str(prediction.get("winner_pick") or "N/A"),
-            str(prediction.get("ats_pick") or "N/A"),
-            prediction.get("ats_edge"),
-            str(prediction.get("total_pick") or "N/A"),
-            prediction.get("total_edge"),
-            str(prediction.get("game_confidence") or "unknown"),
-            str(prediction.get("game_reason") or ""),
-            _value(game, "spread_home"),
-            _value(game, "game_total"),
-            _value(game, "rest_days_home"),
-            _value(game, "rest_days_away"),
-        ),
-    )
-    conn.commit()
-    row = conn.execute(
-        "SELECT id FROM game_predictions WHERE game_id = ? AND model_version = ?",
-        (int(game["id"]), MODEL_VERSION),
-    ).fetchone()
-    return int(row["id"])
+    with sqlite_write_lock():
+        conn.execute(
+            """
+            INSERT INTO game_predictions (
+                game_id, model_version, prediction_time,
+                home_projected_points, away_projected_points, projected_margin, projected_total,
+                winner_pick, ats_pick, ats_edge, total_pick, total_edge,
+                confidence, reason, spread_home, game_total, home_rest_days, away_rest_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(game_id, model_version) DO UPDATE SET
+                prediction_time = excluded.prediction_time,
+                home_projected_points = excluded.home_projected_points,
+                away_projected_points = excluded.away_projected_points,
+                projected_margin = excluded.projected_margin,
+                projected_total = excluded.projected_total,
+                winner_pick = excluded.winner_pick,
+                ats_pick = excluded.ats_pick,
+                ats_edge = excluded.ats_edge,
+                total_pick = excluded.total_pick,
+                total_edge = excluded.total_edge,
+                confidence = excluded.confidence,
+                reason = excluded.reason,
+                spread_home = excluded.spread_home,
+                game_total = excluded.game_total,
+                home_rest_days = excluded.home_rest_days,
+                away_rest_days = excluded.away_rest_days
+            """,
+            (
+                int(game["id"]),
+                MODEL_VERSION,
+                prediction_time,
+                prediction.get("home_projected_points"),
+                prediction.get("away_projected_points"),
+                prediction.get("projected_margin"),
+                prediction.get("projected_total"),
+                str(prediction.get("winner_pick") or "N/A"),
+                str(prediction.get("ats_pick") or "N/A"),
+                prediction.get("ats_edge"),
+                str(prediction.get("total_pick") or "N/A"),
+                prediction.get("total_edge"),
+                str(prediction.get("game_confidence") or "unknown"),
+                str(prediction.get("game_reason") or ""),
+                _value(game, "spread_home"),
+                _value(game, "game_total"),
+                _value(game, "rest_days_home"),
+                _value(game, "rest_days_away"),
+            ),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT id FROM game_predictions WHERE game_id = ? AND model_version = ?",
+            (int(game["id"]), MODEL_VERSION),
+        ).fetchone()
+        return int(row["id"])
 
 
 def settle_completed_game_predictions(

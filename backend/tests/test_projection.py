@@ -1910,6 +1910,47 @@ def test_matchups_payload_survives_rotowire_failure(monkeypatch) -> None:
     assert payload[0]["injury_from_cache"] is False
 
 
+def test_matchups_payload_survives_game_prediction_lock(monkeypatch) -> None:
+    load_test_history()
+
+    monkeypatch.setattr(main_module, "import_rotowire_lineups", lambda conn, force_refresh=False: {"source": "cache", "captured_at": None, "from_cache": True})
+    monkeypatch.setattr(main_module, "_covers_records_by_game", lambda conn: {})
+    monkeypatch.setattr(main_module, "_covers_market_odds_by_game", lambda: {})
+    monkeypatch.setattr(main_module, "_team_last_10_summary", lambda conn, team_id: {})
+    monkeypatch.setattr(main_module, "_is_today_active_game_time", lambda start_time: True)
+    monkeypatch.setattr(main_module, "_value_board_payload_for_games", lambda conn, game_ids, include_filtered_only=False: [])
+    monkeypatch.setattr(main_module, "_sportsbook_props_for_games", lambda conn, game_ids: [])
+    monkeypatch.setattr(main_module, "_line_discrepancies_for_games", lambda conn, game_ids: [])
+    monkeypatch.setattr(
+        main_module,
+        "save_game_prediction",
+        lambda conn, game, prediction: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "project_game",
+        lambda conn, game: {
+            "home_projected_points": 80.0,
+            "away_projected_points": 75.0,
+            "projected_margin": 5.0,
+            "projected_total": 155.0,
+            "winner_pick": "NY",
+            "ats_pick": "NY",
+            "ats_edge": 0.04,
+            "total_pick": "Under",
+            "total_edge": 0.03,
+            "game_confidence": "medium",
+            "game_reason": "test",
+        },
+    )
+
+    with connect() as conn:
+        payload = main_module._matchups_payload(conn)
+
+    assert payload
+    assert payload[0]["game_prediction_id"] is None
+
+
 def test_game_projection_returns_picks() -> None:
     load_test_history()
     with connect() as conn:

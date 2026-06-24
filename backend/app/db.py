@@ -2,7 +2,9 @@
 
 import os
 import sqlite3
+import threading
 from collections.abc import Mapping
+from contextlib import contextmanager
 from typing import Any, Iterable, Sequence
 
 import requests
@@ -12,6 +14,7 @@ from .auth import ensure_auth_schema
 from .paths import ROOT_DIR, get_db_path
 
 load_dotenv(ROOT_DIR / ".env")
+_SQLITE_WRITE_LOCK = threading.RLock()
 
 
 class ManagedSqliteConnection(sqlite3.Connection):
@@ -45,6 +48,12 @@ def connect() -> Any:
     conn = sqlite3.connect(db_path, timeout=30, factory=ManagedSqliteConnection)
     _configure_connection(conn)
     return conn
+
+
+@contextmanager
+def sqlite_write_lock():
+    with _SQLITE_WRITE_LOCK:
+        yield
 
 
 def _configure_connection(conn: Any) -> None:

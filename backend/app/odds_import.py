@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 
 from .bootstrap import ensure_team
 from .cache import read_json_cache, write_json_cache
+from .db import sqlite_write_lock
 from .game_resolver import resolve_or_create_game
 from .projections import rebuild_predictions
 from .timezone_utils import APP_TIMEZONE, local_today_iso
@@ -278,80 +279,81 @@ def sync_prop_lines_from_sportsbook(
         game_filter_params = tuple(touched_game_ids)
 
     try:
-        _begin_immediate_with_retry(
-            conn,
-            attempts=4 if fast_fail else 24,
-            base_sleep=0.05 if fast_fail else 0.20,
-        )
-        target_prop_line_ids = _open_scheduled_prop_line_ids(conn, touched_game_ids)
-        if target_prop_line_ids:
-            delete_attempts = 4 if fast_fail else 20
-            delete_sleep = 0.05 if fast_fail else 0.15
-            _delete_by_id_batches(
+        with sqlite_write_lock():
+            _begin_immediate_with_retry(
                 conn,
-                "watchlist_snapshot_items",
-                "prop_line_id",
-                target_prop_line_ids,
-                attempts=delete_attempts,
-                base_sleep=delete_sleep,
+                attempts=4 if fast_fail else 24,
+                base_sleep=0.05 if fast_fail else 0.20,
             )
-            _delete_by_id_batches(
-                conn,
-                "gem_snapshot_items",
-                "prop_line_id",
-                target_prop_line_ids,
-                attempts=delete_attempts,
-                base_sleep=delete_sleep,
-            )
-            _delete_by_id_batches(
-                conn,
-                "prop_predictions",
-                "prop_line_id",
-                target_prop_line_ids,
-                attempts=delete_attempts,
-                base_sleep=delete_sleep,
-            )
-            _delete_by_id_batches(
-                conn,
-                "prop_lines",
-                "id",
-                target_prop_line_ids,
-                attempts=delete_attempts,
-                base_sleep=delete_sleep,
-            )
-        changed_prop_line_ids: list[int] = []
-        if insert_rows:
-            if include_change_details:
-                for insert_row in insert_rows:
-                    cursor = conn.execute(
+            target_prop_line_ids = _open_scheduled_prop_line_ids(conn, touched_game_ids)
+            if target_prop_line_ids:
+                delete_attempts = 4 if fast_fail else 20
+                delete_sleep = 0.05 if fast_fail else 0.15
+                _delete_by_id_batches(
+                    conn,
+                    "watchlist_snapshot_items",
+                    "prop_line_id",
+                    target_prop_line_ids,
+                    attempts=delete_attempts,
+                    base_sleep=delete_sleep,
+                )
+                _delete_by_id_batches(
+                    conn,
+                    "gem_snapshot_items",
+                    "prop_line_id",
+                    target_prop_line_ids,
+                    attempts=delete_attempts,
+                    base_sleep=delete_sleep,
+                )
+                _delete_by_id_batches(
+                    conn,
+                    "prop_predictions",
+                    "prop_line_id",
+                    target_prop_line_ids,
+                    attempts=delete_attempts,
+                    base_sleep=delete_sleep,
+                )
+                _delete_by_id_batches(
+                    conn,
+                    "prop_lines",
+                    "id",
+                    target_prop_line_ids,
+                    attempts=delete_attempts,
+                    base_sleep=delete_sleep,
+                )
+            changed_prop_line_ids: list[int] = []
+            if insert_rows:
+                if include_change_details:
+                    for insert_row in insert_rows:
+                        cursor = conn.execute(
+                            """
+                            INSERT INTO prop_lines (
+                                game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            insert_row,
+                        )
+                        changed_prop_line_ids.append(int(cursor.lastrowid))
+                else:
+                    conn.executemany(
                         """
                         INSERT INTO prop_lines (
                             game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
                         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        insert_row,
+                        insert_rows,
                     )
-                    changed_prop_line_ids.append(int(cursor.lastrowid))
-            else:
-                conn.executemany(
-                    """
-                    INSERT INTO prop_lines (
-                        game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    insert_rows,
+            if rebuild_predictions_after and touched_game_ids:
+                rebuild_predictions(conn, game_ids=touched_game_ids, refresh_models=False)
+            conn.commit()
+            if include_change_details:
+                return SyncPropLinesResult(
+                    synced_props=len(rows),
+                    changed_props=len(changed_prop_line_ids),
+                    changed_prop_line_ids=changed_prop_line_ids,
+                    touched_game_ids=touched_game_ids,
                 )
-        if rebuild_predictions_after and touched_game_ids:
-            rebuild_predictions(conn, game_ids=touched_game_ids, refresh_models=False)
-        conn.commit()
-        if include_change_details:
-            return SyncPropLinesResult(
-                synced_props=len(rows),
-                changed_props=len(changed_prop_line_ids),
-                changed_prop_line_ids=changed_prop_line_ids,
-                touched_game_ids=touched_game_ids,
-            )
-        return len(rows)
+            return len(rows)
     except sqlite3.OperationalError as exc:
         if "database is locked" in str(exc).lower():
             try:

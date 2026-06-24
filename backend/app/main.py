@@ -32,7 +32,7 @@ from .auth import (
 from .bootstrap import ensure_teams
 from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
-from .db import connect, init_db, using_turso
+from .db import connect, init_db, sqlite_write_lock, using_turso
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
 from .game_predictions import _team_injury_impact, project_game
@@ -804,6 +804,10 @@ def _protect_mutation(
 ) -> None:
     _consume_rate_limit(_client_key(request), "mutation", RATE_LIMIT_MUTATION_CAPACITY, RATE_LIMIT_MUTATION_REFILL_PER_SEC)
     _require_admin_session_or_api_key(request, x_api_key, authorization, x_csrf_token)
+    if using_turso():
+        return
+    with sqlite_write_lock():
+        yield
 
 
 def _protect_force_refresh(
@@ -1355,7 +1359,7 @@ def _matchups_payload(conn) -> list[dict]:
         game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
         game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
         prediction = project_game(conn, game_context)
-        game_prediction_id = save_game_prediction(conn, game_context, prediction)
+        game_prediction_id = _save_game_prediction_if_possible(conn, game_context, prediction)
         payload.append(
             {
                 "id": game["id"],
@@ -1389,6 +1393,19 @@ def _matchups_payload(conn) -> list[dict]:
             }
         )
     return payload
+
+
+def _save_game_prediction_if_possible(conn, game_context: dict[str, Any], prediction: dict[str, Any]) -> int | None:
+    try:
+        return save_game_prediction(conn, game_context, prediction)
+    except sqlite3.OperationalError as exc:
+        if not _is_sqlite_locked_error(exc):
+            raise
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        return None
 
 
 def _publish_current_read_payloads(conn, *, include_matchups: bool = True) -> dict[str, int]:

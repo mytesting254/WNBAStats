@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 from .bootstrap import normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
+from .db import sqlite_write_lock
 from .timezone_utils import local_today_iso
 
 
@@ -75,50 +76,51 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
     current_player_ids: set[int] = set()
     lineup_team_ids: set[int] = set()
     try:
-        if source == "rotowire":
-            lineup_team_ids = _lineup_team_ids(conn, page)
-        for row in rows:
-            if row["status"] not in UNAVAILABLE_STATUSES:
-                continue
-            team_abbr = normalize_team_abbreviation(row["team"])
-            if not team_abbr:
-                unresolved += 1
-                unresolved_names.append(f"{row['team']}:{row['player_name']}")
-                continue
-            team_id = _resolve_team_id(conn, team_abbr)
-            if team_id:
-                affected_team_ids.add(team_id)
-            player_id = _resolve_player_id(conn, team_abbr, row["player_name"])
-            if not player_id:
-                unresolved += 1
-                unresolved_names.append(f"{team_abbr}:{row['player_name']}")
-                continue
-            current_player_ids.add(player_id)
-            latest = conn.execute(
-                "SELECT captured_at FROM injuries WHERE player_id = ? ORDER BY captured_at DESC LIMIT 1",
-                (player_id,),
-            ).fetchone()
-            if latest and str(latest["captured_at"]) >= captured_at:
-                skipped_stale += 1
-                continue
-            conn.execute(
-                """
-                INSERT INTO injuries (player_id, status, note, captured_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (player_id, row["status"].lower(), f"rotowire lineups ({row['team']})", captured_at),
-            )
-            inserted += 1
-        if source == "rotowire":
-            cleared = _clear_resolved_rotowire_injuries(
-                conn,
-                affected_team_ids | lineup_team_ids,
-                current_player_ids,
-                captured_at,
-            )
-            if cleared:
-                message = (message or "Roster import completed.") + f" Cleared {cleared} resolved injury status(es)."
-        conn.commit()
+        with sqlite_write_lock():
+            if source == "rotowire":
+                lineup_team_ids = _lineup_team_ids(conn, page)
+            for row in rows:
+                if row["status"] not in UNAVAILABLE_STATUSES:
+                    continue
+                team_abbr = normalize_team_abbreviation(row["team"])
+                if not team_abbr:
+                    unresolved += 1
+                    unresolved_names.append(f"{row['team']}:{row['player_name']}")
+                    continue
+                team_id = _resolve_team_id(conn, team_abbr)
+                if team_id:
+                    affected_team_ids.add(team_id)
+                player_id = _resolve_player_id(conn, team_abbr, row["player_name"])
+                if not player_id:
+                    unresolved += 1
+                    unresolved_names.append(f"{team_abbr}:{row['player_name']}")
+                    continue
+                current_player_ids.add(player_id)
+                latest = conn.execute(
+                    "SELECT captured_at FROM injuries WHERE player_id = ? ORDER BY captured_at DESC LIMIT 1",
+                    (player_id,),
+                ).fetchone()
+                if latest and str(latest["captured_at"]) >= captured_at:
+                    skipped_stale += 1
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO injuries (player_id, status, note, captured_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (player_id, row["status"].lower(), f"rotowire lineups ({row['team']})", captured_at),
+                )
+                inserted += 1
+            if source == "rotowire":
+                cleared = _clear_resolved_rotowire_injuries(
+                    conn,
+                    affected_team_ids | lineup_team_ids,
+                    current_player_ids,
+                    captured_at,
+                )
+                if cleared:
+                    message = (message or "Roster import completed.") + f" Cleared {cleared} resolved injury status(es)."
+            conn.commit()
     except sqlite3.OperationalError as exc:
         if _is_db_locked(exc):
             try:
