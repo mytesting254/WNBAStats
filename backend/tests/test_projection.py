@@ -627,9 +627,9 @@ def test_watchlist_endpoint_uses_read_cache(monkeypatch) -> None:
 
 
 def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) -> None:
-    calls: list[bool] = []
     connect_calls = 0
     publish_calls: list[bool] = []
+    repair_calls = 0
 
     class DummyConn:
         def __enter__(self):
@@ -641,14 +641,15 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
             return None
 
     monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
-    monkeypatch.setattr(
-        main_module,
-        "rebuild_predictions",
-        lambda conn, game_ids=None, refresh_models=True: calls.append(refresh_models) or [],
-    )
+
+    def fake_repair_current_slate_props(conn):
+        nonlocal repair_calls
+        repair_calls += 1
+        return {"rebuilt_predictions": 0}
+
+    monkeypatch.setattr(main_module, "_repair_current_slate_props", fake_repair_current_slate_props)
     monkeypatch.setattr(main_module, "settle_completed_props", lambda conn: {"settled": 0})
     monkeypatch.setattr(main_module, "settle_completed_game_predictions", lambda conn: {"settled": 0})
-    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, snapshot_date: None)
     monkeypatch.setattr(
         main_module,
         "_publish_current_read_payloads",
@@ -659,9 +660,9 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
     result = main_module.recalculate(response)
 
     assert result == {"predictions": 0, "settled": 0, "game_settled": 0}
-    assert calls == [False]
+    assert repair_calls == 1
     assert publish_calls == [False]
-    assert connect_calls == 4
+    assert connect_calls == 3
     assert response.headers["Deprecation"] == "true"
     assert response.headers["X-Legacy-Endpoint"] == "/api/recalculate"
 

@@ -4046,8 +4046,27 @@ function confidenceRank(confidence: ValueProp["confidence"]) {
 }
 
 function propsForMatchup(matchup: Matchup, props: ValueProp[]) {
-  void props;
-  return matchup.props ?? [];
+  const matchupProps = Array.isArray(matchup.props) ? matchup.props : [];
+  const fallbackProps = props.filter(
+    (prop) =>
+      prop.start_time === matchup.start_time &&
+      (normalizeTeamCode(prop.team) === normalizeTeamCode(matchup.home_team) ||
+        normalizeTeamCode(prop.team) === normalizeTeamCode(matchup.away_team))
+  );
+  if (!fallbackProps.length) {
+    return matchupProps;
+  }
+  const merged = new Map<number, ValueProp>();
+  for (const item of [...matchupProps, ...fallbackProps]) {
+    merged.set(item.id, item);
+  }
+  return Array.from(merged.values()).sort((left, right) => {
+    const evDiff = right.expected_value - left.expected_value;
+    if (evDiff !== 0) {
+      return evDiff;
+    }
+    return right.edge - left.edge;
+  });
 }
 
 function parlayAvailabilityLabel(matchup: Matchup, props: ValueProp[]) {

@@ -1597,16 +1597,18 @@ def recalculate(response: Response) -> dict[str, int]:
     response.headers["Link"] = '</api/props/repair-current-slate>; rel="successor-version"'
     response.headers["X-Legacy-Endpoint"] = "/api/recalculate"
     with connect() as conn:
-        projections = rebuild_predictions(conn, refresh_models=False)
+        rebuild_result = _repair_current_slate_props(conn)
     with connect() as conn:
         settlements = settle_completed_props(conn)
         game_settlements = settle_completed_game_predictions(conn)
-    with connect() as conn:
-        _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     _invalidate_read_caches()
     with connect() as conn:
         _publish_current_read_payloads(conn, include_matchups=False)
-    return {"predictions": len(projections), "settled": settlements["settled"], "game_settled": game_settlements["settled"]}
+    return {
+        "predictions": int(rebuild_result["rebuilt_predictions"]),
+        "settled": settlements["settled"],
+        "game_settled": game_settlements["settled"],
+    }
 
 
 @app.get("/api/props/sync-status")
