@@ -196,6 +196,27 @@ async function apiFetch(input: string, init?: RequestInit & { includeApiKey?: bo
   });
 }
 
+async function readErrorDetail(response: Response): Promise<string> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    try {
+      const payload = await response.json();
+      if (typeof payload?.detail === "string" && payload.detail.trim()) {
+        return payload.detail.trim();
+      }
+    } catch {
+      // Fall through to text parsing.
+    }
+  }
+  try {
+    const text = (await response.text()).trim();
+    if (text) return text;
+  } catch {
+    // Ignore parse errors and use status text fallback below.
+  }
+  return response.statusText || "Request failed";
+}
+
 export async function fetchAuthState(): Promise<AuthState> {
   const response = await apiFetch("/api/auth/me");
   if (!response.ok) {
@@ -751,18 +772,51 @@ export async function repairCurrentSlateProps(): Promise<{
   synced_props?: number;
   rebuilt_predictions?: number;
 }> {
-  const response = await apiFetch("/api/props/repair-current-slate", { method: "POST" });
+  let response = await apiFetch("/api/props/repair-current-slate", { method: "POST" });
+
+  // Backward compatibility for stale backend deployments that still expose only the legacy route.
+  if (response.status === 404 || response.status === 405) {
+    response = await apiFetch("/api/recalculate", { method: "POST" });
+  }
+
   if (!response.ok) {
-    let detail = "";
-    try {
-      const payload = await response.json();
-      detail = typeof payload?.detail === "string" ? payload.detail : "";
-    } catch {
-      detail = "";
+    const detail = await readErrorDetail(response);
+    if (response.status === 401) {
+      throw new Error("Unauthorized. Sign in on the Data tab and try Recalculate again.");
+    }
+    if (response.status === 403) {
+      throw new Error(
+        "Admin session verification failed. Sign out and sign back in, then retry Recalculate from the same public domain."
+      );
     }
     throw new Error(detail || "Failed to repair current slate projections");
   }
-  return response.json();
+
+  const payload = (await response.json()) as {
+    status?: string;
+    started_at?: string | null;
+    scope?: string | null;
+    target_game_ids?: number[];
+    scanned_props?: number;
+    synced_props?: number;
+    rebuilt_predictions?: number;
+    predictions?: number;
+  };
+
+  // Normalize the legacy response shape to match the guarded current-slate response.
+  if (typeof payload.predictions === "number" && payload.rebuilt_predictions == null) {
+    return {
+      status: "completed",
+      rebuilt_predictions: payload.predictions,
+      scanned_props: payload.scanned_props,
+      synced_props: payload.synced_props,
+      scope: payload.scope,
+      started_at: payload.started_at,
+      target_game_ids: payload.target_game_ids,
+    };
+  }
+
+  return payload;
 }
 
 export async function settleProps(
