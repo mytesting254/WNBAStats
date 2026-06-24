@@ -1652,7 +1652,9 @@ def test_repair_current_slate_props_targets_only_active_games() -> None:
         active_prop_lines = int(conn.execute("SELECT COUNT(*) FROM prop_lines WHERE game_id = 9910").fetchone()[0] or 0)
         stale_prop_lines = int(conn.execute("SELECT COUNT(*) FROM prop_lines WHERE game_id = 9920").fetchone()[0] or 0)
 
+    assert result["scope"] == "current_slate"
     assert result["target_game_ids"] == [9910]
+    assert result["scanned_props"] >= 1
     assert result["synced_props"] >= 1
     assert active_prop_lines >= 1
     assert stale_prop_lines == 0
@@ -1667,11 +1669,12 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
         assert kwargs["rebuild_predictions_after"] is False
         return SyncPropLinesResult(
             synced_props=2,
+            changed_props=2,
             changed_prop_line_ids=[501, 502],
             touched_game_ids=[9910],
         )
 
-    def fake_rebuild(conn, game_ids=None, prop_line_ids=None):
+    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, refresh_models=True):
         rebuild_calls.append(
             (
                 list(game_ids) if game_ids is not None else None,
@@ -1689,8 +1692,48 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
         result = main_module._repair_current_slate_props(conn)
 
     assert rebuild_calls == [([9910], [501, 502])]
+    assert result["scope"] == "current_slate"
+    assert result["scanned_props"] == 2
+    assert result["synced_props"] == 2
     assert result["changed_prop_line_ids"] == [501, 502]
     assert result["rebuilt_predictions"] == 0
+
+
+def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -> None:
+    rebuild_calls: list[tuple[list[int] | None, list[int] | None]] = []
+
+    def fake_sync(conn, **kwargs):
+        assert kwargs["game_ids"] == [9910, 9920]
+        return SyncPropLinesResult(
+            synced_props=4,
+            changed_props=1,
+            changed_prop_line_ids=[501],
+            touched_game_ids=[9910, 9920],
+        )
+
+    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, refresh_models=True):
+        rebuild_calls.append(
+            (
+                list(game_ids) if game_ids is not None else None,
+                list(prop_line_ids) if prop_line_ids is not None else None,
+            )
+        )
+        return []
+
+    monkeypatch.setattr(main_module, "_active_slate_game_ids", lambda conn: [])
+    monkeypatch.setattr(main_module, "_scheduled_game_ids", lambda conn: [9910, 9920])
+    monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fake_sync)
+    monkeypatch.setattr(main_module, "rebuild_predictions", fake_rebuild)
+    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: None)
+
+    with connect() as conn:
+        result = main_module._repair_current_slate_props(conn)
+
+    assert rebuild_calls == [([9910, 9920], [501])]
+    assert result["scope"] == "scheduled"
+    assert result["target_game_ids"] == [9910, 9920]
+    assert result["scanned_props"] == 4
+    assert result["synced_props"] == 1
 
 
 def test_game_projection_returns_picks() -> None:

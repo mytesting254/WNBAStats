@@ -11,6 +11,7 @@ import {
   fetchPerformance,
   fetchRoster,
   auditStalePayloads,
+  auditDbLock,
   deleteStalePayloads,
   fetchValueBoard,
   fetchWatchlistPerformance,
@@ -24,11 +25,13 @@ import {
   loginAdmin,
   logoutAdmin,
   repairCurrentSlateProps,
+  recoverDbLock,
   settleProps,
   setCsrfToken,
   trainModel,
   type AuthState,
   type CoversRecordRow,
+  type DbLockAudit,
   type GemPerformance,
   type LineDiscrepancy,
   type Matchup,
@@ -164,6 +167,8 @@ export function App() {
   const [snapshottingGems, setSnapshottingGems] = useState(false);
   const [auditingStalePayloads, setAuditingStalePayloads] = useState(false);
   const [deletingStalePayloads, setDeletingStalePayloads] = useState(false);
+  const [auditingDbLock, setAuditingDbLock] = useState(false);
+  const [recoveringDbLock, setRecoveringDbLock] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("props");
   const [market, setMarket] = useState("all");
   const [confidence, setConfidence] = useState("all");
@@ -172,6 +177,7 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [operationStatus, setOperationStatus] = useState<string | null>(null);
   const [stalePayloadAudit, setStalePayloadAudit] = useState<StalePayloadAudit | null>(null);
+  const [dbLockAudit, setDbLockAudit] = useState<DbLockAudit | null>(null);
   const [stalePayloadAck, setStalePayloadAck] = useState("");
   const [availabilityToast, setAvailabilityToast] = useState<string | null>(null);
   const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
@@ -198,7 +204,9 @@ export function App() {
     settlingProps ||
     snapshottingGems ||
     auditingStalePayloads ||
-    deletingStalePayloads;
+    deletingStalePayloads ||
+    auditingDbLock ||
+    recoveringDbLock;
 
   async function load() {
     const requestId = ++loadRequestIdRef.current;
@@ -397,15 +405,23 @@ export function App() {
 
   async function handleRecalculate() {
     setRecalculating(true);
+    setError(null);
     setOperationStatus(null);
     try {
       const result = await repairCurrentSlateProps();
-      await load();
       if (result.status === "busy") {
         setOperationStatus("Current-slate repair is already running.");
+        return;
+      }
+      await load();
+      const scopeLabel = result.scope === "scheduled" ? "scheduled slate" : "current slate";
+      const scanned = result.scanned_props ?? result.synced_props ?? 0;
+      const changed = result.synced_props ?? 0;
+      if (!result.target_game_ids?.length) {
+        setOperationStatus("No scheduled games found to recalculate.");
       } else {
         setOperationStatus(
-          `Current slate refreshed: ${result.synced_props ?? 0} prop lines synced, ${result.rebuilt_predictions ?? 0} projections rebuilt.`
+          `${scopeLabel[0].toUpperCase()}${scopeLabel.slice(1)} refreshed: ${changed} prop lines changed from ${scanned} scanned rows, ${result.rebuilt_predictions ?? 0} projections rebuilt.`
         );
       }
     } catch (err) {
@@ -699,6 +715,43 @@ export function App() {
     }
   }
 
+  async function handleAuditDbLock() {
+    setAuditingDbLock(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await auditDbLock();
+      setDbLockAudit(result);
+      setOperationStatus(result.message);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to audit database lock state");
+    } finally {
+      setAuditingDbLock(false);
+    }
+  }
+
+  async function handleRecoverDbLock() {
+    const confirmed = window.confirm(
+      "Run SQLite recovery now? This performs a write probe and WAL checkpoint only. It will not force-break an active writer lock."
+    );
+    if (!confirmed) {
+      return;
+    }
+    setRecoveringDbLock(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await recoverDbLock();
+      setDbLockAudit(result);
+      setOperationStatus(result.message);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to run database recovery");
+    } finally {
+      setRecoveringDbLock(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -821,12 +874,15 @@ export function App() {
             snapshottingGems={snapshottingGems}
             auditingStalePayloads={auditingStalePayloads}
             deletingStalePayloads={deletingStalePayloads}
+            auditingDbLock={auditingDbLock}
+            recoveringDbLock={recoveringDbLock}
             propsCount={props.length}
             matchupsCount={matchups.length}
             discrepanciesCount={discrepancies.length}
             missingEspnDates={missingEspnDates}
             missingEspnGames={missingEspnGames}
             stalePayloadAudit={stalePayloadAudit}
+            dbLockAudit={dbLockAudit}
             stalePayloadAck={stalePayloadAck}
             onImportOdds={handleImportOdds}
             onImportCoversOdds={handleImportCoversOdds}
@@ -842,6 +898,8 @@ export function App() {
             onSnapshotGems={handleSnapshotGems}
             onAuditStalePayloads={handleAuditStalePayloads}
             onDeleteStalePayloads={handleDeleteStalePayloads}
+            onAuditDbLock={handleAuditDbLock}
+            onRecoverDbLock={handleRecoverDbLock}
             onStalePayloadAckChange={setStalePayloadAck}
             onReload={load}
           />
@@ -889,12 +947,15 @@ function DataView({
   snapshottingGems,
   auditingStalePayloads,
   deletingStalePayloads,
+  auditingDbLock,
+  recoveringDbLock,
   propsCount,
   matchupsCount,
   discrepanciesCount,
   missingEspnDates,
   missingEspnGames,
   stalePayloadAudit,
+  dbLockAudit,
   stalePayloadAck,
   onImportOdds,
   onImportCoversOdds,
@@ -910,6 +971,8 @@ function DataView({
   onSnapshotGems,
   onAuditStalePayloads,
   onDeleteStalePayloads,
+  onAuditDbLock,
+  onRecoverDbLock,
   onStalePayloadAckChange,
   onReload
 }: {
@@ -931,12 +994,15 @@ function DataView({
   snapshottingGems: boolean;
   auditingStalePayloads: boolean;
   deletingStalePayloads: boolean;
+  auditingDbLock: boolean;
+  recoveringDbLock: boolean;
   propsCount: number;
   matchupsCount: number;
   discrepanciesCount: number;
   missingEspnDates: string[];
   missingEspnGames: MissingEspnGame[];
   stalePayloadAudit: StalePayloadAudit | null;
+  dbLockAudit: DbLockAudit | null;
   stalePayloadAck: string;
   onImportOdds: (forceRefresh: boolean) => void;
   onImportCoversOdds: (forceRefresh: boolean) => void;
@@ -958,6 +1024,8 @@ function DataView({
   onSnapshotGems: () => void;
   onAuditStalePayloads: () => void;
   onDeleteStalePayloads: () => void;
+  onAuditDbLock: () => void;
+  onRecoverDbLock: () => void;
   onStalePayloadAckChange: (value: string) => void;
   onReload: () => void;
 }) {
@@ -973,7 +1041,9 @@ function DataView({
     loading ||
     settlingProps ||
     auditingStalePayloads ||
-    deletingStalePayloads;
+    deletingStalePayloads ||
+    auditingDbLock ||
+    recoveringDbLock;
   const today = todayInputValue();
   const missingPriorDateGames = missingEspnGames.filter((game) => game.game_date < today).length;
   const missingTodayGames = missingEspnGames.length - missingPriorDateGames;
@@ -1206,6 +1276,27 @@ function DataView({
                 }
               >
                 {deletingStalePayloads ? "Deleting" : "Delete Audited Payloads"}
+              </button>
+            </div>
+          </article>
+          <article className="operation-card">
+            <div>
+              <p className="eyebrow">{dbLockAudit ? (dbLockAudit.locked ? "sqlite locked" : dbLockAudit.status) : "sqlite recovery"}</p>
+              <h3>DB Lock Audit</h3>
+              <p>Check whether local SQLite is writable, inspect WAL sidecar files, and run a safe recovery attempt that checkpoints WAL without force-breaking an active writer.</p>
+              <p className="reason">
+                {dbLockAudit
+                  ? `${dbLockAudit.message}${dbLockAudit.wal ? ` WAL ${dbLockAudit.wal.exists ? `${dbLockAudit.wal.size_bytes} bytes` : "missing"}.` : ""}${dbLockAudit.shm ? ` SHM ${dbLockAudit.shm.exists ? `${dbLockAudit.shm.size_bytes} bytes` : "missing"}.` : ""}`
+                  : "Run audit first. Recovery only succeeds when no other writer is actively holding the database."}
+              </p>
+            </div>
+            <div className="operation-actions">
+              <button className="icon-button text-button dark-button" onClick={onAuditDbLock} disabled={busy}>
+                <RefreshCw size={18} />
+                {auditingDbLock ? "Auditing" : "Audit DB Lock"}
+              </button>
+              <button className="secondary-button" onClick={onRecoverDbLock} disabled={busy}>
+                {recoveringDbLock ? "Recovering" : "Attempt Recovery"}
               </button>
             </div>
           </article>

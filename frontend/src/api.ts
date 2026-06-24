@@ -140,6 +140,32 @@ export type StalePayloadAudit = {
   message: string;
 };
 
+export type DbLockAudit = {
+  engine: string;
+  status: string;
+  locked: boolean;
+  message: string;
+  db_path?: string;
+  db_exists?: boolean;
+  writable?: boolean;
+  recovered?: boolean;
+  checkpoint?: {
+    busy: number;
+    log_frames: number;
+    checkpointed_frames: number;
+  } | null;
+  wal?: {
+    path: string;
+    exists: boolean;
+    size_bytes: number;
+  };
+  shm?: {
+    path: string;
+    exists: boolean;
+    size_bytes: number;
+  };
+};
+
 const RUNTIME_API_KEY = (window.__APP_CONFIG__?.apiKey ?? "").trim();
 const BUILD_API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
 const API_KEY = RUNTIME_API_KEY || BUILD_API_KEY;
@@ -248,6 +274,36 @@ export async function deleteStalePayloads(acknowledgement: string): Promise<{
       detail = "";
     }
     throw new Error(detail || "Failed to delete stale payloads");
+  }
+  return response.json();
+}
+
+export async function auditDbLock(): Promise<DbLockAudit> {
+  const response = await apiFetch("/api/db/lock");
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "Failed to audit database lock state");
+  }
+  return response.json();
+}
+
+export async function recoverDbLock(): Promise<DbLockAudit> {
+  const response = await apiFetch("/api/db/unlock", { method: "POST" });
+  if (!response.ok) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = typeof payload?.detail === "string" ? payload.detail : "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail || "Failed to run database recovery");
   }
   return response.json();
 }
@@ -691,6 +747,7 @@ export async function repairCurrentSlateProps(): Promise<{
   started_at?: string | null;
   scope?: string | null;
   target_game_ids?: number[];
+  scanned_props?: number;
   synced_props?: number;
   rebuilt_predictions?: number;
 }> {

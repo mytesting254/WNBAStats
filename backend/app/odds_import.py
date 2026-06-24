@@ -63,6 +63,7 @@ TEAM_ALIASES = {
 @dataclass(frozen=True)
 class SyncPropLinesResult:
     synced_props: int
+    changed_props: int
     changed_prop_line_ids: list[int]
     touched_game_ids: list[int]
 
@@ -378,6 +379,7 @@ def sync_prop_lines_from_sportsbook(
         if include_change_details:
             return SyncPropLinesResult(
                 synced_props=len(rows),
+                changed_props=len(changed_prop_line_ids),
                 changed_prop_line_ids=changed_prop_line_ids,
                 touched_game_ids=touched_game_ids,
             )

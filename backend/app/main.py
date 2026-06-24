@@ -32,7 +32,7 @@ from .auth import (
 from .bootstrap import ensure_teams
 from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
-from .db import connect, init_db
+from .db import connect, init_db, using_turso
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
 from .game_predictions import _team_injury_impact, project_game
@@ -51,7 +51,7 @@ from .settlement import settle_completed_props
 from .player_prop_model import prewarm_model_cache
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
 from .timezone_utils import APP_TIMEZONE, local_today_iso
-from .paths import get_cache_dir
+from .paths import get_cache_dir, get_db_path
 
 
 app = FastAPI(title="WNBA Prop Value API")
@@ -94,6 +94,7 @@ RATE_LIMIT_REFRESH_REFILL_PER_SEC = float(os.getenv("RATE_LIMIT_REFRESH_REFILL_P
 _RATE_BUCKETS: dict[tuple[str, str], tuple[float, float]] = {}
 _RATE_LOCK = threading.Lock()
 _PROP_SYNC_LOCK = threading.Lock()
+_DB_MAINTENANCE_LOCK = threading.Lock()
 _PROP_SYNC_STATE: dict[str, Any] = {
     "running": False,
     "started_at": None,
@@ -198,6 +199,134 @@ def _cached_app_response(entry: dict[str, Any], cache_status: str) -> JSONRespon
 
 def _local_today_iso() -> str:
     return local_today_iso()
+
+
+def _sqlite_sidecar_info(path: Path) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "size_bytes": path.stat().st_size if path.exists() else 0,
+    }
+
+
+def _sqlite_checkpoint_payload(row: Any) -> dict[str, int] | None:
+    if row is None:
+        return None
+    values = tuple(row)
+    if len(values) < 3:
+        return None
+    return {
+        "busy": int(values[0]),
+        "log_frames": int(values[1]),
+        "checkpointed_frames": int(values[2]),
+    }
+
+
+def _audit_sqlite_lock(timeout_seconds: float = 1.0) -> dict[str, Any]:
+    if using_turso():
+        return {
+            "engine": "turso",
+            "status": "unsupported",
+            "locked": False,
+            "message": "Lock audit is only available when the app is using local SQLite.",
+        }
+
+    db_path = get_db_path()
+    wal_path = db_path.with_suffix(f"{db_path.suffix}-wal")
+    shm_path = db_path.with_suffix(f"{db_path.suffix}-shm")
+    payload: dict[str, Any] = {
+        "engine": "sqlite",
+        "status": "ok",
+        "locked": False,
+        "db_path": str(db_path),
+        "db_exists": db_path.exists(),
+        "wal": _sqlite_sidecar_info(wal_path),
+        "shm": _sqlite_sidecar_info(shm_path),
+        "writable": False,
+        "checkpoint": None,
+        "message": "SQLite write path is available.",
+    }
+    if not db_path.exists():
+        payload["status"] = "missing"
+        payload["message"] = "SQLite database file does not exist."
+        return payload
+
+    conn = sqlite3.connect(db_path, timeout=timeout_seconds, isolation_level=None)
+    try:
+        conn.execute(f"PRAGMA busy_timeout = {max(1, int(timeout_seconds * 1000))}")
+        try:
+            payload["checkpoint"] = _sqlite_checkpoint_payload(conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone())
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_locked_error(exc):
+                payload["locked"] = True
+                payload["status"] = "db_locked"
+                payload["message"] = "SQLite is currently locked by an active writer."
+                payload["checkpoint_error"] = str(exc)
+            else:
+                raise
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            payload["writable"] = True
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_locked_error(exc):
+                payload["locked"] = True
+                payload["status"] = "db_locked"
+                payload["message"] = "SQLite is currently locked by an active writer."
+                payload["write_probe_error"] = str(exc)
+            else:
+                raise
+        finally:
+            if payload["writable"]:
+                conn.execute("ROLLBACK")
+    finally:
+        conn.close()
+    return payload
+
+
+def _recover_sqlite_lock() -> dict[str, Any]:
+    audit = _audit_sqlite_lock()
+    if audit.get("engine") != "sqlite":
+        return audit
+    if audit.get("status") == "missing":
+        return audit
+    if audit.get("locked"):
+        return {
+            **audit,
+            "recovered": False,
+            "message": "SQLite is actively locked by another writer. Stop the running write job or extra backend instance before retrying recovery.",
+        }
+    if not _DB_MAINTENANCE_LOCK.acquire(blocking=False):
+        return {
+            **audit,
+            "status": "busy",
+            "recovered": False,
+            "message": "Database maintenance is already running.",
+        }
+
+    db_path = get_db_path()
+    try:
+        conn = sqlite3.connect(db_path, timeout=1, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout = 1000")
+            conn.execute("BEGIN IMMEDIATE")
+            checkpoint = _sqlite_checkpoint_payload(conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
+            conn.execute("ROLLBACK")
+        finally:
+            conn.close()
+    finally:
+        _DB_MAINTENANCE_LOCK.release()
+
+    refreshed = _audit_sqlite_lock()
+    return {
+        **refreshed,
+        "recovered": not refreshed.get("locked", False),
+        "checkpoint": checkpoint,
+        "message": (
+            "SQLite recovery completed. WAL checkpoint/truncate succeeded and the database accepted a write probe."
+            if not refreshed.get("locked", False)
+            else "SQLite remains locked after recovery attempt."
+        ),
+    }
 
 
 def _parse_cache_timestamp(value: Any) -> datetime | None:
@@ -705,6 +834,16 @@ def delete_stale_payloads(payload: DeleteStalePayloadRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"Type {DELETE_STALE_PAYLOAD_ACK!r} to confirm stale payload deletion.")
     result = _delete_stale_payloads()
     return result
+
+
+@app.get("/api/db/lock", dependencies=[Depends(_protect_mutation)])
+def audit_db_lock() -> dict[str, Any]:
+    return _audit_sqlite_lock()
+
+
+@app.post("/api/db/unlock", dependencies=[Depends(_protect_mutation)])
+def recover_db_lock() -> dict[str, Any]:
+    return _recover_sqlite_lock()
 
 
 @app.post("/api/auth/login")
@@ -1367,12 +1506,32 @@ def _active_slate_game_ids(conn) -> list[int]:
     )
 
 
+def _scheduled_game_ids(conn) -> list[int]:
+    return [
+        int(row["id"])
+        for row in conn.execute(
+            """
+            SELECT id
+            FROM games
+            WHERE status = 'scheduled'
+            ORDER BY start_time
+            """
+        ).fetchall()
+        if int(row["id"]) > 0
+    ]
+
+
 def _repair_current_slate_props(conn) -> dict[str, Any]:
     target_game_ids = _active_slate_game_ids(conn)
+    scope = "current_slate"
+    if not target_game_ids:
+        target_game_ids = _scheduled_game_ids(conn)
+        scope = "scheduled"
     if not target_game_ids:
         return {
-            "scope": "current_slate",
+            "scope": scope,
             "target_game_ids": [],
+            "scanned_props": 0,
             "synced_props": 0,
             "rebuilt_predictions": 0,
         }
@@ -1384,9 +1543,11 @@ def _repair_current_slate_props(conn) -> dict[str, Any]:
         include_change_details=True,
     )
     if isinstance(sync_result, SyncPropLinesResult):
-        synced = sync_result.synced_props
+        scanned = sync_result.synced_props
+        synced = sync_result.changed_props
         changed_prop_line_ids = sync_result.changed_prop_line_ids
     else:
+        scanned = int(sync_result)
         synced = int(sync_result)
         changed_prop_line_ids = []
     projections = rebuild_predictions(
@@ -1397,8 +1558,9 @@ def _repair_current_slate_props(conn) -> dict[str, Any]:
     )
     _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     return {
-        "scope": "current_slate",
+        "scope": scope,
         "target_game_ids": target_game_ids,
+        "scanned_props": int(scanned),
         "synced_props": int(synced),
         "changed_prop_line_ids": changed_prop_line_ids,
         "rebuilt_predictions": len(projections),
