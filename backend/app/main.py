@@ -473,7 +473,7 @@ def _start_read_payload_prewarm() -> None:
     def _worker() -> None:
         try:
             with connect() as conn:
-                _publish_current_read_payloads(conn, include_matchups=False)
+                _publish_current_read_payloads(conn)
         except Exception as exc:
             print(f"[startup] read payload prewarm skipped: {exc}")
 
@@ -1446,7 +1446,7 @@ def _publish_current_read_payloads(conn, *, include_matchups: bool = True) -> di
 
 
 def _publish_post_mutation_read_payloads(conn) -> dict[str, int]:
-    return _publish_current_read_payloads(conn, include_matchups=False)
+    return _publish_current_read_payloads(conn)
 
 
 def _clear_scheduled_prop_state(conn, *, clear_source_rows: bool = False) -> None:
@@ -1623,7 +1623,7 @@ def recalculate(response: Response) -> dict[str, int]:
         game_settlements = settle_completed_game_predictions(conn)
     _invalidate_read_caches()
     with connect() as conn:
-        _publish_current_read_payloads(conn, include_matchups=False)
+        _publish_current_read_payloads(conn)
     return {
         "predictions": int(rebuild_result["rebuilt_predictions"]),
         "settled": settlements["settled"],

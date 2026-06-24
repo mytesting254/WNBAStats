@@ -96,6 +96,25 @@ Recommended first live checks:
 3. run `Refresh ESPN`
 4. verify `Roster` tab loads and only shows `Refresh Roster` for admins
 
+### Run Live Maintenance From The Repo Shell
+
+When this host also has a local checkout, do not assume host `/data/wnba.sqlite`
+is the same file used by the deployed backend container. Use the runtime wrapper
+instead so maintenance commands execute inside the active backend container for
+the current commit:
+
+```bash
+python scripts/live_backend.py runtime-info
+python scripts/live_backend.py recalculate
+python scripts/live_backend.py exec -- python scripts/import_espn_history.py --dates 2026-06-25
+```
+
+If auto-detection is ambiguous, pass the container explicitly:
+
+```bash
+python scripts/live_backend.py --container backend-RESOURCE-ID-DEPLOY-ID recalculate
+```
+
 Recommended deploy-freshness checks:
 
 ```bash

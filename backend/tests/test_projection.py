@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 from types import SimpleNamespace
@@ -309,6 +310,26 @@ def test_publish_current_read_payloads_can_skip_matchups(monkeypatch) -> None:
     assert main_module.MATCHUPS_CACHE_NAME not in result
     assert main_module.VALUE_BOARD_CACHE_NAME in published
     assert main_module.WATCHLIST_CACHE_NAME in published
+
+
+def test_publish_post_mutation_read_payloads_includes_matchups(monkeypatch) -> None:
+    published: list[str] = []
+
+    monkeypatch.setattr(main_module, "_value_board_payload", lambda conn: [1, 2])
+    monkeypatch.setattr(main_module, "_watchlist_payload", lambda conn: [3])
+    monkeypatch.setattr(main_module, "line_discrepancies", lambda conn, game_id=None: [4])
+    monkeypatch.setattr(main_module, "_roster_payload", lambda conn: [5])
+    monkeypatch.setattr(main_module, "_model_runs_payload", lambda conn: {"latest": {}, "runs": [1]})
+    monkeypatch.setattr(main_module, "_model_performance_payload", lambda conn: {"model": 1})
+    monkeypatch.setattr(main_module, "_gem_performance_payload", lambda conn: {"gem": 1})
+    monkeypatch.setattr(main_module, "_watchlist_performance_payload", lambda conn: {"watchlist": 1})
+    monkeypatch.setattr(main_module, "_matchups_payload", lambda conn: [6])
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: published.append(name))
+
+    result = main_module._publish_post_mutation_read_payloads(SimpleNamespace())
+
+    assert main_module.MATCHUPS_CACHE_NAME in published
+    assert result[main_module.MATCHUPS_CACHE_NAME] == 1
 
 
 def test_watchlist_performance_uses_read_cache(monkeypatch) -> None:
@@ -661,7 +682,7 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
 
     assert result == {"predictions": 0, "settled": 0, "game_settled": 0}
     assert repair_calls == 1
-    assert publish_calls == [False]
+    assert publish_calls == [True]
     assert connect_calls == 3
     assert response.headers["Deprecation"] == "true"
     assert response.headers["X-Legacy-Endpoint"] == "/api/recalculate"
@@ -2730,6 +2751,23 @@ def test_rebuild_predictions_clears_watchlist_rows_for_replaced_predictions() ->
     assert replacement is not None
     assert replacement["id"] != 9942
     assert old_watch_row is None
+
+
+def test_rebuild_predictions_uses_sqlite_write_lock(monkeypatch) -> None:
+    load_test_history()
+    entered: list[str] = []
+
+    @contextmanager
+    def fake_lock():
+        entered.append("lock")
+        yield
+
+    monkeypatch.setattr(projections_module, "sqlite_write_lock", fake_lock)
+
+    with connect() as conn:
+        rebuild_predictions(conn)
+
+    assert entered == ["lock"]
 
 
 def test_model_performance_counts_settled_props_without_predictions() -> None:

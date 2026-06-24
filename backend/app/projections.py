@@ -5,6 +5,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from .db import sqlite_write_lock
 from .odds import american_to_implied_probability, expected_value
 from .player_prop_model import MODEL_VERSION as LEARNED_MODEL_VERSION
 from .player_prop_model import clear_model_cache, predict_player_prop
@@ -287,120 +288,121 @@ def rebuild_predictions(
 ) -> list[PropProjection]:
     if refresh_models:
         clear_model_cache()
-    target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
-    target_prop_line_ids = sorted({int(prop_line_id) for prop_line_id in (prop_line_ids or []) if int(prop_line_id) > 0})
-    if target_prop_line_ids and not target_game_ids:
-        placeholders = ",".join("?" for _ in target_prop_line_ids)
-        target_game_ids = [
-            int(row["game_id"])
-            for row in conn.execute(
-                f"""
-                SELECT DISTINCT pl.game_id
-                FROM prop_lines pl
-                JOIN games g ON g.id = pl.game_id
-                WHERE g.status = 'scheduled'
-                  AND pl.id IN ({placeholders})
-                """,
-                tuple(target_prop_line_ids),
-            ).fetchall()
-        ]
-    _refresh_scheduled_game_rest_days(conn, game_ids=target_game_ids or None)
-    # Defensive cleanup for legacy partial-import states.
-    conn.execute(
-        """
-        DELETE FROM watchlist_snapshot_items
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM prop_predictions pp
-            WHERE pp.id = watchlist_snapshot_items.prediction_id
-        )
-        """
-    )
-    # Defensive cleanup in case legacy/orphaned rows exist from prior partial imports.
-    conn.execute(
-        """
-        DELETE FROM prop_predictions
-        WHERE NOT EXISTS (
-            SELECT 1
-            FROM prop_lines pl
-            WHERE pl.id = prop_predictions.prop_line_id
-        )
-        """
-    )
-    filters: list[str] = []
-    filter_params: list[int] = []
-    if target_game_ids:
-        placeholders = ",".join("?" for _ in target_game_ids)
-        filters.append(f"pl.game_id IN ({placeholders})")
-        filter_params.extend(target_game_ids)
-    if target_prop_line_ids:
-        placeholders = ",".join("?" for _ in target_prop_line_ids)
-        filters.append(f"pl.id IN ({placeholders})")
-        filter_params.extend(target_prop_line_ids)
-    where_filters = ""
-    if filters:
-        where_filters = " AND " + " AND ".join(filters)
-    props = conn.execute(
-        """
-        SELECT pl.id
-        FROM prop_lines pl
-        JOIN games g ON g.id = pl.game_id
-        WHERE g.status = 'scheduled'
-        """ + where_filters + """
-        ORDER BY pl.captured_at DESC
-        """,
-        tuple(filter_params),
-    ).fetchall()
-    projections = [build_prop_projection(conn, int(row["id"])) for row in props]
-    prop_ids = [p.prop_line_id for p in projections]
-    if prop_ids:
-        placeholders = ",".join("?" for _ in prop_ids)
+    with sqlite_write_lock():
+        target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+        target_prop_line_ids = sorted({int(prop_line_id) for prop_line_id in (prop_line_ids or []) if int(prop_line_id) > 0})
+        if target_prop_line_ids and not target_game_ids:
+            placeholders = ",".join("?" for _ in target_prop_line_ids)
+            target_game_ids = [
+                int(row["game_id"])
+                for row in conn.execute(
+                    f"""
+                    SELECT DISTINCT pl.game_id
+                    FROM prop_lines pl
+                    JOIN games g ON g.id = pl.game_id
+                    WHERE g.status = 'scheduled'
+                      AND pl.id IN ({placeholders})
+                    """,
+                    tuple(target_prop_line_ids),
+                ).fetchall()
+            ]
+        _refresh_scheduled_game_rest_days(conn, game_ids=target_game_ids or None)
+        # Defensive cleanup for legacy partial-import states.
         conn.execute(
-            f"""
+            """
             DELETE FROM watchlist_snapshot_items
-            WHERE prediction_id IN (
-                SELECT id
-                FROM prop_predictions
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM prop_predictions pp
+                WHERE pp.id = watchlist_snapshot_items.prediction_id
+            )
+            """
+        )
+        # Defensive cleanup in case legacy/orphaned rows exist from prior partial imports.
+        conn.execute(
+            """
+            DELETE FROM prop_predictions
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM prop_lines pl
+                WHERE pl.id = prop_predictions.prop_line_id
+            )
+            """
+        )
+        filters: list[str] = []
+        filter_params: list[int] = []
+        if target_game_ids:
+            placeholders = ",".join("?" for _ in target_game_ids)
+            filters.append(f"pl.game_id IN ({placeholders})")
+            filter_params.extend(target_game_ids)
+        if target_prop_line_ids:
+            placeholders = ",".join("?" for _ in target_prop_line_ids)
+            filters.append(f"pl.id IN ({placeholders})")
+            filter_params.extend(target_prop_line_ids)
+        where_filters = ""
+        if filters:
+            where_filters = " AND " + " AND ".join(filters)
+        props = conn.execute(
+            """
+            SELECT pl.id
+            FROM prop_lines pl
+            JOIN games g ON g.id = pl.game_id
+            WHERE g.status = 'scheduled'
+            """ + where_filters + """
+            ORDER BY pl.captured_at DESC
+            """,
+            tuple(filter_params),
+        ).fetchall()
+        projections = [build_prop_projection(conn, int(row["id"])) for row in props]
+        prop_ids = [p.prop_line_id for p in projections]
+        if prop_ids:
+            placeholders = ",".join("?" for _ in prop_ids)
+            conn.execute(
+                f"""
+                DELETE FROM watchlist_snapshot_items
+                WHERE prediction_id IN (
+                    SELECT id
+                    FROM prop_predictions
+                    WHERE model_version = ?
+                      AND prop_line_id IN ({placeholders})
+                )
+                """,
+                (MODEL_VERSION, *prop_ids),
+            )
+            conn.execute(
+                f"""
+                DELETE FROM prop_predictions
                 WHERE model_version = ?
                   AND prop_line_id IN ({placeholders})
+                """,
+                (MODEL_VERSION, *prop_ids),
             )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (MODEL_VERSION, *prop_ids),
+            [
+                (
+                    p.prop_line_id,
+                    p.model_version,
+                    p.prediction_time,
+                    p.projection,
+                    p.recommended_side,
+                    p.model_probability,
+                    p.implied_probability,
+                    p.edge,
+                    p.expected_value,
+                    p.confidence,
+                    p.reason,
+                )
+                for p in projections
+            ],
         )
-        conn.execute(
-            f"""
-            DELETE FROM prop_predictions
-            WHERE model_version = ?
-              AND prop_line_id IN ({placeholders})
-            """,
-            (MODEL_VERSION, *prop_ids),
-        )
-    conn.executemany(
-        """
-        INSERT INTO prop_predictions (
-            prop_line_id, model_version, prediction_time, projection, recommended_side,
-            model_probability, implied_probability, edge, expected_value, confidence, reason
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        [
-            (
-                p.prop_line_id,
-                p.model_version,
-                p.prediction_time,
-                p.projection,
-                p.recommended_side,
-                p.model_probability,
-                p.implied_probability,
-                p.edge,
-                p.expected_value,
-                p.confidence,
-                p.reason,
-            )
-            for p in projections
-        ],
-    )
-    conn.commit()
-    return projections
+        conn.commit()
+        return projections
 
 
 def _refresh_scheduled_game_rest_days(conn: sqlite3.Connection, game_ids: list[int] | None = None) -> None:
