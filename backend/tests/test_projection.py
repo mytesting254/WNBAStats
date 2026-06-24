@@ -562,7 +562,7 @@ def test_startup_prewarms_models(monkeypatch) -> None:
 
     main_module.on_startup()
 
-    assert calls == ["init_db", "ensure_teams", "prewarm", "invalidate", "publish"]
+    assert calls == ["init_db", "ensure_teams", "prewarm", "publish"]
 
 
 def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
@@ -708,8 +708,8 @@ def test_espn_history_accepts_batch_dates(monkeypatch) -> None:
 
     monkeypatch.setattr("backend.app.main.import_espn_scoreboard", fake_scoreboard)
     monkeypatch.setattr("backend.app.main.import_espn_player_boxscores", fake_boxscores)
-    monkeypatch.setattr("backend.app.main.settle_completed_props", lambda conn: {"settled": 0})
-    monkeypatch.setattr("backend.app.main.settle_completed_game_predictions", lambda conn: {"settled": 0})
+    monkeypatch.setattr("backend.app.main.settle_completed_props", lambda conn, selected_dates=None: {"settled": 0})
+    monkeypatch.setattr("backend.app.main.settle_completed_game_predictions", lambda conn, selected_dates=None: {"settled": 0})
     monkeypatch.setattr("backend.app.main.sync_prop_lines_from_sportsbook", lambda conn: 0)
     monkeypatch.setattr("backend.app.main.rebuild_predictions", lambda conn: [])
 
