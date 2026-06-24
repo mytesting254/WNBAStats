@@ -1424,6 +1424,10 @@ def _publish_current_read_payloads(conn, *, include_matchups: bool = True) -> di
     return published
 
 
+def _publish_post_mutation_read_payloads(conn) -> dict[str, int]:
+    return _publish_current_read_payloads(conn, include_matchups=False)
+
+
 def _clear_scheduled_prop_state(conn, *, clear_source_rows: bool = False) -> None:
     conn.execute(
         """
@@ -1675,7 +1679,7 @@ def repair_current_slate_props() -> dict[str, Any]:
             }
         _invalidate_read_caches()
         with connect() as conn:
-            result["published_payloads"] = _publish_current_read_payloads(conn)
+            result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
         with _PROP_SYNC_LOCK:
             _PROP_SYNC_STATE["last_result"] = result
             _PROP_SYNC_STATE["target_game_ids"] = list(result.get("target_game_ids") or [])
@@ -1702,7 +1706,7 @@ def settle_props(
         watchlist = _sync_watchlist_snapshot_settlements(conn)
     _invalidate_read_caches()
     with connect() as conn:
-        published_payloads = _publish_current_read_payloads(conn)
+        published_payloads = _publish_post_mutation_read_payloads(conn)
     return {
         "props": props,
         "games": games,
@@ -2479,7 +2483,7 @@ def import_odds(force_refresh: bool = False) -> dict:
     _invalidate_read_caches()
     if not result.get("sync_error"):
         with connect() as conn:
-            result["published_payloads"] = _publish_current_read_payloads(conn)
+            result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
     return result
 
 
@@ -2498,7 +2502,7 @@ def import_covers(selected_date: str | None = None, force_refresh: bool = False)
     _invalidate_read_caches()
     if not sync_started:
         with connect() as conn:
-            result["published_payloads"] = _publish_current_read_payloads(conn)
+            result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
     return result
 
 
@@ -2512,7 +2516,7 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     result["affected_game_ids"] = game_ids
     _invalidate_read_caches()
     with connect() as conn:
-        result["published_payloads"] = _publish_current_read_payloads(conn)
+        result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
     return result
 
 
@@ -2642,7 +2646,7 @@ def import_espn_history(
     _clear_prop_scrape_caches()
     _invalidate_read_caches()
     with connect() as conn:
-        published_payloads = _publish_current_read_payloads(conn)
+        published_payloads = _publish_post_mutation_read_payloads(conn)
     return {
         "season": target_season,
         "seasons": unique_seasons,
@@ -2745,7 +2749,7 @@ def backfill_espn_history_gaps(
     _clear_prop_scrape_caches()
     _invalidate_read_caches()
     with connect() as conn:
-        published_payloads = _publish_current_read_payloads(conn)
+        published_payloads = _publish_post_mutation_read_payloads(conn)
     return {
         "source": "espn",
         "backfill": result,
@@ -2769,7 +2773,7 @@ def recompute_ats_from_game_lines() -> dict:
         result = _recompute_team_results_from_game_lines(conn)
     _invalidate_read_caches()
     with connect() as conn:
-        published_payloads = _publish_current_read_payloads(conn)
+        published_payloads = _publish_post_mutation_read_payloads(conn)
     return {"source": "game_lines", "published_payloads": published_payloads, **result}
 
 
@@ -2807,7 +2811,7 @@ def backfill_covers_lines(
         ats = _recompute_team_results_from_game_lines(conn)
     _invalidate_read_caches()
     with connect() as conn:
-        published_payloads = _publish_current_read_payloads(conn)
+        published_payloads = _publish_post_mutation_read_payloads(conn)
     return {
         "source": "covers",
         "start_date": start.isoformat(),
@@ -3298,7 +3302,7 @@ def _start_prop_sync_if_needed(source: str) -> bool:
                 synced = sync_prop_lines_from_sportsbook(conn)
             _invalidate_read_caches()
             with connect() as conn:
-                published_payloads = _publish_current_read_payloads(conn)
+                published_payloads = _publish_post_mutation_read_payloads(conn)
             with _PROP_SYNC_LOCK:
                 _PROP_SYNC_STATE["last_result"] = {
                     "source": source,

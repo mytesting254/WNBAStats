@@ -1826,7 +1826,7 @@ def test_repair_current_slate_endpoint_uses_phased_connections(monkeypatch) -> N
         ) or [],
     )
     monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, snapshot_date: None)
-    monkeypatch.setattr(main_module, "_publish_current_read_payloads", lambda conn: {"watchlist.json": 1})
+    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"watchlist.json": 1})
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
     monkeypatch.setitem(main_module._PROP_SYNC_STATE, "running", False)
     monkeypatch.setitem(main_module._PROP_SYNC_STATE, "started_at", None)
