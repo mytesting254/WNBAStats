@@ -34,7 +34,7 @@ from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
 from .db import connect, init_db, sqlite_write_lock, using_turso
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
-from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
+from .game_prediction_tracking import settle_completed_game_predictions
 from .game_predictions import _team_injury_impact, project_game
 from .odds_import import (
     RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME,
@@ -1359,7 +1359,7 @@ def _matchups_payload(conn) -> list[dict]:
         game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
         game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
         prediction = project_game(conn, game_context)
-        game_prediction_id = _save_game_prediction_if_possible(conn, game_context, prediction)
+        game_prediction_id = _latest_game_prediction_id(conn, game_id)
         payload.append(
             {
                 "id": game["id"],
@@ -1395,17 +1395,20 @@ def _matchups_payload(conn) -> list[dict]:
     return payload
 
 
-def _save_game_prediction_if_possible(conn, game_context: dict[str, Any], prediction: dict[str, Any]) -> int | None:
-    try:
-        return save_game_prediction(conn, game_context, prediction)
-    except sqlite3.OperationalError as exc:
-        if not _is_sqlite_locked_error(exc):
-            raise
-        try:
-            conn.rollback()
-        except sqlite3.Error:
-            pass
+def _latest_game_prediction_id(conn, game_id: int) -> int | None:
+    row = conn.execute(
+        """
+        SELECT id
+        FROM game_predictions
+        WHERE game_id = ?
+        ORDER BY prediction_time DESC, id DESC
+        LIMIT 1
+        """,
+        (game_id,),
+    ).fetchone()
+    if row is None:
         return None
+    return int(row["id"])
 
 
 def _publish_current_read_payloads(conn, *, include_matchups: bool = True) -> dict[str, int]:

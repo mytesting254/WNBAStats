@@ -1881,7 +1881,6 @@ def test_matchups_payload_survives_rotowire_failure(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "_value_board_payload_for_games", lambda conn, game_ids, include_filtered_only=False: [])
     monkeypatch.setattr(main_module, "_sportsbook_props_for_games", lambda conn, game_ids: [])
     monkeypatch.setattr(main_module, "_line_discrepancies_for_games", lambda conn, game_ids: [])
-    monkeypatch.setattr(main_module, "save_game_prediction", lambda conn, game, prediction: 123)
     monkeypatch.setattr(
         main_module,
         "project_game",
@@ -1910,7 +1909,7 @@ def test_matchups_payload_survives_rotowire_failure(monkeypatch) -> None:
     assert payload[0]["injury_from_cache"] is False
 
 
-def test_matchups_payload_survives_game_prediction_lock(monkeypatch) -> None:
+def test_matchups_payload_does_not_write_game_predictions(monkeypatch) -> None:
     load_test_history()
 
     monkeypatch.setattr(main_module, "import_rotowire_lineups", lambda conn, force_refresh=False: {"source": "cache", "captured_at": None, "from_cache": True})
@@ -1921,11 +1920,6 @@ def test_matchups_payload_survives_game_prediction_lock(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "_value_board_payload_for_games", lambda conn, game_ids, include_filtered_only=False: [])
     monkeypatch.setattr(main_module, "_sportsbook_props_for_games", lambda conn, game_ids: [])
     monkeypatch.setattr(main_module, "_line_discrepancies_for_games", lambda conn, game_ids: [])
-    monkeypatch.setattr(
-        main_module,
-        "save_game_prediction",
-        lambda conn, game, prediction: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
-    )
     monkeypatch.setattr(
         main_module,
         "project_game",
@@ -1945,10 +1939,14 @@ def test_matchups_payload_survives_game_prediction_lock(monkeypatch) -> None:
     )
 
     with connect() as conn:
+        conn.execute("DELETE FROM game_predictions")
+        conn.commit()
         payload = main_module._matchups_payload(conn)
+        saved = conn.execute("SELECT COUNT(*) AS count FROM game_predictions").fetchone()
 
     assert payload
     assert payload[0]["game_prediction_id"] is None
+    assert int(saved["count"]) == 0
 
 
 def test_game_projection_returns_picks() -> None:
