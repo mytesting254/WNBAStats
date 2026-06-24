@@ -1521,12 +1521,17 @@ def _scheduled_game_ids(conn) -> list[int]:
     ]
 
 
-def _repair_current_slate_props(conn) -> dict[str, Any]:
+def _repair_current_slate_target(conn) -> tuple[str, list[int]]:
     target_game_ids = _active_slate_game_ids(conn)
     scope = "current_slate"
     if not target_game_ids:
         target_game_ids = _scheduled_game_ids(conn)
         scope = "scheduled"
+    return scope, target_game_ids
+
+
+def _repair_current_slate_props(conn) -> dict[str, Any]:
+    scope, target_game_ids = _repair_current_slate_target(conn)
     if not target_game_ids:
         return {
             "scope": scope,
@@ -1576,8 +1581,10 @@ def recalculate(response: Response) -> dict[str, int]:
     response.headers["X-Legacy-Endpoint"] = "/api/recalculate"
     with connect() as conn:
         projections = rebuild_predictions(conn, refresh_models=False)
+    with connect() as conn:
         settlements = settle_completed_props(conn)
         game_settlements = settle_completed_game_predictions(conn)
+    with connect() as conn:
         _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     _invalidate_read_caches()
     with connect() as conn:
@@ -1599,8 +1606,8 @@ def repair_current_slate_props() -> dict[str, Any]:
                 "status": "busy",
                 "started_at": _PROP_SYNC_STATE["started_at"],
                 "scope": _PROP_SYNC_STATE.get("scope"),
-                "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
-            }
+            "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
+        }
         _PROP_SYNC_STATE["running"] = True
         _PROP_SYNC_STATE["started_at"] = datetime.now(timezone.utc).isoformat()
         _PROP_SYNC_STATE["finished_at"] = None
@@ -1611,7 +1618,49 @@ def repair_current_slate_props() -> dict[str, Any]:
 
     try:
         with connect() as conn:
-            result = _repair_current_slate_props(conn)
+            scope, target_game_ids = _repair_current_slate_target(conn)
+        if not target_game_ids:
+            result = {
+                "scope": scope,
+                "target_game_ids": [],
+                "scanned_props": 0,
+                "synced_props": 0,
+                "rebuilt_predictions": 0,
+            }
+        else:
+            with connect() as conn:
+                sync_result = sync_prop_lines_from_sportsbook(
+                    conn,
+                    game_ids=target_game_ids,
+                    fast_fail=True,
+                    rebuild_predictions_after=False,
+                    include_change_details=True,
+                )
+            if isinstance(sync_result, SyncPropLinesResult):
+                scanned = sync_result.synced_props
+                synced = sync_result.changed_props
+                changed_prop_line_ids = sync_result.changed_prop_line_ids
+            else:
+                scanned = int(sync_result)
+                synced = int(sync_result)
+                changed_prop_line_ids = []
+            with connect() as conn:
+                projections = rebuild_predictions(
+                    conn,
+                    game_ids=target_game_ids,
+                    prop_line_ids=changed_prop_line_ids or None,
+                    refresh_models=False,
+                )
+            with connect() as conn:
+                _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
+            result = {
+                "scope": scope,
+                "target_game_ids": target_game_ids,
+                "scanned_props": int(scanned),
+                "synced_props": int(synced),
+                "changed_prop_line_ids": changed_prop_line_ids,
+                "rebuilt_predictions": len(projections),
+            }
         _invalidate_read_caches()
         with connect() as conn:
             result["published_payloads"] = _publish_current_read_payloads(conn)

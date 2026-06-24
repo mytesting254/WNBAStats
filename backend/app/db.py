@@ -14,6 +14,14 @@ from .paths import ROOT_DIR, get_db_path
 load_dotenv(ROOT_DIR / ".env")
 
 
+class ManagedSqliteConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 def get_turso_database_url() -> str | None:
     return os.getenv("TURSO_DATABASE_URL")
 
@@ -34,7 +42,7 @@ def connect() -> Any:
 
     db_path = get_db_path()
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=30)
+    conn = sqlite3.connect(db_path, timeout=30, factory=ManagedSqliteConnection)
     _configure_connection(conn)
     return conn
 

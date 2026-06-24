@@ -23,6 +23,9 @@ def get_cache_dir() -> Path:
     override = os.getenv("WNBA_CACHE_DIR")
     if override:
         return Path(override)
+    db_override = os.getenv("WNBA_DB_PATH")
+    if db_override:
+        return Path(db_override).resolve().parent / "cache"
     return get_data_dir() / "cache"
 
 
@@ -30,4 +33,7 @@ def get_snapshot_dir() -> Path:
     override = os.getenv("WNBA_SNAPSHOT_DIR")
     if override:
         return Path(override)
+    db_override = os.getenv("WNBA_DB_PATH")
+    if db_override:
+        return Path(db_override).resolve().parent / "snapshots"
     return get_data_dir() / "snapshots"

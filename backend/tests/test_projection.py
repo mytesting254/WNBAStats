@@ -13,6 +13,7 @@ from starlette.requests import Request
 from backend.app import covers_import as covers_import_module
 from backend.app import cache as cache_module
 from backend.app import espn_history as espn_history_module
+from backend.app import paths as paths_module
 from backend.app import projections as projections_module
 from backend.app import rotowire_import as rotowire_import_module
 from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
@@ -200,6 +201,24 @@ def test_american_odds_helpers() -> None:
     assert round(american_to_implied_probability(-110), 4) == 0.5238
     assert round(american_to_implied_probability(150), 4) == 0.4
     assert expected_value(0.55, -110) > 0
+
+
+def test_sqlite_connect_context_manager_closes_connection() -> None:
+    with connect() as conn:
+        conn.execute("SELECT 1").fetchone()
+
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        conn.execute("SELECT 1")
+
+
+def test_cache_and_snapshot_dirs_follow_db_override(monkeypatch, tmp_path) -> None:
+    db_path = tmp_path / "runtime" / "wnba.sqlite"
+    monkeypatch.delenv("WNBA_CACHE_DIR", raising=False)
+    monkeypatch.delenv("WNBA_SNAPSHOT_DIR", raising=False)
+    monkeypatch.setenv("WNBA_DB_PATH", str(db_path))
+
+    assert paths_module.get_cache_dir() == db_path.parent / "cache"
+    assert paths_module.get_snapshot_dir() == db_path.parent / "snapshots"
 
 
 def test_read_json_cache_returns_none_for_invalid_json(tmp_path, monkeypatch) -> None:
@@ -583,9 +602,12 @@ def test_watchlist_endpoint_uses_read_cache(monkeypatch) -> None:
 
 def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) -> None:
     calls: list[bool] = []
+    connect_calls = 0
 
     class DummyConn:
         def __enter__(self):
+            nonlocal connect_calls
+            connect_calls += 1
             return self
 
         def __exit__(self, exc_type, exc, tb):
@@ -606,6 +628,7 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
 
     assert result == {"predictions": 0, "settled": 0, "game_settled": 0}
     assert calls == [False]
+    assert connect_calls == 4
     assert response.headers["Deprecation"] == "true"
     assert response.headers["X-Legacy-Endpoint"] == "/api/recalculate"
 
@@ -1734,6 +1757,69 @@ def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -
     assert result["target_game_ids"] == [9910, 9920]
     assert result["scanned_props"] == 4
     assert result["synced_props"] == 1
+
+
+def test_repair_current_slate_endpoint_uses_phased_connections(monkeypatch) -> None:
+    connect_calls = 0
+    sync_calls: list[dict] = []
+    rebuild_calls: list[tuple[list[int] | None, list[int] | None, bool]] = []
+
+    class DummyConn:
+        def __enter__(self):
+            nonlocal connect_calls
+            connect_calls += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module, "_active_slate_game_ids", lambda conn: [9910])
+    monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", lambda conn, **kwargs: sync_calls.append(kwargs) or SyncPropLinesResult(
+        synced_props=2,
+        changed_props=2,
+        changed_prop_line_ids=[501, 502],
+        touched_game_ids=[9910],
+    ))
+    monkeypatch.setattr(
+        main_module,
+        "rebuild_predictions",
+        lambda conn, game_ids=None, prop_line_ids=None, refresh_models=True: rebuild_calls.append(
+            (
+                list(game_ids) if game_ids is not None else None,
+                list(prop_line_ids) if prop_line_ids is not None else None,
+                refresh_models,
+            )
+        ) or [],
+    )
+    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, snapshot_date: None)
+    monkeypatch.setattr(main_module, "_publish_current_read_payloads", lambda conn: {"watchlist.json": 1})
+    monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "running", False)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "started_at", None)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "finished_at", None)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "last_error", None)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "last_result", None)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "scope", None)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "target_game_ids", [])
+
+    result = main_module.repair_current_slate_props()
+
+    assert connect_calls == 5
+    assert sync_calls == [
+        {
+            "game_ids": [9910],
+            "fast_fail": True,
+            "rebuild_predictions_after": False,
+            "include_change_details": True,
+        }
+    ]
+    assert rebuild_calls == [([9910], [501, 502], False)]
+    assert result["status"] == "completed"
+    assert result["scope"] == "current_slate"
+    assert result["target_game_ids"] == [9910]
+    assert result["changed_prop_line_ids"] == [501, 502]
+    assert result["published_payloads"] == {"watchlist.json": 1}
 
 
 def test_game_projection_returns_picks() -> None:
