@@ -1294,7 +1294,16 @@ def _watchlist_performance_payload(conn) -> dict:
 
 
 def _matchups_payload(conn) -> list[dict]:
-    injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
+    try:
+        injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
+    except Exception as exc:
+        injury_refresh = {
+            "source": "unavailable",
+            "captured_at": None,
+            "from_cache": False,
+            "status": "failed",
+            "message": str(exc),
+        }
     games = conn.execute(
         """
         SELECT
@@ -1381,14 +1390,14 @@ def _matchups_payload(conn) -> list[dict]:
     return payload
 
 
-def _publish_current_read_payloads(conn) -> dict[str, int]:
+def _publish_current_read_payloads(conn, *, include_matchups: bool = True) -> dict[str, int]:
     published: dict[str, int] = {}
 
     def publish(name: str, ttl_seconds: int, payload: Any, count: int) -> None:
         write_json_cache(name, _cache_envelope(payload, ttl_seconds))
         published[name] = count
 
-    for name, ttl_seconds, compute in (
+    payload_builders = [
         (VALUE_BOARD_CACHE_NAME, VALUE_BOARD_TTL_SECONDS, lambda: _value_board_payload(conn)),
         (WATCHLIST_CACHE_NAME, WATCHLIST_TTL_SECONDS, lambda: _watchlist_payload(conn)),
         (LINE_DISCREPANCIES_CACHE_NAME, LINE_DISCREPANCIES_TTL_SECONDS, lambda: line_discrepancies(conn, None)),
@@ -1397,8 +1406,11 @@ def _publish_current_read_payloads(conn) -> dict[str, int]:
         (MODEL_PERFORMANCE_CACHE_NAME, MODEL_PERFORMANCE_TTL_SECONDS, lambda: _model_performance_payload(conn)),
         (GEM_PERFORMANCE_CACHE_NAME, GEM_PERFORMANCE_TTL_SECONDS, lambda: _gem_performance_payload(conn)),
         (WATCHLIST_PERFORMANCE_CACHE_NAME, WATCHLIST_PERFORMANCE_TTL_SECONDS, lambda: _watchlist_performance_payload(conn)),
-        (MATCHUPS_CACHE_NAME, MATCHUPS_TTL_SECONDS, lambda: _matchups_payload(conn)),
-    ):
+    ]
+    if include_matchups:
+        payload_builders.append((MATCHUPS_CACHE_NAME, MATCHUPS_TTL_SECONDS, lambda: _matchups_payload(conn)))
+
+    for name, ttl_seconds, compute in payload_builders:
         try:
             payload = compute()
             if isinstance(payload, dict):
@@ -1588,7 +1600,7 @@ def recalculate(response: Response) -> dict[str, int]:
         _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     _invalidate_read_caches()
     with connect() as conn:
-        _publish_current_read_payloads(conn)
+        _publish_current_read_payloads(conn, include_matchups=False)
     return {"predictions": len(projections), "settled": settlements["settled"], "game_settled": game_settlements["settled"]}
 
 

@@ -285,6 +285,32 @@ def test_publish_current_read_payloads_continues_after_single_failure(monkeypatc
     assert result[main_module.WATCHLIST_PERFORMANCE_CACHE_NAME] == 1
 
 
+def test_publish_current_read_payloads_can_skip_matchups(monkeypatch) -> None:
+    published: list[str] = []
+
+    monkeypatch.setattr(main_module, "_value_board_payload", lambda conn: [1, 2])
+    monkeypatch.setattr(main_module, "_watchlist_payload", lambda conn: [3])
+    monkeypatch.setattr(main_module, "line_discrepancies", lambda conn, game_id=None: [4])
+    monkeypatch.setattr(main_module, "_roster_payload", lambda conn: [5])
+    monkeypatch.setattr(main_module, "_model_runs_payload", lambda conn: {"latest": {}, "runs": [1, 2, 3]})
+    monkeypatch.setattr(main_module, "_model_performance_payload", lambda conn: {"model": 1})
+    monkeypatch.setattr(main_module, "_gem_performance_payload", lambda conn: {"gem": 1})
+    monkeypatch.setattr(main_module, "_watchlist_performance_payload", lambda conn: {"watchlist": 1})
+    monkeypatch.setattr(
+        main_module,
+        "_matchups_payload",
+        lambda conn: (_ for _ in ()).throw(AssertionError("matchups prewarm should be skipped")),
+    )
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: published.append(name))
+
+    result = main_module._publish_current_read_payloads(SimpleNamespace(), include_matchups=False)
+
+    assert main_module.MATCHUPS_CACHE_NAME not in published
+    assert main_module.MATCHUPS_CACHE_NAME not in result
+    assert main_module.VALUE_BOARD_CACHE_NAME in published
+    assert main_module.WATCHLIST_CACHE_NAME in published
+
+
 def test_watchlist_performance_uses_read_cache(monkeypatch) -> None:
     payload = {
         "qualified": 1,
@@ -603,6 +629,7 @@ def test_watchlist_endpoint_uses_read_cache(monkeypatch) -> None:
 def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) -> None:
     calls: list[bool] = []
     connect_calls = 0
+    publish_calls: list[bool] = []
 
     class DummyConn:
         def __enter__(self):
@@ -622,12 +649,18 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
     monkeypatch.setattr(main_module, "settle_completed_props", lambda conn: {"settled": 0})
     monkeypatch.setattr(main_module, "settle_completed_game_predictions", lambda conn: {"settled": 0})
     monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, snapshot_date: None)
+    monkeypatch.setattr(
+        main_module,
+        "_publish_current_read_payloads",
+        lambda conn, include_matchups=True: publish_calls.append(include_matchups) or {},
+    )
 
     response = Response()
     result = main_module.recalculate(response)
 
     assert result == {"predictions": 0, "settled": 0, "game_settled": 0}
     assert calls == [False]
+    assert publish_calls == [False]
     assert connect_calls == 4
     assert response.headers["Deprecation"] == "true"
     assert response.headers["X-Legacy-Endpoint"] == "/api/recalculate"
@@ -1820,6 +1853,46 @@ def test_repair_current_slate_endpoint_uses_phased_connections(monkeypatch) -> N
     assert result["target_game_ids"] == [9910]
     assert result["changed_prop_line_ids"] == [501, 502]
     assert result["published_payloads"] == {"watchlist.json": 1}
+
+
+def test_matchups_payload_survives_rotowire_failure(monkeypatch) -> None:
+    load_test_history()
+
+    monkeypatch.setattr(main_module, "import_rotowire_lineups", lambda conn, force_refresh=False: (_ for _ in ()).throw(RuntimeError("rotowire unavailable")))
+    monkeypatch.setattr(main_module, "_covers_records_by_game", lambda conn: {})
+    monkeypatch.setattr(main_module, "_covers_market_odds_by_game", lambda: {})
+    monkeypatch.setattr(main_module, "_team_last_10_summary", lambda conn, team_id: {})
+    monkeypatch.setattr(main_module, "_is_today_active_game_time", lambda start_time: True)
+    monkeypatch.setattr(main_module, "_value_board_payload_for_games", lambda conn, game_ids, include_filtered_only=False: [])
+    monkeypatch.setattr(main_module, "_sportsbook_props_for_games", lambda conn, game_ids: [])
+    monkeypatch.setattr(main_module, "_line_discrepancies_for_games", lambda conn, game_ids: [])
+    monkeypatch.setattr(main_module, "save_game_prediction", lambda conn, game, prediction: 123)
+    monkeypatch.setattr(
+        main_module,
+        "project_game",
+        lambda conn, game: {
+            "home_projected_points": 80.0,
+            "away_projected_points": 75.0,
+            "projected_margin": 5.0,
+            "projected_total": 155.0,
+            "winner_pick": "NY",
+            "ats_pick": "NY",
+            "ats_edge": 0.04,
+            "total_pick": "Under",
+            "total_edge": 0.03,
+            "game_confidence": "medium",
+            "game_reason": "test",
+        },
+    )
+
+    with connect() as conn:
+        payload = main_module._matchups_payload(conn)
+
+    assert payload
+    assert payload[0]["props"] == []
+    assert payload[0]["injury_source"] == "unavailable"
+    assert payload[0]["injury_captured_at"] is None
+    assert payload[0]["injury_from_cache"] is False
 
 
 def test_game_projection_returns_picks() -> None:
