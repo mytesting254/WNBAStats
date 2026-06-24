@@ -149,6 +149,8 @@ export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
+  const [matchupsLoaded, setMatchupsLoaded] = useState(false);
+  const [loadingMatchups, setLoadingMatchups] = useState(false);
   const [discrepancies, setDiscrepancies] = useState<LineDiscrepancy[]>([]);
   const [roster, setRoster] = useState<RosterPlayer[]>([]);
   const [performance, setPerformance] = useState<ModelPerformance | null>(null);
@@ -219,7 +221,6 @@ export function App() {
         gemPerformanceResult,
         watchlistPerformanceResult,
         watchlistResult,
-        matchupsResult,
         discrepanciesResult,
         modelRunsResult,
         rosterResult,
@@ -230,7 +231,6 @@ export function App() {
         fetchGemPerformance(),
         fetchWatchlistPerformance(),
         fetchWatchlist(),
-        fetchMatchups(),
         fetchLineDiscrepancies(),
         fetchModelRuns(),
         fetchRoster(),
@@ -285,12 +285,6 @@ export function App() {
         failures.push("watchlist");
       }
 
-      if (matchupsResult.status === "fulfilled") {
-        setMatchups(matchupsResult.value);
-      } else {
-        failures.push("matchups");
-      }
-
       if (discrepanciesResult.status === "fulfilled") {
         setDiscrepancies(discrepanciesResult.value);
       } else {
@@ -329,6 +323,20 @@ export function App() {
   useEffect(() => {
     load();
   }, []);
+
+  async function loadMatchups() {
+    setLoadingMatchups(true);
+    setError(null);
+    try {
+      const result = await fetchMatchups();
+      setMatchups(result);
+      setMatchupsLoaded(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load matchups");
+    } finally {
+      setLoadingMatchups(false);
+    }
+  }
 
   async function loadAuth() {
     setAuthLoading(true);
@@ -849,9 +857,22 @@ export function App() {
         ) : activeTab === "watchlist" ? (
           <WatchlistView watchlist={watchlist} loading={loading} error={error} />
         ) : activeTab === "matchups" ? (
-          <MatchupsView matchups={matchups} loading={loading} error={error} />
+          <MatchupsView
+            matchups={matchups}
+            loading={loading || loadingMatchups}
+            error={error}
+            loaded={matchupsLoaded}
+            onLoadMatchups={loadMatchups}
+          />
         ) : activeTab === "parlays" ? (
-          <ParlayCandidatesView matchups={matchups} props={props} loading={loading} error={error} />
+          <ParlayCandidatesView
+            matchups={matchups}
+            props={props}
+            loading={loading || loadingMatchups}
+            error={error}
+            matchupsLoaded={matchupsLoaded}
+            onLoadMatchups={loadMatchups}
+          />
         ) : activeTab === "discrepancies" ? (
           <DiscrepanciesView discrepancies={discrepancies} loading={loading} error={error} />
         ) : activeTab === "data" ? (
@@ -2311,7 +2332,19 @@ function DiscrepanciesView({
   );
 }
 
-function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loading: boolean; error: string | null }) {
+function MatchupsView({
+  matchups,
+  loading,
+  error,
+  loaded,
+  onLoadMatchups,
+}: {
+  matchups: Matchup[];
+  loading: boolean;
+  error: string | null;
+  loaded: boolean;
+  onLoadMatchups: () => void;
+}) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const selectedMatchup = matchups.find((matchup) => matchup.id === selectedGameId) ?? matchups[0] ?? null;
   const selectedCoversRecords = normalizeCoversRecords(selectedMatchup?.covers_records);
@@ -2322,11 +2355,22 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
         <div className="panel-header">
           <div>
             <h2>Today's Games</h2>
-            <p>{loading ? "Loading matchups" : "Last 10 form, home/away split, ATS, and totals"}</p>
+            <p>{loading ? "Loading matchups" : loaded ? "Last 10 form, home/away split, ATS, and totals" : "Matchups load on demand to avoid background write activity."}</p>
           </div>
           <ShieldCheck size={20} />
         </div>
         {error && <div className="error">{error}</div>}
+        {!loaded ? (
+          <div className="empty-state">
+            <p>Matchups are manual now. Load them only when you want fresh game context.</p>
+            <button className="icon-button text-button dark-button" onClick={onLoadMatchups} disabled={loading}>
+              <RefreshCw size={18} />
+              {loading ? "Loading Matchups..." : "Load Matchups"}
+            </button>
+          </div>
+        ) : null}
+        {loaded ? (
+          <>
         <div className="game-tabs matchup-game-tabs" aria-label="Game tabs">
           {matchups.map((matchup) => {
             const winnerCode = normalizeTeamCode(matchup.winner_pick);
@@ -2416,6 +2460,8 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
             <p className="empty">No scheduled games found.</p>
           )}
         </div>
+          </>
+        ) : null}
       </div>
     </section>
   );
@@ -3079,8 +3125,45 @@ function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp
   );
 }
 
-function ParlayCandidatesView({ matchups, props, loading, error }: { matchups: Matchup[]; props: ValueProp[]; loading: boolean; error: string | null }) {
+function ParlayCandidatesView({
+  matchups,
+  props,
+  loading,
+  error,
+  matchupsLoaded,
+  onLoadMatchups,
+}: {
+  matchups: Matchup[];
+  props: ValueProp[];
+  loading: boolean;
+  error: string | null;
+  matchupsLoaded: boolean;
+  onLoadMatchups: () => void;
+}) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
+
+  if (!matchupsLoaded) {
+    return (
+      <section className="matchup-list">
+        <div className="board-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Parlay Candidates</h2>
+              <p>Load matchups first to build matchup-aware parlay groups.</p>
+            </div>
+            <ListChecks size={20} />
+          </div>
+          {error && <div className="error">{error}</div>}
+          <div className="empty-state">
+            <button className="icon-button text-button dark-button" onClick={onLoadMatchups} disabled={loading}>
+              <RefreshCw size={18} />
+              {loading ? "Loading Matchups..." : "Load Matchups"}
+            </button>
+          </div>
+        </div>
+      </section>
+    );
+  }
   const matchupCards = useMemo(
     () =>
       matchups.map((matchup) => ({

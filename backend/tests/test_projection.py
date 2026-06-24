@@ -725,6 +725,20 @@ def test_espn_history_accepts_batch_dates(monkeypatch) -> None:
     assert boxscore_dates == [(2026, "2026-05-14"), (2026, "2026-05-15")]
 
 
+def test_espn_history_rejects_overlapping_imports(monkeypatch) -> None:
+    class BusyLock:
+        def acquire(self, blocking: bool = True) -> bool:
+            return False
+
+    monkeypatch.setattr(main_module, "_ESPN_HISTORY_IMPORT_LOCK", BusyLock())
+
+    with pytest.raises(main_module.HTTPException) as exc_info:
+        import_espn_history_endpoint(season=2026, include_player_stats=False, include_previous_season=False)
+
+    assert exc_info.value.status_code == 409
+    assert "already running" in str(exc_info.value.detail).lower()
+
+
 def test_rest_days_uses_game_date_boundary_not_utc_rollover() -> None:
     with connect() as conn:
         team_id = int(conn.execute("SELECT id FROM teams WHERE abbreviation = 'PHX'").fetchone()["id"])

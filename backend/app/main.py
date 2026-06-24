@@ -95,6 +95,7 @@ _RATE_BUCKETS: dict[tuple[str, str], tuple[float, float]] = {}
 _RATE_LOCK = threading.Lock()
 _PROP_SYNC_LOCK = threading.Lock()
 _DB_MAINTENANCE_LOCK = threading.Lock()
+_ESPN_HISTORY_IMPORT_LOCK = threading.Lock()
 _PROP_SYNC_STATE: dict[str, Any] = {
     "running": False,
     "started_at": None,
@@ -472,7 +473,7 @@ def _start_read_payload_prewarm() -> None:
     def _worker() -> None:
         try:
             with connect() as conn:
-                _publish_current_read_payloads(conn)
+                _publish_current_read_payloads(conn, include_matchups=False)
         except Exception as exc:
             print(f"[startup] read payload prewarm skipped: {exc}")
 
@@ -2537,6 +2538,11 @@ def import_espn_history(
     daily_dates = _selected_espn_dates(selected_date, selected_dates)
     if not daily_dates and not force_refresh and not include_previous_season:
         daily_dates = _default_espn_daily_dates()
+    if not _ESPN_HISTORY_IMPORT_LOCK.acquire(blocking=False):
+        raise HTTPException(
+            status_code=409,
+            detail="An ESPN history import is already running. Wait for it to finish before starting another import.",
+        )
 
     try:
         with connect() as conn:
@@ -2613,6 +2619,8 @@ def import_espn_history(
                                     "error": str(exc),
                                 }
                             )
+
+        with connect() as conn:
             ats_backfill = _recompute_team_results_from_game_lines(conn)
             settlements = settle_completed_props(conn, selected_dates=daily_dates)
             game_settlements = settle_completed_game_predictions(conn, selected_dates=daily_dates)
@@ -2643,6 +2651,8 @@ def import_espn_history(
                 ),
             ) from exc
         raise
+    finally:
+        _ESPN_HISTORY_IMPORT_LOCK.release()
     _clear_prop_scrape_caches()
     _invalidate_read_caches()
     with connect() as conn:
