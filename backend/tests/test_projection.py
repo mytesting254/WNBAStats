@@ -2237,6 +2237,7 @@ def test_odds_import_syncs_model_prop_lines_from_sportsbook(monkeypatch) -> None
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
     load_test_history()
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-05-08")
     monkeypatch.setattr(
         "backend.app.odds_import.read_json_cache",
         lambda name: [

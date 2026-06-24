@@ -283,74 +283,42 @@ def sync_prop_lines_from_sportsbook(
             attempts=4 if fast_fail else 24,
             base_sleep=0.05 if fast_fail else 0.20,
         )
-        conn.execute(
-            """
-            DELETE FROM watchlist_snapshot_items
-            WHERE prop_line_id IN (
-                SELECT pl.id
-                FROM prop_lines pl
-                JOIN games g ON g.id = pl.game_id
-                LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
-                WHERE sp.id IS NULL
-                  AND g.status = 'scheduled'
-            """
-            + game_filter
-            + """
+        target_prop_line_ids = _open_scheduled_prop_line_ids(conn, touched_game_ids)
+        if target_prop_line_ids:
+            delete_attempts = 4 if fast_fail else 20
+            delete_sleep = 0.05 if fast_fail else 0.15
+            _delete_by_id_batches(
+                conn,
+                "watchlist_snapshot_items",
+                "prop_line_id",
+                target_prop_line_ids,
+                attempts=delete_attempts,
+                base_sleep=delete_sleep,
             )
-            """,
-            game_filter_params,
-        )
-        conn.execute(
-            """
-            DELETE FROM gem_snapshot_items
-            WHERE prop_line_id IN (
-                SELECT pl.id
-                FROM prop_lines pl
-                JOIN games g ON g.id = pl.game_id
-                LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
-                WHERE sp.id IS NULL
-                  AND g.status = 'scheduled'
-            """
-            + game_filter
-            + """
+            _delete_by_id_batches(
+                conn,
+                "gem_snapshot_items",
+                "prop_line_id",
+                target_prop_line_ids,
+                attempts=delete_attempts,
+                base_sleep=delete_sleep,
             )
-            """,
-            game_filter_params,
-        )
-        conn.execute(
-            """
-            DELETE FROM prop_predictions
-            WHERE prop_line_id IN (
-                SELECT pl.id
-                FROM prop_lines pl
-                JOIN games g ON g.id = pl.game_id
-                LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
-                WHERE sp.id IS NULL
-                  AND g.status = 'scheduled'
-            """
-            + game_filter
-            + """
+            _delete_by_id_batches(
+                conn,
+                "prop_predictions",
+                "prop_line_id",
+                target_prop_line_ids,
+                attempts=delete_attempts,
+                base_sleep=delete_sleep,
             )
-            """,
-            game_filter_params,
-        )
-        conn.execute(
-            """
-            DELETE FROM prop_lines
-            WHERE id IN (
-                SELECT pl.id
-                FROM prop_lines pl
-                JOIN games g ON g.id = pl.game_id
-                LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
-                WHERE sp.id IS NULL
-                  AND g.status = 'scheduled'
-            """
-            + game_filter
-            + """
+            _delete_by_id_batches(
+                conn,
+                "prop_lines",
+                "id",
+                target_prop_line_ids,
+                attempts=delete_attempts,
+                base_sleep=delete_sleep,
             )
-            """,
-            game_filter_params,
-        )
         changed_prop_line_ids: list[int] = []
         if insert_rows:
             if include_change_details:
@@ -505,6 +473,49 @@ def _replace_sportsbook_rows(conn: sqlite3.Connection, raw_payload: list[dict], 
         "imported": len(imported_rows),
         "captured_at": captured_at,
     }
+
+
+def _open_scheduled_prop_line_ids(conn: sqlite3.Connection, game_ids: list[int]) -> list[int]:
+    if not game_ids:
+        return []
+    placeholders = ",".join("?" for _ in game_ids)
+    rows = conn.execute(
+        f"""
+        SELECT pl.id
+        FROM prop_lines pl
+        JOIN games g ON g.id = pl.game_id
+        LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+        WHERE sp.id IS NULL
+          AND g.status = 'scheduled'
+          AND pl.game_id IN ({placeholders})
+        """,
+        tuple(game_ids),
+    ).fetchall()
+    return [int(row[0]) for row in rows]
+
+
+def _delete_by_id_batches(
+    conn: sqlite3.Connection,
+    table: str,
+    id_column: str,
+    ids: list[int],
+    *,
+    batch_size: int = 250,
+    attempts: int = 20,
+    base_sleep: float = 0.15,
+) -> None:
+    if not ids:
+        return
+    for start in range(0, len(ids), batch_size):
+        batch = ids[start : start + batch_size]
+        placeholders = ",".join("?" for _ in batch)
+        _execute_with_lock_retry(
+            conn,
+            f"DELETE FROM {table} WHERE {id_column} IN ({placeholders})",
+            tuple(batch),
+            attempts=attempts,
+            base_sleep=base_sleep,
+        )
 
 
 def _active_cached_events(raw_payload: object) -> list[dict]:
