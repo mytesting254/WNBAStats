@@ -650,6 +650,34 @@ def init_db() -> None:
             ON watchlist_snapshot_items(prop_line_id)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prop_sync_jobs (
+                id INTEGER PRIMARY KEY,
+                scope TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                stage TEXT,
+                stage_index INTEGER NOT NULL DEFAULT 0,
+                stage_total INTEGER NOT NULL DEFAULT 1,
+                current_count INTEGER NOT NULL DEFAULT 0,
+                total_count INTEGER NOT NULL DEFAULT 0,
+                percent REAL NOT NULL DEFAULT 0.0,
+                message TEXT,
+                last_error TEXT,
+                last_result_json TEXT,
+                target_game_ids_json TEXT NOT NULL DEFAULT '[]',
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_prop_sync_jobs_started_at
+            ON prop_sync_jobs(started_at DESC, id DESC)
+            """
+        )
 
 
 SCHEMA = """
@@ -932,12 +960,32 @@ CREATE TABLE IF NOT EXISTS watchlist_snapshot_items (
     UNIQUE(snapshot_id, prop_line_id)
 );
 
+CREATE TABLE IF NOT EXISTS prop_sync_jobs (
+    id INTEGER PRIMARY KEY,
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    stage TEXT,
+    stage_index INTEGER NOT NULL DEFAULT 0,
+    stage_total INTEGER NOT NULL DEFAULT 1,
+    current_count INTEGER NOT NULL DEFAULT 0,
+    total_count INTEGER NOT NULL DEFAULT 0,
+    percent REAL NOT NULL DEFAULT 0.0,
+    message TEXT,
+    last_error TEXT,
+    last_result_json TEXT,
+    target_game_ids_json TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_player_stats_player_game ON player_game_stats(player_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_team_results_team_game ON team_game_results(team_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_prop_lines_game ON prop_lines(game_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_prop ON prop_predictions(prop_line_id);
 CREATE INDEX IF NOT EXISTS idx_game_predictions_game ON game_predictions(game_id);
 CREATE INDEX IF NOT EXISTS idx_settled_game_predictions_game ON settled_game_predictions(game_id);
+CREATE INDEX IF NOT EXISTS idx_prop_sync_jobs_started_at ON prop_sync_jobs(started_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_model_runs_started ON model_runs(started_at);
 CREATE INDEX IF NOT EXISTS idx_gem_snapshots_date_preset ON gem_snapshots(snapshot_date, preset);
 CREATE INDEX IF NOT EXISTS idx_gem_snapshot_items_snapshot ON gem_snapshot_items(snapshot_id);

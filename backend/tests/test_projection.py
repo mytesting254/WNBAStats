@@ -748,6 +748,7 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
 
     monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
     monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(main_module, "_create_prop_sync_job_record", lambda *args, **kwargs: None)
 
     monkeypatch.setitem(main_module._PROP_SYNC_STATE, "running", False)
 
@@ -2063,6 +2064,7 @@ def test_repair_current_slate_endpoint_queues_background_job(monkeypatch) -> Non
 
     monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
     monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(main_module, "_create_prop_sync_job_record", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         main_module,
         "_run_current_slate_repair_job",

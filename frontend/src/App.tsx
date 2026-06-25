@@ -190,6 +190,7 @@ export function App() {
   const loadRequestIdRef = useRef(0);
   const operationsBusyRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
+  const lastCompletedPropSyncRef = useRef<string | null>(null);
   const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const operationsBusy =
@@ -208,9 +209,11 @@ export function App() {
     auditingDbLock ||
     recoveringDbLock;
 
-  async function load() {
+  async function load(options?: { silent?: boolean }) {
     const requestId = ++loadRequestIdRef.current;
-    setLoading(true);
+    if (!options?.silent) {
+      setLoading(true);
+    }
     setError(null);
     try {
       const [
@@ -320,7 +323,7 @@ export function App() {
         setError(`Some dashboard data failed to load: ${failures.join(", ")}. Showing the last successful data.`);
       }
     } finally {
-      if (requestId === loadRequestIdRef.current) {
+      if (!options?.silent && requestId === loadRequestIdRef.current) {
         setLoading(false);
       }
     }
@@ -388,6 +391,22 @@ export function App() {
     }, intervalMs);
     return () => window.clearInterval(interval);
   }, [opsHealth?.prop_sync.running]);
+
+  useEffect(() => {
+    const propSync = opsHealth?.prop_sync;
+    if (!propSync || propSync.running || !propSync.finished_at) {
+      return;
+    }
+    if (lastCompletedPropSyncRef.current === propSync.finished_at) {
+      return;
+    }
+    lastCompletedPropSyncRef.current = propSync.finished_at;
+    void load({ silent: true });
+  }, [opsHealth?.prop_sync.running, opsHealth?.prop_sync.finished_at]);
+
+  function handleReload() {
+    void load();
+  }
 
   const filtered = useMemo(() => {
     return props
@@ -761,7 +780,7 @@ export function App() {
           <h1>{tabTitle(activeTab)}</h1>
         </div>
         <div className="topbar-actions">
-          <button className="icon-button text-button" onClick={load} disabled={loading} title="Reload dashboard data">
+          <button className="icon-button text-button" onClick={handleReload} disabled={loading} title="Reload dashboard data">
             <RefreshCw size={18} />
             {loading ? "Loading" : "Reload"}
           </button>
@@ -830,7 +849,7 @@ export function App() {
       )}
       {performance?.message ? <div className="summary-message">{performance.message}</div> : null}
 
-      <DashboardErrorBoundary key={activeTab} onReset={load}>
+      <DashboardErrorBoundary key={activeTab} onReset={handleReload}>
         {activeTab === "props" ? (
           <PropsView
             filtered={filtered}
@@ -902,7 +921,7 @@ export function App() {
             onAuditDbLock={handleAuditDbLock}
             onRecoverDbLock={handleRecoverDbLock}
             onStalePayloadAckChange={setStalePayloadAck}
-            onReload={load}
+            onReload={handleReload}
           />
         ) : activeTab === "roster" ? (
           <RosterView

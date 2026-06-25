@@ -124,23 +124,28 @@ export type AuthState = {
 
 export type OpsHealth = {
   status: string;
-  prop_sync: {
-    running: boolean;
-    started_at: string | null;
-    finished_at: string | null;
-    last_error: string | null;
-    last_result: Record<string, unknown> | null;
-    scope?: string | null;
-    target_game_ids?: number[];
-    stage?: string | null;
-    stage_index?: number;
-    stage_total?: number;
-    current?: number;
-    total?: number;
-    percent?: number;
-    message?: string | null;
-    updated_at?: string | null;
-  };
+  prop_sync: PropSyncHealth;
+  prop_sync_job?: PropSyncHealth | null;
+};
+
+export type PropSyncHealth = {
+  job_id?: number | null;
+  running: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  last_error: string | null;
+  last_result: Record<string, unknown> | null;
+  status?: string | null;
+  scope?: string | null;
+  target_game_ids?: number[];
+  stage?: string | null;
+  stage_index?: number;
+  stage_total?: number;
+  current?: number;
+  total?: number;
+  percent?: number;
+  message?: string | null;
+  updated_at?: string | null;
 };
 
 export type StalePayloadAudit = {
