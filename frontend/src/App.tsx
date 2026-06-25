@@ -4200,18 +4200,32 @@ function formatGameTotal(value: number | null) {
 
 function formatSpreadMarket(matchup: Matchup) {
   const market = matchup.spread_market;
-  if (!market) {
+  const awayLine = market?.away_line ?? (matchup.spread_home != null ? -matchup.spread_home : null);
+  const homeLine = market?.home_line ?? matchup.spread_home;
+  const awayPrice = market?.away_price ?? matchup.away_spread_price ?? null;
+  const homePrice = market?.home_price ?? matchup.home_spread_price ?? null;
+  if (awayLine == null || homeLine == null) {
     return `${matchup.home_team} ${formatSpread(matchup.spread_home)}`;
   }
-  return `${matchup.away_team} ${formatSpread(market.away_line)} (${formatMoneyline(market.away_price)}) / ${matchup.home_team} ${formatSpread(market.home_line)} (${formatMoneyline(market.home_price)})`;
+  if (awayPrice == null || homePrice == null) {
+    return `${matchup.away_team} ${formatSpread(awayLine)} / ${matchup.home_team} ${formatSpread(homeLine)}`;
+  }
+  return `${matchup.away_team} ${formatSpread(awayLine)} (${formatMoneyline(awayPrice)}) / ${matchup.home_team} ${formatSpread(homeLine)} (${formatMoneyline(homePrice)})`;
 }
 
 function formatTotalMarket(matchup: Matchup) {
   const market = matchup.total_market;
-  if (!market) {
+  const overLine = market?.over_line ?? matchup.game_total;
+  const underLine = market?.under_line ?? matchup.game_total;
+  const overPrice = market?.over_price ?? matchup.over_price ?? null;
+  const underPrice = market?.under_price ?? matchup.under_price ?? null;
+  if (overLine == null || underLine == null) {
     return `${formatGameTotal(matchup.game_total)}`;
   }
-  return `O${formatGameTotal(market.over_line)} (${formatMoneyline(market.over_price)}) / U${formatGameTotal(market.under_line)} (${formatMoneyline(market.under_price)})`;
+  if (overPrice == null || underPrice == null) {
+    return `O${formatGameTotal(overLine)} / U${formatGameTotal(underLine)}`;
+  }
+  return `O${formatGameTotal(overLine)} (${formatMoneyline(overPrice)}) / U${formatGameTotal(underLine)} (${formatMoneyline(underPrice)})`;
 }
 
 function formatMoneylineMarket(matchup: Matchup) {

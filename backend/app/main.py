@@ -1335,6 +1335,10 @@ def _matchups_payload(conn) -> list[dict]:
             ,g.game_total
             ,g.home_moneyline
             ,g.away_moneyline
+            ,g.home_spread_price
+            ,g.away_spread_price
+            ,g.over_price
+            ,g.under_price
         FROM games g
         JOIN teams home ON home.id = g.home_team_id
         JOIN teams away ON away.id = g.away_team_id
@@ -1359,13 +1363,23 @@ def _matchups_payload(conn) -> list[dict]:
         home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
         away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
         game_context = dict(game)
-        for field in ("spread_home", "game_total", "home_moneyline", "away_moneyline"):
+        for field in (
+            "spread_home",
+            "game_total",
+            "home_moneyline",
+            "away_moneyline",
+            "home_spread_price",
+            "away_spread_price",
+            "over_price",
+            "under_price",
+        ):
             if market_override.get(field) is not None:
                 game_context[field] = market_override[field]
         game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
         game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
         prediction = project_game(conn, game_context)
         game_prediction_id = _latest_game_prediction_id(conn, game_id)
+        market_payload = _matchup_game_markets(game_context)
         payload.append(
             {
                 "id": game["id"],
@@ -1384,6 +1398,11 @@ def _matchups_payload(conn) -> list[dict]:
                 "game_total": game_context["game_total"],
                 "home_moneyline": game_context["home_moneyline"],
                 "away_moneyline": game_context["away_moneyline"],
+                "home_spread_price": game_context.get("home_spread_price"),
+                "away_spread_price": game_context.get("away_spread_price"),
+                "over_price": game_context.get("over_price"),
+                "under_price": game_context.get("under_price"),
+                **market_payload,
                 **market_override,
                 "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
                 **prediction,
@@ -1399,6 +1418,37 @@ def _matchups_payload(conn) -> list[dict]:
             }
         )
     return payload
+
+
+def _matchup_game_markets(game: dict[str, Any]) -> dict[str, dict[str, float | None]]:
+    spread_home = game.get("spread_home")
+    spread_home_value = float(spread_home) if isinstance(spread_home, (int, float)) else None
+    game_total = game.get("game_total")
+    game_total_value = float(game_total) if isinstance(game_total, (int, float)) else None
+    home_spread_price = game.get("home_spread_price")
+    away_spread_price = game.get("away_spread_price")
+    over_price = game.get("over_price")
+    under_price = game.get("under_price")
+    home_moneyline = game.get("home_moneyline")
+    away_moneyline = game.get("away_moneyline")
+    return {
+        "spread_market": {
+            "away_line": (-spread_home_value if spread_home_value is not None else None),
+            "away_price": float(away_spread_price) if isinstance(away_spread_price, (int, float)) else None,
+            "home_line": spread_home_value,
+            "home_price": float(home_spread_price) if isinstance(home_spread_price, (int, float)) else None,
+        },
+        "total_market": {
+            "over_line": game_total_value,
+            "over_price": float(over_price) if isinstance(over_price, (int, float)) else None,
+            "under_line": game_total_value,
+            "under_price": float(under_price) if isinstance(under_price, (int, float)) else None,
+        },
+        "moneyline_market": {
+            "away_price": float(away_moneyline) if isinstance(away_moneyline, (int, float)) else None,
+            "home_price": float(home_moneyline) if isinstance(home_moneyline, (int, float)) else None,
+        },
+    }
 
 
 def _latest_game_prediction_id(conn, game_id: int) -> int | None:

@@ -426,6 +426,10 @@ export type Matchup = {
   game_total: number | null;
   home_moneyline: number | null;
   away_moneyline: number | null;
+  home_spread_price?: number | null;
+  away_spread_price?: number | null;
+  over_price?: number | null;
+  under_price?: number | null;
   spread_market?: {
     away_line: number | null;
     away_price: number | null;
