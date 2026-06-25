@@ -15,7 +15,7 @@ from .bootstrap import ensure_team
 from .cache import read_json_cache, write_json_cache
 from .db import sqlite_write_lock
 from .game_resolver import resolve_or_create_game
-from .projections import rebuild_predictions
+from .projections import rebuild_predictions, rebuild_predictions_live
 from .timezone_utils import APP_TIMEZONE, local_today_iso
 
 
@@ -353,7 +353,7 @@ def sync_prop_lines_from_sportsbook(
                         insert_rows,
                     )
             if rebuild_predictions_after and touched_game_ids:
-                rebuild_predictions(conn, game_ids=touched_game_ids, refresh_models=False)
+                rebuild_predictions_live(conn, game_ids=touched_game_ids)
             conn.commit()
             if include_change_details:
                 return SyncPropLinesResult(

@@ -4053,11 +4053,17 @@ def test_odds_sync_can_skip_rebuild_inside_sync_transaction(monkeypatch) -> None
     captured_at = datetime.now(timezone.utc).isoformat()
     rebuild_calls: list[list[int] | None] = []
 
-    def fake_rebuild_predictions(conn, game_ids=None, refresh_models=False):
+    def fake_rebuild_predictions(conn, game_ids=None, prop_line_ids=None, chunk_size=20):
         rebuild_calls.append(list(game_ids) if game_ids is not None else None)
-        return []
+        return projections_module.LiveRebuildResult(
+            projections=[],
+            attempted=0,
+            written=0,
+            skipped=0,
+            errors=[],
+        )
 
-    monkeypatch.setattr("backend.app.odds_import.rebuild_predictions", fake_rebuild_predictions)
+    monkeypatch.setattr("backend.app.odds_import.rebuild_predictions_live", fake_rebuild_predictions)
 
     with connect() as conn:
         conn.execute("DELETE FROM prop_predictions")
