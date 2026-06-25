@@ -92,6 +92,12 @@ see [VM.md](VM.md).
 
 For a Coolify URL-based deployment using Docker Compose, see [COOLIFY.md](COOLIFY.md).
 
+If this VM also has a local repo checkout, do not assume host `/data/wnba.sqlite`
+or repo `data/wnba.sqlite` is the same database the deployed backend is using.
+Use `python scripts/live_backend.py host-runtime-info` to see the real mounted
+runtime root, or `source scripts/live_env.sh` before any host-side maintenance
+command that should target the live deployment.
+
 ## Troubleshooting
 
 For common deployment, auth, proxy, SQLite, and provider failure cases, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

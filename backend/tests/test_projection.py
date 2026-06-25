@@ -14,6 +14,7 @@ from starlette.requests import Request
 from backend.app import covers_import as covers_import_module
 from backend.app import cache as cache_module
 from backend.app import espn_history as espn_history_module
+from backend.app import odds_import as odds_import_module
 from backend.app import paths as paths_module
 from backend.app import projections as projections_module
 from backend.app import rotowire_import as rotowire_import_module
@@ -577,6 +578,7 @@ def test_startup_prewarms_models(monkeypatch) -> None:
     monkeypatch.setattr(main_module, "_start_model_prewarm", lambda: calls.append("prewarm"))
     monkeypatch.setattr(main_module, "_start_read_payload_prewarm", lambda: calls.append("publish"))
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: calls.append("invalidate"))
+    monkeypatch.setattr(main_module, "_delete_stale_payloads", lambda: {"deleted": 0, "files": [], "checked": 0})
     monkeypatch.setattr(main_module, "_configured_api_key", lambda: None)
     monkeypatch.setattr(main_module, "_bootstrap_admin_configured", lambda: False)
     monkeypatch.setattr(main_module, "_is_dev_env", lambda: True)
@@ -584,6 +586,27 @@ def test_startup_prewarms_models(monkeypatch) -> None:
     main_module.on_startup()
 
     assert calls == ["init_db", "ensure_teams", "prewarm", "publish"]
+
+
+def test_startup_deletes_stale_payloads_before_prewarm(monkeypatch) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(main_module, "init_db", lambda: calls.append("init_db"))
+    monkeypatch.setattr(main_module, "ensure_teams", lambda conn: calls.append("ensure_teams"))
+    monkeypatch.setattr(main_module, "_start_model_prewarm", lambda: calls.append("prewarm"))
+    monkeypatch.setattr(main_module, "_start_read_payload_prewarm", lambda: calls.append("publish"))
+    monkeypatch.setattr(
+        main_module,
+        "_delete_stale_payloads",
+        lambda: calls.append("delete_stale") or {"deleted": 2, "files": ["current_value_board.json", "app_response_cache_x.json"], "checked": 2},
+    )
+    monkeypatch.setattr(main_module, "_configured_api_key", lambda: None)
+    monkeypatch.setattr(main_module, "_bootstrap_admin_configured", lambda: False)
+    monkeypatch.setattr(main_module, "_is_dev_env", lambda: True)
+
+    main_module.on_startup()
+
+    assert calls == ["delete_stale", "init_db", "ensure_teams", "prewarm", "publish"]
 
 
 def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
@@ -2258,6 +2281,7 @@ def test_odds_import_loads_saved_json_without_api_key(monkeypatch) -> None:
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
     load_test_history()
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-05-08")
     monkeypatch.setattr(
         "backend.app.odds_import.read_json_cache",
         lambda name: [
@@ -2291,6 +2315,46 @@ def test_odds_import_loads_saved_json_without_api_key(monkeypatch) -> None:
     assert result["source"] == "cache"
     assert result["imported"] == 2
     assert len(rows) == 2
+
+
+def test_odds_import_ignores_cached_future_events(monkeypatch) -> None:
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
+    load_test_history()
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-05-08")
+    monkeypatch.setattr(
+        "backend.app.odds_import.read_json_cache",
+        lambda name: [
+            {
+                "id": "tomorrow-event",
+                "commence_time": "2026-05-09T23:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+                "bookmakers": [
+                    {
+                        "key": "draftkings",
+                        "title": "DraftKings",
+                        "markets": [
+                            {
+                                "key": "player_points",
+                                "outcomes": [
+                                    {"name": "Over", "description": "Breanna Stewart", "price": -110, "point": 21.5},
+                                    {"name": "Under", "description": "Breanna Stewart", "price": -110, "point": 21.5},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ] if name == RAW_CACHE_NAME else None,
+    )
+    with connect() as conn:
+        result = import_the_odds_api_props(conn)
+        rows = conn.execute("SELECT * FROM sportsbook_prop_lines").fetchall()
+
+    assert result["status"] == "loaded_from_cache"
+    assert result["imported"] == 0
+    assert len(rows) == 0
 
 
 def test_odds_import_syncs_model_prop_lines_from_sportsbook(monkeypatch) -> None:
@@ -2339,6 +2403,166 @@ def test_odds_import_syncs_model_prop_lines_from_sportsbook(monkeypatch) -> None
     assert row["line"] == 2.5
     assert row["over_odds"] == -145
     assert row["under_odds"] == 114
+
+
+def test_odds_import_updates_game_markets_from_saved_payload(monkeypatch) -> None:
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
+    load_test_history()
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-05-08")
+    monkeypatch.setattr(
+        "backend.app.odds_import.read_json_cache",
+        lambda name: [
+            {
+                "id": "cached-event",
+                "commence_time": "2026-05-08T23:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+                "bookmakers": [
+                    {
+                        "key": "fanduel",
+                        "title": "FanDuel",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Connecticut Sun", "price": -105},
+                                    {"name": "New York Liberty", "price": -115},
+                                ],
+                            },
+                            {
+                                "key": "spreads",
+                                "outcomes": [
+                                    {"name": "Connecticut Sun", "price": -114, "point": 1.5},
+                                    {"name": "New York Liberty", "price": -106, "point": -1.5},
+                                ],
+                            },
+                            {
+                                "key": "totals",
+                                "outcomes": [
+                                    {"name": "Over", "price": -110, "point": 161.5},
+                                    {"name": "Under", "price": -108, "point": 161.5},
+                                ],
+                            },
+                        ],
+                    }
+                ],
+            }
+        ] if name == RAW_CACHE_NAME else None,
+    )
+    with connect() as conn:
+        result = import_the_odds_api_props(conn)
+        game = conn.execute(
+            """
+            SELECT spread_home, game_total, home_moneyline, away_moneyline,
+                   home_spread_price, away_spread_price, over_price, under_price
+            FROM games
+            WHERE id = 2010
+            """
+        ).fetchone()
+
+    assert result["status"] == "loaded_from_cache"
+    assert game["spread_home"] == -1.5
+    assert game["game_total"] == 161.5
+    assert game["home_moneyline"] == -115
+    assert game["away_moneyline"] == -105
+    assert game["home_spread_price"] == -106
+    assert game["away_spread_price"] == -114
+    assert game["over_price"] == -110
+    assert game["under_price"] == -108
+
+
+def test_odds_event_game_market_extracts_game_lines() -> None:
+    market = odds_import_module._event_game_market(
+        {
+            "home_team": "Toronto Tempo",
+            "away_team": "Los Angeles Sparks",
+            "bookmakers": [
+                {
+                    "key": "fanduel",
+                    "title": "FanDuel",
+                    "markets": [
+                        {
+                            "key": "h2h",
+                            "outcomes": [
+                                {"name": "Los Angeles Sparks", "price": -105},
+                                {"name": "Toronto Tempo", "price": -115},
+                            ],
+                        },
+                        {
+                            "key": "spreads",
+                            "outcomes": [
+                                {"name": "Los Angeles Sparks", "price": -114, "point": 1.5},
+                                {"name": "Toronto Tempo", "price": -106, "point": -1.5},
+                            ],
+                        },
+                        {
+                            "key": "totals",
+                            "outcomes": [
+                                {"name": "Over", "price": -110, "point": 179.5},
+                                {"name": "Under", "price": -110, "point": 179.5},
+                            ],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert market == {
+        "spread_home": -1.5,
+        "game_total": 179.5,
+        "home_moneyline": -115.0,
+        "away_moneyline": -105.0,
+        "home_spread_price": -106.0,
+        "away_spread_price": -114.0,
+        "over_price": -110.0,
+        "under_price": -110.0,
+    }
+
+
+def test_odds_import_fetches_only_todays_events(monkeypatch) -> None:
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
+    monkeypatch.setattr("backend.app.odds_import.load_dotenv", lambda: None)
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-05-08")
+    monkeypatch.setattr("backend.app.odds_import.read_json_cache", lambda _: None)
+    monkeypatch.setattr("backend.app.odds_import.write_json_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.app.odds_import.sync_prop_lines_from_sportsbook", lambda conn: 0)
+
+    fetched_urls: list[str] = []
+
+    def fake_fetch(url: str):
+        fetched_urls.append(url)
+        if url.endswith("/events?apiKey=test-key"):
+            return [
+                {"id": "today-event", "commence_time": "2026-05-08T23:30:00Z"},
+                {"id": "tomorrow-event", "commence_time": "2026-05-09T23:30:00Z"},
+            ]
+        if "/events/today-event/odds?" in url:
+            return {
+                "id": "today-event",
+                "commence_time": "2026-05-08T23:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+                "bookmakers": [],
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr("backend.app.odds_import._fetch_json", fake_fetch)
+    monkeypatch.setattr(
+        "backend.app.odds_import._replace_sportsbook_rows",
+        lambda conn, payload, captured_at: {"events": len(payload), "imported": 0, "captured_at": captured_at},
+    )
+
+    with connect() as conn:
+        result = import_the_odds_api_props(conn, force_refresh=True)
+
+    assert result["status"] == "imported"
+    assert result["fetched_events"] == 1
+    assert fetched_urls[0].endswith("/events?apiKey=test-key")
+    assert any("/events/today-event/odds?" in url for url in fetched_urls)
+    assert not any("/events/tomorrow-event/odds?" in url for url in fetched_urls)
 
 
 def test_odds_sync_prefers_covers_lines_when_available() -> None:

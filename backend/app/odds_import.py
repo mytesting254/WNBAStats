@@ -27,8 +27,9 @@ DEFAULT_REGIONS = "us"
 DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars,espnbet,fanatics,betrivers"
 RAW_CACHE_NAME = "sportsbook_props_raw.json"
 COMPLETED_GAME_GRACE_HOURS = 4
+GAME_MARKETS = ("h2h", "spreads", "totals")
 
-MARKETS = {
+PLAYER_MARKETS = {
     "player_points": "points",
     "player_rebounds": "rebounds",
     "player_assists": "assists",
@@ -98,11 +99,14 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
         }
 
     captured_at = datetime.now(timezone.utc).isoformat()
-    markets = ",".join(MARKETS)
+    markets = ",".join([*GAME_MARKETS, *PLAYER_MARKETS])
+    today = local_today_iso()
     events = _fetch_json(f"{BASE_URL}/sports/{SPORT_KEY}/events?{urlencode({'apiKey': api_key})}")
     fetched_payload = []
 
     for event in events:
+        if not _is_today_event(event, today=today):
+            continue
         event_id = event["id"]
         event_odds = _fetch_json(
             f"{BASE_URL}/sports/{SPORT_KEY}/events/{event_id}/odds?"
@@ -120,7 +124,12 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
 
     merged_payload = _merge_event_cache(cached_payload, fetched_payload)
     write_json_cache(RAW_CACHE_NAME, merged_payload)
-    result = _replace_sportsbook_rows(conn, merged_payload, captured_at)
+    persisted_payload = read_json_cache(RAW_CACHE_NAME)
+    result = _replace_sportsbook_rows(
+        conn,
+        persisted_payload if isinstance(persisted_payload, list) else merged_payload,
+        captured_at,
+    )
     synced = 0
     sync_error = None
     try:
@@ -458,7 +467,9 @@ def _replace_sportsbook_rows(conn: sqlite3.Connection, raw_payload: list[dict], 
     active_payload = _active_cached_events(raw_payload)
     imported_rows = []
     for event_odds in active_payload:
-        imported_rows.extend(_event_rows(conn, event_odds, captured_at))
+        game_id = _match_or_create_local_game(conn, event_odds)
+        _update_game_market_from_event(conn, event_odds, game_id)
+        imported_rows.extend(_event_rows(event_odds, captured_at, game_id=game_id))
     conn.execute("DELETE FROM sportsbook_prop_lines WHERE provider = ?", (PROVIDER,))
     conn.executemany(
         """
@@ -526,25 +537,27 @@ def _active_cached_events(raw_payload: object) -> list[dict]:
     today = local_today_iso()
     active_events: list[dict] = []
     for event in raw_payload:
-        if not isinstance(event, dict):
-            continue
-        commence_time = event.get("commence_time")
-        if not commence_time:
-            continue
-        if _game_date(str(commence_time)) < today:
-            continue
-        active_events.append(event)
+        if _is_today_event(event, today=today):
+            active_events.append(event)
     return active_events
 
 
-def _event_rows(conn: sqlite3.Connection, event_odds: dict, captured_at: str) -> list[tuple]:
+def _is_today_event(event: object, *, today: str) -> bool:
+    if not isinstance(event, dict):
+        return False
+    commence_time = event.get("commence_time")
+    if not commence_time:
+        return False
+    return _game_date(str(commence_time)) == today
+
+
+def _event_rows(event_odds: dict, captured_at: str, *, game_id: int | None) -> list[tuple]:
     imported_rows = []
     event_id = event_odds["id"]
-    game_id = _match_or_create_local_game(conn, event_odds)
     game_date = _game_date(event_odds["commence_time"])
     for bookmaker in event_odds.get("bookmakers", []):
         for market in bookmaker.get("markets", []):
-            app_market = MARKETS.get(market.get("key"))
+            app_market = PLAYER_MARKETS.get(market.get("key"))
             if not app_market:
                 continue
             over_by_player: dict[tuple[str, float], dict] = {}
@@ -587,6 +600,98 @@ def _event_rows(conn: sqlite3.Connection, event_odds: dict, captured_at: str) ->
                         )
                     )
     return imported_rows
+
+
+def _update_game_market_from_event(conn: sqlite3.Connection, event_odds: dict, game_id: int | None) -> None:
+    if game_id is None:
+        return
+    market = _event_game_market(event_odds)
+    updates = []
+    params: list[float | int] = []
+    for column in (
+        "spread_home",
+        "game_total",
+        "home_moneyline",
+        "away_moneyline",
+        "home_spread_price",
+        "away_spread_price",
+        "over_price",
+        "under_price",
+    ):
+        value = market.get(column)
+        if value is None:
+            continue
+        updates.append(f"{column} = ?")
+        params.append(float(value))
+    if not updates:
+        return
+    params.append(int(game_id))
+    conn.execute(f"UPDATE games SET {', '.join(updates)} WHERE id = ?", tuple(params))
+
+
+def _event_game_market(event_odds: dict) -> dict[str, float | None]:
+    home_team = str(event_odds.get("home_team") or "")
+    away_team = str(event_odds.get("away_team") or "")
+    result: dict[str, float | None] = {
+        "spread_home": None,
+        "game_total": None,
+        "home_moneyline": None,
+        "away_moneyline": None,
+        "home_spread_price": None,
+        "away_spread_price": None,
+        "over_price": None,
+        "under_price": None,
+    }
+    for bookmaker in event_odds.get("bookmakers", []):
+        for market in bookmaker.get("markets", []):
+            key = str(market.get("key") or "")
+            outcomes = market.get("outcomes") or []
+            if key == "h2h":
+                for outcome in outcomes:
+                    name = str(outcome.get("name") or "")
+                    price = _coerce_float(outcome.get("price"))
+                    if price is None:
+                        continue
+                    if name == home_team and result["home_moneyline"] is None:
+                        result["home_moneyline"] = price
+                    elif name == away_team and result["away_moneyline"] is None:
+                        result["away_moneyline"] = price
+            elif key == "spreads":
+                for outcome in outcomes:
+                    name = str(outcome.get("name") or "")
+                    point = _coerce_float(outcome.get("point"))
+                    price = _coerce_float(outcome.get("price"))
+                    if point is None:
+                        continue
+                    if name == home_team:
+                        if result["spread_home"] is None:
+                            result["spread_home"] = point
+                        if result["home_spread_price"] is None:
+                            result["home_spread_price"] = price
+                    elif name == away_team:
+                        if result["spread_home"] is None:
+                            result["spread_home"] = -point
+                        if result["away_spread_price"] is None:
+                            result["away_spread_price"] = price
+            elif key == "totals":
+                for outcome in outcomes:
+                    side = str(outcome.get("name") or "").lower()
+                    point = _coerce_float(outcome.get("point"))
+                    price = _coerce_float(outcome.get("price"))
+                    if point is not None and result["game_total"] is None:
+                        result["game_total"] = point
+                    if side == "over" and result["over_price"] is None:
+                        result["over_price"] = price
+                    elif side == "under" and result["under_price"] is None:
+                        result["under_price"] = price
+        if (
+            result["spread_home"] is not None
+            and result["game_total"] is not None
+            and result["home_moneyline"] is not None
+            and result["away_moneyline"] is not None
+        ):
+            break
+    return result
 
 
 def list_sportsbook_props(conn: sqlite3.Connection, game_id: int | None = None) -> list[dict]:
@@ -725,6 +830,7 @@ def _match_or_create_local_game(conn: sqlite3.Connection, event: dict) -> int | 
     if not home or not away:
         return None
     commence_time_text = str(event["commence_time"])
+    game_date = _game_date(commence_time_text)
     commence_time = _parse_utc(commence_time_text)
     rows = conn.execute(
         """
@@ -754,6 +860,15 @@ def _match_or_create_local_game(conn: sqlite3.Connection, event: dict) -> int | 
 def _game_date(commence_time: str) -> str:
     value = commence_time.replace("Z", "+00:00")
     return datetime.fromisoformat(value).astimezone(LOCAL_TZ).date().isoformat()
+
+
+def _coerce_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_utc(value: str) -> datetime:

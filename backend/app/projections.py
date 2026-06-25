@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from .db import sqlite_write_lock
 from .odds import american_to_implied_probability, expected_value
 from .player_prop_model import MODEL_VERSION as LEARNED_MODEL_VERSION
-from .player_prop_model import clear_model_cache, predict_player_prop
+from .player_prop_model import clear_model_cache, predict_player_prop, prewarm_model_cache
 from .timezone_utils import APP_TIMEZONE
 
 
@@ -169,7 +169,12 @@ def project_player_market(
     return round(projection, 2), reason
 
 
-def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropProjection:
+def build_prop_projection(
+    conn: sqlite3.Connection,
+    prop_line_id: int,
+    *,
+    runtime_cache: dict[str, dict[tuple, object]] | None = None,
+) -> PropProjection:
     prop = conn.execute(
         """
         SELECT pl.*, p.full_name, g.start_time
@@ -191,6 +196,7 @@ def build_prop_projection(conn: sqlite3.Connection, prop_line_id: int) -> PropPr
         line=float(prop["line"]),
         over_odds=int(prop["over_odds"]),
         under_odds=int(prop["under_odds"]),
+        runtime_cache=runtime_cache,
     )
     projection_bias = _market_projection_bias_adjustment(conn, prop["market"], model_version)
     if projection_bias is not None:
@@ -353,7 +359,9 @@ def rebuild_predictions(
             """,
             tuple(filter_params),
         ).fetchall()
-        projections = [build_prop_projection(conn, int(row["id"])) for row in props]
+        prewarm_model_cache(conn)
+        runtime_cache: dict[str, dict[tuple, object]] = {}
+        projections = [build_prop_projection(conn, int(row["id"]), runtime_cache=runtime_cache) for row in props]
         prop_ids = [p.prop_line_id for p in projections]
         if prop_ids:
             placeholders = ",".join("?" for _ in prop_ids)
