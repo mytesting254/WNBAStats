@@ -301,6 +301,48 @@ h3 {
   line-height: 1.45;
 }
 
+.cache-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.cache-badge {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 10px;
+  border: 1px solid #d5dbe4;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #344054;
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+.cache-badge strong {
+  color: #101828;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cache-badge.fresh {
+  border-color: #b7e4c7;
+  background: #f2fbf5;
+}
+
+.cache-badge.stale {
+  border-color: #f3d3a1;
+  background: #fff8ee;
+}
+
+.cache-badge.missing {
+  border-color: #e4e7ec;
+  background: #f8fafc;
+}
+
 .progress-block {
   display: grid;
   gap: 8px;

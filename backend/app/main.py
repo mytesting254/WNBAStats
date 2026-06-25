@@ -1129,6 +1129,22 @@ def audit_stale_payloads() -> dict[str, Any]:
     return _audit_stale_payloads()
 
 
+@app.get("/api/cache/status")
+def cache_status() -> dict[str, Any]:
+    return {
+        "status": "ok",
+        "views": {
+            "props": _cache_status_payload(VALUE_BOARD_CACHE_NAME),
+            "watchlist": _cache_status_payload(WATCHLIST_CACHE_NAME),
+            "matchups": _cache_status_payload(MATCHUPS_CACHE_NAME),
+            "parlays": {
+                "matchups": _cache_status_payload(MATCHUPS_CACHE_NAME),
+                "props": _cache_status_payload(VALUE_BOARD_CACHE_NAME),
+            },
+        },
+    }
+
+
 @app.post("/api/cache/stale-payloads/delete", dependencies=[Depends(_protect_mutation)])
 def delete_stale_payloads(payload: DeleteStalePayloadRequest) -> dict[str, Any]:
     if payload.acknowledgement.strip() != DELETE_STALE_PAYLOAD_ACK:
@@ -1290,6 +1306,42 @@ def _read_cached_payload(cache_name: str, *, allow_stale: bool = False) -> Any |
     if not allow_stale and datetime.now(timezone.utc) - cached_at > timedelta(seconds=ttl_seconds):
         return None
     return cached.get("payload")
+
+
+def _cache_status_payload(cache_name: str) -> dict[str, Any]:
+    cached = read_json_cache(cache_name)
+    now = datetime.now(timezone.utc)
+    status: dict[str, Any] = {
+        "cache_name": cache_name,
+        "exists": isinstance(cached, dict),
+        "cached_at": None,
+        "cache_date": None,
+        "ttl_seconds": None,
+        "source": None,
+        "is_fresh": False,
+        "age_seconds": None,
+    }
+    if not isinstance(cached, dict):
+        return status
+    cached_at = _parse_cache_timestamp(cached.get("cached_at"))
+    ttl_seconds = cached.get("ttl_seconds")
+    cache_date = cached.get("cache_date")
+    status["cache_date"] = cache_date if isinstance(cache_date, str) else None
+    status["ttl_seconds"] = ttl_seconds if isinstance(ttl_seconds, int) else None
+    status["source"] = cached.get("source") if isinstance(cached.get("source"), str) else None
+    if cached_at is None:
+        return status
+    age_seconds = max(0.0, (now - cached_at).total_seconds())
+    is_fresh = (
+        isinstance(cache_date, str)
+        and cache_date == _local_today_iso()
+        and isinstance(ttl_seconds, int)
+        and age_seconds <= ttl_seconds
+    )
+    status["cached_at"] = cached_at.isoformat()
+    status["age_seconds"] = round(age_seconds, 2)
+    status["is_fresh"] = is_fresh
+    return status
 
 
 def _read_through_cache(cache_name: str, ttl_seconds: int, compute: Callable[[], Any]) -> Any:

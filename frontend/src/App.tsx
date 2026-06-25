@@ -2,6 +2,7 @@
 import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import {
   fetchAuthState,
+  fetchCacheStatus,
   fetchMissingEspnScores,
   fetchOpsHealth,
   fetchLineDiscrepancies,
@@ -30,6 +31,8 @@ import {
   setCsrfToken,
   trainModel,
   type AuthState,
+  type CacheStatus,
+  type CacheViewStatus,
   type CoversRecordRow,
   type DbLockAudit,
   type GemPerformance,
@@ -187,6 +190,7 @@ export function App() {
   const [authLoading, setAuthLoading] = useState(true);
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [opsHealth, setOpsHealth] = useState<OpsHealth | null>(null);
+  const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
   const loadRequestIdRef = useRef(0);
   const operationsBusyRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
@@ -226,7 +230,8 @@ export function App() {
         discrepanciesResult,
         modelRunsResult,
         rosterResult,
-        opsHealthResult
+        opsHealthResult,
+        cacheStatusResult
       ] = await Promise.allSettled([
         fetchValueBoard(),
         fetchPerformance(),
@@ -237,7 +242,8 @@ export function App() {
         fetchLineDiscrepancies(),
         fetchModelRuns(),
         fetchRoster(),
-        fetchOpsHealth()
+        fetchOpsHealth(),
+        fetchCacheStatus()
       ]);
 
       const failures: string[] = [];
@@ -319,6 +325,12 @@ export function App() {
         failures.push("operations health");
       }
 
+      if (cacheStatusResult.status === "fulfilled") {
+        setCacheStatus(cacheStatusResult.value);
+      } else {
+        failures.push("cache status");
+      }
+
       if (failures.length > 0) {
         setError(`Some dashboard data failed to load: ${failures.join(", ")}. Showing the last successful data.`);
       }
@@ -388,6 +400,7 @@ export function App() {
     const intervalMs = opsHealth?.prop_sync.running ? 2000 : 15000;
     const interval = window.setInterval(() => {
       fetchOpsHealth().then(setOpsHealth).catch(() => {});
+      fetchCacheStatus().then(setCacheStatus).catch(() => {});
     }, intervalMs);
     return () => window.clearInterval(interval);
   }, [opsHealth?.prop_sync.running]);
@@ -855,6 +868,7 @@ export function App() {
             filtered={filtered}
             loading={loading}
             error={error}
+            cacheStatus={cacheStatus?.views.props ?? null}
             market={market}
             confidence={confidence}
             modelProbabilityOrder={modelProbabilityOrder}
@@ -867,11 +881,18 @@ export function App() {
         ) : activeTab === "gems" ? (
           <GemsView gems={gems} matchups={matchups} loading={loading} error={error} />
         ) : activeTab === "watchlist" ? (
-          <WatchlistView watchlist={watchlist} loading={loading} error={error} />
+          <WatchlistView watchlist={watchlist} loading={loading} error={error} cacheStatus={cacheStatus?.views.watchlist ?? null} />
         ) : activeTab === "matchups" ? (
-          <MatchupsView matchups={matchups} props={props} loading={loading} error={error} />
+          <MatchupsView matchups={matchups} props={props} loading={loading} error={error} cacheStatus={cacheStatus?.views.matchups ?? null} />
         ) : activeTab === "parlays" ? (
-          <ParlayCandidatesView matchups={matchups} props={props} loading={loading} error={error} />
+          <ParlayCandidatesView
+            matchups={matchups}
+            props={props}
+            loading={loading}
+            error={error}
+            propsCacheStatus={cacheStatus?.views.parlays.props ?? null}
+            matchupsCacheStatus={cacheStatus?.views.parlays.matchups ?? null}
+          />
         ) : activeTab === "discrepancies" ? (
           <DiscrepanciesView discrepancies={discrepancies} loading={loading} error={error} />
         ) : activeTab === "data" ? (
@@ -1813,6 +1834,7 @@ function PropsView({
   filtered,
   loading,
   error,
+  cacheStatus,
   market,
   confidence,
   modelProbabilityOrder,
@@ -1825,6 +1847,7 @@ function PropsView({
   filtered: ValueProp[];
   loading: boolean;
   error: string | null;
+  cacheStatus: CacheViewStatus | null;
   market: string;
   confidence: string;
   modelProbabilityOrder: SortDirection;
@@ -1841,6 +1864,9 @@ function PropsView({
           <div>
             <h2>Pregame Props</h2>
             <p>{loading ? "Loading projections" : "Ranked by expected value and edge"}</p>
+            <div className="cache-badge-row">
+              <CacheFreshnessBadge label="Props cache" status={cacheStatus} />
+            </div>
           </div>
           <SlidersHorizontal size={20} />
         </div>
@@ -2357,11 +2383,13 @@ function MatchupsView({
   props,
   loading,
   error,
+  cacheStatus,
 }: {
   matchups: Matchup[];
   props: ValueProp[];
   loading: boolean;
   error: string | null;
+  cacheStatus: CacheViewStatus | null;
 }) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const selectedMatchup = matchups.find((matchup) => matchup.id === selectedGameId) ?? matchups[0] ?? null;
@@ -2375,6 +2403,9 @@ function MatchupsView({
           <div>
             <h2>Today's Games</h2>
             <p>{loading ? "Loading matchups" : "Last 10 form, home/away split, ATS, and totals"}</p>
+            <div className="cache-badge-row">
+              <CacheFreshnessBadge label="Matchups cache" status={cacheStatus} />
+            </div>
           </div>
           <ShieldCheck size={20} />
         </div>
@@ -2955,7 +2986,17 @@ function summarizeCoversContextOu(rows: CoversRecordRow[] | undefined, context: 
   return `${overs}-${unders}-${pushes}`;
 }
 
-function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp[]; loading: boolean; error: string | null }) {
+function WatchlistView({
+  watchlist,
+  loading,
+  error,
+  cacheStatus,
+}: {
+  watchlist: WatchlistProp[];
+  loading: boolean;
+  error: string | null;
+  cacheStatus: CacheViewStatus | null;
+}) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const [marketFilter, setMarketFilter] = useState("all");
   const [sideFilter, setSideFilter] = useState("all");
@@ -2997,6 +3038,9 @@ function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp
           <div>
             <h2>Watchlist</h2>
             <p>{loading ? "Loading watchlist" : "Low-confidence value plays that missed Props and Gems filters"}</p>
+            <div className="cache-badge-row">
+              <CacheFreshnessBadge label="Watchlist cache" status={cacheStatus} />
+            </div>
           </div>
           <ListChecks size={20} />
         </div>
@@ -3137,7 +3181,21 @@ function WatchlistView({ watchlist, loading, error }: { watchlist: WatchlistProp
   );
 }
 
-function ParlayCandidatesView({ matchups, props, loading, error }: { matchups: Matchup[]; props: ValueProp[]; loading: boolean; error: string | null }) {
+function ParlayCandidatesView({
+  matchups,
+  props,
+  loading,
+  error,
+  propsCacheStatus,
+  matchupsCacheStatus,
+}: {
+  matchups: Matchup[];
+  props: ValueProp[];
+  loading: boolean;
+  error: string | null;
+  propsCacheStatus: CacheViewStatus | null;
+  matchupsCacheStatus: CacheViewStatus | null;
+}) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const matchupCards = useMemo(
     () =>
@@ -3157,6 +3215,10 @@ function ParlayCandidatesView({ matchups, props, loading, error }: { matchups: M
           <div>
             <h2>Parlay Candidates</h2>
             <p>{loading ? "Loading candidate legs" : "Model-ranked legs and sportsbook gaps by matchup"}</p>
+            <div className="cache-badge-row">
+              <CacheFreshnessBadge label="Props cache" status={propsCacheStatus} />
+              <CacheFreshnessBadge label="Matchups cache" status={matchupsCacheStatus} />
+            </div>
           </div>
           <ListChecks size={20} />
         </div>
@@ -3670,6 +3732,21 @@ function Metric({ label, value, className = "" }: { label: string; value: string
   );
 }
 
+function CacheFreshnessBadge({ label, status }: { label: string; status: CacheViewStatus | null }) {
+  const badgeClass = !status?.exists ? "missing" : status.is_fresh ? "fresh" : "stale";
+  const detail = !status?.exists
+    ? "No server cache yet"
+    : status.cached_at
+      ? `Updated ${formatRelativeAge(status.cached_at)}`
+      : "Cache timestamp unavailable";
+  return (
+    <div className={`cache-badge ${badgeClass}`.trim()} title={status?.cached_at ? formatDateTime(status.cached_at) : detail}>
+      <strong>{label}</strong>
+      <span>{detail}</span>
+    </div>
+  );
+}
+
 function formatPropSyncStage(value?: string | null) {
   const labels: Record<string, string> = {
     queued: "Queued",
@@ -3683,6 +3760,24 @@ function formatPropSyncStage(value?: string | null) {
     return "Idle";
   }
   return labels[value] ?? value.split("_").join(" ");
+}
+
+function formatRelativeAge(value?: string | null) {
+  if (!value) {
+    return "unknown";
+  }
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) {
+    return "unknown";
+  }
+  const diffSeconds = Math.max(0, Math.round((Date.now() - time) / 1000));
+  if (diffSeconds < 60) {
+    return `${diffSeconds}s ago`;
+  }
+  if (diffSeconds < 3600) {
+    return `${Math.round(diffSeconds / 60)}m ago`;
+  }
+  return `${Math.round(diffSeconds / 3600)}h ago`;
 }
 
 function formatPercent(value?: number) {

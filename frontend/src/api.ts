@@ -148,6 +148,30 @@ export type PropSyncHealth = {
   updated_at?: string | null;
 };
 
+export type CacheViewStatus = {
+  cache_name?: string;
+  exists: boolean;
+  cached_at: string | null;
+  cache_date?: string | null;
+  ttl_seconds?: number | null;
+  source?: string | null;
+  is_fresh: boolean;
+  age_seconds?: number | null;
+};
+
+export type CacheStatus = {
+  status: string;
+  views: {
+    props: CacheViewStatus;
+    watchlist: CacheViewStatus;
+    matchups: CacheViewStatus;
+    parlays: {
+      matchups: CacheViewStatus;
+      props: CacheViewStatus;
+    };
+  };
+};
+
 export type StalePayloadAudit = {
   stale: number;
   checked: number;
@@ -271,6 +295,14 @@ export async function fetchOpsHealth(): Promise<OpsHealth> {
   const response = await apiFetch("/api/ops/health");
   if (!response.ok) {
     throw new Error("Failed to load operations health");
+  }
+  return response.json();
+}
+
+export async function fetchCacheStatus(): Promise<CacheStatus> {
+  const response = await apiFetch("/api/cache/status");
+  if (!response.ok) {
+    throw new Error("Failed to load cache status");
   }
   return response.json();
 }
