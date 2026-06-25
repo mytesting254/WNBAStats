@@ -3225,6 +3225,10 @@ function MatchupProps({
           <p>
             {props.length
               ? `${visibleProps.length} legs match the current filters, ranked by model EV and edge`
+              : matchup.model_props_status === "pending"
+                ? "Model projections are still rebuilding for this matchup. Sportsbook rows are shown below in degraded mode."
+                : matchup.model_props_status === "sportsbook_only"
+                  ? "Sportsbook prop lines are available, but no model-ready props have been built for this matchup yet."
               : discrepancyShortlist.length
                 ? `${discrepancyShortlist.length} sportsbook line gaps match the current filters while models are unavailable`
                 : filteredSportsbookProps.length
@@ -4012,6 +4016,12 @@ function availableLabel(matchup: Matchup) {
   const parlayCount = (matchup.props ?? []).filter((prop) => qualifiesForParlayCandidate(prop)).length;
   const discrepancyCount = matchup.line_discrepancies?.length ?? 0;
   const sportsbookCount = matchup.sportsbook_props?.length ?? 0;
+  if ((matchup.model_props_status ?? "empty") === "pending") {
+    return `model rebuild pending | ${discrepancyCount} gaps | ${sportsbookCount} book`;
+  }
+  if ((matchup.model_props_status ?? "empty") === "sportsbook_only") {
+    return `sportsbook only | ${discrepancyCount} gaps | ${sportsbookCount} book`;
+  }
   return `${parlayCount} parlay | ${discrepancyCount} gaps | ${sportsbookCount} book`;
 }
 
@@ -4093,6 +4103,12 @@ function parlayAvailabilityLabel(matchup: Matchup, props: ValueProp[]) {
   }
   if (props.length > 0) {
     return `${props.length} model prop${props.length === 1 ? "" : "s"}`;
+  }
+  if ((matchup.model_props_status ?? "empty") === "pending") {
+    return "model rebuild pending";
+  }
+  if ((matchup.model_props_status ?? "empty") === "sportsbook_only") {
+    return "sportsbook only";
   }
   return availableLabel(matchup);
 }

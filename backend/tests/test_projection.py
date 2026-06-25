@@ -1856,19 +1856,25 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
             touched_game_ids=[9910],
         )
 
-    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, refresh_models=True):
+    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=20):
         rebuild_calls.append(
             (
                 list(game_ids) if game_ids is not None else None,
                 list(prop_line_ids) if prop_line_ids is not None else None,
             )
         )
-        return []
+        return projections_module.LiveRebuildResult(
+            projections=[],
+            attempted=2,
+            written=2,
+            skipped=0,
+            errors=[],
+        )
 
     monkeypatch.setattr(main_module, "_active_slate_game_ids", lambda conn: [9910])
     monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fake_sync)
-    monkeypatch.setattr(main_module, "rebuild_predictions", fake_rebuild)
-    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: None)
+    monkeypatch.setattr(main_module, "rebuild_predictions_live", fake_rebuild)
+    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: {"tracked": 0})
 
     with connect() as conn:
         result = main_module._repair_current_slate_props(conn)
@@ -1878,7 +1884,9 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
     assert result["scanned_props"] == 2
     assert result["synced_props"] == 2
     assert result["changed_prop_line_ids"] == [501, 502]
-    assert result["rebuilt_predictions"] == 0
+    assert result["attempted_predictions"] == 2
+    assert result["rebuilt_predictions"] == 2
+    assert result["skipped_predictions"] == 0
 
 
 def test_rebuild_predictions_skips_model_prewarm_when_refresh_disabled(monkeypatch) -> None:
@@ -1930,9 +1938,65 @@ def test_rebuild_predictions_skips_model_prewarm_when_refresh_disabled(monkeypat
     assert all(flag is False for flag in build_flags)
 
 
-def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -> None:
-    rebuild_calls: list[tuple[list[int] | None, list[int] | None]] = []
+def test_rebuild_predictions_live_writes_incrementally_without_training(monkeypatch) -> None:
+    load_test_history()
+    build_flags: list[bool] = []
 
+    def fake_build(conn, prop_line_id, *, runtime_cache=None, allow_training=True):
+        build_flags.append(bool(allow_training))
+        return projections_module.PropProjection(
+            prop_line_id=int(prop_line_id),
+            model_version="component",
+            prediction_time="2026-06-25T00:00:00+00:00",
+            projection=10.0,
+            recommended_side="over",
+            model_probability=0.55,
+            implied_probability=0.50,
+            edge=0.05,
+            expected_value=0.02,
+            confidence="medium",
+            reason="test",
+        )
+
+    monkeypatch.setattr(projections_module, "build_prop_projection", fake_build)
+
+    with connect() as conn:
+        scheduled_game = conn.execute(
+            """
+            SELECT g.id
+            FROM games g
+            JOIN prop_lines pl ON pl.game_id = g.id
+            WHERE g.status = 'scheduled'
+            ORDER BY g.id
+            LIMIT 1
+            """
+        ).fetchone()
+        assert scheduled_game is not None
+        game_id = int(scheduled_game["id"])
+        result = projections_module.rebuild_predictions_live(conn, game_ids=[game_id], chunk_size=2)
+        count = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM prop_predictions pp
+                JOIN prop_lines pl ON pl.id = pp.prop_line_id
+                WHERE pl.game_id = ?
+                """,
+                (game_id,),
+            ).fetchone()[0]
+            or 0
+        )
+
+    assert result.attempted > 0
+    assert result.written == result.attempted
+    assert result.skipped == 0
+    assert result.errors == []
+    assert count == result.written
+    assert build_flags
+    assert all(flag is False for flag in build_flags)
+
+
+def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -> None:
     def fake_sync(conn, **kwargs):
         assert kwargs["game_ids"] == [9910, 9920]
         return SyncPropLinesResult(
@@ -1942,29 +2006,32 @@ def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -
             touched_game_ids=[9910, 9920],
         )
 
-    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, refresh_models=True):
-        rebuild_calls.append(
-            (
-                list(game_ids) if game_ids is not None else None,
-                list(prop_line_ids) if prop_line_ids is not None else None,
-            )
-        )
-        return []
-
     monkeypatch.setattr(main_module, "_active_slate_game_ids", lambda conn: [])
     monkeypatch.setattr(main_module, "_scheduled_game_ids", lambda conn: [9910, 9920])
     monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fake_sync)
-    monkeypatch.setattr(main_module, "rebuild_predictions", fake_rebuild)
-    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: None)
+    monkeypatch.setattr(
+        main_module,
+        "rebuild_predictions_live",
+        lambda conn, game_ids=None, prop_line_ids=None, chunk_size=20: projections_module.LiveRebuildResult(
+            projections=[],
+            attempted=1,
+            written=1,
+            skipped=0,
+            errors=[],
+        ),
+    )
+    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: {"tracked": 0})
 
     with connect() as conn:
         result = main_module._repair_current_slate_props(conn)
 
-    assert rebuild_calls == [([9910, 9920], [501])]
     assert result["scope"] == "scheduled"
     assert result["target_game_ids"] == [9910, 9920]
     assert result["scanned_props"] == 4
     assert result["synced_props"] == 1
+    assert result["attempted_predictions"] == 1
+    assert result["rebuilt_predictions"] == 1
+    assert result["skipped_predictions"] == 0
 
 
 def test_repair_current_slate_endpoint_queues_background_job(monkeypatch) -> None:

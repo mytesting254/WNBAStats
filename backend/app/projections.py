@@ -66,6 +66,15 @@ class PropProjection:
     reason: str
 
 
+@dataclass(frozen=True)
+class LiveRebuildResult:
+    projections: list[PropProjection]
+    attempted: int
+    written: int
+    skipped: int
+    errors: list[str]
+
+
 def project_player_market(
     conn: sqlite3.Connection,
     player_id: int,
@@ -423,6 +432,155 @@ def rebuild_predictions(
         )
         conn.commit()
         return projections
+
+
+def rebuild_predictions_live(
+    conn: sqlite3.Connection,
+    game_ids: list[int] | None = None,
+    prop_line_ids: list[int] | None = None,
+    *,
+    chunk_size: int = 20,
+) -> LiveRebuildResult:
+    prop_ids = _target_scheduled_prop_line_ids(conn, game_ids=game_ids, prop_line_ids=prop_line_ids)
+    if not prop_ids:
+        return LiveRebuildResult(projections=[], attempted=0, written=0, skipped=0, errors=[])
+
+    runtime_cache: dict[str, dict[tuple, object]] = {}
+    projections: list[PropProjection] = []
+    errors: list[str] = []
+
+    with sqlite_write_lock():
+        _delete_predictions_for_prop_line_ids(conn, prop_ids)
+        conn.commit()
+
+    safe_chunk_size = max(1, int(chunk_size))
+    for start in range(0, len(prop_ids), safe_chunk_size):
+        batch_ids = prop_ids[start : start + safe_chunk_size]
+        batch_projections: list[PropProjection] = []
+        for prop_line_id in batch_ids:
+            try:
+                batch_projections.append(
+                    build_prop_projection(
+                        conn,
+                        int(prop_line_id),
+                        runtime_cache=runtime_cache,
+                        allow_training=False,
+                    )
+                )
+            except Exception as exc:
+                errors.append(f"{prop_line_id}: {exc}")
+        if not batch_projections:
+            continue
+        with sqlite_write_lock():
+            _delete_predictions_for_prop_line_ids(conn, [projection.prop_line_id for projection in batch_projections])
+            conn.executemany(
+                """
+                INSERT INTO prop_predictions (
+                    prop_line_id, model_version, prediction_time, projection, recommended_side,
+                    model_probability, implied_probability, edge, expected_value, confidence, reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        projection.prop_line_id,
+                        projection.model_version,
+                        projection.prediction_time,
+                        projection.projection,
+                        projection.recommended_side,
+                        projection.model_probability,
+                        projection.implied_probability,
+                        projection.edge,
+                        projection.expected_value,
+                        projection.confidence,
+                        projection.reason,
+                    )
+                    for projection in batch_projections
+                ],
+            )
+            conn.commit()
+        projections.extend(batch_projections)
+
+    return LiveRebuildResult(
+        projections=projections,
+        attempted=len(prop_ids),
+        written=len(projections),
+        skipped=max(0, len(prop_ids) - len(projections)),
+        errors=errors,
+    )
+
+
+def _target_scheduled_prop_line_ids(
+    conn: sqlite3.Connection,
+    game_ids: list[int] | None = None,
+    prop_line_ids: list[int] | None = None,
+) -> list[int]:
+    target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+    target_prop_line_ids = sorted({int(prop_line_id) for prop_line_id in (prop_line_ids or []) if int(prop_line_id) > 0})
+    if target_prop_line_ids and not target_game_ids:
+        placeholders = ",".join("?" for _ in target_prop_line_ids)
+        target_game_ids = [
+            int(row["game_id"])
+            for row in conn.execute(
+                f"""
+                SELECT DISTINCT pl.game_id
+                FROM prop_lines pl
+                JOIN games g ON g.id = pl.game_id
+                WHERE g.status = 'scheduled'
+                  AND pl.id IN ({placeholders})
+                """,
+                tuple(target_prop_line_ids),
+            ).fetchall()
+        ]
+    filters: list[str] = []
+    filter_params: list[int] = []
+    if target_game_ids:
+        placeholders = ",".join("?" for _ in target_game_ids)
+        filters.append(f"pl.game_id IN ({placeholders})")
+        filter_params.extend(target_game_ids)
+    if target_prop_line_ids:
+        placeholders = ",".join("?" for _ in target_prop_line_ids)
+        filters.append(f"pl.id IN ({placeholders})")
+        filter_params.extend(target_prop_line_ids)
+    where_filters = ""
+    if filters:
+        where_filters = " AND " + " AND ".join(filters)
+    rows = conn.execute(
+        """
+        SELECT pl.id
+        FROM prop_lines pl
+        JOIN games g ON g.id = pl.game_id
+        WHERE g.status = 'scheduled'
+        """ + where_filters + """
+        ORDER BY pl.captured_at DESC
+        """,
+        tuple(filter_params),
+    ).fetchall()
+    return [int(row["id"]) for row in rows]
+
+
+def _delete_predictions_for_prop_line_ids(conn: sqlite3.Connection, prop_line_ids: list[int]) -> None:
+    normalized = sorted({int(prop_line_id) for prop_line_id in prop_line_ids if int(prop_line_id) > 0})
+    if not normalized:
+        return
+    placeholders = ",".join("?" for _ in normalized)
+    conn.execute(
+        f"""
+        DELETE FROM watchlist_snapshot_items
+        WHERE prediction_id IN (
+            SELECT id
+            FROM prop_predictions
+            WHERE prop_line_id IN ({placeholders})
+        )
+        """,
+        tuple(normalized),
+    )
+    conn.execute(
+        f"""
+        DELETE FROM prop_predictions
+        WHERE prop_line_id IN ({placeholders})
+        """,
+        tuple(normalized),
+    )
 
 
 def _refresh_scheduled_game_rest_days(conn: sqlite3.Connection, game_ids: list[int] | None = None) -> None:

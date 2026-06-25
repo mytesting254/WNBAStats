@@ -473,6 +473,11 @@ export type Matchup = {
   away_spread_price?: number | null;
   over_price?: number | null;
   under_price?: number | null;
+  model_prop_count?: number;
+  prediction_count?: number;
+  sportsbook_prop_count?: number;
+  model_props_ready?: boolean;
+  model_props_status?: "ready" | "pending" | "sportsbook_only" | "empty";
   spread_market?: {
     away_line: number | null;
     away_price: number | null;

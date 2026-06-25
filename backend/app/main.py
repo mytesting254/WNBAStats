@@ -45,7 +45,7 @@ from .odds_import import (
     odds_cache_summary,
     sync_prop_lines_from_sportsbook,
 )
-from .projections import rebuild_predictions
+from .projections import rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
 from .player_prop_model import prewarm_model_cache
@@ -1350,6 +1350,7 @@ def _matchups_payload(conn) -> list[dict]:
     game_groups = _coalesce_matchup_games(games)
     covers_records = _covers_records_by_game(conn)
     covers_market_odds = _covers_market_odds_by_game()
+    prediction_state_by_game = _prediction_state_by_game(conn)
     payload = []
     for game, game_ids in game_groups:
         home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
@@ -1380,6 +1381,16 @@ def _matchups_payload(conn) -> list[dict]:
         prediction = project_game(conn, game_context)
         game_prediction_id = _latest_game_prediction_id(conn, game_id)
         market_payload = _matchup_game_markets(game_context)
+        prediction_state = next(
+            (prediction_state_by_game.get(int(candidate_id)) for candidate_id in game_ids if prediction_state_by_game.get(int(candidate_id))),
+            prediction_state_by_game.get(game_id),
+        ) or {
+            "model_prop_count": 0,
+            "prediction_count": 0,
+            "sportsbook_prop_count": 0,
+            "model_props_ready": False,
+            "model_props_status": "empty",
+        }
         payload.append(
             {
                 "id": game["id"],
@@ -1404,6 +1415,7 @@ def _matchups_payload(conn) -> list[dict]:
                 "under_price": game_context.get("under_price"),
                 **market_payload,
                 **market_override,
+                **prediction_state,
                 "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
                 **prediction,
                 "home": home_summary,
@@ -1417,6 +1429,46 @@ def _matchups_payload(conn) -> list[dict]:
                 "injury_from_cache": injury_refresh.get("from_cache"),
             }
         )
+    return payload
+
+
+def _prediction_state_by_game(conn) -> dict[int, dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            g.id AS game_id,
+            COUNT(DISTINCT pl.id) AS model_prop_count,
+            COUNT(DISTINCT pp.id) AS prediction_count,
+            COUNT(DISTINCT sp.id) AS sportsbook_prop_count
+        FROM games g
+        LEFT JOIN prop_lines pl ON pl.game_id = g.id
+        LEFT JOIN prop_predictions pp ON pp.prop_line_id = pl.id
+        LEFT JOIN sportsbook_prop_lines sp ON sp.game_id = g.id
+        WHERE g.status = 'scheduled'
+        GROUP BY g.id
+        """
+    ).fetchall()
+    payload: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        game_id = int(row["game_id"])
+        model_prop_count = int(row["model_prop_count"] or 0)
+        prediction_count = int(row["prediction_count"] or 0)
+        sportsbook_prop_count = int(row["sportsbook_prop_count"] or 0)
+        if prediction_count > 0:
+            status = "ready"
+        elif model_prop_count > 0:
+            status = "pending"
+        elif sportsbook_prop_count > 0:
+            status = "sportsbook_only"
+        else:
+            status = "empty"
+        payload[game_id] = {
+            "model_prop_count": model_prop_count,
+            "prediction_count": prediction_count,
+            "sportsbook_prop_count": sportsbook_prop_count,
+            "model_props_ready": prediction_count > 0,
+            "model_props_status": status,
+        }
     return payload
 
 
@@ -1648,20 +1700,23 @@ def _repair_current_slate_props(conn) -> dict[str, Any]:
         scanned = int(sync_result)
         synced = int(sync_result)
         changed_prop_line_ids = []
-    projections = rebuild_predictions(
+    rebuild_result = rebuild_predictions_live(
         conn,
         game_ids=target_game_ids,
         prop_line_ids=changed_prop_line_ids or None,
-        refresh_models=False,
     )
-    _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
+    watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     return {
         "scope": scope,
         "target_game_ids": target_game_ids,
         "scanned_props": int(scanned),
         "synced_props": int(synced),
         "changed_prop_line_ids": changed_prop_line_ids,
-        "rebuilt_predictions": len(projections),
+        "attempted_predictions": int(rebuild_result.attempted),
+        "rebuilt_predictions": int(rebuild_result.written),
+        "skipped_predictions": int(rebuild_result.skipped),
+        "rebuild_errors": list(rebuild_result.errors[:20]),
+        "watchlist_snapshot": watchlist_snapshot,
     }
 
 
