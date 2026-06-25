@@ -1672,6 +1672,10 @@ def recalculate(response: Response) -> dict[str, int]:
     response.headers["Sunset"] = "Wed, 31 Dec 2026 23:59:59 GMT"
     response.headers["Link"] = '</api/props/repair-current-slate>; rel="successor-version"'
     response.headers["X-Legacy-Endpoint"] = "/api/recalculate"
+    return _queue_legacy_recalculate_job()
+
+
+def _run_legacy_recalculate_job() -> dict[str, Any]:
     with connect() as conn:
         rebuild_result = _repair_current_slate_props(conn)
     with connect() as conn:
@@ -1684,6 +1688,46 @@ def recalculate(response: Response) -> dict[str, int]:
         "predictions": int(rebuild_result["rebuilt_predictions"]),
         "settled": settlements["settled"],
         "game_settled": game_settlements["settled"],
+    }
+
+
+def _queue_legacy_recalculate_job() -> dict[str, Any]:
+    with _PROP_SYNC_LOCK:
+        if _PROP_SYNC_STATE["running"]:
+            return {
+                "status": "busy",
+                "started_at": _PROP_SYNC_STATE["started_at"],
+                "scope": _PROP_SYNC_STATE.get("scope"),
+                "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
+            }
+        _PROP_SYNC_STATE["running"] = True
+        _PROP_SYNC_STATE["started_at"] = datetime.now(timezone.utc).isoformat()
+        _PROP_SYNC_STATE["finished_at"] = None
+        _PROP_SYNC_STATE["last_error"] = None
+        _PROP_SYNC_STATE["last_result"] = None
+        _PROP_SYNC_STATE["scope"] = "legacy_recalculate"
+        _PROP_SYNC_STATE["target_game_ids"] = []
+        started_at = _PROP_SYNC_STATE["started_at"]
+
+    def _run() -> None:
+        try:
+            result = _run_legacy_recalculate_job()
+            with _PROP_SYNC_LOCK:
+                _PROP_SYNC_STATE["last_result"] = {"status": "completed", **result}
+        except Exception as exc:
+            with _PROP_SYNC_LOCK:
+                _PROP_SYNC_STATE["last_error"] = str(exc)
+        finally:
+            with _PROP_SYNC_LOCK:
+                _PROP_SYNC_STATE["running"] = False
+                _PROP_SYNC_STATE["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {
+        "status": "queued",
+        "started_at": started_at,
+        "scope": "legacy_recalculate",
+        "target_game_ids": [],
     }
 
 

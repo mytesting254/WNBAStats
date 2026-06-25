@@ -260,6 +260,49 @@ export async function fetchOpsHealth(): Promise<OpsHealth> {
   return response.json();
 }
 
+async function waitForPropSyncCompletion(startedAt?: string | null): Promise<{
+  status?: string;
+  started_at?: string | null;
+  scope?: string | null;
+  target_game_ids?: number[];
+  scanned_props?: number;
+  synced_props?: number;
+  rebuilt_predictions?: number;
+  predictions?: number;
+}> {
+  const deadline = Date.now() + 10 * 60 * 1000;
+
+  while (Date.now() < deadline) {
+    const health = await fetchOpsHealth();
+    const propSync = health.prop_sync;
+
+    if (propSync.last_error) {
+      throw new Error(propSync.last_error);
+    }
+
+    if (!propSync.running && propSync.last_result) {
+      const result = propSync.last_result as {
+        status?: string;
+        started_at?: string | null;
+        scope?: string | null;
+        target_game_ids?: number[];
+        scanned_props?: number;
+        synced_props?: number;
+        rebuilt_predictions?: number;
+        predictions?: number;
+      };
+
+      if (!startedAt || !health.prop_sync.started_at || health.prop_sync.started_at === startedAt) {
+        return result;
+      }
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+
+  throw new Error("Timed out waiting for current-slate repair to finish.");
+}
+
 export async function auditStalePayloads(): Promise<StalePayloadAudit> {
   const response = await apiFetch("/api/cache/stale-payloads");
   if (!response.ok) {
@@ -806,6 +849,10 @@ export async function repairCurrentSlateProps(): Promise<{
     rebuilt_predictions?: number;
     predictions?: number;
   };
+
+  if (payload.status === "queued" || payload.status === "running") {
+    return waitForPropSyncCompletion(payload.started_at);
+  }
 
   // Normalize the legacy response shape to match the guarded current-slate response.
   if (typeof payload.predictions === "number" && payload.rebuilt_predictions == null) {

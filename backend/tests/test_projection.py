@@ -725,6 +725,7 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
     connect_calls = 0
     publish_calls: list[bool] = []
     repair_calls = 0
+    thread_starts = 0
 
     class DummyConn:
         def __enter__(self):
@@ -735,7 +736,18 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
         def __exit__(self, exc_type, exc, tb):
             return None
 
+    class ImmediateThread:
+        def __init__(self, *args, **kwargs):
+            self.target = kwargs.get("target")
+
+        def start(self):
+            nonlocal thread_starts
+            thread_starts += 1
+            if self.target is not None:
+                self.target()
+
     monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
 
     def fake_repair_current_slate_props(conn):
         nonlocal repair_calls
@@ -754,10 +766,14 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
     response = Response()
     result = main_module.recalculate(response)
 
-    assert result == {"predictions": 0, "settled": 0, "game_settled": 0}
+    assert result["status"] == "queued"
+    assert result["scope"] == "legacy_recalculate"
+    assert result["target_game_ids"] == []
+    assert isinstance(result["started_at"], str)
     assert repair_calls == 1
     assert publish_calls == [True]
     assert connect_calls == 3
+    assert thread_starts == 1
     assert response.headers["Deprecation"] == "true"
     assert response.headers["X-Legacy-Endpoint"] == "/api/recalculate"
 
