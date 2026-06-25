@@ -178,6 +178,7 @@ def predict_player_prop(
     under_odds: int | None = None,
     config: ModelTuningConfig | None = None,
     runtime_cache: dict[str, dict[tuple, object]] | None = None,
+    allow_training: bool = True,
 ) -> tuple[float, str, str]:
     tuning = config or DEFAULT_TUNING_CONFIG
     snapshot_cache = runtime_cache.setdefault("feature_snapshot", {}) if runtime_cache is not None else None
@@ -187,7 +188,7 @@ def predict_player_prop(
     snapshot = (
         snapshot_cache[snapshot_key]
         if snapshot_cache is not None and snapshot_key in snapshot_cache
-        else feature_snapshot(conn, player_id, market, game_id)
+        else feature_snapshot(conn, player_id, market, game_id, allow_training=allow_training)
     )
     if snapshot_cache is not None:
         snapshot_cache.setdefault(snapshot_key, snapshot)
@@ -199,7 +200,7 @@ def predict_player_prop(
         sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
         if sample_cache is not None:
             sample_cache[sample_key] = (sample_count, avg_minutes)
-    model = train_market_model(conn, market, config=tuning)
+    model = train_market_model(conn, market, config=tuning, allow_training=allow_training)
     if not model:
         return snapshot.component_projection, snapshot.reason, "component"
 
@@ -214,7 +215,7 @@ def predict_player_prop(
         market_weight = _market_weight(model.rows, config=tuning)
         market_weight = max(market_weight, _player_market_weight(sample_count, avg_minutes, config=tuning))
         projection = ((1 - market_weight) * learned) + (market_weight * float(line))
-        residual_model = train_market_residual_model(conn, market, config=tuning)
+        residual_model = train_market_residual_model(conn, market, config=tuning, allow_training=allow_training)
         if residual_model is not None:
             residual_prediction = _predict(residual_model, snapshot.values)
             residual_projection = float(line) + residual_prediction
@@ -340,6 +341,7 @@ def feature_snapshot(
     market: str,
     game_id: int,
     before_game_date: str | None = None,
+    allow_training: bool = True,
 ) -> FeatureSnapshot:
     context = _game_context(conn, player_id, game_id)
     reference_game_date = before_game_date or context.get("game_date")
@@ -390,6 +392,7 @@ def feature_snapshot(
         injury_status=str(injury["status"]),
         recent_absence_days=_recent_absence_days(history, before_game_date or context.get("game_date")),
         before_game_date=before_game_date,
+        allow_training=allow_training,
     )
     rate_projection = weighted_rate * projected_minutes
     component_base = _adaptive_component_projection(
@@ -490,11 +493,14 @@ def train_market_model(
     conn: sqlite3.Connection,
     market: str,
     config: ModelTuningConfig | None = None,
+    allow_training: bool = True,
 ) -> RidgeModel | None:
     tuning = config or DEFAULT_TUNING_CONFIG
     if not isinstance(conn, sqlite3.Connection):
         key = (id(conn), market, tuning)
         if key not in _CONNECTION_MODEL_CACHE:
+            if not allow_training:
+                return None
             _CONNECTION_MODEL_CACHE[key] = _train_market_model_uncached(conn, market, config=tuning)
         return _CONNECTION_MODEL_CACHE[key]
     db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
@@ -502,6 +508,8 @@ def train_market_model(
     cached_model = _load_cached_model(cache_key)
     if cached_model is not None:
         return cached_model
+    if not allow_training:
+        return None
     return _train_market_model_cached(db_path, market, tuning)
 
 
@@ -519,12 +527,15 @@ def train_market_residual_model(
     conn: sqlite3.Connection,
     market: str,
     config: ModelTuningConfig | None = None,
+    allow_training: bool = True,
 ) -> RidgeModel | None:
     tuning = config or DEFAULT_TUNING_CONFIG
     cache_market = f"residual:{market}"
     if not isinstance(conn, sqlite3.Connection):
         key = (id(conn), market, tuning)
         if key not in _CONNECTION_RESIDUAL_MODEL_CACHE:
+            if not allow_training:
+                return None
             _CONNECTION_RESIDUAL_MODEL_CACHE[key] = _train_market_residual_model_uncached(conn, market, config=tuning)
         return _CONNECTION_RESIDUAL_MODEL_CACHE[key]
     db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
@@ -532,6 +543,8 @@ def train_market_residual_model(
     cached_model = _load_cached_model(cache_key)
     if cached_model is not None:
         return cached_model
+    if not allow_training:
+        return None
     return _train_market_residual_model_cached(db_path, market, tuning)
 
 
@@ -887,6 +900,7 @@ def train_minutes_model(
     conn: sqlite3.Connection,
     config: ModelTuningConfig | None = None,
     role_bucket: str | None = None,
+    allow_training: bool = True,
 ) -> RidgeModel | None:
     tuning = config or DEFAULT_TUNING_CONFIG
     bucket = role_bucket if role_bucket in set(MINUTES_ROLE_BUCKETS) else None
@@ -894,6 +908,8 @@ def train_minutes_model(
     if not isinstance(conn, sqlite3.Connection):
         key = (id(conn), bucket, tuning)
         if key not in _CONNECTION_MINUTES_MODEL_CACHE:
+            if not allow_training:
+                return None
             _CONNECTION_MINUTES_MODEL_CACHE[key] = _train_minutes_model_uncached(conn, config=tuning, role_bucket=bucket)
         return _CONNECTION_MINUTES_MODEL_CACHE[key]
     db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
@@ -901,6 +917,8 @@ def train_minutes_model(
     cached_model = _load_cached_model(cache_key)
     if cached_model is not None:
         return cached_model
+    if not allow_training:
+        return None
     return _train_minutes_model_cached(db_path, tuning, bucket)
 
 
@@ -1033,6 +1051,7 @@ def _project_minutes(
     injury_status: str,
     recent_absence_days: float | None,
     before_game_date: str | None,
+    allow_training: bool = True,
 ) -> tuple[float, str]:
     base_heuristic = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
     hard_statuses = {"out", "inactive", "suspended", "unavailable"}
@@ -1062,10 +1081,10 @@ def _project_minutes(
     learned_minutes = None
     blend_note = "heuristic only"
     if conn is not None:
-        minutes_model = train_minutes_model(conn, role_bucket=role_state.bucket)
+        minutes_model = train_minutes_model(conn, role_bucket=role_state.bucket, allow_training=allow_training)
         model_scope = f"role {role_state.bucket}"
         if minutes_model is None:
-            minutes_model = train_minutes_model(conn)
+            minutes_model = train_minutes_model(conn, allow_training=allow_training)
             model_scope = "global"
         if minutes_model is not None:
             minutes_features = _minutes_feature_values(

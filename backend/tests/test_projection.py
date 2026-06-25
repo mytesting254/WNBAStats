@@ -1881,6 +1881,55 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
     assert result["rebuilt_predictions"] == 0
 
 
+def test_rebuild_predictions_skips_model_prewarm_when_refresh_disabled(monkeypatch) -> None:
+    load_test_history()
+    prewarm_calls = 0
+    build_flags: list[bool] = []
+
+    def fake_prewarm(conn):
+        nonlocal prewarm_calls
+        prewarm_calls += 1
+        return {}
+
+    def fake_build(conn, prop_line_id, *, runtime_cache=None, allow_training=True):
+        build_flags.append(bool(allow_training))
+        return projections_module.PropProjection(
+            prop_line_id=int(prop_line_id),
+            model_version="component",
+            prediction_time="2026-06-25T00:00:00+00:00",
+            projection=10.0,
+            recommended_side="over",
+            model_probability=0.55,
+            implied_probability=0.50,
+            edge=0.05,
+            expected_value=0.02,
+            confidence="medium",
+            reason="test",
+        )
+
+    monkeypatch.setattr(projections_module, "prewarm_model_cache", fake_prewarm)
+    monkeypatch.setattr(projections_module, "build_prop_projection", fake_build)
+
+    with connect() as conn:
+        scheduled_game = conn.execute(
+            """
+            SELECT g.id
+            FROM games g
+            JOIN prop_lines pl ON pl.game_id = g.id
+            WHERE g.status = 'scheduled'
+            ORDER BY g.id
+            LIMIT 1
+            """
+        ).fetchone()
+        assert scheduled_game is not None
+        rows = projections_module.rebuild_predictions(conn, game_ids=[int(scheduled_game["id"])], refresh_models=False)
+
+    assert prewarm_calls == 0
+    assert rows
+    assert build_flags
+    assert all(flag is False for flag in build_flags)
+
+
 def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -> None:
     rebuild_calls: list[tuple[list[int] | None, list[int] | None]] = []
 

@@ -174,6 +174,7 @@ def build_prop_projection(
     prop_line_id: int,
     *,
     runtime_cache: dict[str, dict[tuple, object]] | None = None,
+    allow_training: bool = True,
 ) -> PropProjection:
     prop = conn.execute(
         """
@@ -197,6 +198,7 @@ def build_prop_projection(
         over_odds=int(prop["over_odds"]),
         under_odds=int(prop["under_odds"]),
         runtime_cache=runtime_cache,
+        allow_training=allow_training,
     )
     projection_bias = _market_projection_bias_adjustment(conn, prop["market"], model_version)
     if projection_bias is not None:
@@ -359,9 +361,18 @@ def rebuild_predictions(
             """,
             tuple(filter_params),
         ).fetchall()
-        prewarm_model_cache(conn)
+        if refresh_models:
+            prewarm_model_cache(conn)
         runtime_cache: dict[str, dict[tuple, object]] = {}
-        projections = [build_prop_projection(conn, int(row["id"]), runtime_cache=runtime_cache) for row in props]
+        projections = [
+            build_prop_projection(
+                conn,
+                int(row["id"]),
+                runtime_cache=runtime_cache,
+                allow_training=refresh_models,
+            )
+            for row in props
+        ]
         prop_ids = [p.prop_line_id for p in projections]
         if prop_ids:
             placeholders = ",".join("?" for _ in prop_ids)
