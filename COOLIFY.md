@@ -105,9 +105,23 @@ the current commit:
 
 ```bash
 python scripts/live_backend.py runtime-info
+python scripts/live_backend.py host-runtime-info
 python scripts/live_backend.py recalculate
 python scripts/live_backend.py exec -- python scripts/import_espn_history.py --dates 2026-06-25
 ```
+
+If you must run a host-side script directly against the live SQLite files instead
+of executing inside the container, load the active runtime volume paths first:
+
+```bash
+source scripts/live_env.sh
+python scripts/init_db.py
+python scripts/import_espn_history.py --dates 2026-06-25
+```
+
+This resolves the host-side `WNBA_DB_PATH`, `WNBA_CACHE_DIR`, and
+`WNBA_SNAPSHOT_DIR` from the active backend container mount. Do not point host
+commands at `/data/wnba.sqlite` or `data/wnba.sqlite` by assumption.
 
 If auto-detection is ambiguous, pass the container explicitly:
 

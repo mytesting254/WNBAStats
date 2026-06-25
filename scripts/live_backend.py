@@ -51,6 +51,19 @@ def _backend_candidates() -> list[dict[str, str]]:
     return candidates
 
 
+def _docker_inspect(container: str) -> dict:
+    proc = _run(["docker", "inspect", container])
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"docker inspect failed for {container}")
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"docker inspect returned invalid JSON for {container}") from exc
+    if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+        raise RuntimeError(f"docker inspect returned no container data for {container}")
+    return payload[0]
+
+
 def _select_container(explicit: str | None = None) -> str:
     if explicit:
         return explicit
@@ -82,6 +95,29 @@ def _select_container(explicit: str | None = None) -> str:
     return best["name"]
 
 
+def _runtime_mount(container: str, destination: str = "/data") -> dict[str, str]:
+    payload = _docker_inspect(container)
+    mounts = payload.get("Mounts")
+    if not isinstance(mounts, list):
+        raise RuntimeError(f"docker inspect returned no mounts for {container}")
+    for mount in mounts:
+        if not isinstance(mount, dict):
+            continue
+        if str(mount.get("Destination") or "") != destination:
+            continue
+        source = str(mount.get("Source") or "")
+        if not source:
+            break
+        return {
+            "container": container,
+            "destination": destination,
+            "source": source,
+            "type": str(mount.get("Type") or ""),
+            "name": str(mount.get("Name") or ""),
+        }
+    raise RuntimeError(f"Could not find a mount for {destination} on {container}")
+
+
 def _docker_exec(container: str, command: list[str], *, workdir: str = "/app") -> int:
     proc = subprocess.run(["docker", "exec", "-i", "-w", workdir, container, *command], cwd=ROOT, check=False)
     return int(proc.returncode)
@@ -101,9 +137,14 @@ def _cmd_exec(args: argparse.Namespace) -> int:
 
 def _cmd_runtime_info(args: argparse.Namespace) -> int:
     container = _select_container(args.container)
+    mount = _runtime_mount(container)
     payload = {
         "container": container,
         "git_head": _git_head()[0],
+        "host_runtime_root": mount["source"],
+        "container_runtime_root": mount["destination"],
+        "mount_type": mount["type"],
+        "mount_name": mount["name"],
     }
     print(json.dumps(payload, indent=2))
     return _docker_exec(
@@ -126,6 +167,35 @@ def _cmd_runtime_info(args: argparse.Namespace) -> int:
             ),
         ],
     )
+
+
+def _cmd_host_runtime_info(args: argparse.Namespace) -> int:
+    container = _select_container(args.container)
+    mount = _runtime_mount(container)
+    payload = {
+        "container": container,
+        "git_head": _git_head()[0],
+        "host_runtime_root": mount["source"],
+        "container_runtime_root": mount["destination"],
+        "db_path": f"{mount['source']}/wnba.sqlite",
+        "cache_dir": f"{mount['source']}/cache",
+        "snapshot_dir": f"{mount['source']}/snapshots",
+        "mount_type": mount["type"],
+        "mount_name": mount["name"],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def _cmd_host_env(args: argparse.Namespace) -> int:
+    container = _select_container(args.container)
+    mount = _runtime_mount(container)
+    source = mount["source"]
+    print(f"export WNBA_DATA_DIR={source}")
+    print(f"export WNBA_DB_PATH={source}/wnba.sqlite")
+    print(f"export WNBA_CACHE_DIR={source}/cache")
+    print(f"export WNBA_SNAPSHOT_DIR={source}/snapshots")
+    return 0
 
 
 def _cmd_recalculate(args: argparse.Namespace) -> int:
@@ -157,6 +227,18 @@ def _build_parser() -> argparse.ArgumentParser:
 
     info_parser = subparsers.add_parser("runtime-info", help="Print the detected runtime container and active DB/cache paths.")
     info_parser.set_defaults(func=_cmd_runtime_info)
+
+    host_info_parser = subparsers.add_parser(
+        "host-runtime-info",
+        help="Print the detected live host-side runtime root and the DB/cache/snapshot paths that match the active backend container.",
+    )
+    host_info_parser.set_defaults(func=_cmd_host_runtime_info)
+
+    host_env_parser = subparsers.add_parser(
+        "host-env",
+        help="Print shell export lines for host-side commands that should target the active backend runtime volume.",
+    )
+    host_env_parser.set_defaults(func=_cmd_host_env)
 
     recalc_parser = subparsers.add_parser("recalculate", help="Run the backend recalculate path inside the active container.")
     recalc_parser.set_defaults(func=_cmd_recalculate)

@@ -849,7 +849,7 @@ export function App() {
         ) : activeTab === "watchlist" ? (
           <WatchlistView watchlist={watchlist} loading={loading} error={error} />
         ) : activeTab === "matchups" ? (
-          <MatchupsView matchups={matchups} loading={loading} error={error} />
+          <MatchupsView matchups={matchups} props={props} loading={loading} error={error} />
         ) : activeTab === "parlays" ? (
           <ParlayCandidatesView matchups={matchups} props={props} loading={loading} error={error} />
         ) : activeTab === "discrepancies" ? (
@@ -2311,10 +2311,21 @@ function DiscrepanciesView({
   );
 }
 
-function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loading: boolean; error: string | null }) {
+function MatchupsView({
+  matchups,
+  props,
+  loading,
+  error,
+}: {
+  matchups: Matchup[];
+  props: ValueProp[];
+  loading: boolean;
+  error: string | null;
+}) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const selectedMatchup = matchups.find((matchup) => matchup.id === selectedGameId) ?? matchups[0] ?? null;
   const selectedCoversRecords = normalizeCoversRecords(selectedMatchup?.covers_records);
+  const selectedProps = selectedMatchup ? propsForMatchup(selectedMatchup, props) : [];
 
   return (
     <section className="matchup-list">
@@ -2411,6 +2422,12 @@ function MatchupsView({ matchups, loading, error }: { matchups: Matchup[]; loadi
                 <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
               </div>
               <CoversRecordsPanel matchup={selectedMatchup} />
+              <MatchupProps
+                matchup={selectedMatchup}
+                props={selectedProps}
+                sportsbookProps={selectedMatchup.sportsbook_props ?? []}
+                discrepancies={selectedMatchup.line_discrepancies ?? []}
+              />
             </article>
           ) : (
             <p className="empty">No scheduled games found.</p>

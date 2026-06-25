@@ -450,6 +450,12 @@ def on_startup() -> None:
         raise RuntimeError("Configure either API_KEY or ADMIN_USERNAME/ADMIN_PASSWORD when ENV is not dev/local/test.")
     if _is_dev_env() and not _configured_api_key():
         print("[security] API_KEY not set; mutating endpoints are open in dev/test mode.")
+    stale_cleanup = _delete_stale_payloads()
+    if stale_cleanup["deleted"]:
+        print(
+            f"[cache] deleted {stale_cleanup['deleted']} stale payload(s) on startup: "
+            f"{', '.join(stale_cleanup['files'])}"
+        )
     init_db()
     with connect() as conn:
         ensure_teams(conn)

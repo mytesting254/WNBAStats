@@ -177,10 +177,28 @@ def predict_player_prop(
     over_odds: int | None = None,
     under_odds: int | None = None,
     config: ModelTuningConfig | None = None,
+    runtime_cache: dict[str, dict[tuple, object]] | None = None,
 ) -> tuple[float, str, str]:
     tuning = config or DEFAULT_TUNING_CONFIG
-    snapshot = feature_snapshot(conn, player_id, market, game_id)
-    sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
+    snapshot_cache = runtime_cache.setdefault("feature_snapshot", {}) if runtime_cache is not None else None
+    sample_cache = runtime_cache.setdefault("player_sample_quality", {}) if runtime_cache is not None else None
+
+    snapshot_key = (int(player_id), str(market), int(game_id))
+    snapshot = (
+        snapshot_cache[snapshot_key]
+        if snapshot_cache is not None and snapshot_key in snapshot_cache
+        else feature_snapshot(conn, player_id, market, game_id)
+    )
+    if snapshot_cache is not None:
+        snapshot_cache.setdefault(snapshot_key, snapshot)
+
+    sample_key = (int(player_id), int(game_id))
+    if sample_cache is not None and sample_key in sample_cache:
+        sample_count, avg_minutes = sample_cache[sample_key]  # type: ignore[misc]
+    else:
+        sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
+        if sample_cache is not None:
+            sample_cache[sample_key] = (sample_count, avg_minutes)
     model = train_market_model(conn, market, config=tuning)
     if not model:
         return snapshot.component_projection, snapshot.reason, "component"
