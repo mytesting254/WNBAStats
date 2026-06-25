@@ -314,7 +314,8 @@ def rebuild_predictions(
                     tuple(target_prop_line_ids),
                 ).fetchall()
             ]
-        _refresh_scheduled_game_rest_days(conn, game_ids=target_game_ids or None)
+        if refresh_models:
+            _refresh_scheduled_game_rest_days(conn, game_ids=target_game_ids or None)
         # Defensive cleanup for legacy partial-import states.
         conn.execute(
             """
