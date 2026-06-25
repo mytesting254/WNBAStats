@@ -301,6 +301,41 @@ h3 {
   line-height: 1.45;
 }
 
+.progress-block {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: #184f86;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.progress-track {
+  overflow: hidden;
+  height: 10px;
+  border-radius: 999px;
+  background: #e6edf5;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2364aa 0%, #39a0ed 100%);
+  transition: width 180ms ease;
+}
+
+.progress-caption {
+  color: #667085;
+  font-size: 13px;
+}
+
 .operation-actions {
   display: flex;
   flex-wrap: wrap;

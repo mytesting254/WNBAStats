@@ -382,11 +382,12 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    const intervalMs = opsHealth?.prop_sync.running ? 2000 : 15000;
     const interval = window.setInterval(() => {
       fetchOpsHealth().then(setOpsHealth).catch(() => {});
-    }, 15000);
+    }, intervalMs);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [opsHealth?.prop_sync.running]);
 
   const filtered = useMemo(() => {
     return props
@@ -1052,11 +1053,13 @@ function DataView({
     : `Missing: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`;
   const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
   const propSync = opsHealth?.prop_sync;
+  const progressPercent = Math.max(0, Math.min(100, Math.round((propSync?.percent ?? 0) * 100)));
+  const progressStageLabel = formatPropSyncStage(propSync?.stage);
   const queueLabel = propSync == null ? "Unknown" : propSync.running ? "Running" : "Clear";
   const queueDetail = propSync == null
     ? "Operations health unavailable."
     : propSync.running
-      ? `Started ${formatDateTime(propSync.started_at)}`
+      ? propSync.message || `Started ${formatDateTime(propSync.started_at)}`
       : `Last finished ${formatDateTime(propSync.finished_at)}`;
 
   return (
@@ -1076,10 +1079,29 @@ function DataView({
             <p className="eyebrow">prop sync queue</p>
             <h3>{queueLabel}</h3>
             <p>{queueDetail}</p>
+            {propSync ? (
+              <div className="progress-block" aria-live="polite">
+                <div className="progress-meta">
+                  <strong>{progressStageLabel}</strong>
+                  <span>{progressPercent}%</span>
+                </div>
+                <div className="progress-track" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100}>
+                  <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+                </div>
+                <p className="progress-caption">
+                  {propSync.current != null && propSync.total != null && propSync.total > 0
+                    ? `${propSync.current} of ${propSync.total} complete`
+                    : propSync.running
+                      ? "Waiting for first completed step."
+                      : "No active background job."}
+                </p>
+              </div>
+            ) : null}
             {propSync?.last_error ? <p className="reason">Last error: {propSync.last_error}</p> : null}
           </div>
           <div className="detail-grid">
             <Metric label="Running" value={propSync?.running ? "Yes" : "No"} />
+            <Metric label="Phase" value={progressStageLabel} />
             <Metric label="Started" value={formatDateTime(propSync?.started_at)} />
             <Metric label="Finished" value={formatDateTime(propSync?.finished_at)} />
             <Metric
@@ -3627,6 +3649,21 @@ function Metric({ label, value, className = "" }: { label: string; value: string
       <strong>{value}</strong>
     </div>
   );
+}
+
+function formatPropSyncStage(value?: string | null) {
+  const labels: Record<string, string> = {
+    queued: "Queued",
+    syncing_props: "Syncing props",
+    rebuilding_predictions: "Rebuilding projections",
+    settling_props: "Settling props",
+    settling_games: "Settling games",
+    publishing_payloads: "Publishing payloads"
+  };
+  if (!value) {
+    return "Idle";
+  }
+  return labels[value] ?? value.split("_").join(" ");
 }
 
 function formatPercent(value?: number) {

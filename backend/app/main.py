@@ -104,6 +104,14 @@ _PROP_SYNC_STATE: dict[str, Any] = {
     "last_result": None,
     "scope": None,
     "target_game_ids": [],
+    "stage": None,
+    "stage_index": 0,
+    "stage_total": 1,
+    "current": 0,
+    "total": 0,
+    "percent": 0.0,
+    "message": None,
+    "updated_at": None,
 }
 DELETE_STALE_PAYLOAD_ACK = "DELETE STALE PAYLOAD"
 READ_CACHE_FILES = {
@@ -200,6 +208,77 @@ def _cached_app_response(entry: dict[str, Any], cache_status: str) -> JSONRespon
 
 def _local_today_iso() -> str:
     return local_today_iso()
+
+
+def _set_prop_sync_progress(
+    *,
+    stage: str | None = None,
+    stage_index: int | None = None,
+    stage_total: int | None = None,
+    current: int | None = None,
+    total: int | None = None,
+    message: str | None = None,
+    scope: str | None = None,
+    target_game_ids: list[int] | None = None,
+) -> None:
+    with _PROP_SYNC_LOCK:
+        if stage is not None:
+            _PROP_SYNC_STATE["stage"] = stage
+        if stage_index is not None:
+            _PROP_SYNC_STATE["stage_index"] = max(0, int(stage_index))
+        if stage_total is not None:
+            _PROP_SYNC_STATE["stage_total"] = max(1, int(stage_total))
+        if current is not None:
+            _PROP_SYNC_STATE["current"] = max(0, int(current))
+        if total is not None:
+            _PROP_SYNC_STATE["total"] = max(0, int(total))
+        if message is not None:
+            _PROP_SYNC_STATE["message"] = message
+        if scope is not None:
+            _PROP_SYNC_STATE["scope"] = scope
+        if target_game_ids is not None:
+            _PROP_SYNC_STATE["target_game_ids"] = list(target_game_ids)
+
+        current_value = int(_PROP_SYNC_STATE.get("current") or 0)
+        total_value = int(_PROP_SYNC_STATE.get("total") or 0)
+        stage_index_value = int(_PROP_SYNC_STATE.get("stage_index") or 0)
+        stage_total_value = max(1, int(_PROP_SYNC_STATE.get("stage_total") or 1))
+        phase_ratio = 0.0
+        if total_value > 0:
+            phase_ratio = min(1.0, max(0.0, current_value / total_value))
+        if stage_index_value <= 0:
+            percent = 0.0
+        else:
+            percent = min(1.0, max(0.0, ((stage_index_value - 1) + phase_ratio) / stage_total_value))
+        _PROP_SYNC_STATE["percent"] = percent
+        _PROP_SYNC_STATE["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+
+def _begin_prop_sync_job(
+    scope: str,
+    *,
+    stage: str = "queued",
+    message: str = "Queued for background processing.",
+    target_game_ids: list[int] | None = None,
+) -> str:
+    started_at = datetime.now(timezone.utc).isoformat()
+    with _PROP_SYNC_LOCK:
+        _PROP_SYNC_STATE["running"] = True
+        _PROP_SYNC_STATE["started_at"] = started_at
+        _PROP_SYNC_STATE["finished_at"] = None
+        _PROP_SYNC_STATE["last_error"] = None
+        _PROP_SYNC_STATE["last_result"] = None
+        _PROP_SYNC_STATE["scope"] = scope
+        _PROP_SYNC_STATE["target_game_ids"] = list(target_game_ids or [])
+        _PROP_SYNC_STATE["stage"] = stage
+        _PROP_SYNC_STATE["stage_index"] = 0
+        _PROP_SYNC_STATE["stage_total"] = 1
+        _PROP_SYNC_STATE["current"] = 0
+        _PROP_SYNC_STATE["total"] = 0
+        _PROP_SYNC_STATE["percent"] = 0.0
+        _PROP_SYNC_STATE["message"] = message
+        _PROP_SYNC_STATE["updated_at"] = started_at
+    return started_at
 
 
 def _sqlite_sidecar_info(path: Path) -> dict[str, Any]:
@@ -1675,9 +1754,15 @@ def _repair_current_slate_target(conn) -> tuple[str, list[int]]:
     return scope, target_game_ids
 
 
-def _repair_current_slate_props(conn) -> dict[str, Any]:
+def _repair_current_slate_props(
+    conn,
+    *,
+    progress_callback: Callable[[str, int, int, str | None], None] | None = None,
+) -> dict[str, Any]:
     scope, target_game_ids = _repair_current_slate_target(conn)
     if not target_game_ids:
+        if progress_callback is not None:
+            progress_callback("syncing_props", 0, 0, "No scheduled games were available for repair.")
         return {
             "scope": scope,
             "target_game_ids": [],
@@ -1685,12 +1770,17 @@ def _repair_current_slate_props(conn) -> dict[str, Any]:
             "synced_props": 0,
             "rebuilt_predictions": 0,
         }
+    if progress_callback is not None:
+        progress_callback("syncing_props", 0, 1, f"Syncing props for {len(target_game_ids)} games.")
     sync_result = sync_prop_lines_from_sportsbook(
         conn,
         game_ids=target_game_ids,
         fast_fail=True,
         rebuild_predictions_after=False,
         include_change_details=True,
+        progress_callback=lambda current, total, message: progress_callback("syncing_props", current, total, message)
+        if progress_callback is not None
+        else None,
     )
     if isinstance(sync_result, SyncPropLinesResult):
         scanned = sync_result.synced_props
@@ -1704,7 +1794,12 @@ def _repair_current_slate_props(conn) -> dict[str, Any]:
         conn,
         game_ids=target_game_ids,
         prop_line_ids=changed_prop_line_ids or None,
+        progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
+        if progress_callback is not None
+        else None,
     )
+    if progress_callback is not None:
+        progress_callback("rebuilding_predictions", rebuild_result.attempted, rebuild_result.attempted, "Refreshing watchlist snapshot.")
     watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     return {
         "scope": scope,
@@ -1731,14 +1826,67 @@ def recalculate(response: Response) -> dict[str, int]:
 
 
 def _run_legacy_recalculate_job() -> dict[str, Any]:
+    total_stages = 4
     with connect() as conn:
-        rebuild_result = _repair_current_slate_props(conn)
+        rebuild_result = _repair_current_slate_props(
+            conn,
+            progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                stage=stage,
+                stage_index=1,
+                stage_total=total_stages,
+                current=current,
+                total=total,
+                message=message,
+            ),
+        )
     with connect() as conn:
+        _set_prop_sync_progress(
+            stage="settling_props",
+            stage_index=2,
+            stage_total=total_stages,
+            current=0,
+            total=1,
+            message="Settling completed player props.",
+        )
         settlements = settle_completed_props(conn)
+        _set_prop_sync_progress(
+            current=1,
+            total=1,
+            message=f"Settled {int(settlements['settled'])} player props.",
+        )
+        _set_prop_sync_progress(
+            stage="settling_games",
+            stage_index=3,
+            stage_total=total_stages,
+            current=0,
+            total=1,
+            message="Settling completed game predictions.",
+        )
         game_settlements = settle_completed_game_predictions(conn)
+        _set_prop_sync_progress(
+            current=1,
+            total=1,
+            message=f"Settled {int(game_settlements['settled'])} game predictions.",
+        )
     _invalidate_read_caches()
     with connect() as conn:
+        _set_prop_sync_progress(
+            stage="publishing_payloads",
+            stage_index=4,
+            stage_total=total_stages,
+            current=0,
+            total=1,
+            message="Publishing refreshed read payloads.",
+        )
         _publish_current_read_payloads(conn)
+    _set_prop_sync_progress(
+        stage="publishing_payloads",
+        stage_index=4,
+        stage_total=total_stages,
+        current=1,
+        total=1,
+        message="Legacy recalculate finished.",
+    )
     return {
         "predictions": int(rebuild_result["rebuilt_predictions"]),
         "settled": settlements["settled"],
@@ -1755,14 +1903,7 @@ def _queue_legacy_recalculate_job() -> dict[str, Any]:
                 "scope": _PROP_SYNC_STATE.get("scope"),
                 "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
             }
-        _PROP_SYNC_STATE["running"] = True
-        _PROP_SYNC_STATE["started_at"] = datetime.now(timezone.utc).isoformat()
-        _PROP_SYNC_STATE["finished_at"] = None
-        _PROP_SYNC_STATE["last_error"] = None
-        _PROP_SYNC_STATE["last_result"] = None
-        _PROP_SYNC_STATE["scope"] = "legacy_recalculate"
-        _PROP_SYNC_STATE["target_game_ids"] = []
-        started_at = _PROP_SYNC_STATE["started_at"]
+    started_at = _begin_prop_sync_job("legacy_recalculate")
 
     def _run() -> None:
         try:
@@ -1772,6 +1913,7 @@ def _queue_legacy_recalculate_job() -> dict[str, Any]:
         except Exception as exc:
             with _PROP_SYNC_LOCK:
                 _PROP_SYNC_STATE["last_error"] = str(exc)
+                _PROP_SYNC_STATE["message"] = str(exc)
         finally:
             with _PROP_SYNC_LOCK:
                 _PROP_SYNC_STATE["running"] = False
@@ -1793,11 +1935,38 @@ def props_sync_status() -> dict:
 
 
 def _run_current_slate_repair_job() -> dict[str, Any]:
+    total_stages = 3
     with connect() as conn:
-        result = _repair_current_slate_props(conn)
+        result = _repair_current_slate_props(
+            conn,
+            progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                stage=stage,
+                stage_index=1 if stage == "syncing_props" else 2,
+                stage_total=total_stages,
+                current=current,
+                total=total,
+                message=message,
+            ),
+        )
     _invalidate_read_caches()
     with connect() as conn:
+        _set_prop_sync_progress(
+            stage="publishing_payloads",
+            stage_index=3,
+            stage_total=total_stages,
+            current=0,
+            total=1,
+            message="Publishing repaired payloads.",
+        )
         result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+    _set_prop_sync_progress(
+        stage="publishing_payloads",
+        stage_index=3,
+        stage_total=total_stages,
+        current=1,
+        total=1,
+        message="Current slate repair finished.",
+    )
     return result
 
 
@@ -1810,14 +1979,7 @@ def _queue_current_slate_repair_job() -> dict[str, Any]:
                 "scope": _PROP_SYNC_STATE.get("scope"),
                 "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
             }
-        _PROP_SYNC_STATE["running"] = True
-        _PROP_SYNC_STATE["started_at"] = datetime.now(timezone.utc).isoformat()
-        _PROP_SYNC_STATE["finished_at"] = None
-        _PROP_SYNC_STATE["last_error"] = None
-        _PROP_SYNC_STATE["last_result"] = None
-        _PROP_SYNC_STATE["scope"] = "current_slate"
-        _PROP_SYNC_STATE["target_game_ids"] = []
-        started_at = _PROP_SYNC_STATE["started_at"]
+    started_at = _begin_prop_sync_job("current_slate")
 
     def _run() -> None:
         try:
@@ -1829,6 +1991,7 @@ def _queue_current_slate_repair_job() -> dict[str, Any]:
         except Exception as exc:
             with _PROP_SYNC_LOCK:
                 _PROP_SYNC_STATE["last_error"] = str(exc)
+                _PROP_SYNC_STATE["message"] = str(exc)
         finally:
             with _PROP_SYNC_LOCK:
                 _PROP_SYNC_STATE["running"] = False
@@ -3451,30 +3614,76 @@ def _start_prop_sync_if_needed(source: str) -> bool:
     with _PROP_SYNC_LOCK:
         if _PROP_SYNC_STATE["running"]:
             return False
-        _PROP_SYNC_STATE["running"] = True
-        _PROP_SYNC_STATE["started_at"] = datetime.now(timezone.utc).isoformat()
-        _PROP_SYNC_STATE["finished_at"] = None
-        _PROP_SYNC_STATE["last_error"] = None
-        _PROP_SYNC_STATE["last_result"] = None
-        _PROP_SYNC_STATE["scope"] = source
-        _PROP_SYNC_STATE["target_game_ids"] = []
+    _begin_prop_sync_job(source)
 
     def _run() -> None:
         try:
             with connect() as conn:
-                synced = sync_prop_lines_from_sportsbook(conn)
+                sync_result = sync_prop_lines_from_sportsbook(
+                    conn,
+                    rebuild_predictions_after=False,
+                    include_change_details=True,
+                    progress_callback=lambda current, total, message: _set_prop_sync_progress(
+                        stage="syncing_props",
+                        stage_index=1,
+                        stage_total=3,
+                        current=current,
+                        total=total,
+                        message=message,
+                    ),
+                )
+                touched_game_ids = list(sync_result.touched_game_ids)
+                _set_prop_sync_progress(
+                    scope=source,
+                    target_game_ids=touched_game_ids,
+                )
+                rebuild_result = rebuild_predictions_live(
+                    conn,
+                    game_ids=touched_game_ids,
+                    prop_line_ids=sync_result.changed_prop_line_ids or None,
+                    progress_callback=lambda current, total, message: _set_prop_sync_progress(
+                        stage="rebuilding_predictions",
+                        stage_index=2,
+                        stage_total=3,
+                        current=current,
+                        total=total,
+                        message=message,
+                    ),
+                )
             _invalidate_read_caches()
             with connect() as conn:
+                _set_prop_sync_progress(
+                    stage="publishing_payloads",
+                    stage_index=3,
+                    stage_total=3,
+                    current=0,
+                    total=1,
+                    message="Publishing synced payloads.",
+                )
                 published_payloads = _publish_post_mutation_read_payloads(conn)
+            _set_prop_sync_progress(
+                stage="publishing_payloads",
+                stage_index=3,
+                stage_total=3,
+                current=1,
+                total=1,
+                message="Background prop sync finished.",
+            )
             with _PROP_SYNC_LOCK:
                 _PROP_SYNC_STATE["last_result"] = {
                     "source": source,
-                    "synced_props": int(synced),
+                    "synced_props": int(sync_result.synced_props),
+                    "changed_props": int(sync_result.changed_props),
+                    "rebuilt_predictions": int(rebuild_result.written),
+                    "attempted_predictions": int(rebuild_result.attempted),
+                    "skipped_predictions": int(rebuild_result.skipped),
+                    "target_game_ids": touched_game_ids,
                     "published_payloads": published_payloads,
                 }
         except Exception as exc:
             with _PROP_SYNC_LOCK:
                 _PROP_SYNC_STATE["last_error"] = str(exc)
+                _PROP_SYNC_STATE["message"] = str(exc)
         finally:
             with _PROP_SYNC_LOCK:
                 _PROP_SYNC_STATE["running"] = False

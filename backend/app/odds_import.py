@@ -6,6 +6,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -155,7 +156,10 @@ def sync_prop_lines_from_sportsbook(
     game_ids: list[int] | tuple[int, ...] | None = None,
     rebuild_predictions_after: bool = True,
     include_change_details: bool = False,
+    progress_callback: Callable[[int, int, str | None], None] | None = None,
 ) -> int | SyncPropLinesResult:
+    if progress_callback is not None:
+        progress_callback(0, 1, "Collecting sportsbook props.")
     target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
     game_filter = ""
     game_filter_params: tuple[int, ...] = ()
@@ -280,6 +284,8 @@ def sync_prop_lines_from_sportsbook(
         not in tracked_keys
     ]
     touched_game_ids = sorted({int(row["game_id"]) for row in rows if row["game_id"] is not None})
+    if progress_callback is not None:
+        progress_callback(len(rows), max(len(rows), 1), f"Matched {len(rows)} sportsbook props across {len(touched_game_ids)} games.")
     game_filter = ""
     game_filter_params: tuple[int, ...] = ()
     if touched_game_ids:
@@ -353,8 +359,10 @@ def sync_prop_lines_from_sportsbook(
                         insert_rows,
                     )
             if rebuild_predictions_after and touched_game_ids:
-                rebuild_predictions_live(conn, game_ids=touched_game_ids)
+                rebuild_predictions_live(conn, game_ids=touched_game_ids, progress_callback=progress_callback)
             conn.commit()
+            if progress_callback is not None:
+                progress_callback(len(rows), max(len(rows), 1), f"Synced {len(insert_rows)} fresh prop lines.")
             if include_change_details:
                 return SyncPropLinesResult(
                     synced_props=len(rows),

@@ -4,6 +4,7 @@ import math
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from typing import Callable
 
 from .db import sqlite_write_lock
 from .odds import american_to_implied_probability, expected_value
@@ -440,14 +441,21 @@ def rebuild_predictions_live(
     prop_line_ids: list[int] | None = None,
     *,
     chunk_size: int = 20,
+    progress_callback: Callable[[int, int, str | None], None] | None = None,
 ) -> LiveRebuildResult:
     prop_ids = _target_scheduled_prop_line_ids(conn, game_ids=game_ids, prop_line_ids=prop_line_ids)
     if not prop_ids:
+        if progress_callback is not None:
+            progress_callback(0, 0, "No scheduled props needed rebuilding.")
         return LiveRebuildResult(projections=[], attempted=0, written=0, skipped=0, errors=[])
 
     runtime_cache: dict[str, dict[tuple, object]] = {}
     projections: list[PropProjection] = []
     errors: list[str] = []
+    total_props = len(prop_ids)
+
+    if progress_callback is not None:
+        progress_callback(0, total_props, "Clearing stale projections.")
 
     with sqlite_write_lock():
         _delete_predictions_for_prop_line_ids(conn, prop_ids)
@@ -499,6 +507,9 @@ def rebuild_predictions_live(
             )
             conn.commit()
         projections.extend(batch_projections)
+        if progress_callback is not None:
+            processed = min(start + len(batch_ids), total_props)
+            progress_callback(processed, total_props, f"Built {len(projections)} of {total_props} projections.")
 
     return LiveRebuildResult(
         projections=projections,

@@ -130,6 +130,16 @@ export type OpsHealth = {
     finished_at: string | null;
     last_error: string | null;
     last_result: Record<string, unknown> | null;
+    scope?: string | null;
+    target_game_ids?: number[];
+    stage?: string | null;
+    stage_index?: number;
+    stage_total?: number;
+    current?: number;
+    total?: number;
+    percent?: number;
+    message?: string | null;
+    updated_at?: string | null;
   };
 };
 

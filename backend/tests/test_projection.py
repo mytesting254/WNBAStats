@@ -749,9 +749,13 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
     monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
     monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
 
-    def fake_repair_current_slate_props(conn):
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "running", False)
+
+    def fake_repair_current_slate_props(conn, progress_callback=None):
         nonlocal repair_calls
         repair_calls += 1
+        if progress_callback is not None:
+            progress_callback("rebuilding_predictions", 1, 1, "Repair complete.")
         return {"rebuilt_predictions": 0}
 
     monkeypatch.setattr(main_module, "_repair_current_slate_props", fake_repair_current_slate_props)
@@ -1856,7 +1860,7 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
             touched_game_ids=[9910],
         )
 
-    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=20):
+    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None):
         rebuild_calls.append(
             (
                 list(game_ids) if game_ids is not None else None,
@@ -2012,7 +2016,7 @@ def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -
     monkeypatch.setattr(
         main_module,
         "rebuild_predictions_live",
-        lambda conn, game_ids=None, prop_line_ids=None, chunk_size=20: projections_module.LiveRebuildResult(
+        lambda conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None: projections_module.LiveRebuildResult(
             projections=[],
             attempted=1,
             written=1,
@@ -2062,13 +2066,23 @@ def test_repair_current_slate_endpoint_queues_background_job(monkeypatch) -> Non
     monkeypatch.setattr(
         main_module,
         "_run_current_slate_repair_job",
-        lambda: {
-            "scope": "current_slate",
-            "target_game_ids": [9910],
-            "changed_prop_line_ids": [501, 502],
-            "rebuilt_predictions": 2,
-            "published_payloads": {"watchlist.json": 1},
-        },
+        lambda: (
+            main_module._set_prop_sync_progress(
+                stage="publishing_payloads",
+                stage_index=3,
+                stage_total=3,
+                current=1,
+                total=1,
+                message="Current slate repair finished.",
+            )
+            or {
+                "scope": "current_slate",
+                "target_game_ids": [9910],
+                "changed_prop_line_ids": [501, 502],
+                "rebuilt_predictions": 2,
+                "published_payloads": {"watchlist.json": 1},
+            }
+        ),
     )
     monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"watchlist.json": 1})
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
@@ -2079,6 +2093,14 @@ def test_repair_current_slate_endpoint_queues_background_job(monkeypatch) -> Non
     monkeypatch.setitem(main_module._PROP_SYNC_STATE, "last_result", None)
     monkeypatch.setitem(main_module._PROP_SYNC_STATE, "scope", None)
     monkeypatch.setitem(main_module._PROP_SYNC_STATE, "target_game_ids", [])
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "stage", None)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "stage_index", 0)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "stage_total", 1)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "current", 0)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "total", 0)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "percent", 0.0)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "message", None)
+    monkeypatch.setitem(main_module._PROP_SYNC_STATE, "updated_at", None)
 
     result = main_module.repair_current_slate_props()
 
@@ -2096,6 +2118,78 @@ def test_repair_current_slate_endpoint_queues_background_job(monkeypatch) -> Non
         "published_payloads": {"watchlist.json": 1},
     }
     assert main_module._PROP_SYNC_STATE["target_game_ids"] == [9910]
+    assert main_module._PROP_SYNC_STATE["stage"] == "publishing_payloads"
+    assert main_module._PROP_SYNC_STATE["percent"] == 1.0
+
+
+def test_start_prop_sync_if_needed_tracks_progress(monkeypatch) -> None:
+    thread_starts = 0
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    class ImmediateThread:
+        def __init__(self, *args, **kwargs):
+            self.target = kwargs.get("target")
+
+        def start(self):
+            nonlocal thread_starts
+            thread_starts += 1
+            if self.target is not None:
+                self.target()
+
+    def fake_sync(conn, **kwargs):
+        callback = kwargs.get("progress_callback")
+        if callback is not None:
+            callback(3, 6, "Matched 3 props.")
+        return SyncPropLinesResult(
+            synced_props=6,
+            changed_props=3,
+            changed_prop_line_ids=[901, 902, 903],
+            touched_game_ids=[9910],
+        )
+
+    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None):
+        assert game_ids == [9910]
+        assert prop_line_ids == [901, 902, 903]
+        if progress_callback is not None:
+            progress_callback(3, 3, "Built 3 of 3 projections.")
+        return projections_module.LiveRebuildResult(
+            projections=[],
+            attempted=3,
+            written=3,
+            skipped=0,
+            errors=[],
+        )
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fake_sync)
+    monkeypatch.setattr(main_module, "rebuild_predictions_live", fake_rebuild)
+    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"watchlist.json": 1})
+    monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
+
+    started = main_module._start_prop_sync_if_needed("odds_import")
+
+    assert started is True
+    assert thread_starts == 1
+    assert main_module._PROP_SYNC_STATE["target_game_ids"] == [9910]
+    assert main_module._PROP_SYNC_STATE["stage"] == "publishing_payloads"
+    assert main_module._PROP_SYNC_STATE["percent"] == 1.0
+    assert main_module._PROP_SYNC_STATE["last_result"] == {
+        "source": "odds_import",
+        "synced_props": 6,
+        "changed_props": 3,
+        "rebuilt_predictions": 3,
+        "attempted_predictions": 3,
+        "skipped_predictions": 0,
+        "target_game_ids": [9910],
+        "published_payloads": {"watchlist.json": 1},
+    }
 
 
 def test_matchups_payload_survives_rotowire_failure(monkeypatch) -> None:
