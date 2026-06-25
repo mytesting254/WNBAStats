@@ -1918,10 +1918,9 @@ def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -
     assert result["synced_props"] == 1
 
 
-def test_repair_current_slate_endpoint_uses_phased_connections(monkeypatch) -> None:
+def test_repair_current_slate_endpoint_queues_background_job(monkeypatch) -> None:
     connect_calls = 0
-    sync_calls: list[dict] = []
-    rebuild_calls: list[tuple[list[int] | None, list[int] | None, bool]] = []
+    thread_starts = 0
 
     class DummyConn:
         def __enter__(self):
@@ -1932,26 +1931,29 @@ def test_repair_current_slate_endpoint_uses_phased_connections(monkeypatch) -> N
         def __exit__(self, exc_type, exc, tb):
             return None
 
+    class ImmediateThread:
+        def __init__(self, *args, **kwargs):
+            self.target = kwargs.get("target")
+
+        def start(self):
+            nonlocal thread_starts
+            thread_starts += 1
+            if self.target is not None:
+                self.target()
+
     monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
-    monkeypatch.setattr(main_module, "_active_slate_game_ids", lambda conn: [9910])
-    monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", lambda conn, **kwargs: sync_calls.append(kwargs) or SyncPropLinesResult(
-        synced_props=2,
-        changed_props=2,
-        changed_prop_line_ids=[501, 502],
-        touched_game_ids=[9910],
-    ))
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(
         main_module,
-        "rebuild_predictions",
-        lambda conn, game_ids=None, prop_line_ids=None, refresh_models=True: rebuild_calls.append(
-            (
-                list(game_ids) if game_ids is not None else None,
-                list(prop_line_ids) if prop_line_ids is not None else None,
-                refresh_models,
-            )
-        ) or [],
+        "_run_current_slate_repair_job",
+        lambda: {
+            "scope": "current_slate",
+            "target_game_ids": [9910],
+            "changed_prop_line_ids": [501, 502],
+            "rebuilt_predictions": 2,
+            "published_payloads": {"watchlist.json": 1},
+        },
     )
-    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, snapshot_date: None)
     monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"watchlist.json": 1})
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
     monkeypatch.setitem(main_module._PROP_SYNC_STATE, "running", False)
@@ -1964,21 +1966,20 @@ def test_repair_current_slate_endpoint_uses_phased_connections(monkeypatch) -> N
 
     result = main_module.repair_current_slate_props()
 
-    assert connect_calls == 5
-    assert sync_calls == [
-        {
-            "game_ids": [9910],
-            "fast_fail": True,
-            "rebuild_predictions_after": False,
-            "include_change_details": True,
-        }
-    ]
-    assert rebuild_calls == [([9910], [501, 502], False)]
-    assert result["status"] == "completed"
+    assert connect_calls == 0
+    assert thread_starts == 1
+    assert result["status"] == "queued"
     assert result["scope"] == "current_slate"
-    assert result["target_game_ids"] == [9910]
-    assert result["changed_prop_line_ids"] == [501, 502]
-    assert result["published_payloads"] == {"watchlist.json": 1}
+    assert result["target_game_ids"] == []
+    assert main_module._PROP_SYNC_STATE["last_result"] == {
+        "status": "completed",
+        "scope": "current_slate",
+        "target_game_ids": [9910],
+        "changed_prop_line_ids": [501, 502],
+        "rebuilt_predictions": 2,
+        "published_payloads": {"watchlist.json": 1},
+    }
+    assert main_module._PROP_SYNC_STATE["target_game_ids"] == [9910]
 
 
 def test_matchups_payload_survives_rotowire_failure(monkeypatch) -> None:

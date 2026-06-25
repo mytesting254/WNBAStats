@@ -850,7 +850,7 @@ export async function repairCurrentSlateProps(): Promise<{
     predictions?: number;
   };
 
-  if (payload.status === "queued" || payload.status === "running") {
+  if (payload.status === "queued" || payload.status === "running" || payload.status === "busy") {
     return waitForPropSyncCompletion(payload.started_at);
   }
 

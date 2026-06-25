@@ -1737,16 +1737,24 @@ def props_sync_status() -> dict:
         return dict(_PROP_SYNC_STATE)
 
 
-@app.post("/api/props/repair-current-slate", dependencies=[Depends(_protect_mutation)])
-def repair_current_slate_props() -> dict[str, Any]:
+def _run_current_slate_repair_job() -> dict[str, Any]:
+    with connect() as conn:
+        result = _repair_current_slate_props(conn)
+    _invalidate_read_caches()
+    with connect() as conn:
+        result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+    return result
+
+
+def _queue_current_slate_repair_job() -> dict[str, Any]:
     with _PROP_SYNC_LOCK:
         if _PROP_SYNC_STATE["running"]:
             return {
                 "status": "busy",
                 "started_at": _PROP_SYNC_STATE["started_at"],
                 "scope": _PROP_SYNC_STATE.get("scope"),
-            "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
-        }
+                "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
+            }
         _PROP_SYNC_STATE["running"] = True
         _PROP_SYNC_STATE["started_at"] = datetime.now(timezone.utc).isoformat()
         _PROP_SYNC_STATE["finished_at"] = None
@@ -1754,67 +1762,35 @@ def repair_current_slate_props() -> dict[str, Any]:
         _PROP_SYNC_STATE["last_result"] = None
         _PROP_SYNC_STATE["scope"] = "current_slate"
         _PROP_SYNC_STATE["target_game_ids"] = []
+        started_at = _PROP_SYNC_STATE["started_at"]
 
-    try:
-        with connect() as conn:
-            scope, target_game_ids = _repair_current_slate_target(conn)
-        if not target_game_ids:
-            result = {
-                "scope": scope,
-                "target_game_ids": [],
-                "scanned_props": 0,
-                "synced_props": 0,
-                "rebuilt_predictions": 0,
-            }
-        else:
-            with connect() as conn:
-                sync_result = sync_prop_lines_from_sportsbook(
-                    conn,
-                    game_ids=target_game_ids,
-                    fast_fail=True,
-                    rebuild_predictions_after=False,
-                    include_change_details=True,
-                )
-            if isinstance(sync_result, SyncPropLinesResult):
-                scanned = sync_result.synced_props
-                synced = sync_result.changed_props
-                changed_prop_line_ids = sync_result.changed_prop_line_ids
-            else:
-                scanned = int(sync_result)
-                synced = int(sync_result)
-                changed_prop_line_ids = []
-            with connect() as conn:
-                projections = rebuild_predictions(
-                    conn,
-                    game_ids=target_game_ids,
-                    prop_line_ids=changed_prop_line_ids or None,
-                    refresh_models=False,
-                )
-            with connect() as conn:
-                _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
-            result = {
-                "scope": scope,
-                "target_game_ids": target_game_ids,
-                "scanned_props": int(scanned),
-                "synced_props": int(synced),
-                "changed_prop_line_ids": changed_prop_line_ids,
-                "rebuilt_predictions": len(projections),
-            }
-        _invalidate_read_caches()
-        with connect() as conn:
-            result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
-        with _PROP_SYNC_LOCK:
-            _PROP_SYNC_STATE["last_result"] = result
-            _PROP_SYNC_STATE["target_game_ids"] = list(result.get("target_game_ids") or [])
-        return {"status": "completed", **result}
-    except Exception as exc:
-        with _PROP_SYNC_LOCK:
-            _PROP_SYNC_STATE["last_error"] = str(exc)
-        raise
-    finally:
-        with _PROP_SYNC_LOCK:
-            _PROP_SYNC_STATE["running"] = False
-            _PROP_SYNC_STATE["finished_at"] = datetime.now(timezone.utc).isoformat()
+    def _run() -> None:
+        try:
+            result = _run_current_slate_repair_job()
+            with _PROP_SYNC_LOCK:
+                _PROP_SYNC_STATE["last_result"] = {"status": "completed", **result}
+                _PROP_SYNC_STATE["target_game_ids"] = list(result.get("target_game_ids") or [])
+                _PROP_SYNC_STATE["scope"] = result.get("scope") or "current_slate"
+        except Exception as exc:
+            with _PROP_SYNC_LOCK:
+                _PROP_SYNC_STATE["last_error"] = str(exc)
+        finally:
+            with _PROP_SYNC_LOCK:
+                _PROP_SYNC_STATE["running"] = False
+                _PROP_SYNC_STATE["finished_at"] = datetime.now(timezone.utc).isoformat()
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {
+        "status": "queued",
+        "started_at": started_at,
+        "scope": "current_slate",
+        "target_game_ids": [],
+    }
+
+
+@app.post("/api/props/repair-current-slate", dependencies=[Depends(_protect_mutation)])
+def repair_current_slate_props() -> dict[str, Any]:
+    return _queue_current_slate_repair_job()
 
 
 @app.post("/api/settle-props", dependencies=[Depends(_protect_mutation)])
