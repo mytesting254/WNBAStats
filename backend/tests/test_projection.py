@@ -4,6 +4,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
+import runpy
 from types import SimpleNamespace
 
 import pytest
@@ -38,6 +39,8 @@ from backend.app.game_predictions import evaluate_game_residual_models, project_
 from backend.app.history_import import determine_ats_result
 from backend.app.main import app, import_espn_history as import_espn_history_endpoint, model_performance
 from backend.app import main as main_module
+
+INIT_DB_SCRIPT = str(paths_module.ROOT_DIR / "scripts" / "init_db.py")
 from backend.app.odds import american_to_implied_probability, expected_value
 from backend.app.odds_import import (
     RAW_CACHE_NAME,
@@ -607,6 +610,54 @@ def test_startup_deletes_stale_payloads_before_prewarm(monkeypatch) -> None:
     main_module.on_startup()
 
     assert calls == ["delete_stale", "init_db", "ensure_teams", "prewarm", "publish"]
+
+
+def test_init_db_script_retries_locked_startup_then_succeeds(monkeypatch, capsys) -> None:
+    attempts = {"init_db": 0, "ensure_teams": 0}
+    sleeps: list[float] = []
+
+    def flaky_init_db() -> None:
+        attempts["init_db"] += 1
+        if attempts["init_db"] < 3:
+            raise sqlite3.OperationalError("database is locked")
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    monkeypatch.setattr("backend.app.db.init_db", flaky_init_db)
+    monkeypatch.setattr("backend.app.db.connect", lambda: DummyConn())
+    monkeypatch.setattr(
+        "backend.app.bootstrap.ensure_teams",
+        lambda conn: attempts.__setitem__("ensure_teams", attempts["ensure_teams"] + 1),
+    )
+    monkeypatch.setattr("time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setenv("WNBA_INIT_DB_LOCK_ATTEMPTS", "4")
+    monkeypatch.setenv("WNBA_INIT_DB_LOCK_BASE_SLEEP", "0.25")
+
+    runpy.run_path(INIT_DB_SCRIPT, run_name="__main__")
+
+    output = capsys.readouterr().out
+    assert attempts["init_db"] == 3
+    assert attempts["ensure_teams"] == 1
+    assert sleeps == [0.25, 0.5]
+    assert "retrying in 0.2s" in output or "retrying in 0.3s" in output
+
+
+def test_init_db_script_raises_after_retry_budget(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.db.init_db",
+        lambda: (_ for _ in ()).throw(sqlite3.OperationalError("database is locked")),
+    )
+    monkeypatch.setattr("time.sleep", lambda seconds: None)
+    monkeypatch.setenv("WNBA_INIT_DB_LOCK_ATTEMPTS", "2")
+    monkeypatch.setenv("WNBA_INIT_DB_LOCK_BASE_SLEEP", "0.1")
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        runpy.run_path(INIT_DB_SCRIPT, run_name="__main__")
 
 
 def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
