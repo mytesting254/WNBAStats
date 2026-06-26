@@ -568,6 +568,7 @@ export type RosterPlayer = {
   captured_at?: string | null;
   player_id?: number;
   rotation_role?: string | null;
+  position?: string | null;
   recent_minutes_avg?: number | null;
   recent_contribution_avg?: number | null;
   player_impact_score?: number | null;

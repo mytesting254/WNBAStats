@@ -1418,6 +1418,11 @@ function RosterView({
   const visibleRows = useMemo(() => {
     const filtered = selectedTeam ? roster.filter((item) => item.team === selectedTeam) : roster;
     return [...filtered].sort((left, right) => {
+      const leftSeverity = rosterStatusSeverity(left.status);
+      const rightSeverity = rosterStatusSeverity(right.status);
+      if (rightSeverity !== leftSeverity) {
+        return rightSeverity - leftSeverity;
+      }
       const impactDelta = (right.player_impact_score ?? -1) - (left.player_impact_score ?? -1);
       if (impactDelta !== 0) {
         return impactDelta;
@@ -1432,16 +1437,16 @@ function RosterView({
 
   return (
     <section className="matchup-list">
-      <div className="board-panel">
+      <div className="board-panel roster-panel">
         <div className="panel-header">
           <div>
             <h2>Team Roster Status</h2>
-            <p>{loading ? "Loading lineup status" : "Rotowire lineup statuses grouped by team"}</p>
+            <p>{loading ? "Loading lineup status" : "Rotowire lineup statuses grouped by team with impact context"}</p>
           </div>
           <ShieldCheck size={20} />
         </div>
         {canRefresh ? (
-          <div className="operation-actions">
+          <div className="operation-actions roster-actions">
             <button className="icon-button text-button dark-button" onClick={onRefresh} disabled={loading || refreshing}>
               <RefreshCw size={18} />
               {refreshing ? "Refreshing" : "Refresh Roster"}
@@ -1450,16 +1455,17 @@ function RosterView({
         ) : null}
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
-        <div className="game-tabs" aria-label="Roster team tabs">
+        <div className="game-tabs roster-tabs" aria-label="Roster team tabs">
           {teams.map((team) => (
             <button key={team} className={selectedTeam === team ? "active" : ""} onClick={() => setSelectedTeam(team)}>
+              <span>Team</span>
               <strong>{team}</strong>
               <em>{roster.filter((item) => item.team === team).length} players</em>
             </button>
           ))}
         </div>
         {teamSummary ? (
-          <section className="summary-grid">
+          <section className="summary-grid roster-summary-grid">
             <Metric label="Key absences" value={formatCount(teamSummary.team_missing_key_players)} className="metric-compact" />
             <Metric
               label="Team impact"
@@ -1470,8 +1476,8 @@ function RosterView({
             <Metric label="Tracked players" value={formatCount(visibleRows.length)} className="metric-compact" />
           </section>
         ) : null}
-        <div className="props-table-wrapper">
-          <table className="props-table">
+        <div className="props-table-wrapper roster-table-wrapper">
+          <table className="props-table roster-table">
             <thead>
               <tr>
                 <th>Player</th>
@@ -1485,9 +1491,18 @@ function RosterView({
             </thead>
             <tbody>
               {visibleRows.map((item) => (
-                <tr key={`${item.team}-${item.player_name}-${item.status}`}>
-                  <td>{item.player_name}</td>
-                  <td><span className={`status-pill ${statusClass(item.status)}`}>{item.status}</span></td>
+                <tr key={`${item.team}-${item.player_name}-${item.status}`} className={`roster-row roster-row-${statusClass(item.status)}`}>
+                  <td>
+                    <div className="roster-player-cell">
+                      <PlayerLabel name={item.player_name} position={item.position} />
+                      <span className="roster-player-meta">{formatRosterPosition(item.position)} | {item.team}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div className="roster-status-cell">
+                      <span className={`status-pill ${statusClass(item.status)}`}>{item.status}</span>
+                    </div>
+                  </td>
                   <td>{formatRosterRole(item.rotation_role)}</td>
                   <td>{formatMetricNumber(item.recent_minutes_avg, 1)}</td>
                   <td>{formatMetricNumber(item.recent_contribution_avg, 1)}</td>
@@ -1527,6 +1542,25 @@ function formatRosterRole(role?: string | null) {
     .split("_")
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(" ");
+}
+
+function formatRosterPosition(position?: string | null) {
+  const value = String(position || "").trim().toUpperCase();
+  return value || "POS N/A";
+}
+
+function rosterStatusSeverity(status: string) {
+  const value = status.trim().toUpperCase();
+  if (value === "OUT" || value === "INACTIVE" || value === "SUSPENDED" || value === "UNAVAILABLE") {
+    return 3;
+  }
+  if (value === "GTD" || value === "QUESTIONABLE" || value === "DOUBTFUL") {
+    return 2;
+  }
+  if (value === "PROBABLE") {
+    return 1;
+  }
+  return 0;
 }
 
 function teamImpactMetricClass(value: number | null) {

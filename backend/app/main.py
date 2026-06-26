@@ -949,7 +949,8 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
         SELECT
             p.id AS player_id,
             p.full_name,
-            p.rotation_role
+            p.rotation_role,
+            p.position
         FROM players p
         JOIN teams t ON t.id = p.team_id
         WHERE lower(p.full_name) = lower(?)
@@ -970,7 +971,8 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
         SELECT
             p.id AS player_id,
             p.full_name,
-            p.rotation_role
+            p.rotation_role,
+            p.position
         FROM players p
         JOIN teams t ON t.id = p.team_id
         WHERE p.full_name LIKE ?
@@ -989,7 +991,8 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
         SELECT
             p.id AS player_id,
             p.full_name,
-            p.rotation_role
+            p.rotation_role,
+            p.position
         FROM players p
         WHERE lower(p.full_name) = lower(?)
         LIMIT 2
@@ -1005,7 +1008,8 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
             SELECT
                 p.id AS player_id,
                 p.full_name,
-                p.rotation_role
+                p.rotation_role,
+                p.position
             FROM players p
             WHERE p.full_name LIKE ?
             LIMIT 2
@@ -1099,6 +1103,7 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
                 {
                     **row,
                     "rotation_role": None,
+                    "position": None,
                     "recent_minutes_avg": None,
                     "recent_contribution_avg": None,
                     "player_impact_score": None,
@@ -1117,6 +1122,7 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
                 **row,
                 "player_id": int(player["player_id"]),
                 "rotation_role": player.get("rotation_role"),
+                "position": player.get("position"),
                 "recent_minutes_avg": profile["recent_minutes_avg"],
                 "recent_contribution_avg": profile["recent_contribution_avg"],
                 "player_impact_score": round(impact_score, 1) if impact_score > 0 else None,
