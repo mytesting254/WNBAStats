@@ -9,7 +9,7 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .bootstrap import ensure_team, ensure_teams
+from .bootstrap import ensure_team, ensure_teams, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
 from .game_resolver import resolve_or_create_game
 from .timezone_utils import APP_TIMEZONE
@@ -18,14 +18,6 @@ from .timezone_utils import APP_TIMEZONE
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary"
 LOCAL_TZ = APP_TIMEZONE
-ESPN_TEAM_ALIASES = {
-    "CONN": "CON",
-    "CON": "CON",
-    "WSH": "WSH",
-    "WSHINGTON": "WSH",
-}
-
-
 def fetch_scoreboard(season: int, force_refresh: bool = False, selected_date: str | None = None) -> dict[str, Any]:
     dates_param = _scoreboard_dates_param(season, selected_date)
     cache_name = f"espn_wnba_scoreboard_{dates_param}.json"
@@ -372,8 +364,7 @@ def _parse_score(competitor: dict[str, Any]) -> int | None:
 
 def _team_id(conn: sqlite3.Connection, competitor: dict[str, Any]) -> int | None:
     team = competitor.get("team") or {}
-    abbreviation = str(team.get("abbreviation") or "").upper()
-    abbreviation = ESPN_TEAM_ALIASES.get(abbreviation, abbreviation)
+    abbreviation = normalize_team_abbreviation(str(team.get("abbreviation") or ""))
     display_name = str(team.get("displayName") or team.get("shortDisplayName") or abbreviation)
     return ensure_team(conn, abbreviation or display_name)
 
@@ -451,8 +442,7 @@ def _player_stat_rows(conn: sqlite3.Connection, game_id: int, payload: dict[str,
 
 
 def _boxscore_team_id(conn: sqlite3.Connection, team_box: dict[str, Any]) -> int | None:
-    abbreviation = str((team_box.get("team") or {}).get("abbreviation") or "").upper()
-    abbreviation = ESPN_TEAM_ALIASES.get(abbreviation, abbreviation)
+    abbreviation = normalize_team_abbreviation(str((team_box.get("team") or {}).get("abbreviation") or ""))
     team = team_box.get("team") or {}
     display_name = str(team.get("displayName") or team.get("shortDisplayName") or abbreviation).strip()
     return ensure_team(conn, abbreviation or display_name)

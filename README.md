@@ -78,6 +78,8 @@ The app is built around a provider-backed pregame workflow:
 - `Roster` remains a separate read tab.
 - Roster data is visible normally.
 - `Refresh Roster` is hidden unless the viewer has an active admin session.
+- Rotowire and ESPN now share the same backend team alias normalization, so city-only or nickname-only labels such as `Chicago`, `Sky`, `Portland`, or `Fire` resolve to the same internal team codes.
+- Roster enrichment also normalizes abbreviated/accented player names before lookup, reducing `N/A` role/position rows for provider spellings like `C. Vandersloot`, `D. Carrington`, `K. Samuelson`, or `Luisa Geiselsoder` / `Luisa Geiselsöder`.
 
 ## GitHub Codespaces
 
@@ -506,6 +508,8 @@ GET /api/roster
 ```
 
 `/api/roster` reads the Rotowire lineup pull/cache rows and returns `team`, `player_name`, `status`, and `captured_at` so team tabs can render current lineup status even when ESPN player IDs are not yet present.
+
+Roster enrichment still attempts to match those provider names back to local player profiles for `position`, `rotation_role`, and impact metrics. Team normalization is shared with ESPN imports, and player matching now tolerates abbreviated first names plus accent/punctuation differences so provider naming drift is less likely to produce `N/A` roster metadata.
 
 Each Rotowire pull also writes a normalized roster snapshot cache:
 

@@ -235,6 +235,14 @@ So an absent or very small H2H view is not always a bug.
 
 - roster data is readable normally
 - `Refresh Roster` is admin-only
+- Rotowire and ESPN team labels should normalize to the same internal team code before roster enrichment runs.
+
+### If Some Roster Rows Show `N/A`
+
+- first check whether the issue is a player-name or team-alias mismatch rather than missing roster data
+- city-only or nickname-only team labels such as `Chicago`, `Sky`, `Portland`, or `Fire` should now normalize correctly
+- abbreviated or accented player spellings such as `C. Vandersloot`, `D. Carrington`, `K. Samuelson`, or `Luisa Geiselsöder` should resolve to the local player profile if the player exists in the DB
+- if only `position` / `role` / impact fields are `N/A`, but `player_name`, `team`, and `status` are present, inspect roster-player resolution before changing Rotowire parsing
 
 If the roster tab is missing entirely or the `Data` tab breaks after roster changes, compare the current frontend against the last known-good tab layout before changing backend behavior.
 
