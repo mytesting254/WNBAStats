@@ -1290,78 +1290,80 @@ function DataView({
         </div>
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
-        <article className="operation-card">
-          <div>
-            <p className="eyebrow">live pipeline</p>
-            <h3>{pipelineLabel}</h3>
-            <p>{pipelineDetail}</p>
-            <div className="progress-block" aria-live="polite">
-              <div className="progress-meta">
-                <strong>{pipelineStageLabel}</strong>
-                <span>{pipelinePercent}%</span>
-              </div>
-              <div className="progress-track" role="progressbar" aria-valuenow={pipelinePercent} aria-valuemin={0} aria-valuemax={100}>
-                <div className="progress-fill" style={{ width: `${pipelinePercent}%` }} />
-              </div>
-              <p className="progress-caption">
-                {pipelineRunning
-                  ? activePipeline?.waitingForBackground
-                    ? (propSync?.current != null && propSync?.total != null && propSync.total > 0
-                      ? `${propSync.current} of ${propSync.total} background steps complete`
-                      : "Waiting for background prop sync progress.")
-                    : "Request is running on the backend."
-                  : propSync?.current != null && propSync?.total != null && propSync.total > 0
-                    ? `${propSync.current} of ${propSync.total} complete`
-                    : "No active ingest request."}
-              </p>
-            </div>
-          </div>
-          <div className="detail-grid">
-            <Metric label="Request" value={pipelineRunning ? "Active" : "Idle"} />
-            <Metric label="Phase" value={pipelineStageLabel} />
-            <Metric label="Started" value={pipelineRunning ? formatDateTime(activePipeline?.startedAt) : formatDateTime(propSync?.started_at)} />
-            <Metric
-              label="Background"
-              value={pipelineRunning ? (activePipeline?.waitingForBackground ? "Queued" : "None") : (propSync?.running ? "Running" : "Idle")}
-            />
-          </div>
-        </article>
-        <article className="operation-card">
-          <div>
-            <p className="eyebrow">prop sync queue</p>
-            <h3>{queueLabel}</h3>
-            <p>{queueDetail}</p>
-            {propSync ? (
+        <div className="status-card-row">
+          <article className="operation-card operation-card-compact">
+            <div>
+              <p className="eyebrow">live pipeline</p>
+              <h3>{pipelineLabel}</h3>
+              <p>{pipelineDetail}</p>
               <div className="progress-block" aria-live="polite">
                 <div className="progress-meta">
-                  <strong>{progressStageLabel}</strong>
-                  <span>{progressPercent}%</span>
+                  <strong>{pipelineStageLabel}</strong>
+                  <span>{pipelinePercent}%</span>
                 </div>
-                <div className="progress-track" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100}>
-                  <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+                <div className="progress-track" role="progressbar" aria-valuenow={pipelinePercent} aria-valuemin={0} aria-valuemax={100}>
+                  <div className="progress-fill" style={{ width: `${pipelinePercent}%` }} />
                 </div>
                 <p className="progress-caption">
-                  {propSync.current != null && propSync.total != null && propSync.total > 0
-                    ? `${propSync.current} of ${propSync.total} complete`
-                    : propSync.running
-                      ? "Waiting for first completed step."
-                      : "No active background job."}
+                  {pipelineRunning
+                    ? activePipeline?.waitingForBackground
+                      ? (propSync?.current != null && propSync?.total != null && propSync.total > 0
+                        ? `${propSync.current} of ${propSync.total} background steps complete`
+                        : "Waiting for background prop sync progress.")
+                      : "Request is running on the backend."
+                    : propSync?.current != null && propSync?.total != null && propSync.total > 0
+                      ? `${propSync.current} of ${propSync.total} complete`
+                      : "No active ingest request."}
                 </p>
               </div>
-            ) : null}
-            {propSync?.last_error ? <p className="reason">Last error: {propSync.last_error}</p> : null}
-          </div>
-          <div className="detail-grid">
-            <Metric label="Running" value={propSync?.running ? "Yes" : "No"} />
-            <Metric label="Phase" value={progressStageLabel} />
-            <Metric label="Started" value={formatDateTime(propSync?.started_at)} />
-            <Metric label="Finished" value={formatDateTime(propSync?.finished_at)} />
-            <Metric
-              label="Last result"
-              value={propSync?.last_result && Object.keys(propSync.last_result).length ? "Ready" : "None"}
-            />
-          </div>
-        </article>
+            </div>
+            <div className="detail-grid detail-grid-compact">
+              <Metric label="Request" value={pipelineRunning ? "Active" : "Idle"} />
+              <Metric label="Phase" value={pipelineStageLabel} />
+              <Metric label="Started" value={pipelineRunning ? formatDateTime(activePipeline?.startedAt) : formatDateTime(propSync?.started_at)} />
+              <Metric
+                label="Background"
+                value={pipelineRunning ? (activePipeline?.waitingForBackground ? "Queued" : "None") : (propSync?.running ? "Running" : "Idle")}
+              />
+            </div>
+          </article>
+          <article className="operation-card operation-card-compact">
+            <div>
+              <p className="eyebrow">prop sync queue</p>
+              <h3>{queueLabel}</h3>
+              <p>{queueDetail}</p>
+              {propSync ? (
+                <div className="progress-block" aria-live="polite">
+                  <div className="progress-meta">
+                    <strong>{progressStageLabel}</strong>
+                    <span>{progressPercent}%</span>
+                  </div>
+                  <div className="progress-track" role="progressbar" aria-valuenow={progressPercent} aria-valuemin={0} aria-valuemax={100}>
+                    <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
+                  </div>
+                  <p className="progress-caption">
+                    {propSync.current != null && propSync.total != null && propSync.total > 0
+                      ? `${propSync.current} of ${propSync.total} complete`
+                      : propSync.running
+                        ? "Waiting for first completed step."
+                        : "No active background job."}
+                  </p>
+                </div>
+              ) : null}
+              {propSync?.last_error ? <p className="reason">Last error: {propSync.last_error}</p> : null}
+            </div>
+            <div className="detail-grid detail-grid-compact">
+              <Metric label="Running" value={propSync?.running ? "Yes" : "No"} />
+              <Metric label="Phase" value={progressStageLabel} />
+              <Metric label="Started" value={formatDateTime(propSync?.started_at)} />
+              <Metric label="Finished" value={formatDateTime(propSync?.finished_at)} />
+              <Metric
+                label="Last result"
+                value={propSync?.last_result && Object.keys(propSync.last_result).length ? "Ready" : "None"}
+              />
+            </div>
+          </article>
+        </div>
         {!isAdmin ? (
           <article className="operation-card">
             <div>

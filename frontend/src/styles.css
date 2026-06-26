@@ -277,6 +277,13 @@ h3 {
   padding: 18px;
 }
 
+.status-card-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  padding: 18px 18px 0;
+}
+
 .operation-card {
   display: flex;
   min-height: 260px;
@@ -287,6 +294,11 @@ h3 {
   border: 1px solid #eaecf0;
   border-radius: 8px;
   background: #ffffff;
+}
+
+.operation-card-compact {
+  min-height: 214px;
+  gap: 14px;
 }
 
 .operation-card h3 {
@@ -612,6 +624,10 @@ tbody tr.selected {
   margin-bottom: 18px;
 }
 
+.detail-grid-compact {
+  margin-bottom: 0;
+}
+
 .model-validation-grid {
   margin-top: 12px;
   margin-bottom: 0;
@@ -625,6 +641,20 @@ tbody tr.selected {
 .detail-grid .metric strong {
   font-size: 18px;
   text-transform: capitalize;
+}
+
+.detail-grid-compact .metric {
+  min-height: 64px;
+  padding: 10px;
+}
+
+.detail-grid-compact .metric span {
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+
+.detail-grid-compact .metric strong {
+  font-size: 16px;
 }
 
 .reason {
@@ -1572,6 +1602,7 @@ tbody tr.selected {
   .matchup-grid,
   .team-comparison,
   .model-layout,
+  .status-card-row,
   .data-layout,
   .prediction-strip,
   .covers-records-panel,
