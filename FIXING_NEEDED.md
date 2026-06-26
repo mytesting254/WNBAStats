@@ -42,6 +42,12 @@
 
 ## Current Model Quality Follow-Up
 
+- [ ] Prioritize settled prop history expansion before further model complexity work; current residual markets are still thin (`points 354`, `rebounds 299`, `threes 204`, `assists 67`, `PRA 71`, `PR 37`, `PA 34`, `RA 26`).
+- [x] Import at least one additional full WNBA season of player/game history to improve early-season stability, rookie handling, and matchup/context coverage.
+- [x] Upgrade evaluation from simple chronological 80/20 holdout to season-aware walk-forward backtests segmented by market and season/month window.
+- [x] Add explicit baseline comparisons in Model Lab / reporting against `last_10_avg` and the component model so learned-model gains are measurable.
+- [ ] Separate model strategy by market depth: keep stronger learned/residual behavior for deeper markets and use more conservative shrinkage for sparse combo markets.
+- [ ] Focus the next feature pass on minutes and role-change prediction quality before trying more complex regressors.
 - [ ] Review active-slate props after the residual-model rollout to see which markets still look too aggressive or too weak.
 - [ ] Re-run before/after projection comparison after the archetype restore to quantify how many rows moved.
 - [ ] Measure how often the residual model changes recommended side versus the raw stat model.
@@ -55,6 +61,8 @@
 
 ## Data / Evaluation Follow-Up
 
+- [x] Backfill the main runtime DB with the currently available deploy-history window (`2025-05-02` through `2026-06-04`) so local evaluation does not depend on the deploy snapshot file alone.
+- [ ] Confirm whether older pre-2025 seasons can be imported cleanly enough to support one-more-season model training without breaking team/player identity joins.
 - [ ] Run a fresh WNBA settled-accuracy review on the current branch state.
 - [x] Reconfirm repaired early-2026 matchup market coverage for settled props that were missing spread/total context.
 - [ ] Reconfirm historical label coverage, especially whether `2025` settled props are still missing from the main runtime path.
@@ -64,6 +72,7 @@
 
 - [ ] Decide whether to repair the unrelated baseline failures in `backend/tests/test_projection.py` so full-file runs are clean again.
 - [ ] Keep frontend asset deployment reliable so manual volume syncs are not needed after every WNBA frontend change.
+- [x] Make unchanged local training reruns reuse the latest matching `model_runs` result instead of recomputing the same walk-forward benchmark.
 
 ## Notes
 
@@ -83,4 +92,18 @@
   - live WNBA deployment/docs cleanup so The Odds API path uses `ODDS_API_KEY` only
   - active-date filtering when replaying cached Odds API event payloads
   - combined Covers + Odds API raw row inventory in `sportsbook_prop_lines` instead of game-level Covers-only suppression during sync
+  - segmented walk-forward player-prop evaluation saved in `model_runs` with per-market baseline deltas and segment counts
+  - Model Lab display for baseline-vs-model deltas and evaluation segment coverage
+  - connection-scoped historical training caches for player rows, archetypes, matchup factors, and context reuse
+  - parallel per-market training evaluation in `run_walk_forward_training()`
+  - signature-based reuse of unchanged `model_runs` so repeat local training returns instantly when the data has not changed
+- Current data state checked on `2026-06-26`:
+  - local `data/wnba.sqlite` now mirrors the deploy snapshot and includes imported `2024` ESPN history
+  - active local history spans `2024-05-03` through `2026-09-24`
+  - `686` final games plus `259` scheduled future games
+  - `player_game_stats`: `13,196` rows across `435` players
+  - `settled_props`: `1,092` rows
+  - latest saved segmented walk-forward learned-model run used `123,750` evaluation rows total
+  - latest saved local walk-forward run (`2026-06-26T17:03:18Z`) finished in about `1m 41s`
+  - unchanged repeat training call on the same DB state returned the cached run in about `0.65s`
 - Nyara Sabally rebounds projection exists in the live DB and was being hidden by value-board gating, not missing from the model pipeline.

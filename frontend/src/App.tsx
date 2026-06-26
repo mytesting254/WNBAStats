@@ -1889,13 +1889,19 @@ function ModelsView({
             <p className="eyebrow">Latest run</p>
             <h3>{latest?.model_version ?? "No run yet"}</h3>
             <p className="reason">
-              {latest?.notes ?? "Run training to create a walk-forward benchmark. This does not use future games for each row."}
+              {latest?.notes ?? "Run training to create a segmented walk-forward benchmark. This does not use future games for each evaluation window."}
             </p>
             <div className="detail-grid">
               <Metric label="Status" value={latest?.status ?? "Pending"} />
-              <Metric label="Holdout rows" value={(latest?.training_rows ?? 0).toString()} />
+              <Metric label="Eval rows" value={(latest?.training_rows ?? 0).toString()} />
               <Metric label="Type" value={latest?.run_type ?? "N/A"} />
               <Metric label="Finished" value={latest?.finished_at ? formatDate(latest.finished_at) : "N/A"} />
+            </div>
+            <div className="detail-grid model-validation-grid">
+              <Metric label="Base MAE" value={formatMetricNumber(overallMetric?.baseline_mae)} />
+              <Metric label="MAE delta" value={formatMetricSigned(overallMetric?.mae_improvement, 3)} />
+              <Metric label="Base RMSE" value={formatMetricNumber(overallMetric?.baseline_rmse)} />
+              <Metric label="RMSE delta" value={formatMetricSigned(overallMetric?.rmse_improvement, 3)} />
             </div>
             <div className="detail-grid model-validation-grid">
               <Metric label="Settled rows" value={formatCount(overallMetric?.settled_rows)} />
@@ -1904,10 +1910,16 @@ function ModelsView({
               <Metric label="Realized ROI" value={formatMetricPercent(overallMetric?.realized_roi)} />
             </div>
             <div className="detail-grid model-validation-grid">
+              <Metric label="Eval segments" value={formatCount(overallMetric?.segment_count)} />
+              <Metric label="Skipped segs" value={formatCount(overallMetric?.skipped_segments)} />
               <Metric label="Game eval rows" value={formatCount(overallGameMetric?.rows)} />
               <Metric label="Game MAE delta" value={formatMetricSigned(overallGameMetric?.mae_improvement, 3)} />
+            </div>
+            <div className="detail-grid model-validation-grid">
               <Metric label="Game RMSE delta" value={formatMetricSigned(overallGameMetric?.rmse_improvement, 3)} />
               <Metric label="Game dir delta" value={formatMetricPercent(overallGameMetric?.directional_accuracy_improvement)} />
+              <Metric label="Bias" value={formatMetricSigned(overallMetric?.bias, 3)} />
+              <Metric label="Base bias" value={formatMetricSigned(overallMetric?.baseline_bias, 3)} />
             </div>
           </div>
           <div className="model-card">
@@ -1919,9 +1931,16 @@ function ModelsView({
                     <th>Market</th>
                     <th>Rows</th>
                     <th>MAE</th>
+                    <th>Base MAE</th>
+                    <th>MAE delta</th>
                     <th>RMSE</th>
+                    <th>Base RMSE</th>
+                    <th>RMSE delta</th>
                     <th>Bias</th>
+                    <th>Base bias</th>
                     <th>Direction</th>
+                    <th>Segments</th>
+                    <th>Skipped</th>
                     <th>Settled</th>
                     <th>Win rate</th>
                     <th>Cal gap</th>
@@ -1937,9 +1956,16 @@ function ModelsView({
                       <td>{marketLabel(market)}</td>
                       <td>{metric.rows}</td>
                       <td>{formatNumber(metric.mae)}</td>
+                      <td>{formatMetricNumber(metric.baseline_mae)}</td>
+                      <td>{formatMetricSigned(metric.mae_improvement, 3)}</td>
                       <td>{formatNumber(metric.rmse)}</td>
+                      <td>{formatMetricNumber(metric.baseline_rmse)}</td>
+                      <td>{formatMetricSigned(metric.rmse_improvement, 3)}</td>
                       <td>{formatSigned(metric.bias)}</td>
+                      <td>{formatMetricSigned(metric.baseline_bias, 3)}</td>
                       <td>{formatPercent(metric.directional_accuracy ?? undefined)}</td>
+                      <td>{formatCount(metric.segment_count)}</td>
+                      <td>{formatCount(metric.skipped_segments)}</td>
                       <td>{formatCount(metric.settled_rows)}</td>
                       <td>{formatMetricPercent(metric.side_accuracy)}</td>
                       <td>{formatMetricPercent(metric.calibration_gap)}</td>
@@ -1951,7 +1977,7 @@ function ModelsView({
                   ))}
                   {!playerMetrics.length && (
                     <tr>
-                      <td colSpan={13}>No model metrics yet.</td>
+                      <td colSpan={18}>No model metrics yet.</td>
                     </tr>
                   )}
                 </tbody>

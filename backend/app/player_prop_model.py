@@ -8,6 +8,11 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from functools import lru_cache
 
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - fallback remains exercised without numpy installed
+    np = None
+
 from .odds import american_to_implied_probability
 
 
@@ -106,6 +111,7 @@ _CONNECTION_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | N
 _CONNECTION_RESIDUAL_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_MINUTES_MODEL_CACHE: dict[tuple[int, str | None, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_GAME_TOTAL_MEAN_CACHE: dict[int, float] = {}
+_CONNECTION_TRAINING_CACHE: dict[int, dict[str, dict[tuple, object]]] = {}
 
 MINUTES_ROLE_BUCKETS = ["core_starter", "starter_volatile", "rotation", "bench", "fringe"]
 
@@ -127,6 +133,16 @@ class RidgeModel:
     coefficients: list[float]
     feature_means: list[float]
     feature_scales: list[float]
+
+
+@dataclass(frozen=True)
+class TrainingSample:
+    features: list[float]
+    target: float
+    game_date: str
+    season: str
+    segment: str
+    baseline: float
 
 
 @dataclass(frozen=True)
@@ -461,15 +477,29 @@ def feature_snapshot(
         consistency_score=consistency_score,
     )
 
-    pace_factor = _pace_factor(conn, context["team_id"], context["opponent_id"]) if context else 1.0
-    opponent_factor = _opponent_factor(conn, context["opponent_id"], market) if context else 1.0
-    common_opponent_factor = _common_opponent_factor(conn, player_id, market, context, before_game_date) if context else 1.0
-    h2h_factor = _h2h_factor(conn, player_id, market, context, before_game_date) if context else 1.0
+    pace_factor = _cached_pace_factor(conn, context["team_id"], context["opponent_id"]) if context else 1.0
+    opponent_factor = _cached_opponent_factor(conn, context["opponent_id"], market) if context else 1.0
+    common_opponent_factor = _cached_common_opponent_factor(
+        conn,
+        player_id,
+        market,
+        context,
+        before_game_date,
+        baseline_avg=last_10_avg,
+    ) if context else 1.0
+    h2h_factor = _cached_h2h_factor(
+        conn,
+        player_id,
+        market,
+        context,
+        before_game_date,
+        baseline_avg=last_10_avg,
+    ) if context else 1.0
     home_factor = 1.02 if context and context["is_home"] else 0.99
     rest_factor = _rest_factor(context["rest_days"]) if context else 1.0
     usage_multiplier, adjustment_note = _manual_adjustment(conn, player_id)
     usage_multiplier *= injury["usage_multiplier"]
-    archetype = _player_archetype_profile(
+    archetype = _cached_player_archetype_profile(
         conn,
         player_id=player_id,
         reference_game_date=reference_game_date,
@@ -613,6 +643,7 @@ def clear_model_cache() -> None:
     _train_minutes_model_cached.cache_clear()
     _CONNECTION_MINUTES_MODEL_CACHE.clear()
     _CONNECTION_GAME_TOTAL_MEAN_CACHE.clear()
+    _CONNECTION_TRAINING_CACHE.clear()
 
 
 def _train_market_model_uncached(
@@ -620,7 +651,7 @@ def _train_market_model_uncached(
     market: str,
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
-    rows = _training_rows(conn, market)
+    rows = [(sample.features, sample.target) for sample in _training_samples(conn, market)]
     model = _fit_model_from_rows(market, rows, config=config)
     if model is not None:
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
@@ -634,7 +665,7 @@ def _train_market_residual_model_uncached(
     market: str,
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
-    rows = _residual_training_rows(conn, market)
+    rows = [(sample.features, sample.target) for sample in _residual_training_samples(conn, market)]
     model = _fit_model_from_rows(f"residual:{market}", rows, config=config)
     if model is not None:
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
@@ -649,37 +680,10 @@ def evaluate_market_model(
     config: ModelTuningConfig | None = None,
 ) -> dict:
     tuning = config or DEFAULT_TUNING_CONFIG
-    rows = _training_rows(conn, market)
-    if len(rows) < 20:
+    samples = _training_samples(conn, market)
+    if len(samples) < 20:
         return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
-    split = max(int(len(rows) * 0.8), 10)
-    train_rows = rows[:split]
-    test_rows = rows[split:]
-    model = _fit_model_from_rows(market, train_rows, config=tuning)
-    if not model or not test_rows:
-        return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
-
-    errors = []
-    absolute_errors = []
-    squared_errors = []
-    direction_hits = 0
-    for features, actual in test_rows:
-        prediction = max(0.0, _predict(model, features))
-        error = prediction - actual
-        errors.append(error)
-        absolute_errors.append(abs(error))
-        squared_errors.append(error * error)
-        baseline = features[FEATURE_NAMES.index("last_10_avg")]
-        if (prediction >= baseline and actual >= baseline) or (prediction < baseline and actual < baseline):
-            direction_hits += 1
-    row_count = len(test_rows)
-    return {
-        "rows": row_count,
-        "mae": round(sum(absolute_errors) / row_count, 3),
-        "rmse": round(math.sqrt(sum(squared_errors) / row_count), 3),
-        "bias": round(sum(errors) / row_count, 3),
-        "directional_accuracy": round(direction_hits / row_count, 3),
-    }
+    return _evaluate_walk_forward_samples(market, samples, config=tuning)
 
 
 def evaluate_market_residual_model(
@@ -688,8 +692,8 @@ def evaluate_market_residual_model(
     config: ModelTuningConfig | None = None,
 ) -> dict:
     tuning = config or DEFAULT_TUNING_CONFIG
-    rows = _residual_training_rows(conn, market)
-    if len(rows) < 20:
+    samples = _residual_training_samples(conn, market)
+    if len(samples) < 20:
         return {
             "residual_rows": 0,
             "residual_mae": None,
@@ -697,38 +701,23 @@ def evaluate_market_residual_model(
             "residual_bias": None,
             "residual_directional_accuracy": None,
         }
-    split = max(int(len(rows) * 0.8), 10)
-    train_rows = rows[:split]
-    test_rows = rows[split:]
-    model = _fit_model_from_rows(f"residual:{market}", train_rows, config=tuning)
-    if not model or not test_rows:
-        return {
-            "residual_rows": 0,
-            "residual_mae": None,
-            "residual_rmse": None,
-            "residual_bias": None,
-            "residual_directional_accuracy": None,
-        }
-
-    errors = []
-    absolute_errors = []
-    squared_errors = []
-    direction_hits = 0
-    for features, actual_residual in test_rows:
-        prediction = _predict(model, features)
-        error = prediction - actual_residual
-        errors.append(error)
-        absolute_errors.append(abs(error))
-        squared_errors.append(error * error)
-        if (prediction >= 0 and actual_residual >= 0) or (prediction < 0 and actual_residual < 0):
-            direction_hits += 1
-    row_count = len(test_rows)
+    metrics = _evaluate_walk_forward_samples(f"residual:{market}", samples, config=tuning)
     return {
-        "residual_rows": row_count,
-        "residual_mae": round(sum(absolute_errors) / row_count, 3),
-        "residual_rmse": round(math.sqrt(sum(squared_errors) / row_count), 3),
-        "residual_bias": round(sum(errors) / row_count, 3),
-        "residual_directional_accuracy": round(direction_hits / row_count, 3),
+        "residual_rows": metrics["rows"],
+        "residual_mae": metrics["mae"],
+        "residual_rmse": metrics["rmse"],
+        "residual_bias": metrics["bias"],
+        "residual_directional_accuracy": metrics["directional_accuracy"],
+        "residual_baseline_mae": metrics.get("baseline_mae"),
+        "residual_baseline_rmse": metrics.get("baseline_rmse"),
+        "residual_baseline_directional_accuracy": metrics.get("baseline_directional_accuracy"),
+        "residual_mae_improvement": metrics.get("mae_improvement"),
+        "residual_rmse_improvement": metrics.get("rmse_improvement"),
+        "residual_directional_accuracy_improvement": metrics.get("directional_accuracy_improvement"),
+        "residual_segment_count": metrics.get("segment_count"),
+        "residual_skipped_segments": metrics.get("skipped_segments"),
+        "residual_seasons": metrics.get("seasons"),
+        "residual_segments": metrics.get("segments"),
     }
 
 
@@ -764,44 +753,49 @@ def _fit_model_from_rows(
     )
 
 
-def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
-    samples = []
+def _training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSample]:
+    samples: list[TrainingSample] = []
     players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
     for player in players:
-        rows = conn.execute(
-            """
-            SELECT
-                s.*,
-                g.game_date,
-                g.home_team_id,
-                g.away_team_id,
-                g.rest_days_home,
-                g.rest_days_away,
-                g.spread_home,
-                g.game_total,
-                p.team_id,
-                p.rotation_role
-            FROM player_game_stats s
-            JOIN games g ON g.id = s.game_id
-            JOIN players p ON p.id = s.player_id
-            WHERE s.player_id = ?
-            ORDER BY g.game_date ASC, s.game_id ASC
-            """,
-            (player["id"],),
-        ).fetchall()
+        rows = _player_training_rows(conn, int(player["id"]))
         values = [_market_value(row, market) for row in rows]
         minutes = [float(row["minutes"]) for row in rows]
         for idx in range(5, len(rows)):
             history = values[max(0, idx - 10):idx]
             minute_history = minutes[max(0, idx - 10):idx]
+            recent_rows = rows[max(0, idx - 10):idx]
             previous_game_date = str(rows[idx - 1]["game_date"]) if idx > 0 else None
-            features = _historical_training_features(conn, rows[idx], history, minute_history, market, previous_game_date)
-            samples.append((features, values[idx]))
+            features = _historical_training_features(
+                conn,
+                rows[idx],
+                history,
+                minute_history,
+                market,
+                previous_game_date,
+                recent_rows=recent_rows,
+                player_rows=rows,
+                row_index=idx,
+            )
+            game_date = str(rows[idx]["game_date"])
+            samples.append(
+                TrainingSample(
+                    features=features,
+                    target=values[idx],
+                    game_date=game_date,
+                    season=game_date[:4],
+                    segment=game_date[:7],
+                    baseline=float(features[FEATURE_NAMES.index("last_10_avg")]),
+                )
+            )
     return samples
 
 
-def _residual_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
-    samples = []
+def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
+    return [(sample.features, sample.target) for sample in _training_samples(conn, market)]
+
+
+def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSample]:
+    samples: list[TrainingSample] = []
     rows = conn.execute(
         """
         SELECT
@@ -832,8 +826,274 @@ def _residual_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple
         if not snapshot.values:
             continue
         target = float(row["actual_result"]) - float(row["line"])
-        samples.append((snapshot.values, target))
+        game_date = str(row["game_date"])
+        samples.append(
+            TrainingSample(
+                features=snapshot.values,
+                target=target,
+                game_date=game_date,
+                season=game_date[:4],
+                segment=game_date[:7],
+                baseline=0.0,
+            )
+        )
     return samples
+
+
+def _residual_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
+    return [(sample.features, sample.target) for sample in _residual_training_samples(conn, market)]
+
+
+def _evaluate_walk_forward_samples(
+    market: str,
+    samples: list[TrainingSample],
+    *,
+    config: ModelTuningConfig,
+) -> dict:
+    ordered = sorted(samples, key=lambda sample: (sample.segment, sample.game_date))
+    if len(ordered) < 20:
+        return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
+
+    grouped_segments: dict[str, list[TrainingSample]] = {}
+    for sample in ordered:
+        grouped_segments.setdefault(sample.segment, []).append(sample)
+
+    history: list[tuple[list[float], float]] = []
+    evaluated_segments: list[dict[str, object]] = []
+    season_rollup: dict[str, dict[str, float | int]] = {}
+    errors: list[float] = []
+    squared_errors: list[float] = []
+    absolute_errors: list[float] = []
+    baseline_errors: list[float] = []
+    baseline_squared_errors: list[float] = []
+    baseline_absolute_errors: list[float] = []
+    direction_hits = 0
+    skipped_segments = 0
+
+    for segment, segment_samples in grouped_segments.items():
+        if len(history) < 20:
+            history.extend((sample.features, sample.target) for sample in segment_samples)
+            skipped_segments += 1
+            continue
+        model = _fit_model_from_rows(market, history, config=config)
+        if model is None:
+            history.extend((sample.features, sample.target) for sample in segment_samples)
+            skipped_segments += 1
+            continue
+        segment_errors: list[float] = []
+        segment_squared_errors: list[float] = []
+        segment_absolute_errors: list[float] = []
+        segment_baseline_errors: list[float] = []
+        segment_baseline_squared_errors: list[float] = []
+        segment_baseline_absolute_errors: list[float] = []
+        segment_direction_hits = 0
+        season = segment_samples[0].season
+        for sample in segment_samples:
+            prediction = max(0.0, _predict(model, sample.features)) if not market.startswith("residual:") else _predict(model, sample.features)
+            error = prediction - sample.target
+            baseline_error = sample.baseline - sample.target
+            errors.append(error)
+            squared_errors.append(error * error)
+            absolute_errors.append(abs(error))
+            baseline_errors.append(baseline_error)
+            baseline_squared_errors.append(baseline_error * baseline_error)
+            baseline_absolute_errors.append(abs(baseline_error))
+            segment_errors.append(error)
+            segment_squared_errors.append(error * error)
+            segment_absolute_errors.append(abs(error))
+            segment_baseline_errors.append(baseline_error)
+            segment_baseline_squared_errors.append(baseline_error * baseline_error)
+            segment_baseline_absolute_errors.append(abs(baseline_error))
+            if (prediction >= sample.baseline and sample.target >= sample.baseline) or (prediction < sample.baseline and sample.target < sample.baseline):
+                direction_hits += 1
+                segment_direction_hits += 1
+        row_count = len(segment_samples)
+        segment_metric = {
+            "segment": segment,
+            "season": season,
+            "rows": row_count,
+            "mae": round(sum(segment_absolute_errors) / row_count, 3),
+            "rmse": round(math.sqrt(sum(segment_squared_errors) / row_count), 3),
+            "bias": round(sum(segment_errors) / row_count, 3),
+            "directional_accuracy": round(segment_direction_hits / row_count, 3),
+            "baseline_mae": round(sum(segment_baseline_absolute_errors) / row_count, 3),
+            "baseline_rmse": round(math.sqrt(sum(segment_baseline_squared_errors) / row_count), 3),
+            "baseline_bias": round(sum(segment_baseline_errors) / row_count, 3),
+            "baseline_directional_accuracy": None,
+        }
+        segment_metric["mae_improvement"] = round(float(segment_metric["baseline_mae"]) - float(segment_metric["mae"]), 3)
+        segment_metric["rmse_improvement"] = round(float(segment_metric["baseline_rmse"]) - float(segment_metric["rmse"]), 3)
+        segment_metric["directional_accuracy_improvement"] = None
+        evaluated_segments.append(segment_metric)
+        season_bucket = season_rollup.setdefault(
+            season,
+            {
+                "rows": 0,
+                "mae_sum": 0.0,
+                "rmse_sum": 0.0,
+                "bias_sum": 0.0,
+                "direction_sum": 0.0,
+                "baseline_mae_sum": 0.0,
+                "baseline_rmse_sum": 0.0,
+                "baseline_bias_sum": 0.0,
+            },
+        )
+        season_bucket["rows"] = int(season_bucket["rows"]) + row_count
+        season_bucket["mae_sum"] = float(season_bucket["mae_sum"]) + float(segment_metric["mae"]) * row_count
+        season_bucket["rmse_sum"] = float(season_bucket["rmse_sum"]) + float(segment_metric["rmse"]) * row_count
+        season_bucket["bias_sum"] = float(season_bucket["bias_sum"]) + float(segment_metric["bias"]) * row_count
+        season_bucket["direction_sum"] = float(season_bucket["direction_sum"]) + float(segment_metric["directional_accuracy"]) * row_count
+        season_bucket["baseline_mae_sum"] = float(season_bucket["baseline_mae_sum"]) + float(segment_metric["baseline_mae"]) * row_count
+        season_bucket["baseline_rmse_sum"] = float(season_bucket["baseline_rmse_sum"]) + float(segment_metric["baseline_rmse"]) * row_count
+        season_bucket["baseline_bias_sum"] = float(season_bucket["baseline_bias_sum"]) + float(segment_metric["baseline_bias"]) * row_count
+        history.extend((sample.features, sample.target) for sample in segment_samples)
+
+    row_count = len(errors)
+    if row_count == 0:
+        return _evaluate_holdout_samples(market, ordered, config=config)
+
+    seasons = []
+    for season, bucket in sorted(season_rollup.items()):
+        season_rows = int(bucket["rows"])
+        season_metric = {
+            "season": season,
+            "rows": season_rows,
+            "mae": round(float(bucket["mae_sum"]) / season_rows, 3),
+            "rmse": round(float(bucket["rmse_sum"]) / season_rows, 3),
+            "bias": round(float(bucket["bias_sum"]) / season_rows, 3),
+            "directional_accuracy": round(float(bucket["direction_sum"]) / season_rows, 3),
+            "baseline_mae": round(float(bucket["baseline_mae_sum"]) / season_rows, 3),
+            "baseline_rmse": round(float(bucket["baseline_rmse_sum"]) / season_rows, 3),
+            "baseline_bias": round(float(bucket["baseline_bias_sum"]) / season_rows, 3),
+            "baseline_directional_accuracy": None,
+        }
+        season_metric["mae_improvement"] = round(float(season_metric["baseline_mae"]) - float(season_metric["mae"]), 3)
+        season_metric["rmse_improvement"] = round(float(season_metric["baseline_rmse"]) - float(season_metric["rmse"]), 3)
+        season_metric["directional_accuracy_improvement"] = None
+        seasons.append(season_metric)
+
+    baseline_mae = sum(baseline_absolute_errors) / row_count
+    baseline_rmse = math.sqrt(sum(baseline_squared_errors) / row_count)
+    baseline_bias = sum(baseline_errors) / row_count
+    mae = sum(absolute_errors) / row_count
+    rmse = math.sqrt(sum(squared_errors) / row_count)
+    directional_accuracy = direction_hits / row_count
+    return {
+        "rows": row_count,
+        "mae": round(mae, 3),
+        "rmse": round(rmse, 3),
+        "bias": round(sum(errors) / row_count, 3),
+        "directional_accuracy": round(directional_accuracy, 3),
+        "baseline_mae": round(baseline_mae, 3),
+        "baseline_rmse": round(baseline_rmse, 3),
+        "baseline_bias": round(baseline_bias, 3),
+        "baseline_directional_accuracy": None,
+        "mae_improvement": round(baseline_mae - mae, 3),
+        "rmse_improvement": round(baseline_rmse - rmse, 3),
+        "directional_accuracy_improvement": None,
+        "segment_count": len(evaluated_segments),
+        "skipped_segments": skipped_segments,
+        "segments": evaluated_segments,
+        "seasons": seasons,
+    }
+
+
+def _evaluate_holdout_samples(
+    market: str,
+    samples: list[TrainingSample],
+    *,
+    config: ModelTuningConfig,
+) -> dict:
+    if len(samples) < 20:
+        return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
+    split = max(int(len(samples) * 0.8), 10)
+    train_rows = [(sample.features, sample.target) for sample in samples[:split]]
+    test_samples = samples[split:]
+    model = _fit_model_from_rows(market, train_rows, config=config)
+    if model is None or not test_samples:
+        return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
+
+    errors: list[float] = []
+    absolute_errors: list[float] = []
+    squared_errors: list[float] = []
+    baseline_errors: list[float] = []
+    baseline_absolute_errors: list[float] = []
+    baseline_squared_errors: list[float] = []
+    direction_hits = 0
+    for sample in test_samples:
+        prediction = max(0.0, _predict(model, sample.features)) if not market.startswith("residual:") else _predict(model, sample.features)
+        error = prediction - sample.target
+        baseline_error = sample.baseline - sample.target
+        errors.append(error)
+        absolute_errors.append(abs(error))
+        squared_errors.append(error * error)
+        baseline_errors.append(baseline_error)
+        baseline_absolute_errors.append(abs(baseline_error))
+        baseline_squared_errors.append(baseline_error * baseline_error)
+        if (prediction >= sample.baseline and sample.target >= sample.baseline) or (prediction < sample.baseline and sample.target < sample.baseline):
+            direction_hits += 1
+    row_count = len(test_samples)
+    baseline_mae = sum(baseline_absolute_errors) / row_count
+    baseline_rmse = math.sqrt(sum(baseline_squared_errors) / row_count)
+    mae = sum(absolute_errors) / row_count
+    rmse = math.sqrt(sum(squared_errors) / row_count)
+    segment = test_samples[0].segment if test_samples else None
+    season = test_samples[0].season if test_samples else None
+    return {
+        "rows": row_count,
+        "mae": round(mae, 3),
+        "rmse": round(rmse, 3),
+        "bias": round(sum(errors) / row_count, 3),
+        "directional_accuracy": round(direction_hits / row_count, 3),
+        "baseline_mae": round(baseline_mae, 3),
+        "baseline_rmse": round(baseline_rmse, 3),
+        "baseline_bias": round(sum(baseline_errors) / row_count, 3),
+        "baseline_directional_accuracy": None,
+        "mae_improvement": round(baseline_mae - mae, 3),
+        "rmse_improvement": round(baseline_rmse - rmse, 3),
+        "directional_accuracy_improvement": None,
+        "segment_count": 1 if segment else 0,
+        "skipped_segments": 0,
+        "segments": [
+            {
+                "segment": segment,
+                "season": season,
+                "rows": row_count,
+                "mae": round(mae, 3),
+                "rmse": round(rmse, 3),
+                "bias": round(sum(errors) / row_count, 3),
+                "directional_accuracy": round(direction_hits / row_count, 3),
+                "baseline_mae": round(baseline_mae, 3),
+                "baseline_rmse": round(baseline_rmse, 3),
+                "baseline_bias": round(sum(baseline_errors) / row_count, 3),
+                "baseline_directional_accuracy": None,
+                "mae_improvement": round(baseline_mae - mae, 3),
+                "rmse_improvement": round(baseline_rmse - rmse, 3),
+                "directional_accuracy_improvement": None,
+            }
+        ]
+        if segment
+        else [],
+        "seasons": [
+            {
+                "season": season,
+                "rows": row_count,
+                "mae": round(mae, 3),
+                "rmse": round(rmse, 3),
+                "bias": round(sum(errors) / row_count, 3),
+                "directional_accuracy": round(direction_hits / row_count, 3),
+                "baseline_mae": round(baseline_mae, 3),
+                "baseline_rmse": round(baseline_rmse, 3),
+                "baseline_bias": round(sum(baseline_errors) / row_count, 3),
+                "baseline_directional_accuracy": None,
+                "mae_improvement": round(baseline_mae - mae, 3),
+                "rmse_improvement": round(baseline_rmse - rmse, 3),
+                "directional_accuracy_improvement": None,
+            }
+        ]
+        if season
+        else [],
+    }
 
 
 def _historical_training_features(
@@ -843,6 +1103,9 @@ def _historical_training_features(
     minutes: list[float],
     market: str,
     previous_game_date: str | None,
+    recent_rows: list[sqlite3.Row] | None = None,
+    player_rows: list[sqlite3.Row] | None = None,
+    row_index: int | None = None,
 ) -> list[float]:
     current_game_date = str(row["game_date"]) if row["game_date"] is not None else None
     rates = [value / max(minute, 1.0) for value, minute in zip(history, minutes)]
@@ -861,22 +1124,42 @@ def _historical_training_features(
     value_volatility = _ewma_volatility_newest_first(newest_values, ewma_value, market)
     consistency_score = _consistency_score(ewma_value, value_volatility, market)
     context = _historical_game_context(row)
-    pace_factor = _pace_factor(conn, int(context["team_id"]), int(context["opponent_id"]))
-    opponent_factor = _opponent_factor(conn, int(context["opponent_id"]), market)
-    common_opponent_factor = _common_opponent_factor(
-        conn,
-        int(row["player_id"]),
-        market,
-        context,
-        current_game_date,
-    )
-    h2h_factor = _h2h_factor(
-        conn,
-        int(row["player_id"]),
-        market,
-        context,
-        current_game_date,
-    )
+    pace_factor = _cached_pace_factor(conn, int(context["team_id"]), int(context["opponent_id"]))
+    opponent_factor = _cached_opponent_factor(conn, int(context["opponent_id"]), market)
+    if player_rows is not None and row_index is not None:
+        common_opponent_factor = _common_opponent_factor_from_rows(
+            conn,
+            player_rows=player_rows,
+            row_index=row_index,
+            market=market,
+            context=context,
+            before_game_date=current_game_date,
+            baseline_avg=last_10_avg,
+        )
+        h2h_factor = _h2h_factor_from_rows(
+            player_rows=player_rows,
+            row_index=row_index,
+            market=market,
+            opponent_id=int(context["opponent_id"]),
+            baseline_avg=last_10_avg,
+        )
+    else:
+        common_opponent_factor = _cached_common_opponent_factor(
+            conn,
+            int(row["player_id"]),
+            market,
+            context,
+            current_game_date,
+            baseline_avg=last_10_avg,
+        )
+        h2h_factor = _cached_h2h_factor(
+            conn,
+            int(row["player_id"]),
+            market,
+            context,
+            current_game_date,
+            baseline_avg=last_10_avg,
+        )
     blowout = _blowout_adjustment(None, context, str(row["rotation_role"] or "starter"))
     projected_minutes, _minutes_note = _project_minutes(
         None,
@@ -908,13 +1191,19 @@ def _historical_training_features(
     rest_days = int(context["rest_days"])
     team_spread = context["team_spread"]
     game_total = float(context["game_total"]) if context["game_total"] is not None and float(context["game_total"]) > 0 else 165.0
-    archetype = _player_archetype_profile(
-        conn,
-        player_id=int(row["player_id"]),
-        reference_game_date=str(row["game_date"]),
-        exclude_game_id=int(row["game_id"]),
-        fallback_rotation_role=str(row["rotation_role"] or "starter"),
-    )
+    if recent_rows:
+        archetype = _player_archetype_profile_from_rows(
+            recent_rows,
+            fallback_rotation_role=str(row["rotation_role"] or "starter"),
+        )
+    else:
+        archetype = _cached_player_archetype_profile(
+            conn,
+            player_id=int(row["player_id"]),
+            reference_game_date=str(row["game_date"]),
+            exclude_game_id=int(row["game_id"]),
+            fallback_rotation_role=str(row["rotation_role"] or "starter"),
+        )
     return [
         component_projection,
         weighted_recent,
@@ -1019,27 +1308,7 @@ def _minutes_training_rows(
     bucket_filter = role_bucket if role_bucket in set(MINUTES_ROLE_BUCKETS) else None
     players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
     for player in players:
-        rows = conn.execute(
-            """
-            SELECT
-                s.*,
-                g.game_date,
-                g.home_team_id,
-                g.away_team_id,
-                g.rest_days_home,
-                g.rest_days_away,
-                g.spread_home,
-                g.game_total,
-                p.team_id,
-                p.rotation_role
-            FROM player_game_stats s
-            JOIN games g ON g.id = s.game_id
-            JOIN players p ON p.id = s.player_id
-            WHERE s.player_id = ?
-            ORDER BY g.game_date ASC, s.game_id ASC
-            """,
-            (player["id"],),
-        ).fetchall()
+        rows = _player_training_rows(conn, int(player["id"]))
         minutes = [float(row["minutes"]) for row in rows]
         for idx in range(5, len(rows)):
             newest_minutes = list(reversed(minutes[max(0, idx - 10):idx]))
@@ -1542,6 +1811,8 @@ def _training_rows_slow(conn: sqlite3.Connection, market: str) -> list[tuple[lis
 
 
 def _ridge_regression(xs: list[list[float]], ys: list[float], penalty: float) -> list[float]:
+    if np is not None:
+        return _ridge_regression_numpy(xs, ys, penalty)
     feature_count = len(xs[0]) + 1
     matrix = [[0.0 for _ in range(feature_count)] for _ in range(feature_count)]
     vector = [0.0 for _ in range(feature_count)]
@@ -1554,6 +1825,24 @@ def _ridge_regression(xs: list[list[float]], ys: list[float], penalty: float) ->
     for i in range(1, feature_count):
         matrix[i][i] += penalty
     return _solve_linear_system(matrix, vector)
+
+
+def _ridge_regression_numpy(xs: list[list[float]], ys: list[float], penalty: float) -> list[float]:
+    design = np.asarray(xs, dtype=float)
+    targets = np.asarray(ys, dtype=float)
+    intercept = np.ones((design.shape[0], 1), dtype=float)
+    design = np.concatenate((intercept, design), axis=1)
+
+    xtx = design.T @ design
+    regularization = np.eye(xtx.shape[0], dtype=float)
+    regularization[0, 0] = 0.0
+    xtx = xtx + (regularization * float(penalty))
+    xty = design.T @ targets
+    try:
+        solution = np.linalg.solve(xtx, xty)
+    except np.linalg.LinAlgError:
+        solution = np.linalg.lstsq(xtx, xty, rcond=None)[0]
+    return solution.tolist()
 
 
 def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list[float]:
@@ -1949,6 +2238,298 @@ def _player_archetype_profile(
     )
 
 
+def _player_archetype_profile_from_rows(
+    rows: list[sqlite3.Row],
+    *,
+    fallback_rotation_role: str,
+) -> PlayerArchetypeProfile:
+    if not rows:
+        return PlayerArchetypeProfile(False, False, False, False, False)
+    sample = rows[-10:]
+    sample_count = len(sample)
+    avg_minutes = sum(float(row["minutes"] or 0.0) for row in sample) / sample_count
+    avg_points = sum(float(row["points"] or 0.0) for row in sample) / sample_count
+    avg_rebounds = sum(float(row["rebounds"] or 0.0) for row in sample) / sample_count
+    avg_assists = sum(float(row["assists"] or 0.0) for row in sample) / sample_count
+    avg_threes = sum(float(row["threes"] or 0.0) for row in sample) / sample_count
+    avg_stocks = sum(float((row["steals"] or 0.0) + (row["blocks"] or 0.0)) for row in sample) / sample_count
+    position = str(sample[-1]["position"] or "").upper() if "position" in sample[-1].keys() else ""
+    rotation_role = str(sample[-1]["rotation_role"] or fallback_rotation_role or "").lower()
+
+    usage_scorer = avg_points >= 16.5 and avg_assists <= 6.5 and avg_minutes >= 22.0
+    rebound_big = avg_rebounds >= 7.5 and position in {"F", "C"} and avg_minutes >= 20.0
+    assist_guard = avg_assists >= 5.5 and position in {"G", "PG", "SG"} and avg_minutes >= 22.0
+    bench_gunner = rotation_role in {"bench", "rotation"} and avg_points >= 11.5 and avg_threes >= 1.5 and avg_minutes <= 26.0
+    stocks_specialist = avg_stocks >= 2.0 and avg_minutes >= 18.0
+
+    return PlayerArchetypeProfile(
+        usage_scorer=usage_scorer,
+        rebound_big=rebound_big,
+        assist_guard=assist_guard,
+        bench_gunner=bench_gunner,
+        stocks_specialist=stocks_specialist,
+    )
+
+
+def _connection_training_cache_bucket(conn: sqlite3.Connection, name: str) -> dict[tuple, object]:
+    conn_id = id(conn)
+    buckets = _CONNECTION_TRAINING_CACHE.setdefault(conn_id, {})
+    bucket = buckets.get(name)
+    if bucket is None:
+        bucket = {}
+        buckets[name] = bucket
+    return bucket  # type: ignore[return-value]
+
+
+def _player_training_rows(conn: sqlite3.Connection, player_id: int) -> list[sqlite3.Row]:
+    cache = _connection_training_cache_bucket(conn, "player_rows")
+    key = (int(player_id),)
+    if key not in cache:
+        cache[key] = conn.execute(
+            """
+            SELECT
+                s.*,
+                g.game_date,
+                g.home_team_id,
+                g.away_team_id,
+                g.rest_days_home,
+                g.rest_days_away,
+                g.spread_home,
+                g.game_total,
+                p.position,
+                p.team_id,
+                p.rotation_role
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN players p ON p.id = s.player_id
+            WHERE s.player_id = ?
+            ORDER BY g.game_date ASC, s.game_id ASC
+            """,
+            (int(player_id),),
+        ).fetchall()
+    return cache[key]  # type: ignore[return-value]
+
+
+def _cached_pace_factor(conn: sqlite3.Connection, team_id: int, opponent_id: int) -> float:
+    cache = _connection_training_cache_bucket(conn, "pace_factor")
+    key = (int(team_id), int(opponent_id))
+    if key not in cache:
+        cache[key] = _pace_factor(conn, int(team_id), int(opponent_id))
+    return float(cache[key])
+
+
+def _cached_opponent_factor(conn: sqlite3.Connection, opponent_id: int, market: str) -> float:
+    cache = _connection_training_cache_bucket(conn, "opponent_factor")
+    key = (int(opponent_id), str(market))
+    if key not in cache:
+        cache[key] = _opponent_factor(conn, int(opponent_id), str(market))
+    return float(cache[key])
+
+
+def _cached_common_opponent_factor(
+    conn: sqlite3.Connection,
+    player_id: int,
+    market: str,
+    context: dict,
+    before_game_date: str | None,
+    baseline_avg: float | None = None,
+) -> float:
+    cache = _connection_training_cache_bucket(conn, "common_opponent_factor")
+    key = (
+        int(player_id),
+        str(market),
+        int(context["team_id"]),
+        int(context["opponent_id"]),
+        str(before_game_date or ""),
+        round(float(baseline_avg), 6) if baseline_avg is not None else None,
+    )
+    if key not in cache:
+        cache[key] = _common_opponent_factor(
+            conn,
+            int(player_id),
+            str(market),
+            context,
+            before_game_date,
+            baseline_avg=baseline_avg,
+        )
+    return float(cache[key])
+
+
+def _cached_h2h_factor(
+    conn: sqlite3.Connection,
+    player_id: int,
+    market: str,
+    context: dict,
+    before_game_date: str | None,
+    baseline_avg: float | None = None,
+) -> float:
+    cache = _connection_training_cache_bucket(conn, "h2h_factor")
+    key = (
+        int(player_id),
+        str(market),
+        int(context["opponent_id"]),
+        str(before_game_date or ""),
+        round(float(baseline_avg), 6) if baseline_avg is not None else None,
+    )
+    if key not in cache:
+        cache[key] = _h2h_factor(
+            conn,
+            int(player_id),
+            str(market),
+            context,
+            before_game_date,
+            baseline_avg=baseline_avg,
+        )
+    return float(cache[key])
+
+
+def _cached_player_archetype_profile(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    reference_game_date: str | None,
+    exclude_game_id: int | None,
+    fallback_rotation_role: str,
+) -> PlayerArchetypeProfile:
+    cache = _connection_training_cache_bucket(conn, "player_archetype")
+    key = (
+        int(player_id),
+        str(reference_game_date or ""),
+        int(exclude_game_id) if exclude_game_id is not None else None,
+        str(fallback_rotation_role or ""),
+    )
+    if key not in cache:
+        cache[key] = _player_archetype_profile(
+            conn,
+            player_id=int(player_id),
+            reference_game_date=reference_game_date,
+            exclude_game_id=exclude_game_id,
+            fallback_rotation_role=fallback_rotation_role,
+        )
+    return cache[key]  # type: ignore[return-value]
+
+
+def _cached_player_common_opponent_rows(
+    conn: sqlite3.Connection,
+    player_id: int,
+    common_opponents: tuple[int, ...],
+    before_game_date: str | None,
+) -> list[sqlite3.Row]:
+    cache = _connection_training_cache_bucket(conn, "player_common_rows")
+    key = (int(player_id), common_opponents, str(before_game_date or ""))
+    if key not in cache:
+        placeholders = ",".join("?" for _ in common_opponents)
+        date_filter = "AND g.game_date < ?" if before_game_date is not None else ""
+        params: list[object] = [int(player_id), *common_opponents]
+        if before_game_date is not None:
+            params.append(before_game_date)
+        cache[key] = conn.execute(
+            f"""
+            SELECT s.*
+            FROM player_game_stats s
+            JOIN players p ON p.id = s.player_id
+            JOIN games g ON g.id = s.game_id
+            WHERE s.player_id = ?
+              AND CASE
+                WHEN p.team_id = g.home_team_id THEN g.away_team_id
+                ELSE g.home_team_id
+              END IN ({placeholders})
+              {date_filter}
+            ORDER BY g.game_date DESC
+            LIMIT 10
+            """,
+            params,
+        ).fetchall()
+    return cache[key]  # type: ignore[return-value]
+
+
+def _cached_player_h2h_rows(
+    conn: sqlite3.Connection,
+    player_id: int,
+    opponent_id: int,
+    before_game_date: str | None,
+) -> list[sqlite3.Row]:
+    cache = _connection_training_cache_bucket(conn, "player_h2h_rows")
+    key = (int(player_id), int(opponent_id), str(before_game_date or ""))
+    if key not in cache:
+        date_filter = "AND g.game_date < ?" if before_game_date is not None else ""
+        params: list[object] = [int(player_id), int(opponent_id)]
+        if before_game_date is not None:
+            params.append(before_game_date)
+        cache[key] = conn.execute(
+            f"""
+            SELECT s.*
+            FROM player_game_stats s
+            JOIN players p ON p.id = s.player_id
+            JOIN games g ON g.id = s.game_id
+            WHERE s.player_id = ?
+              AND CASE
+                WHEN p.team_id = g.home_team_id THEN g.away_team_id
+                ELSE g.home_team_id
+              END = ?
+              {date_filter}
+            ORDER BY g.game_date DESC, s.game_id DESC
+            LIMIT 6
+            """,
+            params,
+        ).fetchall()
+    return cache[key]  # type: ignore[return-value]
+
+
+def _historical_row_opponent_id(row: sqlite3.Row) -> int:
+    is_home = int(row["team_id"]) == int(row["home_team_id"])
+    return int(row["away_team_id"] if is_home else row["home_team_id"])
+
+
+def _common_opponent_factor_from_rows(
+    conn: sqlite3.Connection,
+    *,
+    player_rows: list[sqlite3.Row],
+    row_index: int,
+    market: str,
+    context: dict,
+    before_game_date: str | None,
+    baseline_avg: float,
+) -> float:
+    common_opponents = _common_opponent_ids(conn, int(context["team_id"]), int(context["opponent_id"]), before_game_date)
+    if not common_opponents:
+        return 1.0
+    common_set = set(common_opponents)
+    matching_rows: list[sqlite3.Row] = []
+    for prior_row in reversed(player_rows[:row_index]):
+        if _historical_row_opponent_id(prior_row) in common_set:
+            matching_rows.append(prior_row)
+            if len(matching_rows) >= 10:
+                break
+    if len(matching_rows) < 2 or baseline_avg <= 0:
+        return 1.0
+    common_avg = sum(_market_value(row, market) for row in matching_rows) / len(matching_rows)
+    sample_weight = min(len(matching_rows) / 5, 1.0)
+    return _clamp(1 + (((common_avg / baseline_avg) - 1) * sample_weight * 0.5), 0.94, 1.06)
+
+
+def _h2h_factor_from_rows(
+    *,
+    player_rows: list[sqlite3.Row],
+    row_index: int,
+    market: str,
+    opponent_id: int,
+    baseline_avg: float,
+) -> float:
+    h2h_rows: list[sqlite3.Row] = []
+    for prior_row in reversed(player_rows[:row_index]):
+        if _historical_row_opponent_id(prior_row) == int(opponent_id):
+            h2h_rows.append(prior_row)
+            if len(h2h_rows) >= 6:
+                break
+    if len(h2h_rows) < 2 or baseline_avg <= 0:
+        return 1.0
+    h2h_avg = sum(_market_value(row, market) for row in h2h_rows) / len(h2h_rows)
+    sample_weight = min(1.0, len(h2h_rows) / 6.0)
+    ratio = _clamp(h2h_avg / baseline_avg, 0.82, 1.18)
+    return _clamp(1 + ((ratio - 1) * sample_weight * 0.55), 0.92, 1.08)
+
+
 def _weighted_average(values: list[float]) -> float:
     weights = list(range(len(values), 0, -1))
     return sum(value * weight for value, weight in zip(values, weights)) / sum(weights)
@@ -2200,41 +2781,23 @@ def _common_opponent_factor(
     market: str,
     context: dict,
     before_game_date: str | None,
+    baseline_avg: float | None = None,
 ) -> float:
     common_opponents = _common_opponent_ids(conn, context["team_id"], context["opponent_id"], before_game_date)
     if not common_opponents:
         return 1.0
-    placeholders = ",".join("?" for _ in common_opponents)
-    date_filter = "AND g.game_date < ?" if before_game_date is not None else ""
-    params: list[object] = [player_id, *common_opponents]
-    if before_game_date is not None:
-        params.append(before_game_date)
-    player_rows = conn.execute(
-        f"""
-        SELECT s.*
-        FROM player_game_stats s
-        JOIN players p ON p.id = s.player_id
-        JOIN games g ON g.id = s.game_id
-        WHERE s.player_id = ?
-          AND CASE
-            WHEN p.team_id = g.home_team_id THEN g.away_team_id
-            ELSE g.home_team_id
-          END IN ({placeholders})
-          {date_filter}
-        ORDER BY g.game_date DESC
-        LIMIT 10
-        """,
-        params,
-    ).fetchall()
+    player_rows = _cached_player_common_opponent_rows(conn, player_id, tuple(common_opponents), before_game_date)
     if len(player_rows) < 2:
         return 1.0
-    all_rows = _player_history(conn, player_id, market, before_game_date, exclude_game_id=None)
-    if not all_rows:
-        return 1.0
-    common_avg = sum(_market_value(row, market) for row in player_rows) / len(player_rows)
-    player_avg = sum(row["value"] for row in all_rows) / len(all_rows)
+    player_avg = float(baseline_avg) if baseline_avg is not None else None
+    if player_avg is None:
+        all_rows = _player_history(conn, player_id, market, before_game_date, exclude_game_id=None)
+        if not all_rows:
+            return 1.0
+        player_avg = sum(row["value"] for row in all_rows) / len(all_rows)
     if player_avg <= 0:
         return 1.0
+    common_avg = sum(_market_value(row, market) for row in player_rows) / len(player_rows)
     sample_weight = min(len(player_rows) / 5, 1.0)
     return _clamp(1 + (((common_avg / player_avg) - 1) * sample_weight * 0.5), 0.94, 1.06)
 
@@ -2245,48 +2808,43 @@ def _h2h_factor(
     market: str,
     context: dict,
     before_game_date: str | None,
+    baseline_avg: float | None = None,
 ) -> float:
     opponent_id = int(context["opponent_id"])
-    date_filter = "AND g.game_date < ?" if before_game_date is not None else ""
-    params: list[object] = [player_id, opponent_id]
-    if before_game_date is not None:
-        params.append(before_game_date)
-    h2h_rows = conn.execute(
-        f"""
-        SELECT s.*
-        FROM player_game_stats s
-        JOIN players p ON p.id = s.player_id
-        JOIN games g ON g.id = s.game_id
-        WHERE s.player_id = ?
-          AND CASE
-            WHEN p.team_id = g.home_team_id THEN g.away_team_id
-            ELSE g.home_team_id
-          END = ?
-          {date_filter}
-        ORDER BY g.game_date DESC, s.game_id DESC
-        LIMIT 6
-        """,
-        params,
-    ).fetchall()
+    h2h_rows = _cached_player_h2h_rows(conn, player_id, opponent_id, before_game_date)
     if len(h2h_rows) < 2:
         return 1.0
-    baseline_rows = _player_history(conn, player_id, market, before_game_date, exclude_game_id=None)
-    if not baseline_rows:
+    baseline = float(baseline_avg) if baseline_avg is not None else None
+    if baseline is None:
+        baseline_rows = _player_history(conn, player_id, market, before_game_date, exclude_game_id=None)
+        if not baseline_rows:
+            return 1.0
+        baseline = sum(row["value"] for row in baseline_rows) / len(baseline_rows)
+    if baseline <= 0:
         return 1.0
     h2h_avg = sum(_market_value(row, market) for row in h2h_rows) / len(h2h_rows)
-    baseline_avg = sum(row["value"] for row in baseline_rows) / len(baseline_rows)
-    if baseline_avg <= 0:
-        return 1.0
     sample_weight = min(1.0, len(h2h_rows) / 6.0)
-    ratio = _clamp(h2h_avg / baseline_avg, 0.82, 1.18)
+    ratio = _clamp(h2h_avg / baseline, 0.82, 1.18)
     return _clamp(1 + ((ratio - 1) * sample_weight * 0.55), 0.92, 1.08)
 
 
 def _common_opponent_ids(conn: sqlite3.Connection, team_id: int, opponent_id: int, before_game_date: str | None) -> list[int]:
-    return sorted(_recent_opponent_ids(conn, team_id, before_game_date).intersection(_recent_opponent_ids(conn, opponent_id, before_game_date)))
+    cache = _connection_training_cache_bucket(conn, "common_opponent_ids")
+    key = (int(team_id), int(opponent_id), str(before_game_date or ""))
+    if key not in cache:
+        cache[key] = sorted(
+            _recent_opponent_ids(conn, team_id, before_game_date).intersection(
+                _recent_opponent_ids(conn, opponent_id, before_game_date)
+            )
+        )
+    return cache[key]  # type: ignore[return-value]
 
 
 def _recent_opponent_ids(conn: sqlite3.Connection, team_id: int, before_game_date: str | None) -> set[int]:
+    cache = _connection_training_cache_bucket(conn, "recent_opponent_ids")
+    key = (int(team_id), str(before_game_date or ""))
+    if key in cache:
+        return cache[key]  # type: ignore[return-value]
     date_filter = "AND g.game_date < ?" if before_game_date is not None else ""
     params: list[object] = [team_id, team_id]
     if before_game_date is not None:
@@ -2307,7 +2865,8 @@ def _recent_opponent_ids(conn: sqlite3.Connection, team_id: int, before_game_dat
         """,
         params,
     ).fetchall()
-    return {int(row["opponent_id"]) for row in rows if row["opponent_id"] is not None}
+    cache[key] = {int(row["opponent_id"]) for row in rows if row["opponent_id"] is not None}
+    return cache[key]  # type: ignore[return-value]
 
 
 def _blowout_adjustment(conn: sqlite3.Connection, context: dict, rotation_role: str | None) -> dict:

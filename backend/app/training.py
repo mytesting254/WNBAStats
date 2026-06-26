@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import json
 import math
+import re
 import sqlite3
+from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -12,21 +16,41 @@ from .player_prop_model import ModelTuningConfig, TRAINING_MARKETS, evaluate_mar
 
 TRAINING_MODEL_VERSION = LEARNED_MODEL_VERSION
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
+DATA_SIGNATURE_LABEL = "data_signature="
 
 
 def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
-    component_run = _run_component_benchmark(conn)
-    _save_model_run(conn, component_run)
+    data_signature = _training_data_signature(conn)
+    cached_learned = _latest_matching_run(conn, model_version=TRAINING_MODEL_VERSION, run_type="walk_forward_segments", data_signature=data_signature)
+    if cached_learned is not None:
+        return cached_learned
+
+    component_run = _latest_matching_run(
+        conn,
+        model_version=COMPONENT_MODEL_VERSION,
+        run_type="walk_forward_backtest",
+        data_signature=data_signature,
+    )
+    if component_run is None:
+        component_run = _run_component_benchmark(conn)
+        component_run["notes"] = _append_data_signature(component_run.get("notes"), data_signature)
+        _save_model_run(conn, component_run)
 
     started_at = datetime.now(timezone.utc).isoformat()
     metrics = {}
     total_rows = 0
 
-    for market in TRAINING_MARKETS:
-        result = evaluate_market_model(conn, market)
-        result.update(evaluate_market_residual_model(conn, market))
-        metrics[market] = result
-        total_rows += int(result["rows"])
+    parallel_results = _parallel_market_metrics(conn)
+    if parallel_results is None:
+        for market in TRAINING_MARKETS:
+            result = evaluate_market_model(conn, market)
+            result.update(evaluate_market_residual_model(conn, market))
+            metrics[market] = result
+            total_rows += int(result["rows"])
+    else:
+        for market, result in parallel_results:
+            metrics[market] = result
+            total_rows += int(result["rows"])
 
     _ensure_overall_metrics(metrics)
     settled_validation = _settled_validation_metrics(conn, TRAINING_MODEL_VERSION)
@@ -40,7 +64,7 @@ def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
     game_rows = int(metrics.get("game_overall", {}).get("rows") or 0)
     learned_run = {
         "model_version": TRAINING_MODEL_VERSION,
-        "run_type": "chronological_holdout",
+        "run_type": "walk_forward_segments",
         "status": status,
         "started_at": started_at,
         "finished_at": finished_at,
@@ -48,9 +72,10 @@ def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
         "markets": TRAINING_MARKETS,
         "metrics": metrics,
         "notes": (
-            "Chronological 80/20 holdout for the adaptive history/context regression model. "
+            "Month-segmented walk-forward backtest for the adaptive history/context regression model. "
             f"Settled pipeline validation rows merged into market metrics: {validation_rows}. "
-            f"Settled game residual evaluation rows: {game_rows}."
+            f"Settled game residual evaluation rows: {game_rows}. "
+            f"{DATA_SIGNATURE_LABEL}{data_signature}"
         ),
     }
     _save_model_run(conn, learned_run)
@@ -77,11 +102,17 @@ def run_parameter_tuning(
     for config in candidates:
         metrics = {}
         total_rows = 0
-        for market in TRAINING_MARKETS:
-            result = evaluate_market_model(conn, market, config=config)
-            result.update(evaluate_market_residual_model(conn, market, config=config))
-            metrics[market] = result
-            total_rows += int(result["rows"])
+        parallel_results = _parallel_market_metrics(conn, config=config)
+        if parallel_results is None:
+            for market in TRAINING_MARKETS:
+                result = evaluate_market_model(conn, market, config=config)
+                result.update(evaluate_market_residual_model(conn, market, config=config))
+                metrics[market] = result
+                total_rows += int(result["rows"])
+        else:
+            for market, result in parallel_results:
+                metrics[market] = result
+                total_rows += int(result["rows"])
         summary = _aggregate_tuning_summary(metrics)
         results.append(
             {
@@ -147,10 +178,16 @@ def _run_component_benchmark(conn: sqlite3.Connection) -> dict:
     started_at = datetime.now(timezone.utc).isoformat()
     metrics = {}
     total_rows = 0
-    for market in TRAINING_MARKETS:
-        result = _evaluate_market(conn, market)
-        metrics[market] = result
-        total_rows += int(result["rows"])
+    parallel_results = _parallel_component_metrics(conn)
+    if parallel_results is None:
+        for market in TRAINING_MARKETS:
+            result = _evaluate_market(conn, market)
+            metrics[market] = result
+            total_rows += int(result["rows"])
+    else:
+        for market, result in parallel_results:
+            metrics[market] = result
+            total_rows += int(result["rows"])
     _ensure_overall_metrics(metrics)
     finished_at = datetime.now(timezone.utc).isoformat()
     return {
@@ -186,6 +223,142 @@ def _save_model_run(conn: sqlite3.Connection, run: dict) -> None:
             run.get("notes"),
         ),
     )
+
+
+def _training_data_signature(conn: sqlite3.Connection) -> str:
+    payload = {}
+    for table in (
+        "games",
+        "player_game_stats",
+        "players",
+        "settled_props",
+        "prop_predictions",
+        "game_predictions",
+        "settled_game_predictions",
+    ):
+        row = conn.execute(
+            f"SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id FROM {table}"
+        ).fetchone()
+        payload[table] = {
+            "count": int(row["count"] if isinstance(row, sqlite3.Row) else row[0]),
+            "max_id": int(row["max_id"] if isinstance(row, sqlite3.Row) else row[1]),
+        }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
+def _latest_matching_run(
+    conn: sqlite3.Connection,
+    *,
+    model_version: str,
+    run_type: str,
+    data_signature: str,
+) -> dict | None:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM model_runs
+        WHERE model_version = ?
+          AND run_type = ?
+        ORDER BY started_at DESC, id DESC
+        LIMIT 5
+        """,
+        (model_version, run_type),
+    ).fetchall()
+    for item in row:
+        notes = item["notes"] if isinstance(item, sqlite3.Row) else item[9]
+        if _extract_data_signature(notes) == data_signature:
+            return _serialize_run(conn, item)
+    return None
+
+
+def _append_data_signature(notes: str | None, data_signature: str) -> str:
+    base = (notes or "").strip()
+    suffix = f"{DATA_SIGNATURE_LABEL}{data_signature}"
+    if not base:
+        return suffix
+    if suffix in base:
+        return base
+    return f"{base} {suffix}"
+
+
+def _extract_data_signature(notes: str | None) -> str | None:
+    if not notes:
+        return None
+    match = re.search(rf"{re.escape(DATA_SIGNATURE_LABEL)}([0-9a-f]+)", str(notes))
+    return match.group(1) if match else None
+
+
+def _parallel_market_metrics(
+    conn: sqlite3.Connection,
+    *,
+    config: ModelTuningConfig | None = None,
+) -> list[tuple[str, dict]] | None:
+    db_path = _sqlite_db_path(conn)
+    if not db_path:
+        return None
+    workers = _parallel_worker_count(len(TRAINING_MARKETS))
+    if workers <= 1:
+        return None
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(_market_metric_worker, [(db_path, market, config) for market in TRAINING_MARKETS]))
+    return [(market, metric) for market, metric in results]
+
+
+def _parallel_component_metrics(conn: sqlite3.Connection) -> list[tuple[str, dict]] | None:
+    db_path = _sqlite_db_path(conn)
+    if not db_path:
+        return None
+    workers = _parallel_worker_count(len(TRAINING_MARKETS))
+    if workers <= 1:
+        return None
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(_component_metric_worker, [(db_path, market) for market in TRAINING_MARKETS]))
+    return [(market, metric) for market, metric in results]
+
+
+def _sqlite_db_path(conn: sqlite3.Connection) -> str | None:
+    if not isinstance(conn, sqlite3.Connection):
+        return None
+    row = conn.execute("PRAGMA database_list").fetchone()
+    if not row:
+        return None
+    file_value = row["file"] if isinstance(row, sqlite3.Row) else row[2]
+    path = str(file_value or "").strip()
+    return path or None
+
+
+def _parallel_worker_count(task_count: int) -> int:
+    configured = os.getenv("WNBA_TRAINING_MAX_WORKERS")
+    if configured:
+        try:
+            return max(1, min(int(configured), task_count))
+        except ValueError:
+            pass
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(task_count, cpu_count, 4))
+
+
+def _market_metric_worker(args: tuple[str, str, ModelTuningConfig | None]) -> tuple[str, dict]:
+    db_path, market, config = args
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        result = evaluate_market_model(conn, market, config=config)
+        result.update(evaluate_market_residual_model(conn, market, config=config))
+        return market, result
+    finally:
+        conn.close()
+
+
+def _component_metric_worker(args: tuple[str, str]) -> tuple[str, dict]:
+    db_path, market = args
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        return market, _evaluate_market(conn, market)
+    finally:
+        conn.close()
 
 
 def _tuning_candidates(
@@ -294,6 +467,12 @@ def _ensure_overall_metrics(metrics: dict[str, dict]) -> None:
     residual_bias_sum = 0.0
     residual_directional_sum = 0.0
     residual_directional_rows = 0
+    baseline_rows = 0
+    baseline_mae_sum = 0.0
+    baseline_rmse_sum = 0.0
+    baseline_bias_sum = 0.0
+    segment_count = 0
+    skipped_segments = 0
 
     for _, metric in market_items:
         rows = int(metric.get("rows") or 0)
@@ -309,6 +488,15 @@ def _ensure_overall_metrics(metrics: dict[str, dict]) -> None:
         if metric.get("directional_accuracy") is not None:
             directional_sum += float(metric["directional_accuracy"]) * rows
             directional_rows += rows
+        if metric.get("baseline_mae") is not None:
+            baseline_rows += rows
+            baseline_mae_sum += float(metric["baseline_mae"]) * rows
+        if metric.get("baseline_rmse") is not None:
+            baseline_rmse_sum += float(metric["baseline_rmse"]) * rows
+        if metric.get("baseline_bias") is not None:
+            baseline_bias_sum += float(metric["baseline_bias"]) * rows
+        segment_count += int(metric.get("segment_count") or 0)
+        skipped_segments += int(metric.get("skipped_segments") or 0)
         residual_rows = int(metric.get("residual_rows") or 0)
         if residual_rows > 0:
             residual_rows_total += residual_rows
@@ -331,6 +519,25 @@ def _ensure_overall_metrics(metrics: dict[str, dict]) -> None:
     overall.setdefault("rmse", round(rmse_sum / total_rows, 3) if total_rows else None)
     overall.setdefault("bias", round(bias_sum / total_rows, 3) if total_rows else None)
     overall.setdefault("directional_accuracy", round(directional_sum / directional_rows, 3) if directional_rows else None)
+    overall.setdefault("baseline_mae", round(baseline_mae_sum / baseline_rows, 3) if baseline_rows else None)
+    overall.setdefault("baseline_rmse", round(baseline_rmse_sum / baseline_rows, 3) if baseline_rows else None)
+    overall.setdefault("baseline_bias", round(baseline_bias_sum / baseline_rows, 3) if baseline_rows else None)
+    overall.setdefault(
+        "mae_improvement",
+        round(float(overall["baseline_mae"]) - float(overall["mae"]), 3)
+        if overall.get("baseline_mae") is not None and overall.get("mae") is not None
+        else None,
+    )
+    overall.setdefault(
+        "rmse_improvement",
+        round(float(overall["baseline_rmse"]) - float(overall["rmse"]), 3)
+        if overall.get("baseline_rmse") is not None and overall.get("rmse") is not None
+        else None,
+    )
+    overall.setdefault("baseline_directional_accuracy", None)
+    overall.setdefault("directional_accuracy_improvement", None)
+    overall.setdefault("segment_count", segment_count)
+    overall.setdefault("skipped_segments", skipped_segments)
     overall.setdefault("residual_rows", residual_rows_total)
     overall.setdefault("residual_mae", round(residual_mae_sum / residual_rows_total, 3) if residual_rows_total else None)
     overall.setdefault("residual_rmse", round(residual_rmse_sum / residual_rows_total, 3) if residual_rows_total else None)

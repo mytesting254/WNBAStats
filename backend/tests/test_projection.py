@@ -1387,6 +1387,25 @@ def test_walk_forward_training_saves_model_run() -> None:
     assert "mae_improvement" in result["metrics"]["game_total"]
 
 
+def test_walk_forward_training_reuses_cached_run_when_data_unchanged(monkeypatch) -> None:
+    load_test_history()
+    with connect() as conn:
+        first = run_walk_forward_training(conn)
+        first_row_count = conn.execute("SELECT COUNT(*) FROM model_runs").fetchone()[0]
+
+        def fail_component(_conn):
+            raise AssertionError("component benchmark should not rerun")
+
+        monkeypatch.setattr("backend.app.training._run_component_benchmark", fail_component)
+        second = run_walk_forward_training(conn)
+        second_row_count = conn.execute("SELECT COUNT(*) FROM model_runs").fetchone()[0]
+
+    assert first["run_type"] == "walk_forward_segments"
+    assert second["run_type"] == "walk_forward_segments"
+    assert first["started_at"] == second["started_at"]
+    assert first_row_count == second_row_count
+
+
 def test_run_parameter_tuning_returns_ranked_candidates() -> None:
     load_test_history()
     with connect() as conn:

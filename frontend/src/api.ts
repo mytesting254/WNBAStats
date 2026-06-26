@@ -583,6 +583,8 @@ export type ModelRunMetric = {
   rmse: number | null;
   bias: number | null;
   directional_accuracy: number | null;
+  segment_count?: number;
+  skipped_segments?: number;
   baseline_mae?: number | null;
   baseline_rmse?: number | null;
   baseline_bias?: number | null;
