@@ -116,15 +116,22 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 ### Symptom
 
 - `Refresh Odds` fails or reports missing API key
+- `Refresh Odds` stays queued or previously ended in a `504 Gateway Time-out`
 
 ### Likely Cause
 
 - `ODDS_API_KEY` is not set in production
+- old deployment bundle still used the pre-queue synchronous import path
+- reverse proxy timed out before the old synchronous import finished
+- the raw payload was saved, but it belonged to a previous local date so `Load Saved Odds` does not replay it today
 
 ### What To Check
 
 - backend env var exists
 - provider key is attached to the active backend resource
+- the deployed backend includes the queued `/api/odds/import` implementation and the `Data` tab shows the `Live Pipeline` card
+- the active runtime cache path contains `sportsbook_props_raw.json`
+- the cached event dates inside `sportsbook_props_raw.json` match the app's current local date if you expect `Load Saved Odds` to replay them
 
 ## SQLite And Persistence Problems
 

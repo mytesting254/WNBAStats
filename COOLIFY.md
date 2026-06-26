@@ -123,6 +123,11 @@ This resolves the host-side `WNBA_DB_PATH`, `WNBA_CACHE_DIR`, and
 `WNBA_SNAPSHOT_DIR` from the active backend container mount. Do not point host
 commands at `/data/wnba.sqlite` or `data/wnba.sqlite` by assumption.
 
+The same rule applies to raw provider caches. The live Odds API payload is
+stored in the resolved runtime cache directory as `sportsbook_props_raw.json`;
+do not inspect repo-local `data/cache/` unless that checkout is explicitly the
+active runtime root returned by `host-runtime-info` / `live_env.sh`.
+
 If auto-detection is ambiguous, pass the container explicitly:
 
 ```bash

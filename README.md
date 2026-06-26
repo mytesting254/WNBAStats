@@ -236,6 +236,7 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 - `Roster`: Rotowire lineup statuses grouped by team, with a manual `Refresh Roster` pull.
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history.
 - `Data`: operational controls for saved/fresh odds import, completed-game import, projection rebuilds, and reloads.
+- `Data`: includes a `Live Pipeline` card plus a background prop-sync queue card so long-running ingest jobs show current phase and backend progress instead of only button spinners.
 - `Data`: includes `Track Gems Daily` and `Track Watchlist Daily` snapshot controls.
 
 Operational expectations:
@@ -346,7 +347,11 @@ $env:ODDS_API_KEY="your_key_here"
 
 Click `Load Saved Odds` in the app to reload the most recent JSON file from `data/cache/sportsbook_props_raw.json` without calling the provider. The import still syncs `sportsbook_prop_lines -> prop_lines` and refreshes model predictions so value-board/watchlist/gem views update immediately.
 
-Click `Refresh Odds` only when you want a fresh provider call. Fresh calls merge by provider event id, so future events already saved in `sportsbook_props_raw.json` remain cached instead of being discarded.
+Click `Refresh Odds` only when you want a fresh provider call. The request now queues immediately in the backend, writes successful raw provider responses into `sportsbook_props_raw.json`, then continues import/sync/publish work in the background. Watch the `Live Pipeline` card in the `Data` tab for request, sync, and publish progress.
+
+Fresh calls merge by provider event id, so future events already saved in `sportsbook_props_raw.json` remain cached instead of being discarded.
+
+The raw Odds API cache is a single rolling file, not a dated archive. `Load Saved Odds` only replays cached events whose game date matches the app's current local date, so yesterday's payload can still exist in the JSON file but will be ignored on today's replay path.
 
 ## Deployment Checklist
 
