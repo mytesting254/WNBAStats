@@ -176,18 +176,8 @@ def latest_model_run(conn: sqlite3.Connection) -> dict | None:
 
 def _run_component_benchmark(conn: sqlite3.Connection) -> dict:
     started_at = datetime.now(timezone.utc).isoformat()
-    metrics = {}
-    total_rows = 0
-    parallel_results = _parallel_component_metrics(conn)
-    if parallel_results is None:
-        for market in TRAINING_MARKETS:
-            result = _evaluate_market(conn, market)
-            metrics[market] = result
-            total_rows += int(result["rows"])
-    else:
-        for market, result in parallel_results:
-            metrics[market] = result
-            total_rows += int(result["rows"])
+    metrics = _evaluate_all_component_markets(conn)
+    total_rows = sum(int(metric["rows"]) for metric in metrics.values())
     _ensure_overall_metrics(metrics)
     finished_at = datetime.now(timezone.utc).isoformat()
     return {
@@ -336,7 +326,7 @@ def _parallel_worker_count(task_count: int) -> int:
         except ValueError:
             pass
     cpu_count = os.cpu_count() or 1
-    return max(1, min(task_count, cpu_count, 4))
+    return max(1, min(task_count, cpu_count))
 
 
 def _market_metric_worker(args: tuple[str, str, ModelTuningConfig | None]) -> tuple[str, dict]:
@@ -722,6 +712,81 @@ def _evaluate_market(conn: sqlite3.Connection, market: str) -> dict:
         "bias": round(sum(errors) / rows, 3),
         "directional_accuracy": round(direction_hits / max(direction_total, 1), 3),
     }
+
+
+def _empty_component_accumulator() -> dict[str, float]:
+    return {
+        "rows": 0,
+        "error_sum": 0.0,
+        "absolute_error_sum": 0.0,
+        "squared_error_sum": 0.0,
+        "direction_hits": 0.0,
+        "direction_total": 0.0,
+    }
+
+
+def _evaluate_all_component_markets(conn: sqlite3.Connection) -> dict[str, dict]:
+    players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
+    accumulators = {market: _empty_component_accumulator() for market in TRAINING_MARKETS}
+
+    for player in players:
+        rows = conn.execute(
+            """
+            SELECT s.*, g.game_date
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            WHERE s.player_id = ?
+            ORDER BY g.game_date ASC, s.game_id ASC
+            """,
+            (player["id"],),
+        ).fetchall()
+        if len(rows) < 6:
+            continue
+
+        minutes = [float(row["minutes"]) for row in rows]
+        values_by_market = {
+            market: [_market_value(row, market) for row in rows]
+            for market in TRAINING_MARKETS
+        }
+
+        for market, values in values_by_market.items():
+            acc = accumulators[market]
+            for idx in range(5, len(values)):
+                history = values[max(0, idx - 10):idx]
+                minute_history = minutes[max(0, idx - 10):idx]
+                actual = values[idx]
+                projection = _project_from_history(history, minute_history)
+                error = projection - actual
+                baseline = sum(history) / len(history)
+
+                acc["rows"] += 1
+                acc["error_sum"] += error
+                acc["absolute_error_sum"] += abs(error)
+                acc["squared_error_sum"] += error * error
+                acc["direction_total"] += 1
+                if (projection >= baseline and actual >= baseline) or (projection < baseline and actual < baseline):
+                    acc["direction_hits"] += 1
+
+    metrics: dict[str, dict] = {}
+    for market, acc in accumulators.items():
+        rows = int(acc["rows"])
+        if rows <= 0:
+            metrics[market] = {
+                "rows": 0,
+                "mae": None,
+                "rmse": None,
+                "bias": None,
+                "directional_accuracy": None,
+            }
+            continue
+        metrics[market] = {
+            "rows": rows,
+            "mae": round(float(acc["absolute_error_sum"]) / rows, 3),
+            "rmse": round(math.sqrt(float(acc["squared_error_sum"]) / rows), 3),
+            "bias": round(float(acc["error_sum"]) / rows, 3),
+            "directional_accuracy": round(float(acc["direction_hits"]) / max(float(acc["direction_total"]), 1.0), 3),
+        }
+    return metrics
 
 
 def _project_from_history(values: list[float], minutes: list[float]) -> float:

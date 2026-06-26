@@ -126,6 +126,7 @@ export type OpsHealth = {
   status: string;
   prop_sync: PropSyncHealth;
   prop_sync_job?: PropSyncHealth | null;
+  model_training: AsyncJobHealth;
 };
 
 export type PropSyncHealth = {
@@ -144,6 +145,17 @@ export type PropSyncHealth = {
   current?: number;
   total?: number;
   percent?: number;
+  message?: string | null;
+  updated_at?: string | null;
+};
+
+export type AsyncJobHealth = {
+  running: boolean;
+  started_at: string | null;
+  finished_at: string | null;
+  last_error: string | null;
+  last_result: Record<string, unknown> | null;
+  status?: string | null;
   message?: string | null;
   updated_at?: string | null;
 };
@@ -348,6 +360,32 @@ async function waitForPropSyncCompletion(startedAt?: string | null): Promise<{
   }
 
   throw new Error("Timed out waiting for current-slate repair to finish.");
+}
+
+export async function waitForModelTrainingCompletion(startedAt?: string | null): Promise<Record<string, unknown> | null> {
+  const deadline = Date.now() + 20 * 60 * 1000;
+
+  while (Date.now() < deadline) {
+    const health = await fetchOpsHealth();
+    const job = health.model_training;
+
+    if (job.started_at !== startedAt) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      continue;
+    }
+
+    if (job.last_error) {
+      throw new Error(job.last_error);
+    }
+
+    if (!job.running) {
+      return job.last_result;
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+
+  throw new Error("Timed out waiting for model training to finish.");
 }
 
 export async function auditStalePayloads(): Promise<StalePayloadAudit> {
@@ -972,7 +1010,11 @@ export async function fetchModelRuns(): Promise<{ latest: ModelRun | null; runs:
   return response.json();
 }
 
-export async function trainModel(): Promise<ModelRun> {
+export async function trainModel(): Promise<{
+  status?: string;
+  started_at?: string | null;
+  message?: string;
+}> {
   const response = await apiFetch("/api/models/train", { method: "POST" });
   if (!response.ok) {
     const detail = await readErrorDetail(response);
@@ -986,7 +1028,11 @@ export async function trainModel(): Promise<ModelRun> {
     }
     throw new Error(detail || "Failed to train model");
   }
-  return response.json();
+  const payload = await response.json();
+  if (payload?.status === "busy") {
+    throw new Error(typeof payload?.message === "string" && payload.message ? payload.message : "Model training is already running.");
+  }
+  return payload;
 }
 
 export async function tuneModel(): Promise<ModelTuningRun> {

@@ -94,6 +94,7 @@ RATE_LIMIT_REFRESH_REFILL_PER_SEC = float(os.getenv("RATE_LIMIT_REFRESH_REFILL_P
 _RATE_BUCKETS: dict[tuple[str, str], tuple[float, float]] = {}
 _RATE_LOCK = threading.Lock()
 _PROP_SYNC_LOCK = threading.Lock()
+_MODEL_TRAIN_LOCK = threading.Lock()
 _DB_MAINTENANCE_LOCK = threading.Lock()
 _ESPN_HISTORY_IMPORT_LOCK = threading.Lock()
 _PROP_SYNC_STATE: dict[str, Any] = {
@@ -112,6 +113,16 @@ _PROP_SYNC_STATE: dict[str, Any] = {
     "current": 0,
     "total": 0,
     "percent": 0.0,
+    "message": None,
+    "updated_at": None,
+}
+_MODEL_TRAIN_STATE: dict[str, Any] = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": None,
+    "last_result": None,
+    "status": "idle",
     "message": None,
     "updated_at": None,
 }
@@ -371,6 +382,104 @@ def _mutate_prop_sync_state(
         }
     _persist_prop_sync_job_snapshot(snapshot, conn=conn)
     return snapshot
+
+
+def _mutate_model_training_state(
+    *,
+    running: Any = _UNSET,
+    started_at: Any = _UNSET,
+    finished_at: Any = _UNSET,
+    last_error: Any = _UNSET,
+    last_result: Any = _UNSET,
+    status: Any = _UNSET,
+    message: Any = _UNSET,
+) -> dict[str, Any]:
+    with _MODEL_TRAIN_LOCK:
+        updates = {
+            "running": running,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "last_error": last_error,
+            "last_result": last_result,
+            "status": status,
+            "message": message,
+        }
+        for key, value in updates.items():
+            if value is _UNSET:
+                continue
+            if key == "last_result" and value is not None:
+                _MODEL_TRAIN_STATE[key] = dict(value)
+            else:
+                _MODEL_TRAIN_STATE[key] = value
+        _MODEL_TRAIN_STATE["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return {
+            key: (dict(value) if isinstance(value, dict) else value)
+            for key, value in _MODEL_TRAIN_STATE.items()
+        }
+
+
+def _queue_model_training_job() -> dict[str, Any]:
+    with _MODEL_TRAIN_LOCK:
+        if _MODEL_TRAIN_STATE.get("running"):
+            return {
+                "status": "busy",
+                "started_at": _MODEL_TRAIN_STATE.get("started_at"),
+                "message": str(_MODEL_TRAIN_STATE.get("message") or "Model training is already running."),
+            }
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    _mutate_model_training_state(
+        running=True,
+        started_at=started_at,
+        finished_at=None,
+        last_error=None,
+        last_result=None,
+        status="queued",
+        message="Model training queued.",
+    )
+
+    def _run() -> None:
+        _mutate_model_training_state(
+            running=True,
+            started_at=started_at,
+            finished_at=None,
+            last_error=None,
+            last_result=None,
+            status="running",
+            message="Model training is running.",
+        )
+        try:
+            with connect() as conn:
+                result = run_walk_forward_training(conn)
+            _invalidate_read_caches()
+            with connect() as conn:
+                result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+            _mutate_model_training_state(
+                running=False,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                last_error=None,
+                last_result=result,
+                status=str(result.get("status") or "completed"),
+                message="Model training finished.",
+            )
+        except Exception as exc:
+            _mutate_model_training_state(
+                running=False,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                last_error=str(exc),
+                last_result=None,
+                status="error",
+                message=f"Model training failed: {exc}",
+            )
+
+    threading.Thread(target=_run, name="model-training", daemon=True).start()
+    return {
+        "status": "queued",
+        "started_at": started_at,
+        "message": "Model training queued. Results will appear when the background job finishes.",
+    }
 
 
 def _set_prop_sync_progress(
@@ -818,6 +927,8 @@ def health() -> dict[str, str]:
 def ops_health() -> dict[str, Any]:
     with _PROP_SYNC_LOCK:
         sync_state = dict(_PROP_SYNC_STATE)
+    with _MODEL_TRAIN_LOCK:
+        model_training_state = dict(_MODEL_TRAIN_STATE)
     latest_job = _latest_prop_sync_job_state()
     sync_updated_at = sync_state.get("updated_at")
     latest_updated_at = latest_job.get("updated_at") if latest_job else None
@@ -830,6 +941,7 @@ def ops_health() -> dict[str, Any]:
         "status": "ok",
         "prop_sync": sync_state,
         "prop_sync_job": latest_job,
+        "model_training": model_training_state,
     }
 
 
@@ -3256,8 +3368,7 @@ def model_loss_breakdown(model_version: str = "adaptive-context-v1", top_n_playe
 
 @app.post("/api/models/train", dependencies=[Depends(_protect_mutation)])
 def train_model() -> dict:
-    with connect() as conn:
-        return run_walk_forward_training(conn)
+    return _queue_model_training_job()
 
 
 @app.post("/api/models/tune", dependencies=[Depends(_protect_mutation)])

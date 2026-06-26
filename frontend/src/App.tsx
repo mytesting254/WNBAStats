@@ -30,6 +30,7 @@ import {
   settleProps,
   setCsrfToken,
   trainModel,
+  waitForModelTrainingCompletion,
   type AuthState,
   type CacheStatus,
   type CacheViewStatus,
@@ -543,10 +544,18 @@ export function App() {
     setTraining(true);
     setError(null);
     try {
-      await trainModel();
+      const queued = await trainModel();
+      setOperationStatus(queued.message ?? "Model training queued.");
+      const result = await waitForModelTrainingCompletion(queued.started_at ?? null);
       const modelRunBoard = await fetchModelRuns();
       setModelRuns(modelRunBoard.runs);
       setLatestModelRun(modelRunBoard.latest);
+      const evalRows = typeof result?.training_rows === "number" ? result.training_rows : modelRunBoard.latest?.training_rows;
+      setOperationStatus(
+        typeof evalRows === "number"
+          ? `Model training finished. Evaluated ${evalRows} rows.`
+          : "Model training finished."
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to train model");
     } finally {
