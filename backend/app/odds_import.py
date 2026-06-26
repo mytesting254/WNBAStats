@@ -74,15 +74,28 @@ class SyncPropLinesResult:
 
 
 def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = False) -> dict:
+    return _import_the_odds_api_props(conn, force_refresh=force_refresh, progress_callback=None)
+
+
+def _import_the_odds_api_props(
+    conn: sqlite3.Connection,
+    *,
+    force_refresh: bool = False,
+    progress_callback: Callable[[str, int, int, str | None], None] | None = None,
+) -> dict:
     cached_payload = read_json_cache(RAW_CACHE_NAME)
     if cached_payload and not force_refresh:
+        if progress_callback is not None:
+            progress_callback("loading_saved_cache", 0, 1, "Loading saved Odds API cache.")
         result = _replace_sportsbook_rows(conn, cached_payload, datetime.now(timezone.utc).isoformat())
         synced = 0
         sync_error = None
         try:
-            synced = sync_prop_lines_from_sportsbook(conn)
+            synced = _sync_props_after_import(conn, progress_callback)
         except sqlite3.OperationalError as exc:
             sync_error = str(exc)
+        if progress_callback is not None:
+            progress_callback("loading_saved_cache", 1, 1, "Saved Odds API cache loaded.")
         return {
             **result,
             "synced_props": synced,
@@ -106,19 +119,40 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
     events = _fetch_json(f"{BASE_URL}/sports/{SPORT_KEY}/events?{urlencode({'apiKey': api_key})}")
     fetched_payload = []
     errors: list[dict[str, str]] = []
+    todays_events = [event for event in events if _is_today_event(event, today=today)]
+    total_events = len(todays_events)
+    if progress_callback is not None:
+        progress_callback(
+            "requesting_provider",
+            0,
+            max(total_events, 1),
+            "Requesting today's Odds API event payloads.",
+        )
 
-    for event in events:
-        if not _is_today_event(event, today=today):
-            continue
+    for index, event in enumerate(todays_events, start=1):
         event_id = event["id"]
         event_odds, event_errors = _fetch_event_odds(event_id, api_key=api_key)
         errors.extend({"event_id": str(event_id), "error": error} for error in event_errors)
         if event_odds is not None:
             fetched_payload.append(event_odds)
+        if progress_callback is not None:
+            progress_callback(
+                "requesting_provider",
+                index,
+                max(total_events, 1),
+                f"Fetched {index} of {total_events} Odds API event payloads.",
+            )
 
     merged_payload = _merge_event_cache(cached_payload, fetched_payload)
     write_json_cache(RAW_CACHE_NAME, merged_payload)
     persisted_payload = read_json_cache(RAW_CACHE_NAME)
+    if progress_callback is not None:
+        progress_callback(
+            "requesting_provider",
+            max(total_events, 1),
+            max(total_events, 1),
+            "Saved raw Odds API payload to cache. Syncing sportsbook rows.",
+        )
     result = _replace_sportsbook_rows(
         conn,
         persisted_payload if isinstance(persisted_payload, list) else merged_payload,
@@ -127,7 +161,7 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
     synced = 0
     sync_error = None
     try:
-        synced = sync_prop_lines_from_sportsbook(conn)
+        synced = _sync_props_after_import(conn, progress_callback)
     except sqlite3.OperationalError as exc:
         sync_error = str(exc)
     status = "imported"
@@ -150,6 +184,25 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
         "errors": errors,
         "message": message,
     }
+
+
+def _sync_props_after_import(
+    conn: sqlite3.Connection,
+    progress_callback: Callable[[str, int, int, str | None], None] | None = None,
+) -> int:
+    if progress_callback is None:
+        return int(sync_prop_lines_from_sportsbook(conn))
+    return int(
+        sync_prop_lines_from_sportsbook(
+            conn,
+            progress_callback=lambda current, total, message: progress_callback(
+                "syncing_props",
+                current,
+                total,
+                message,
+            ),
+        )
+    )
 
 
 def sync_prop_lines_from_sportsbook(

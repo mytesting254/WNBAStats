@@ -191,6 +191,14 @@ export function App() {
   const [authSubmitting, setAuthSubmitting] = useState(false);
   const [opsHealth, setOpsHealth] = useState<OpsHealth | null>(null);
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
+  const [activePipeline, setActivePipeline] = useState<{
+    scope: string;
+    label: string;
+    stage: string;
+    detail: string;
+    startedAt: string;
+    waitingForBackground: boolean;
+  } | null>(null);
   const loadRequestIdRef = useRef(0);
   const operationsBusyRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
@@ -397,13 +405,13 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    const intervalMs = opsHealth?.prop_sync.running ? 2000 : 15000;
+    const intervalMs = opsHealth?.prop_sync.running || activePipeline ? 2000 : 15000;
     const interval = window.setInterval(() => {
       fetchOpsHealth().then(setOpsHealth).catch(() => {});
       fetchCacheStatus().then(setCacheStatus).catch(() => {});
     }, intervalMs);
     return () => window.clearInterval(interval);
-  }, [opsHealth?.prop_sync.running]);
+  }, [activePipeline, opsHealth?.prop_sync.running]);
 
   useEffect(() => {
     const propSync = opsHealth?.prop_sync;
@@ -416,6 +424,22 @@ export function App() {
     lastCompletedPropSyncRef.current = propSync.finished_at;
     void load({ silent: true });
   }, [opsHealth?.prop_sync.running, opsHealth?.prop_sync.finished_at]);
+
+  useEffect(() => {
+    if (!activePipeline?.waitingForBackground) {
+      return;
+    }
+    const propSync = opsHealth?.prop_sync;
+    if (!propSync || propSync.running || !propSync.finished_at) {
+      return;
+    }
+    const pipelineStartedAt = Date.parse(activePipeline.startedAt);
+    const syncFinishedAt = Date.parse(propSync.finished_at);
+    if (Number.isNaN(pipelineStartedAt) || Number.isNaN(syncFinishedAt) || syncFinishedAt < pipelineStartedAt) {
+      return;
+    }
+    setActivePipeline(null);
+  }, [activePipeline, opsHealth?.prop_sync]);
 
   function handleReload() {
     void load();
@@ -554,21 +578,66 @@ export function App() {
     setImportingOdds(true);
     setError(null);
     setOperationStatus(null);
+    setActivePipeline({
+      scope: "odds_import",
+      label: forceRefresh ? "Refresh Odds" : "Load Saved Odds",
+      stage: forceRefresh ? "requesting_provider" : "loading_saved_cache",
+      detail: forceRefresh
+        ? "Requesting today's Odds API payloads. Successful responses are written to the raw cache before sync."
+        : "Reading the saved Odds API cache and syncing sportsbook rows.",
+      startedAt: new Date().toISOString(),
+      waitingForBackground: false,
+    });
     try {
       const result = await importOdds(forceRefresh);
+      if (result.status === "busy") {
+        setActivePipeline(null);
+        setOperationStatus(result.message ?? "Another data pipeline is already running.");
+        return;
+      }
+      if (result.status === "queued") {
+        setActivePipeline((current) =>
+          current == null
+            ? null
+            : {
+                ...current,
+                stage: "queued",
+                detail: result.message ?? "Odds import queued. Waiting for backend progress.",
+                waitingForBackground: true,
+              }
+        );
+        setOperationStatus(result.message ?? "Odds import queued.");
+        return;
+      }
       if (result.status === "missing_api_key" || result.status === "provider_error") {
+        setActivePipeline(null);
         setError(result.message ?? "Set ODDS_API_KEY to import sportsbook odds");
         return;
       }
+      setActivePipeline((current) =>
+        current == null
+          ? null
+          : {
+              ...current,
+              stage: result.sync_started ? "queued" : "publishing_payloads",
+              detail: result.message
+                ?? (result.sync_started
+                  ? "Odds import finished. Background prop sync is queued."
+                  : "Odds import finished. Reloading dashboard payloads."),
+              waitingForBackground: Boolean(result.sync_started),
+            }
+      );
       await load();
       setOperationStatus(
         result.message
           ?? `${forceRefresh ? "Fresh" : "Saved"} sportsbook odds loaded. Imported ${result.imported ?? 0} sportsbook rows.`
       );
     } catch (err) {
+      setActivePipeline(null);
       setError(err instanceof Error ? err.message : "Unable to import sportsbook odds");
     } finally {
       setImportingOdds(false);
+      setActivePipeline((current) => (current?.waitingForBackground ? current : null));
     }
   }
 
@@ -576,18 +645,44 @@ export function App() {
     setImportingCoversOdds(true);
     setError(null);
     setOperationStatus(null);
+    setActivePipeline({
+      scope: "covers_import",
+      label: forceRefresh ? "Refresh Covers" : "Load Saved Covers",
+      stage: forceRefresh ? "requesting_provider" : "loading_saved_cache",
+      detail: forceRefresh
+        ? "Fetching today's Covers matchup pages and extracting prop tables."
+        : "Reading the saved Covers cache and preparing prop sync.",
+      startedAt: new Date().toISOString(),
+      waitingForBackground: false,
+    });
     try {
       const result = await importCoversOdds(forceRefresh);
       if (result.status === "failed") {
+        setActivePipeline(null);
         setError(result.message ?? "Unable to import Covers odds");
         return;
       }
+      setActivePipeline((current) =>
+        current == null
+          ? null
+          : {
+              ...current,
+              stage: result.sync_started ? "queued" : "publishing_payloads",
+              detail: result.message
+                ?? (result.sync_started
+                  ? "Covers import finished. Background prop sync is queued."
+                  : "Covers import finished. Reloading dashboard payloads."),
+              waitingForBackground: Boolean(result.sync_started),
+            }
+      );
       await load();
       setOperationStatus(result.message ?? `${forceRefresh ? "Fresh" : "Saved"} Covers odds loaded. Imported ${result.imported ?? 0} sportsbook rows from ${result.source ?? "covers"}.`);
     } catch (err) {
+      setActivePipeline(null);
       setError(err instanceof Error ? err.message : "Unable to import Covers odds");
     } finally {
       setImportingCoversOdds(false);
+      setActivePipeline((current) => (current?.waitingForBackground ? current : null));
     }
   }
 
@@ -610,8 +705,27 @@ export function App() {
     setRefreshingResults(true);
     setError(null);
     setOperationStatus(null);
+    setActivePipeline({
+      scope: "espn_history",
+      label: forceRefresh ? "Refresh ESPN" : missingOnly ? "Load Missing ESPN" : "Load Saved ESPN",
+      stage: "requesting_provider",
+      detail: includePlayerStats
+        ? "Fetching ESPN scoreboards and player box scores, then rebuilding settlements and payloads."
+        : "Fetching ESPN scoreboards and refreshing completed game results.",
+      startedAt: new Date().toISOString(),
+      waitingForBackground: false,
+    });
     try {
       const result = await importEspnHistory(forceRefresh, includePlayerStats, missingOnly, includePreviousSeason, undefined, selectedDates);
+      setActivePipeline((current) =>
+        current == null
+          ? null
+          : {
+              ...current,
+              stage: "publishing_payloads",
+              detail: "ESPN import finished. Reloading dashboard payloads.",
+            }
+      );
       await load();
       const resultDates = result.selected_dates?.length ? result.selected_dates : result.selected_date ? [result.selected_date] : [];
       const scope = resultDates.length ? ` for ${resultDates.join(", ")}` : ` for ${result.seasons?.join(", ") ?? result.season}`;
@@ -623,9 +737,11 @@ export function App() {
         settledProps: result.settlements?.settled ?? 0
       }));
     } catch (err) {
+      setActivePipeline(null);
       setError(err instanceof Error ? err.message : "Unable to refresh completed results");
     } finally {
       setRefreshingResults(false);
+      setActivePipeline(null);
     }
   }
 
@@ -685,9 +801,26 @@ export function App() {
     setRefreshingMissingScores(true);
     setError(null);
     setOperationStatus(null);
+    setActivePipeline({
+      scope: "espn_missing",
+      label: "Import Missing ESPN Scores",
+      stage: "requesting_provider",
+      detail: "Fetching missing ESPN final scores and box scores, then rebuilding affected payloads.",
+      startedAt: new Date().toISOString(),
+      waitingForBackground: false,
+    });
     try {
       const result = await importMissingEspnScores(true, true, true, 30);
       const usedDates = result.missing_dates?.length ? result.missing_dates : result.selected_dates ?? [];
+      setActivePipeline((current) =>
+        current == null
+          ? null
+          : {
+              ...current,
+              stage: "publishing_payloads",
+              detail: "Missing-score import finished. Reloading dashboard payloads.",
+            }
+      );
       await load();
       const latest = await fetchMissingEspnScores(30);
       setMissingEspnDates(latest.dates ?? []);
@@ -706,9 +839,11 @@ export function App() {
         );
       }
     } catch (err) {
+      setActivePipeline(null);
       setError(err instanceof Error ? err.message : "Unable to import missing ESPN scores");
     } finally {
       setRefreshingMissingScores(false);
+      setActivePipeline(null);
     }
   }
 
@@ -912,6 +1047,7 @@ export function App() {
             authSubmitting={authSubmitting}
             authState={authState}
             opsHealth={opsHealth}
+            activePipeline={activePipeline}
             adminUsername={adminUsername}
             adminPassword={adminPassword}
             error={error}
@@ -985,6 +1121,7 @@ function DataView({
   authSubmitting,
   authState,
   opsHealth,
+  activePipeline,
   adminUsername,
   adminPassword,
   error,
@@ -1032,6 +1169,14 @@ function DataView({
   authSubmitting: boolean;
   authState: AuthState;
   opsHealth: OpsHealth | null;
+  activePipeline: {
+    scope: string;
+    label: string;
+    stage: string;
+    detail: string;
+    startedAt: string;
+    waitingForBackground: boolean;
+  } | null;
   adminUsername: string;
   adminPassword: string;
   error: string | null;
@@ -1103,6 +1248,27 @@ function DataView({
     : `Missing: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`;
   const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
   const propSync = opsHealth?.prop_sync;
+  const pipelineRunning = activePipeline != null;
+  const pipelineStageLabel = activePipeline ? formatPipelineStage(activePipeline.stage) : formatPropSyncStage(propSync?.stage);
+  const pipelinePercent = pipelineRunning
+    ? activePipeline?.waitingForBackground
+      ? Math.max(0, Math.min(100, Math.round((propSync?.percent ?? 0) * 100)))
+      : 15
+    : Math.max(0, Math.min(100, Math.round((propSync?.percent ?? 0) * 100)));
+  const pipelineLabel = pipelineRunning
+    ? activePipeline!.label
+    : propSync == null
+      ? "Unknown"
+      : propSync.running
+        ? "Background Prop Sync"
+        : "Clear";
+  const pipelineDetail = pipelineRunning
+    ? activePipeline!.detail
+    : propSync == null
+      ? "Operations health unavailable."
+      : propSync.running
+        ? propSync.message || `Started ${formatDateTime(propSync.started_at)}`
+        : `Last finished ${formatDateTime(propSync.finished_at)}`;
   const progressPercent = Math.max(0, Math.min(100, Math.round((propSync?.percent ?? 0) * 100)));
   const progressStageLabel = formatPropSyncStage(propSync?.stage);
   const queueLabel = propSync == null ? "Unknown" : propSync.running ? "Running" : "Clear";
@@ -1124,6 +1290,42 @@ function DataView({
         </div>
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
+        <article className="operation-card">
+          <div>
+            <p className="eyebrow">live pipeline</p>
+            <h3>{pipelineLabel}</h3>
+            <p>{pipelineDetail}</p>
+            <div className="progress-block" aria-live="polite">
+              <div className="progress-meta">
+                <strong>{pipelineStageLabel}</strong>
+                <span>{pipelinePercent}%</span>
+              </div>
+              <div className="progress-track" role="progressbar" aria-valuenow={pipelinePercent} aria-valuemin={0} aria-valuemax={100}>
+                <div className="progress-fill" style={{ width: `${pipelinePercent}%` }} />
+              </div>
+              <p className="progress-caption">
+                {pipelineRunning
+                  ? activePipeline?.waitingForBackground
+                    ? (propSync?.current != null && propSync?.total != null && propSync.total > 0
+                      ? `${propSync.current} of ${propSync.total} background steps complete`
+                      : "Waiting for background prop sync progress.")
+                    : "Request is running on the backend."
+                  : propSync?.current != null && propSync?.total != null && propSync.total > 0
+                    ? `${propSync.current} of ${propSync.total} complete`
+                    : "No active ingest request."}
+              </p>
+            </div>
+          </div>
+          <div className="detail-grid">
+            <Metric label="Request" value={pipelineRunning ? "Active" : "Idle"} />
+            <Metric label="Phase" value={pipelineStageLabel} />
+            <Metric label="Started" value={pipelineRunning ? formatDateTime(activePipeline?.startedAt) : formatDateTime(propSync?.started_at)} />
+            <Metric
+              label="Background"
+              value={pipelineRunning ? (activePipeline?.waitingForBackground ? "Queued" : "None") : (propSync?.running ? "Running" : "Idle")}
+            />
+          </div>
+        </article>
         <article className="operation-card">
           <div>
             <p className="eyebrow">prop sync queue</p>
@@ -3785,6 +3987,8 @@ function CacheFreshnessBadge({ label, status }: { label: string; status: CacheVi
 function formatPropSyncStage(value?: string | null) {
   const labels: Record<string, string> = {
     queued: "Queued",
+    loading_saved_cache: "Loading saved cache",
+    requesting_provider: "Requesting provider data",
     syncing_props: "Syncing props",
     rebuilding_predictions: "Rebuilding projections",
     settling_props: "Settling props",
@@ -3795,6 +3999,19 @@ function formatPropSyncStage(value?: string | null) {
     return "Idle";
   }
   return labels[value] ?? value.split("_").join(" ");
+}
+
+function formatPipelineStage(value?: string | null) {
+  const labels: Record<string, string> = {
+    loading_saved_cache: "Loading saved cache",
+    requesting_provider: "Requesting provider data",
+    queued: "Queued for background sync",
+    publishing_payloads: "Refreshing dashboard payloads",
+  };
+  if (!value) {
+    return "Idle";
+  }
+  return labels[value] ?? formatPropSyncStage(value);
 }
 
 function formatRelativeAge(value?: string | null) {

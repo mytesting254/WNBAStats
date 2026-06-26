@@ -712,6 +712,8 @@ export type OddsImportResult = {
   synced_props?: number;
   message?: string;
   source?: string;
+  sync_started?: boolean;
+  sync_error?: string | null;
   errors?: Array<{ event_id?: string; error: string }>;
 };
 

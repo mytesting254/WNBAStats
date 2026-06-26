@@ -2339,6 +2339,106 @@ def _queue_current_slate_repair_job() -> dict[str, Any]:
     }
 
 
+def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
+    total_stages = 3
+    with connect() as conn:
+        result = import_the_odds_api_props(
+            conn,
+            force_refresh=force_refresh,
+            progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                conn=conn,
+                stage=stage,
+                stage_index=1 if stage in {"loading_saved_cache", "requesting_provider"} else 2,
+                stage_total=total_stages,
+                current=current,
+                total=total,
+                message=message,
+            ),
+        )
+    if result.get("status") in {"missing_api_key", "provider_error"}:
+        message = str(result.get("message") or "Odds import failed.")
+        _mutate_prop_sync_state(
+            running=False,
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            last_error=message,
+            last_result=result,
+            status="failed",
+            scope="odds_import",
+            message=message,
+        )
+        return result
+    _invalidate_read_caches()
+    with connect() as conn:
+        _set_prop_sync_progress(
+            stage="publishing_payloads",
+            stage_index=3,
+            stage_total=total_stages,
+            current=0,
+            total=1,
+            message="Publishing refreshed odds payloads.",
+        )
+        result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+    _set_prop_sync_progress(
+        stage="publishing_payloads",
+        stage_index=3,
+        stage_total=total_stages,
+        current=1,
+        total=1,
+        message=str(result.get("message") or "Odds import finished."),
+    )
+    return result
+
+
+def _queue_odds_import_job(force_refresh: bool) -> dict[str, Any]:
+    with _PROP_SYNC_LOCK:
+        if _PROP_SYNC_STATE["running"]:
+            return {
+                "status": "busy",
+                "started_at": _PROP_SYNC_STATE["started_at"],
+                "scope": _PROP_SYNC_STATE.get("scope"),
+                "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
+            }
+    started_at = _begin_prop_sync_job(
+        "odds_import",
+        stage="queued",
+        message="Odds import queued for background processing.",
+    )
+
+    def _run() -> None:
+        try:
+            result = _run_odds_import_job(force_refresh)
+            if result.get("status") in {"missing_api_key", "provider_error"}:
+                return
+            _mutate_prop_sync_state(
+                running=False,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                last_result=result,
+                last_error=None,
+                status="completed",
+                scope="odds_import",
+                message=str(result.get("message") or "Odds import finished."),
+            )
+        except Exception as exc:
+            _mutate_prop_sync_state(
+                running=False,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                last_error=str(exc),
+                status="failed",
+                scope="odds_import",
+                message=str(exc),
+            )
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {
+        "status": "queued",
+        "started_at": started_at,
+        "scope": "odds_import",
+        "target_game_ids": [],
+        "force_refresh": force_refresh,
+        "message": "Odds import queued. Follow the Live Pipeline card for progress.",
+    }
+
+
 @app.post("/api/props/repair-current-slate", dependencies=[Depends(_protect_mutation)])
 def repair_current_slate_props() -> dict[str, Any]:
     return _queue_current_slate_repair_job()
@@ -3126,15 +3226,7 @@ def tune_model() -> dict:
 
 @app.post("/api/odds/import", dependencies=[Depends(_protect_mutation)])
 def import_odds(force_refresh: bool = False) -> dict:
-    with connect() as conn:
-        result = import_the_odds_api_props(conn, force_refresh=force_refresh)
-    if result.get("sync_error"):
-        _start_prop_sync_if_needed("odds_import")
-    _invalidate_read_caches()
-    if not result.get("sync_error"):
-        with connect() as conn:
-            result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
-    return result
+    return _queue_odds_import_job(force_refresh)
 
 
 @app.post("/api/covers/import", dependencies=[Depends(_protect_mutation)])
