@@ -644,10 +644,8 @@ export function App() {
         setOperationStatus(
           `${forceRefresh ? "Fresh" : "Cached"} Rotowire lineup pull completed, but roster reload failed. ${detail}`
         );
-        void load();
         return;
       }
-      void load();
       setOperationStatus(
         result.used_fallback_cache
           ? `Rotowire refresh fell back to saved roster data. Parsed ${result.parsed_rows ?? 0} rows${result.captured_at ? ` (${result.captured_at})` : ""}.`
