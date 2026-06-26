@@ -1899,6 +1899,19 @@ def _publish_post_mutation_read_payloads(conn) -> dict[str, int]:
     return _publish_current_read_payloads(conn)
 
 
+def _refresh_roster_read_payloads(conn) -> dict[str, int]:
+    published: dict[str, int] = {}
+    payloads = [
+        (ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn)),
+        (MATCHUPS_CACHE_NAME, MATCHUPS_TTL_SECONDS, lambda: _matchups_payload(conn)),
+    ]
+    for name, ttl_seconds, compute in payloads:
+        payload = compute()
+        write_json_cache(name, _cache_envelope(payload, ttl_seconds))
+        published[name] = len(payload) if isinstance(payload, list) else 1
+    return published
+
+
 def _clear_scheduled_prop_state(conn, *, clear_source_rows: bool = False) -> None:
     conn.execute(
         """
@@ -3104,13 +3117,11 @@ def import_covers(selected_date: str | None = None, force_refresh: bool = False)
 def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     with connect() as conn:
         result = import_rotowire_lineups(conn, force_refresh=force_refresh)
-        game_ids = _scheduled_game_ids_for_teams(conn, result.get("affected_team_ids", []))
-        projections = rebuild_predictions(conn, game_ids=game_ids) if game_ids else []
-    result["predictions"] = len(projections)
-    result["affected_game_ids"] = game_ids
-    _invalidate_read_caches()
-    with connect() as conn:
-        result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+        result["affected_game_ids"] = _scheduled_game_ids_for_teams(conn, result.get("affected_team_ids", []))
+        delete_json_cache(ROSTER_CACHE_NAME)
+        delete_json_cache(MATCHUPS_CACHE_NAME)
+        result["published_payloads"] = _refresh_roster_read_payloads(conn)
+    result["predictions"] = 0
     return result
 
 

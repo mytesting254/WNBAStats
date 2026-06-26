@@ -811,6 +811,62 @@ def test_read_cache_invalidation_clears_app_response_cache_files(tmp_path, monke
     assert main_module.VALUE_BOARD_CACHE_NAME in deleted
 
 
+def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_refreshes_roster_payloads(monkeypatch) -> None:
+    connect_calls = 0
+    deleted: list[str] = []
+
+    class DummyConn:
+        def __enter__(self):
+            nonlocal connect_calls
+            connect_calls += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(
+        main_module,
+        "import_rotowire_lineups",
+        lambda conn, force_refresh=False: {
+            "source": "rotowire",
+            "status": "imported",
+            "affected_team_ids": [3, 7],
+        },
+    )
+    monkeypatch.setattr(main_module, "_scheduled_game_ids_for_teams", lambda conn, team_ids: [991, 992])
+    monkeypatch.setattr(main_module, "delete_json_cache", lambda name: deleted.append(name) or True)
+
+    rebuild_called = False
+
+    def fail_rebuild(*args, **kwargs):
+        nonlocal rebuild_called
+        rebuild_called = True
+        raise AssertionError("rebuild_predictions should not be called")
+
+    monkeypatch.setattr(main_module, "rebuild_predictions", fail_rebuild)
+    monkeypatch.setattr(
+        main_module,
+        "_refresh_roster_read_payloads",
+        lambda conn: {
+            main_module.ROSTER_CACHE_NAME: 12,
+            main_module.MATCHUPS_CACHE_NAME: 4,
+        },
+    )
+
+    result = main_module.import_rotowire_injuries(force_refresh=True)
+
+    assert connect_calls == 1
+    assert rebuild_called is False
+    assert deleted == [main_module.ROSTER_CACHE_NAME, main_module.MATCHUPS_CACHE_NAME]
+    assert result["predictions"] == 0
+    assert result["affected_game_ids"] == [991, 992]
+    assert result["published_payloads"] == {
+        main_module.ROSTER_CACHE_NAME: 12,
+        main_module.MATCHUPS_CACHE_NAME: 4,
+    }
+
+
 def test_espn_history_accepts_batch_dates(monkeypatch) -> None:
     scoreboard_dates: list[tuple[int, str | None]] = []
     boxscore_dates: list[tuple[int, str | None]] = []
