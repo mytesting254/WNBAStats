@@ -975,7 +975,16 @@ export async function fetchModelRuns(): Promise<{ latest: ModelRun | null; runs:
 export async function trainModel(): Promise<ModelRun> {
   const response = await apiFetch("/api/models/train", { method: "POST" });
   if (!response.ok) {
-    throw new Error("Failed to train model");
+    const detail = await readErrorDetail(response);
+    if (response.status === 401) {
+      throw new Error("Unauthorized. Sign in on the Data tab and try Train again.");
+    }
+    if (response.status === 403) {
+      throw new Error(
+        "Admin session verification failed. Sign out and sign back in, then retry Train from the same public domain."
+      );
+    }
+    throw new Error(detail || "Failed to train model");
   }
   return response.json();
 }

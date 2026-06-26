@@ -205,6 +205,7 @@ export function App() {
   const lastCompletedPropSyncRef = useRef<string | null>(null);
   const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
+  const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
   const operationsBusy =
     loading ||
     training ||
@@ -220,6 +221,12 @@ export function App() {
     deletingStalePayloads ||
     auditingDbLock ||
     recoveringDbLock;
+
+  useEffect(() => {
+    if (!isAdmin && activeTab === "models") {
+      setActiveTab("props");
+    }
+  }, [activeTab, isAdmin]);
 
   async function load(options?: { silent?: boolean }) {
     const requestId = ++loadRequestIdRef.current;
@@ -529,6 +536,10 @@ export function App() {
   }
 
   async function handleTrainModel() {
+    if (!isAdmin) {
+      setError("Unauthorized. Sign in on the Data tab and try Train again.");
+      return;
+    }
     setTraining(true);
     setError(null);
     try {
@@ -970,10 +981,12 @@ export function App() {
           <SlidersHorizontal size={18} />
           Discrepancies
         </button>
-        <button className={activeTab === "models" ? "active" : ""} onClick={() => setActiveTab("models")}>
-          <BrainCircuit size={18} />
-          Models
-        </button>
+        {isAdmin ? (
+          <button className={activeTab === "models" ? "active" : ""} onClick={() => setActiveTab("models")}>
+            <BrainCircuit size={18} />
+            Models
+          </button>
+        ) : null}
         <button className={activeTab === "roster" ? "active" : ""} onClick={() => setActiveTab("roster")}>
           <ShieldCheck size={18} />
           Roster
@@ -1098,18 +1111,18 @@ export function App() {
             status={operationStatus}
             refreshing={refreshingRoster}
             onRefresh={() => handleRefreshRoster(true)}
-            canRefresh={Boolean(authState.authenticated && authState.user?.is_admin)}
+            canRefresh={isAdmin}
           />
-        ) : (
+        ) : activeTab === "models" ? (
           <ModelsView
             runs={modelRuns}
             latest={latestModelRun}
             loading={loading || training}
             error={error}
             onTrain={handleTrainModel}
-            canTrain={Boolean(authState.authenticated && authState.user?.is_admin)}
+            canTrain={isAdmin}
           />
-        )}
+        ) : null}
       </DashboardErrorBoundary>
     </main>
   );

@@ -234,7 +234,7 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 - `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Player rows include an `L5` strip (last 5 market outcomes) with hit/miss color coding against the current side+line. Completed games are removed from this view after the stale-game grace window.
 - `Discrepancies`: cross-book line gaps and price gaps.
 - `Roster`: Rotowire lineup statuses grouped by team, with a manual `Refresh Roster` pull.
-- `Model Lab`: latest training metrics, market metrics, model comparison, and run history.
+- `Model Lab`: latest training metrics, market metrics, model comparison, and run history. This tab is only shown to authenticated admins.
 - `Data`: operational controls for saved/fresh odds import, completed-game import, projection rebuilds, and reloads.
 - `Data`: includes a `Live Pipeline` card plus a background prop-sync queue card so long-running ingest jobs show current phase and backend progress instead of only button spinners.
 - `Data`: includes `Track Gems Daily` and `Track Watchlist Daily` snapshot controls.
@@ -244,6 +244,7 @@ Operational expectations:
 - Public viewers should be able to browse read tabs without admin credentials.
 - `Data` actions should require an admin session.
 - `Roster` display is public/readable, but its refresh action is admin-only.
+- `Model Lab` is admin-only. If a non-admin loses auth while on that view, the frontend returns to `Pregame Props`.
 
 `Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
 
@@ -870,7 +871,7 @@ Projection and value are intentionally separate. The model first estimates the s
 
 ## Model Training
 
-The Model Lab tab trains against the active Turso database and records two benchmarks:
+The admin-only Model Lab tab trains against the active Turso database and records two benchmarks:
 
 ```text
 component-pregame-v2
@@ -881,6 +882,11 @@ adaptive-context-v1
 ```
 
 Each training action saves both runs to Turso in `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. Learned-run payloads now also include game residual evaluation rows (`game_ats`, `game_total`, and `game_overall`) with both baseline and blended metrics so saved game predictions can be compared before and after the residual layer. The Model Lab now shows those game residual deltas directly alongside the existing player-market training tables. The comparison table shows the latest run for each model version side by side. Prediction-time learned models also train from the active connection when the app is using Turso, instead of reopening a local SQLite file.
+
+Training auth expectations:
+
+- If `Train` returns `401`, there is no valid admin session. Sign in again from the `Data` tab.
+- If `Train` returns `403`, the admin session exists but session verification failed. Sign out, sign back in, and retry from the same public domain so the session cookie, CSRF token, and forwarded origin stay aligned.
 
 The player model now also supports a separate market-relative residual fit by market. That residual model is used only when a real sportsbook line exists, because its target is line-relative (`actual_result - line`) rather than raw stat outcome. Training/reporting metrics should therefore be read as two related layers:
 

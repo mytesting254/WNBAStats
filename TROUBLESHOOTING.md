@@ -87,6 +87,30 @@ If login still works but POSTs fail, inspect the backend log line and response b
   - `X-API-Key: <API_KEY>`
   - or `Authorization: Bearer <API_KEY>`
 
+## Model Lab Missing Or Train Fails
+
+### Symptom
+
+- the `Models` / `Model Lab` tab is not visible
+- clicking `Train` returns `Unauthorized. Sign in on the Data tab and try Train again.`
+- clicking `Train` returns a session verification / same public domain error
+
+### Expected Behavior
+
+- the `Model Lab` tab is only visible to authenticated admins
+- if auth is lost while that tab is open, the frontend automatically returns to `Pregame Props`
+
+### What To Check
+
+- `GET /api/auth/me` shows `authenticated: true` and `user.is_admin: true`
+- the browser is still on the same public hostname used for login
+- the `Train` request includes the session cookie and `X-CSRF-Token`
+
+### How To Read Failures
+
+- `401`: no valid admin session; sign in again on the `Data` tab
+- `403`: admin session exists, but CSRF/origin/session verification failed; sign out, sign back in, then retry from the same public domain
+
 ## Covers Refresh Fails
 
 ### Symptom
