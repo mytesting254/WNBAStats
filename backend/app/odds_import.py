@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -29,6 +30,7 @@ DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars,espnbet,fanatics,betrive
 RAW_CACHE_NAME = "sportsbook_props_raw.json"
 COMPLETED_GAME_GRACE_HOURS = 4
 GAME_MARKETS = ("h2h", "spreads", "totals")
+PLAYER_MARKET_BATCH_SIZE = 3
 
 PLAYER_MARKETS = {
     "player_points": "points",
@@ -100,28 +102,19 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
         }
 
     captured_at = datetime.now(timezone.utc).isoformat()
-    markets = ",".join([*GAME_MARKETS, *PLAYER_MARKETS])
     today = local_today_iso()
     events = _fetch_json(f"{BASE_URL}/sports/{SPORT_KEY}/events?{urlencode({'apiKey': api_key})}")
     fetched_payload = []
+    errors: list[dict[str, str]] = []
 
     for event in events:
         if not _is_today_event(event, today=today):
             continue
         event_id = event["id"]
-        event_odds = _fetch_json(
-            f"{BASE_URL}/sports/{SPORT_KEY}/events/{event_id}/odds?"
-            + urlencode(
-                {
-                    "apiKey": api_key,
-                    "regions": os.getenv("ODDS_API_REGIONS", DEFAULT_REGIONS),
-                    "bookmakers": os.getenv("ODDS_API_BOOKMAKERS", DEFAULT_BOOKMAKERS),
-                    "markets": markets,
-                    "oddsFormat": "american",
-                }
-            )
-        )
-        fetched_payload.append(event_odds)
+        event_odds, event_errors = _fetch_event_odds(event_id, api_key=api_key)
+        errors.extend({"event_id": str(event_id), "error": error} for error in event_errors)
+        if event_odds is not None:
+            fetched_payload.append(event_odds)
 
     merged_payload = _merge_event_cache(cached_payload, fetched_payload)
     write_json_cache(RAW_CACHE_NAME, merged_payload)
@@ -137,15 +130,25 @@ def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = Fa
         synced = sync_prop_lines_from_sportsbook(conn)
     except sqlite3.OperationalError as exc:
         sync_error = str(exc)
+    status = "imported"
+    message = None
+    if errors and fetched_payload:
+        status = "partial_import"
+        message = f"Imported {len(fetched_payload)} event(s) with {len(errors)} provider error(s)."
+    elif errors:
+        status = "provider_error"
+        message = f"Odds API import failed for {len(errors)} request(s)."
     return {
         **result,
         "synced_props": synced,
-        "status": "imported",
+        "status": status,
         "source": "provider",
         "fetched_events": len(fetched_payload),
         "cached_events": len(merged_payload),
         "captured_at": captured_at,
         "sync_error": sync_error,
+        "errors": errors,
+        "message": message,
     }
 
 
@@ -828,8 +831,97 @@ def line_discrepancies(conn: sqlite3.Connection, game_id: int | None = None) -> 
 
 
 def _fetch_json(url: str) -> object:
-    with urlopen(url, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urlopen(url, timeout=30) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        detail = _http_error_detail(exc)
+        raise RuntimeError(detail) from exc
+    except URLError as exc:
+        raise RuntimeError(f"Unable to reach Odds API: {exc.reason}") from exc
+
+
+def _fetch_event_odds(event_id: str, *, api_key: str) -> tuple[dict | None, list[str]]:
+    params = {
+        "apiKey": api_key,
+        "regions": os.getenv("ODDS_API_REGIONS", DEFAULT_REGIONS),
+        "bookmakers": os.getenv("ODDS_API_BOOKMAKERS", DEFAULT_BOOKMAKERS),
+        "oddsFormat": "american",
+    }
+    payloads: list[dict] = []
+    errors: list[str] = []
+    market_groups: list[tuple[str, ...]] = [GAME_MARKETS]
+    player_market_keys = list(PLAYER_MARKETS)
+    for start in range(0, len(player_market_keys), PLAYER_MARKET_BATCH_SIZE):
+        market_groups.append(tuple(player_market_keys[start : start + PLAYER_MARKET_BATCH_SIZE]))
+    for market_group in market_groups:
+        try:
+            payload = _fetch_json(
+                f"{BASE_URL}/sports/{SPORT_KEY}/events/{event_id}/odds?"
+                + urlencode({**params, "markets": ",".join(market_group)})
+            )
+        except RuntimeError as exc:
+            errors.append(f"markets={','.join(market_group)}: {exc}")
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    if not payloads:
+        return None, errors
+    return _merge_event_market_payloads(payloads), errors
+
+
+def _merge_event_market_payloads(payloads: list[dict]) -> dict:
+    merged = dict(payloads[0])
+    bookmakers_by_key: dict[str, dict] = {}
+    for payload in payloads:
+        for bookmaker in payload.get("bookmakers", []):
+            book_key = str(bookmaker.get("key") or "")
+            if not book_key:
+                continue
+            existing = bookmakers_by_key.get(book_key)
+            if existing is None:
+                existing = {**bookmaker, "markets": []}
+                bookmakers_by_key[book_key] = existing
+            existing_markets = {
+                str(market.get("key") or ""): market
+                for market in existing.get("markets", [])
+                if isinstance(market, dict)
+            }
+            for market in bookmaker.get("markets", []):
+                market_key = str(market.get("key") or "")
+                if not market_key or market_key in existing_markets:
+                    continue
+                existing_markets[market_key] = market
+            existing["markets"] = list(existing_markets.values())
+    merged["bookmakers"] = list(bookmakers_by_key.values())
+    return merged
+
+
+def _http_error_detail(exc: HTTPError) -> str:
+    status = getattr(exc, "status", exc.code)
+    detail = ""
+    try:
+        body = exc.read().decode("utf-8").strip()
+    except Exception:
+        body = ""
+    if body:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            detail = body
+        else:
+            if isinstance(payload, dict):
+                detail = str(
+                    payload.get("message")
+                    or payload.get("error")
+                    or payload.get("detail")
+                    or body
+                )
+            else:
+                detail = body
+    if not detail:
+        detail = exc.reason if getattr(exc, "reason", None) else "request failed"
+    return f"Odds API HTTP {status}: {detail}"
 
 
 def _match_or_create_local_game(conn: sqlite3.Connection, event: dict) -> int | None:

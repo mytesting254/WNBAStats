@@ -3066,6 +3066,148 @@ def test_odds_import_fetches_only_todays_events(monkeypatch) -> None:
     assert not any("/events/tomorrow-event/odds?" in url for url in fetched_urls)
 
 
+def test_odds_import_batches_player_markets_and_merges_successful_chunks(monkeypatch) -> None:
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setattr("backend.app.odds_import.load_dotenv", lambda: None)
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-05-08")
+    monkeypatch.setattr("backend.app.odds_import.read_json_cache", lambda _: None)
+    monkeypatch.setattr("backend.app.odds_import.write_json_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.app.odds_import.sync_prop_lines_from_sportsbook", lambda conn: 0)
+
+    fetched_urls: list[str] = []
+
+    def fake_fetch(url: str):
+        fetched_urls.append(url)
+        if url.endswith("/events?apiKey=test-key"):
+            return [
+                {
+                    "id": "today-event",
+                    "commence_time": "2026-05-08T23:30:00Z",
+                }
+            ]
+        if "markets=h2h%2Cspreads%2Ctotals" in url:
+            return {
+                "id": "today-event",
+                "commence_time": "2026-05-08T23:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+                "bookmakers": [
+                    {
+                        "key": "fanduel",
+                        "title": "FanDuel",
+                        "markets": [
+                            {
+                                "key": "h2h",
+                                "outcomes": [
+                                    {"name": "Connecticut Sun", "price": -105},
+                                    {"name": "New York Liberty", "price": -115},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        if "markets=player_points%2Cplayer_rebounds%2Cplayer_assists" in url:
+            return {
+                "id": "today-event",
+                "commence_time": "2026-05-08T23:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+                "bookmakers": [
+                    {
+                        "key": "fanduel",
+                        "title": "FanDuel",
+                        "markets": [
+                            {
+                                "key": "player_points",
+                                "outcomes": [
+                                    {"name": "Over", "description": "Breanna Stewart", "price": -110, "point": 21.5},
+                                    {"name": "Under", "description": "Breanna Stewart", "price": -110, "point": 21.5},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        if "markets=player_threes%2Cplayer_points_rebounds%2Cplayer_points_assists" in url:
+            raise RuntimeError("Odds API HTTP 422: invalid markets")
+        if "markets=player_rebounds_assists%2Cplayer_points_rebounds_assists%2Cplayer_steals" in url:
+            return {
+                "id": "today-event",
+                "commence_time": "2026-05-08T23:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+                "bookmakers": [
+                    {
+                        "key": "draftkings",
+                        "title": "DraftKings",
+                        "markets": [
+                            {
+                                "key": "player_steals",
+                                "outcomes": [
+                                    {"name": "Over", "description": "Breanna Stewart", "price": 120, "point": 1.5},
+                                    {"name": "Under", "description": "Breanna Stewart", "price": -150, "point": 1.5},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        if "markets=player_blocks%2Cplayer_blocks_steals" in url:
+            return {
+                "id": "today-event",
+                "commence_time": "2026-05-08T23:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+                "bookmakers": [],
+            }
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr("backend.app.odds_import._fetch_json", fake_fetch)
+
+    with connect() as conn:
+        result = import_the_odds_api_props(conn, force_refresh=True)
+
+    assert result["status"] == "partial_import"
+    assert result["fetched_events"] == 1
+    assert result["imported"] == 4
+    assert len(result["errors"]) == 1
+    assert "invalid markets" in result["errors"][0]["error"]
+    assert any("markets=h2h%2Cspreads%2Ctotals" in url for url in fetched_urls)
+    assert any("markets=player_blocks%2Cplayer_blocks_steals" in url for url in fetched_urls)
+
+
+def test_odds_import_returns_provider_error_when_all_event_requests_fail(monkeypatch) -> None:
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setattr("backend.app.odds_import.load_dotenv", lambda: None)
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-05-08")
+    monkeypatch.setattr("backend.app.odds_import.read_json_cache", lambda _: None)
+    monkeypatch.setattr("backend.app.odds_import.write_json_cache", lambda *args, **kwargs: None)
+    monkeypatch.setattr("backend.app.odds_import.sync_prop_lines_from_sportsbook", lambda conn: 0)
+
+    def fake_fetch(url: str):
+        if url.endswith("/events?apiKey=test-key"):
+            return [
+                {
+                    "id": "today-event",
+                    "commence_time": "2026-05-08T23:30:00Z",
+                }
+            ]
+        raise RuntimeError("Odds API HTTP 401: invalid api key")
+
+    monkeypatch.setattr("backend.app.odds_import._fetch_json", fake_fetch)
+
+    with connect() as conn:
+        result = import_the_odds_api_props(conn, force_refresh=True)
+        rows = conn.execute("SELECT * FROM sportsbook_prop_lines").fetchall()
+
+    assert result["status"] == "provider_error"
+    assert result["imported"] == 0
+    assert len(rows) == 0
+    assert len(result["errors"]) == 5
+    assert "failed" in str(result["message"]).lower()
+
+
 def test_odds_sync_prefers_covers_lines_when_available() -> None:
     load_test_history()
     captured_at = datetime.now(timezone.utc).isoformat()

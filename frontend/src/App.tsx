@@ -556,12 +556,15 @@ export function App() {
     setOperationStatus(null);
     try {
       const result = await importOdds(forceRefresh);
-      if (result.status === "missing_api_key") {
+      if (result.status === "missing_api_key" || result.status === "provider_error") {
         setError(result.message ?? "Set ODDS_API_KEY to import sportsbook odds");
         return;
       }
       await load();
-      setOperationStatus(`${forceRefresh ? "Fresh" : "Saved"} sportsbook odds loaded. Imported ${result.imported ?? 0} sportsbook rows.`);
+      setOperationStatus(
+        result.message
+          ?? `${forceRefresh ? "Fresh" : "Saved"} sportsbook odds loaded. Imported ${result.imported ?? 0} sportsbook rows.`
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to import sportsbook odds");
     } finally {
