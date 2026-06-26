@@ -2340,7 +2340,7 @@ def _queue_current_slate_repair_job() -> dict[str, Any]:
 
 
 def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
-    total_stages = 3
+    total_stages = 4
     with connect() as conn:
         result = import_the_odds_api_props(
             conn,
@@ -2367,20 +2367,62 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             message=message,
         )
         return result
+    covers_result: dict[str, Any] | None = None
+    covers_error: str | None = None
+    try:
+        _set_prop_sync_progress(
+            stage="refreshing_covers_context",
+            stage_index=3,
+            stage_total=total_stages,
+            current=0,
+            total=1,
+            message="Refreshing Covers matchup context for H2H and team history.",
+        )
+        with connect() as conn:
+            covers_result = import_covers_props(
+                conn,
+                selected_date=_local_today_iso(),
+                force_refresh=True,
+                sync_props=False,
+            )
+        _set_prop_sync_progress(
+            stage="refreshing_covers_context",
+            stage_index=3,
+            stage_total=total_stages,
+            current=1,
+            total=1,
+            message="Covers matchup context refreshed.",
+        )
+    except Exception as exc:
+        covers_error = str(exc)
+        _set_prop_sync_progress(
+            stage="refreshing_covers_context",
+            stage_index=3,
+            stage_total=total_stages,
+            current=1,
+            total=1,
+            message=f"Covers matchup context refresh failed: {covers_error}",
+        )
     _invalidate_read_caches()
     with connect() as conn:
         _set_prop_sync_progress(
             stage="publishing_payloads",
-            stage_index=3,
+            stage_index=4,
             stage_total=total_stages,
             current=0,
             total=1,
             message="Publishing refreshed odds payloads.",
         )
         result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+    if covers_result is not None:
+        result["covers_context"] = covers_result
+        if covers_result.get("message"):
+            result["message"] = f"{str(result.get('message') or 'Odds import finished.')} {covers_result['message']}"
+    if covers_error:
+        result["covers_context_error"] = covers_error
     _set_prop_sync_progress(
         stage="publishing_payloads",
-        stage_index=3,
+        stage_index=4,
         stage_total=total_stages,
         current=1,
         total=1,

@@ -2915,25 +2915,39 @@ function buildFallbackH2HRows(matchup: Matchup): CoversRecordRow[] {
     return [];
   }
 
-  return matchup.away.recent_games
-    .filter((game) => normalizeTeamCode(game.opponent) === homeCode)
-    .slice(0, 10)
-    .map((game) => {
-      const awayWasHome = Boolean(game.is_home);
-      const homeTeam = awayWasHome ? awayCode : homeCode;
-      const awayPoints = game.points;
-      const homePoints = game.opponent_points;
-      const winner =
-        awayPoints === homePoints ? null : awayPoints > homePoints ? awayCode : homeCode;
-      return {
-        date: formatGameDateShort(game.game_date),
-        home: homeTeam,
-        winner,
-        score: awayWasHome ? `${awayPoints} - ${homePoints}` : `${homePoints} - ${awayPoints}`,
-        ats: atsLabel(game.ats_result).replace("ATS ", ""),
-        total: totalLabel(game.total_result),
-      };
-    });
+  const h2hGames = [
+    ...matchup.away.recent_games
+      .filter((game) => normalizeTeamCode(game.opponent) === homeCode)
+      .map((game) => ({ game, perspective: awayCode as string })),
+    ...matchup.home.recent_games
+      .filter((game) => normalizeTeamCode(game.opponent) === awayCode)
+      .map((game) => ({ game, perspective: homeCode as string })),
+  ];
+  const deduped = new Map<string, CoversRecordRow>();
+  for (const { game, perspective } of h2hGames) {
+    const perspectiveIsAway = perspective === awayCode;
+    const teamWasHome = Boolean(game.is_home);
+    const homeTeam = teamWasHome ? perspective : perspectiveIsAway ? homeCode : awayCode;
+    const awayPoints = perspectiveIsAway ? game.points : game.opponent_points;
+    const homePoints = perspectiveIsAway ? game.opponent_points : game.points;
+    const winner = awayPoints === homePoints ? null : awayPoints > homePoints ? awayCode : homeCode;
+    const score = teamWasHome
+      ? `${game.points} - ${game.opponent_points}`
+      : `${game.opponent_points} - ${game.points}`;
+    const row: CoversRecordRow = {
+      date: formatGameDateShort(game.game_date),
+      home: homeTeam,
+      winner,
+      score,
+      ats: atsLabel(game.ats_result).replace("ATS ", ""),
+      total: totalLabel(game.total_result),
+    };
+    const key = `${game.game_date}-${[awayCode, homeCode].sort().join("-")}-${score}`;
+    if (!deduped.has(key)) {
+      deduped.set(key, row);
+    }
+  }
+  return Array.from(deduped.values()).slice(0, 10);
 }
 
 function h2hMatchupOwner(rows: CoversRecordRow[], matchup: Matchup): { owner: string; record: string } {
@@ -3992,6 +4006,7 @@ function formatPropSyncStage(value?: string | null) {
     loading_saved_cache: "Loading saved cache",
     requesting_provider: "Requesting provider data",
     syncing_props: "Syncing props",
+    refreshing_covers_context: "Refreshing Covers context",
     rebuilding_predictions: "Rebuilding projections",
     settling_props: "Settling props",
     settling_games: "Settling games",
