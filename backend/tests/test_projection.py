@@ -17,6 +17,7 @@ from backend.app import cache as cache_module
 from backend.app import espn_history as espn_history_module
 from backend.app import odds_import as odds_import_module
 from backend.app import paths as paths_module
+from backend.app import player_prop_model as player_prop_model_module
 from backend.app import projections as projections_module
 from backend.app import rotowire_import as rotowire_import_module
 from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
@@ -2029,7 +2030,7 @@ def test_repair_current_slate_props_targets_only_active_games() -> None:
     assert stale_prop_lines == 0
 
 
-def test_repair_current_slate_props_rebuilds_full_touched_games(monkeypatch) -> None:
+def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch) -> None:
     rebuild_calls: list[tuple[list[int] | None, list[int] | None]] = []
 
     def fake_sync(conn, **kwargs):
@@ -2066,7 +2067,7 @@ def test_repair_current_slate_props_rebuilds_full_touched_games(monkeypatch) -> 
     with connect() as conn:
         result = main_module._repair_current_slate_props(conn)
 
-    assert rebuild_calls == [([9910], None)]
+    assert rebuild_calls == [(None, [501, 502])]
     assert result["scope"] == "current_slate"
     assert result["scanned_props"] == 2
     assert result["synced_props"] == 2
@@ -2207,6 +2208,18 @@ def test_rebuild_predictions_live_keeps_existing_predictions_when_a_rebuild_fail
 
     with connect() as conn:
         conn.execute("DELETE FROM prop_predictions")
+        conn.execute("DELETE FROM prop_lines WHERE id IN (101, 102)")
+        conn.executemany(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (101, 2010, 1001, "DraftKings", "points", 21.5, -110, -110, "2026-06-24T00:00:00+00:00"),
+                (102, 2010, 1001, "FanDuel", "rebounds", 8.5, -115, -105, "2026-06-24T00:00:00+00:00"),
+            ],
+        )
         conn.executemany(
             """
             INSERT INTO prop_predictions (
@@ -2239,6 +2252,28 @@ def test_rebuild_predictions_live_keeps_existing_predictions_when_a_rebuild_fail
         (101, "stale", 9.0, "stale"),
         (102, "component", 12.0, "rebuilt"),
     ]
+
+
+def test_feature_snapshot_reuses_shared_player_context_with_runtime_cache(monkeypatch) -> None:
+    load_test_history()
+    call_count = 0
+    original = player_prop_model_module._player_recent_feature_rows
+
+    def counting_rows(conn, player_id, before_game_date, exclude_game_id):
+        nonlocal call_count
+        call_count += 1
+        return original(conn, player_id, before_game_date, exclude_game_id)
+
+    monkeypatch.setattr(player_prop_model_module, "_player_recent_feature_rows", counting_rows)
+
+    with connect() as conn:
+        runtime_cache: dict[str, dict[tuple, object]] = {}
+        first = feature_snapshot(conn, 1001, "points", 2010, runtime_cache=runtime_cache)
+        second = feature_snapshot(conn, 1001, "rebounds", 2010, runtime_cache=runtime_cache)
+
+    assert first.component_projection >= 0.0
+    assert second.component_projection >= 0.0
+    assert call_count == 1
 
 
 def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -> None:
@@ -2396,8 +2431,8 @@ def test_start_prop_sync_if_needed_tracks_progress(monkeypatch) -> None:
         )
 
     def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None):
-        assert game_ids == [9910]
-        assert prop_line_ids is None
+        assert game_ids is None
+        assert prop_line_ids == [901, 902, 903]
         if progress_callback is not None:
             progress_callback(3, 3, "Built 3 of 3 projections.")
         return projections_module.LiveRebuildResult(
@@ -3312,6 +3347,118 @@ def test_odds_sync_keeps_one_model_line_with_best_available_odds() -> None:
     assert rows[1]["line"] == 22.5
 
 
+def test_odds_sync_reingest_preserves_unchanged_prop_lines() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute("DELETE FROM prop_predictions")
+        conn.execute("DELETE FROM prop_lines")
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9601, 2010, 1001, 'DraftKings', 'points', 21.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9601, 'adaptive-context-v1', 'pregame', 22.0, 'over', 0.56, 0.52, 0.04, 0.07, 'medium', 'stale')
+            """
+        )
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 21.5, -110, captured_at),
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 21.5, -110, captured_at),
+            ],
+        )
+
+        result = sync_prop_lines_from_sportsbook(
+            conn,
+            rebuild_predictions_after=False,
+            include_change_details=True,
+        )
+        line = conn.execute("SELECT * FROM prop_lines WHERE id = 9601").fetchone()
+        prediction = conn.execute("SELECT * FROM prop_predictions WHERE prop_line_id = 9601").fetchone()
+
+    assert isinstance(result, SyncPropLinesResult)
+    assert result.changed_props == 0
+    assert result.changed_prop_line_ids == []
+    assert line is not None
+    assert prediction is not None
+    assert prediction["reason"] == "stale"
+
+
+def test_odds_sync_reingest_updates_only_changed_prop_line_predictions(monkeypatch) -> None:
+    load_test_history()
+    first_captured_at = datetime.now(timezone.utc).isoformat()
+    second_captured_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    rebuild_calls: list[list[int] | None] = []
+
+    def fake_rebuild_predictions(conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None):
+        rebuild_calls.append(list(prop_line_ids) if prop_line_ids is not None else None)
+        return projections_module.LiveRebuildResult(
+            projections=[],
+            attempted=len(prop_line_ids or []),
+            written=len(prop_line_ids or []),
+            skipped=0,
+            errors=[],
+        )
+
+    monkeypatch.setattr("backend.app.odds_import.rebuild_predictions_live", fake_rebuild_predictions)
+
+    with connect() as conn:
+        conn.execute("DELETE FROM prop_predictions")
+        conn.execute("DELETE FROM prop_lines")
+        conn.executemany(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (9701, 2010, 1001, "DraftKings", "points", 21.5, -110, -110, first_captured_at),
+                (9702, 2010, 1001, "DraftKings", "rebounds", 8.5, -108, -112, first_captured_at),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 21.5, -110, second_captured_at),
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 21.5, -110, second_captured_at),
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_rebounds", "rebounds", "Breanna Stewart", "over", 8.5, -102, second_captured_at),
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_rebounds", "rebounds", "Breanna Stewart", "under", 8.5, -118, second_captured_at),
+            ],
+        )
+
+        result = sync_prop_lines_from_sportsbook(conn, include_change_details=True)
+        point_row = conn.execute("SELECT * FROM prop_lines WHERE id = 9701").fetchone()
+        rebound_row = conn.execute("SELECT * FROM prop_lines WHERE id = 9702").fetchone()
+
+    assert isinstance(result, SyncPropLinesResult)
+    assert result.changed_prop_line_ids == [9702]
+    assert rebuild_calls == [[9702]]
+    assert point_row is not None
+    assert rebound_row is not None
+    assert point_row["captured_at"] == second_captured_at
+    assert rebound_row["over_odds"] == -102
+    assert rebound_row["under_odds"] == -118
+
+
 def test_odds_sync_matches_player_name_without_punctuation() -> None:
     load_test_history()
     captured_at = datetime.now(timezone.utc).isoformat()
@@ -3539,6 +3686,18 @@ def test_odds_sync_deletes_snapshot_dependents_before_scheduled_line_cleanup() -
                 snapshot_id, prop_line_id, prediction_id, game_id, player_id, market, side, line, edge, expected_value, confidence
             ) VALUES (9504, 9501, 9502, 2010, 1001, 'points', 'over', 21.5, 0.04, 0.07, 'medium')
             """
+        )
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 22.5, -110, captured_at),
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 22.5, -110, captured_at),
+            ],
         )
 
         sync_prop_lines_from_sportsbook(conn)

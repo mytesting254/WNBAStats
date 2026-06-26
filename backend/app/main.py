@@ -2111,8 +2111,8 @@ def _repair_current_slate_props(
         changed_prop_line_ids = []
     rebuild_result = rebuild_predictions_live(
         conn,
-        game_ids=target_game_ids,
-        prop_line_ids=None if target_game_ids else (changed_prop_line_ids or None),
+        game_ids=None,
+        prop_line_ids=changed_prop_line_ids or None,
         progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
         if progress_callback is not None
         else None,
@@ -4106,8 +4106,8 @@ def _start_prop_sync_if_needed(source: str) -> bool:
                 )
                 rebuild_result = rebuild_predictions_live(
                     conn,
-                    game_ids=touched_game_ids,
-                    prop_line_ids=None if touched_game_ids else (sync_result.changed_prop_line_ids or None),
+                    game_ids=None,
+                    prop_line_ids=sync_result.changed_prop_line_ids or None,
                     progress_callback=lambda current, total, message: _set_prop_sync_progress(
                         conn=conn,
                         stage="rebuilding_predictions",

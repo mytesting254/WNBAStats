@@ -34,11 +34,13 @@
 ## Current Repair-Path Optimization Work
 
 - [x] Rebuild only changed `prop_lines` during current-slate repair instead of rebuilding every scheduled prop in the touched games.
-- [ ] Add per-run caching for repeated `feature_snapshot()` inputs during rebuild.
+- [x] Add per-run caching for repeated `feature_snapshot()` inputs during rebuild.
+- [x] Keep unchanged scheduled `prop_lines` in place during reingest instead of deleting and recreating every touched game row.
+- [x] Apply Covers precedence before model-line sync so overlapping Odds API rows do not create duplicate live model rows for the same player market.
 - [ ] Batch current-slate rebuild work per game to reduce lock duration and improve recovery.
 - [ ] Investigate duplicate player identities that may create unnecessary joins and duplicate prop rows.
 - [x] Keep Odds API cache rehydration scoped to active upcoming events instead of blindly reloading stale cached provider rows.
-- [ ] Tighten merged provider dedupe rules so overlapping Covers and Odds API rows keep distinct lines without over-inflating effectively identical offers.
+- [x] Tighten merged provider dedupe rules so overlapping Covers and Odds API rows keep distinct lines without over-inflating effectively identical offers.
 
 ## Current Model Quality Follow-Up
 
@@ -91,10 +93,12 @@
   - game residual evaluation rows in `model_runs` (`game_ats`, `game_total`, `game_overall`)
   - live WNBA deployment/docs cleanup so The Odds API path uses `ODDS_API_KEY` only
   - active-date filtering when replaying cached Odds API event payloads
-  - combined Covers + Odds API raw row inventory in `sportsbook_prop_lines` instead of game-level Covers-only suppression during sync
+  - combined Covers + Odds API raw row inventory in `sportsbook_prop_lines` with Covers-first sync precedence at the final `prop_lines` layer
   - segmented walk-forward player-prop evaluation saved in `model_runs` with per-market baseline deltas and segment counts
   - Model Lab display for baseline-vs-model deltas and evaluation segment coverage
   - connection-scoped historical training caches for player rows, archetypes, matchup factors, and context reuse
+  - run-scoped shared player/game projection context so repeated same-player market rebuilds reuse minutes/context setup
+  - diff-based prop-line reingest so unchanged rows and predictions are preserved across current-slate repairs
   - parallel per-market training evaluation in `run_walk_forward_training()`
   - signature-based reuse of unchanged `model_runs` so repeat local training returns instantly when the data has not changed
 - Current data state checked on `2026-06-26`:

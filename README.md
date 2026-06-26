@@ -434,6 +434,9 @@ Cache behavior safeguards:
 - Covers cache is day-scoped by local date. When a new local day starts, stale Covers cache files are purged before import (`covers_props_raw.json` and `covers_pages_raw.json`).
 - Saved-cache no-op is date-aware. A cache load skips rewrite only when DB already has Covers rows for `game_date >= cache_date`; historical leftover rows no longer block loading today's cached slate.
 - When Covers write/sync hits SQLite lock contention, the API returns a `db_locked` status instead of crashing, so retries are safe.
+- Final `prop_lines` sync is Covers-first by player/game/market. If Covers and Odds API both exist for the same player market, Covers rows win and overlapping non-Covers rows are ignored.
+- Reingest sync is diff-based. Unchanged scheduled `prop_lines` stay in place, deleted lines clean up their dependent snapshots/predictions, and only inserted or odds-changed rows rebuild projections.
+- Projection rebuilds now reuse a shared player/game feature context within the run, which reduces repeated minutes/context recomputation when one player has multiple live markets.
 
 Refresh from the app or call:
 

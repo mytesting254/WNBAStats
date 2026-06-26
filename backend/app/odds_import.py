@@ -233,6 +233,7 @@ def sync_prop_lines_from_sportsbook(
             spl.game_id,
             spl.player_name,
             p.id AS player_id,
+            MAX(CASE WHEN spl.provider = 'covers' THEN 1 ELSE 0 END) AS from_covers,
             CASE
                 WHEN COUNT(DISTINCT spl.sportsbook) = 1 THEN MAX(spl.sportsbook)
                 ELSE 'Best Available'
@@ -299,6 +300,28 @@ def sync_prop_lines_from_sportsbook(
         """,
         game_filter_params,
     ).fetchall()
+    preferred_covers_keys = {
+        (
+            int(row["game_id"]),
+            int(row["player_id"]),
+            str(row["market"]),
+        )
+        for row in rows
+        if int(row["from_covers"] or 0) == 1
+    }
+    candidate_rows = [
+        row
+        for row in rows
+        if not (
+            (
+                int(row["game_id"]),
+                int(row["player_id"]),
+                str(row["market"]),
+            )
+            in preferred_covers_keys
+            and int(row["from_covers"] or 0) != 1
+        )
+    ]
     tracked_keys = {
         (
             int(row["game_id"]),
@@ -323,35 +346,94 @@ def sync_prop_lines_from_sportsbook(
             tuple(target_game_ids) if target_game_ids else (),
         ).fetchall()
     }
-    insert_rows = [
+    desired_rows = {
         (
-            row["game_id"],
-            row["player_id"],
-            row["sportsbook"],
-            row["market"],
-            row["line"],
-            int(row["over_odds"]),
-            int(row["under_odds"]),
-            row["captured_at"],
-        )
-        for row in rows
+            int(row["game_id"]),
+            int(row["player_id"]),
+            str(row["market"]),
+            float(row["line"]),
+        ): {
+            "game_id": int(row["game_id"]),
+            "player_id": int(row["player_id"]),
+            "sportsbook": str(row["sportsbook"]),
+            "market": str(row["market"]),
+            "line": float(row["line"]),
+            "over_odds": int(row["over_odds"]),
+            "under_odds": int(row["under_odds"]),
+            "captured_at": row["captured_at"],
+        }
+        for row in candidate_rows
         if (
             int(row["game_id"]),
             int(row["player_id"]),
-            row["market"],
+            str(row["market"]),
             float(row["line"]),
         )
         not in tracked_keys
-    ]
-    touched_game_ids = sorted({int(row["game_id"]) for row in rows if row["game_id"] is not None})
+    }
+    touched_game_ids = target_game_ids or sorted({int(row["game_id"]) for row in rows if row["game_id"] is not None})
     if progress_callback is not None:
         progress_callback(len(rows), max(len(rows), 1), f"Matched {len(rows)} sportsbook props across {len(touched_game_ids)} games.")
-    game_filter = ""
-    game_filter_params: tuple[int, ...] = ()
-    if touched_game_ids:
-        placeholders = ",".join("?" for _ in touched_game_ids)
-        game_filter = f" AND pl.game_id IN ({placeholders})"
-        game_filter_params = tuple(touched_game_ids)
+    existing_rows = _open_scheduled_prop_line_rows(conn, touched_game_ids)
+    existing_by_key = {
+        (
+            int(row["game_id"]),
+            int(row["player_id"]),
+            str(row["market"]),
+            float(row["line"]),
+        ): row
+        for row in existing_rows
+        if (
+            int(row["game_id"]),
+            int(row["player_id"]),
+            str(row["market"]),
+            float(row["line"]),
+        )
+        not in tracked_keys
+    }
+
+    delete_prop_line_ids = [
+        int(row["id"])
+        for key, row in existing_by_key.items()
+        if key not in desired_rows
+    ]
+    insert_rows = [
+        (
+            payload["game_id"],
+            payload["player_id"],
+            payload["sportsbook"],
+            payload["market"],
+            payload["line"],
+            payload["over_odds"],
+            payload["under_odds"],
+            payload["captured_at"],
+        )
+        for key, payload in desired_rows.items()
+        if key not in existing_by_key
+    ]
+    update_rows: list[tuple[str, int, int, str, int]] = []
+    rebuild_prop_line_ids: list[int] = []
+    for key, desired in desired_rows.items():
+        existing = existing_by_key.get(key)
+        if existing is None:
+            continue
+        sportsbook_changed = str(existing["sportsbook"]) != desired["sportsbook"]
+        over_changed = int(existing["over_odds"]) != desired["over_odds"]
+        under_changed = int(existing["under_odds"]) != desired["under_odds"]
+        captured_at_changed = str(existing["captured_at"] or "") != str(desired["captured_at"] or "")
+        if not (sportsbook_changed or over_changed or under_changed or captured_at_changed):
+            continue
+        update_rows.append(
+            (
+                desired["sportsbook"],
+                desired["over_odds"],
+                desired["under_odds"],
+                str(desired["captured_at"]),
+                int(existing["id"]),
+            )
+        )
+        if over_changed or under_changed:
+            rebuild_prop_line_ids.append(int(existing["id"]))
 
     try:
         with sqlite_write_lock():
@@ -360,15 +442,14 @@ def sync_prop_lines_from_sportsbook(
                 attempts=4 if fast_fail else 24,
                 base_sleep=0.05 if fast_fail else 0.20,
             )
-            target_prop_line_ids = _open_scheduled_prop_line_ids(conn, touched_game_ids)
-            if target_prop_line_ids:
+            if delete_prop_line_ids:
                 delete_attempts = 4 if fast_fail else 20
                 delete_sleep = 0.05 if fast_fail else 0.15
                 _delete_by_id_batches(
                     conn,
                     "watchlist_snapshot_items",
                     "prop_line_id",
-                    target_prop_line_ids,
+                    delete_prop_line_ids,
                     attempts=delete_attempts,
                     base_sleep=delete_sleep,
                 )
@@ -376,7 +457,7 @@ def sync_prop_lines_from_sportsbook(
                     conn,
                     "gem_snapshot_items",
                     "prop_line_id",
-                    target_prop_line_ids,
+                    delete_prop_line_ids,
                     attempts=delete_attempts,
                     base_sleep=delete_sleep,
                 )
@@ -384,7 +465,7 @@ def sync_prop_lines_from_sportsbook(
                     conn,
                     "prop_predictions",
                     "prop_line_id",
-                    target_prop_line_ids,
+                    delete_prop_line_ids,
                     attempts=delete_attempts,
                     base_sleep=delete_sleep,
                 )
@@ -392,13 +473,26 @@ def sync_prop_lines_from_sportsbook(
                     conn,
                     "prop_lines",
                     "id",
-                    target_prop_line_ids,
+                    delete_prop_line_ids,
                     attempts=delete_attempts,
                     base_sleep=delete_sleep,
                 )
             changed_prop_line_ids: list[int] = []
+            if update_rows:
+                _executemany_with_lock_retry(
+                    conn,
+                    """
+                    UPDATE prop_lines
+                    SET sportsbook = ?, over_odds = ?, under_odds = ?, captured_at = ?
+                    WHERE id = ?
+                    """,
+                    update_rows,
+                    attempts=4 if fast_fail else 20,
+                    base_sleep=0.05 if fast_fail else 0.15,
+                )
+                changed_prop_line_ids.extend(rebuild_prop_line_ids)
             if insert_rows:
-                if include_change_details:
+                if include_change_details or rebuild_predictions_after:
                     for insert_row in insert_rows:
                         cursor = conn.execute(
                             """
@@ -418,19 +512,28 @@ def sync_prop_lines_from_sportsbook(
                         """,
                         insert_rows,
                     )
-            if rebuild_predictions_after and touched_game_ids:
-                rebuild_predictions_live(conn, game_ids=touched_game_ids, progress_callback=progress_callback)
+            changed_prop_line_ids = sorted({int(prop_line_id) for prop_line_id in changed_prop_line_ids})
+            if rebuild_predictions_after and changed_prop_line_ids:
+                rebuild_predictions_live(
+                    conn,
+                    prop_line_ids=changed_prop_line_ids,
+                    progress_callback=progress_callback,
+                )
             conn.commit()
             if progress_callback is not None:
-                progress_callback(len(rows), max(len(rows), 1), f"Synced {len(insert_rows)} fresh prop lines.")
+                progress_callback(
+                    len(rows),
+                    max(len(rows), 1),
+                    f"Synced {len(insert_rows)} new, {len(update_rows)} updated, {len(delete_prop_line_ids)} removed prop lines.",
+                )
             if include_change_details:
                 return SyncPropLinesResult(
-                    synced_props=len(rows),
-                    changed_props=len(changed_prop_line_ids),
+                    synced_props=len(candidate_rows),
+                    changed_props=len(insert_rows) + len(update_rows) + len(delete_prop_line_ids),
                     changed_prop_line_ids=changed_prop_line_ids,
                     touched_game_ids=touched_game_ids,
                 )
-            return len(rows)
+            return len(candidate_rows)
     except sqlite3.OperationalError as exc:
         if "database is locked" in str(exc).lower():
             try:
@@ -573,6 +676,33 @@ def _open_scheduled_prop_line_ids(conn: sqlite3.Connection, game_ids: list[int])
         tuple(game_ids),
     ).fetchall()
     return [int(row[0]) for row in rows]
+
+
+def _open_scheduled_prop_line_rows(conn: sqlite3.Connection, game_ids: list[int]) -> list[sqlite3.Row]:
+    if not game_ids:
+        return []
+    placeholders = ",".join("?" for _ in game_ids)
+    return conn.execute(
+        f"""
+        SELECT
+            pl.id,
+            pl.game_id,
+            pl.player_id,
+            pl.sportsbook,
+            pl.market,
+            pl.line,
+            pl.over_odds,
+            pl.under_odds,
+            pl.captured_at
+        FROM prop_lines pl
+        JOIN games g ON g.id = pl.game_id
+        LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+        WHERE sp.id IS NULL
+          AND g.status = 'scheduled'
+          AND pl.game_id IN ({placeholders})
+        """,
+        tuple(game_ids),
+    ).fetchall()
 
 
 def _delete_by_id_batches(

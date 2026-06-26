@@ -218,7 +218,14 @@ def predict_player_prop(
     snapshot = (
         snapshot_cache[snapshot_key]
         if snapshot_cache is not None and snapshot_key in snapshot_cache
-        else feature_snapshot(conn, player_id, market, game_id, allow_training=allow_training)
+        else feature_snapshot(
+            conn,
+            player_id,
+            market,
+            game_id,
+            allow_training=allow_training,
+            runtime_cache=runtime_cache,
+        )
     )
     if snapshot_cache is not None:
         snapshot_cache.setdefault(snapshot_key, snapshot)
@@ -415,15 +422,25 @@ def feature_snapshot(
     game_id: int,
     before_game_date: str | None = None,
     allow_training: bool = True,
+    runtime_cache: dict[str, dict[tuple, object]] | None = None,
 ) -> FeatureSnapshot:
-    context = _game_context(conn, player_id, game_id)
-    reference_game_date = before_game_date or context.get("game_date")
-    history = _player_history(conn, player_id, market, reference_game_date, exclude_game_id=game_id)
+    shared = _shared_projection_context(
+        conn,
+        player_id=player_id,
+        game_id=game_id,
+        before_game_date=before_game_date,
+        allow_training=allow_training,
+        runtime_cache=runtime_cache,
+    )
+    context = shared["context"]
+    reference_game_date = shared["reference_game_date"]
+    history_rows = shared["history_rows"]
+    history = shared["history_dates"]
     if not history:
         return FeatureSnapshot([0.0 for _ in FEATURE_NAMES], 0.0, "No historical stats found; projection defaults to 0.")
 
-    values = [row["value"] for row in history]
-    minutes = [row["minutes"] for row in history]
+    values = [_market_value(row, market) for row in history_rows]
+    minutes = [float(row["minutes"]) for row in history_rows]
     rates = [value / max(minute, 1.0) for value, minute in zip(values, minutes)]
     last_5 = values[:5]
     last_10 = values
@@ -437,36 +454,12 @@ def feature_snapshot(
     value_volatility = _ewma_volatility_newest_first(values, ewma_value, market)
     consistency_score = _consistency_score(ewma_value, value_volatility, market)
 
-    rotation_role = str(history[0]["rotation_role"] if history else "starter")
-    recent_minutes_avg = sum(minutes[:5]) / min(len(minutes), 5)
-    last_10_minutes_avg = sum(minutes) / len(minutes)
-    minute_volatility = _minute_volatility(minutes)
-    blowout = _blowout_adjustment(conn, context, rotation_role)
-    injury = _injury_adjustment_for_prop(
-        conn,
-        player_id,
-        context["team_id"],
-        rotation_role,
-        as_of_date=before_game_date or context.get("game_date"),
-    )
-    projected_minutes, minutes_note = _project_minutes(
-        conn,
-        player_id=player_id,
-        game_id=game_id,
-        rotation_role=rotation_role,
-        ewma_minutes=ewma_minutes,
-        minutes_trend=minutes_trend,
-        recent_minutes_avg=recent_minutes_avg,
-        last_10_minutes_avg=last_10_minutes_avg,
-        minute_volatility=minute_volatility,
-        context=context,
-        blowout_delta=float(blowout["minutes_delta"]),
-        injury_delta=float(injury["minutes_delta"]),
-        injury_status=str(injury["status"]),
-        recent_absence_days=_recent_absence_days(history, before_game_date or context.get("game_date")),
-        before_game_date=before_game_date,
-        allow_training=allow_training,
-    )
+    rotation_role = str(shared["rotation_role"])
+    minute_volatility = float(shared["minute_volatility"])
+    blowout = shared["blowout"]
+    injury = shared["injury"]
+    projected_minutes = float(shared["projected_minutes"])
+    minutes_note = str(shared["minutes_note"])
     rate_projection = weighted_rate * projected_minutes
     component_base = _adaptive_component_projection(
         weighted_recent=weighted_recent,
@@ -497,15 +490,10 @@ def feature_snapshot(
     ) if context else 1.0
     home_factor = 1.02 if context and context["is_home"] else 0.99
     rest_factor = _rest_factor(context["rest_days"]) if context else 1.0
-    usage_multiplier, adjustment_note = _manual_adjustment(conn, player_id)
+    usage_multiplier = float(shared["usage_multiplier"])
+    adjustment_note = str(shared["adjustment_note"])
     usage_multiplier *= injury["usage_multiplier"]
-    archetype = _cached_player_archetype_profile(
-        conn,
-        player_id=player_id,
-        reference_game_date=reference_game_date,
-        exclude_game_id=game_id,
-        fallback_rotation_role=rotation_role,
-    )
+    archetype = shared["archetype"]
 
     component_projection = (
         component_base
@@ -564,6 +552,106 @@ def feature_snapshot(
         injury_status=str(injury["status"]),
         hard_cap_zero=bool(injury["hard_cap_zero"]),
     )
+
+
+def _shared_projection_context(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    game_id: int,
+    before_game_date: str | None,
+    allow_training: bool,
+    runtime_cache: dict[str, dict[tuple, object]] | None = None,
+) -> dict[str, object]:
+    cache = runtime_cache.setdefault("shared_projection_context", {}) if runtime_cache is not None else None
+    cache_key = (int(player_id), int(game_id), str(before_game_date or ""), bool(allow_training))
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]  # type: ignore[return-value]
+
+    context = _game_context(conn, player_id, game_id)
+    reference_game_date = before_game_date or context.get("game_date")
+    history_rows = _player_recent_feature_rows(conn, player_id, reference_game_date, exclude_game_id=game_id)
+    if not history_rows:
+        shared = {
+            "context": context,
+            "reference_game_date": reference_game_date,
+            "history_rows": [],
+            "history_dates": [],
+            "rotation_role": "starter",
+            "minute_volatility": 0.0,
+            "blowout": {"risk": "low", "probability": 0.0, "minutes_delta": 0.0, "factor": 1.0},
+            "injury": {
+                "status": "available",
+                "availability_factor": 1.0,
+                "usage_multiplier": 1.0,
+                "minutes_delta": 0.0,
+                "hard_cap_zero": False,
+            },
+            "projected_minutes": 0.0,
+            "minutes_note": "No historical stats found.",
+            "usage_multiplier": 1.0,
+            "adjustment_note": "no manual adjustment",
+            "archetype": PlayerArchetypeProfile(False, False, False, False, False),
+        }
+        if cache is not None:
+            cache[cache_key] = shared
+        return shared
+
+    rotation_role = str(history_rows[0]["rotation_role"] or "starter")
+    minutes = [float(row["minutes"]) for row in history_rows]
+    ewma_minutes = _ewma_newest_first(minutes, alpha=0.38)
+    minutes_trend = _recent_trend(minutes)
+    recent_minutes_avg = sum(minutes[:5]) / min(len(minutes), 5)
+    last_10_minutes_avg = sum(minutes) / len(minutes)
+    minute_volatility = _minute_volatility(minutes)
+    blowout = _blowout_adjustment(conn, context, rotation_role)
+    injury = _injury_adjustment_for_prop(
+        conn,
+        player_id,
+        int(context["team_id"]),
+        rotation_role,
+        as_of_date=reference_game_date,
+    )
+    projected_minutes, minutes_note = _project_minutes(
+        conn,
+        player_id=player_id,
+        game_id=game_id,
+        rotation_role=rotation_role,
+        ewma_minutes=ewma_minutes,
+        minutes_trend=minutes_trend,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minute_volatility=minute_volatility,
+        context=context,
+        blowout_delta=float(blowout["minutes_delta"]),
+        injury_delta=float(injury["minutes_delta"]),
+        injury_status=str(injury["status"]),
+        recent_absence_days=_recent_absence_days(
+            [{"game_date": str(row["game_date"])} for row in history_rows],
+            reference_game_date,
+        ),
+        before_game_date=before_game_date,
+        allow_training=allow_training,
+    )
+    usage_multiplier, adjustment_note = _manual_adjustment(conn, player_id)
+    shared = {
+        "context": context,
+        "reference_game_date": reference_game_date,
+        "history_rows": history_rows,
+        "history_dates": [{"game_date": str(row["game_date"])} for row in history_rows],
+        "rotation_role": rotation_role,
+        "minute_volatility": minute_volatility,
+        "blowout": blowout,
+        "injury": injury,
+        "projected_minutes": projected_minutes,
+        "minutes_note": minutes_note,
+        "usage_multiplier": usage_multiplier,
+        "adjustment_note": adjustment_note,
+        "archetype": _player_archetype_profile_from_rows(history_rows, fallback_rotation_role=rotation_role),
+    }
+    if cache is not None:
+        cache[cache_key] = shared
+    return shared
 
 
 @lru_cache(maxsize=32)
@@ -2152,6 +2240,53 @@ def _player_history(
         }
         for row in rows
     ]
+
+
+def _player_recent_feature_rows(
+    conn: sqlite3.Connection,
+    player_id: int,
+    before_game_date: str | None,
+    exclude_game_id: int | None,
+) -> list[sqlite3.Row]:
+    filters = ["s.player_id = ?"]
+    params: list[object] = [player_id]
+    if before_game_date is not None:
+        filters.append("g.game_date < ?")
+        params.append(before_game_date)
+    if exclude_game_id is not None:
+        filters.append("s.game_id != ?")
+        params.append(exclude_game_id)
+    if before_game_date is not None:
+        return conn.execute(
+            f"""
+            SELECT s.*, g.game_date, p.rotation_role, p.position
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN players p ON p.id = s.player_id
+            WHERE {' AND '.join(filters)}
+            ORDER BY
+                CASE
+                    WHEN substr(g.game_date, 1, 4) = substr(?, 1, 4) THEN 0
+                    ELSE 1
+                END,
+                g.game_date DESC,
+                s.game_id DESC
+            LIMIT 10
+            """,
+            (*params, before_game_date),
+        ).fetchall()
+    return conn.execute(
+        f"""
+        SELECT s.*, g.game_date, p.rotation_role, p.position
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        JOIN players p ON p.id = s.player_id
+        WHERE {' AND '.join(filters)}
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT 10
+        """,
+        params,
+    ).fetchall()
 
 
 def _market_value(row: sqlite3.Row, market: str) -> float:
