@@ -73,8 +73,12 @@ class SyncPropLinesResult:
     touched_game_ids: list[int]
 
 
-def import_the_odds_api_props(conn: sqlite3.Connection, force_refresh: bool = False) -> dict:
-    return _import_the_odds_api_props(conn, force_refresh=force_refresh, progress_callback=None)
+def import_the_odds_api_props(
+    conn: sqlite3.Connection,
+    force_refresh: bool = False,
+    progress_callback: Callable[[str, int, int, str | None], None] | None = None,
+) -> dict:
+    return _import_the_odds_api_props(conn, force_refresh=force_refresh, progress_callback=progress_callback)
 
 
 def _import_the_odds_api_props(
