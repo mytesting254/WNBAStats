@@ -713,6 +713,20 @@ def test_resolve_roster_player_normalizes_team_aliases() -> None:
     assert player["rotation_role"] == "starter"
 
 
+def test_resolve_roster_player_falls_back_to_unique_league_wide_name() -> None:
+    load_test_history()
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (777101, "Kelsey Plum", 7, "G", "starter"),
+        )
+        player = main_module._resolve_roster_player(conn, "LV", "Kelsey Plum")
+
+    assert player is not None
+    assert int(player["player_id"]) == 777101
+    assert player["rotation_role"] == "starter"
+
+
 def test_rotowire_snapshot_cache_normalizes_team_aliases(monkeypatch) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(rotowire_import_module, "read_json_cache", lambda _name: None)
@@ -1996,7 +2010,7 @@ def test_repair_current_slate_props_targets_only_active_games() -> None:
     assert stale_prop_lines == 0
 
 
-def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch) -> None:
+def test_repair_current_slate_props_rebuilds_full_touched_games(monkeypatch) -> None:
     rebuild_calls: list[tuple[list[int] | None, list[int] | None]] = []
 
     def fake_sync(conn, **kwargs):
@@ -2033,7 +2047,7 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
     with connect() as conn:
         result = main_module._repair_current_slate_props(conn)
 
-    assert rebuild_calls == [([9910], [501, 502])]
+    assert rebuild_calls == [([9910], None)]
     assert result["scope"] == "current_slate"
     assert result["scanned_props"] == 2
     assert result["synced_props"] == 2
@@ -2148,6 +2162,64 @@ def test_rebuild_predictions_live_writes_incrementally_without_training(monkeypa
     assert count == result.written
     assert build_flags
     assert all(flag is False for flag in build_flags)
+
+
+def test_rebuild_predictions_live_keeps_existing_predictions_when_a_rebuild_fails(monkeypatch) -> None:
+    load_test_history()
+
+    def fake_build(conn, prop_line_id, *, runtime_cache=None, allow_training=True):
+        if int(prop_line_id) == 101:
+            raise RuntimeError("boom")
+        return projections_module.PropProjection(
+            prop_line_id=int(prop_line_id),
+            model_version="component",
+            prediction_time="2026-06-25T00:00:00+00:00",
+            projection=12.0,
+            recommended_side="over",
+            model_probability=0.57,
+            implied_probability=0.50,
+            edge=0.07,
+            expected_value=0.03,
+            confidence="medium",
+            reason="rebuilt",
+        )
+
+    monkeypatch.setattr(projections_module, "build_prop_projection", fake_build)
+
+    with connect() as conn:
+        conn.execute("DELETE FROM prop_predictions")
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (101, "stale", "2026-06-24T00:00:00+00:00", 9.0, "under", 0.52, 0.50, 0.02, 0.01, "low", "stale"),
+                (102, "stale", "2026-06-24T00:00:00+00:00", 9.5, "under", 0.52, 0.50, 0.02, 0.01, "low", "stale"),
+            ],
+        )
+        conn.commit()
+
+        result = projections_module.rebuild_predictions_live(conn, prop_line_ids=[101, 102], chunk_size=2)
+        rows = conn.execute(
+            """
+            SELECT prop_line_id, model_version, projection, reason
+            FROM prop_predictions
+            WHERE prop_line_id IN (101, 102)
+            ORDER BY prop_line_id
+            """
+        ).fetchall()
+
+    assert result.attempted == 2
+    assert result.written == 1
+    assert result.skipped == 1
+    assert result.errors == ["101: boom"]
+    assert [tuple(row) for row in rows] == [
+        (101, "stale", 9.0, "stale"),
+        (102, "component", 12.0, "rebuilt"),
+    ]
 
 
 def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -> None:
@@ -2306,7 +2378,7 @@ def test_start_prop_sync_if_needed_tracks_progress(monkeypatch) -> None:
 
     def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None):
         assert game_ids == [9910]
-        assert prop_line_ids == [901, 902, 903]
+        assert prop_line_ids is None
         if progress_callback is not None:
             progress_callback(3, 3, "Built 3 of 3 projections.")
         return projections_module.LiveRebuildResult(

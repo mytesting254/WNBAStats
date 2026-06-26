@@ -454,13 +454,6 @@ def rebuild_predictions_live(
     errors: list[str] = []
     total_props = len(prop_ids)
 
-    if progress_callback is not None:
-        progress_callback(0, total_props, "Clearing stale projections.")
-
-    with sqlite_write_lock():
-        _delete_predictions_for_prop_line_ids(conn, prop_ids)
-        conn.commit()
-
     safe_chunk_size = max(1, int(chunk_size))
     for start in range(0, len(prop_ids), safe_chunk_size):
         batch_ids = prop_ids[start : start + safe_chunk_size]

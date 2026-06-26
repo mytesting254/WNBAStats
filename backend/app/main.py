@@ -979,7 +979,42 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
         """,
         (like_pattern, normalized_team),
     ).fetchone()
-    return dict(row) if row else None
+    if row:
+        return dict(row)
+
+    # Display-only fallback for provider/team mismatches: if the player name is uniquely
+    # known league-wide, still expose their role/profile instead of showing N/A.
+    row = conn.execute(
+        """
+        SELECT
+            p.id AS player_id,
+            p.full_name,
+            p.rotation_role
+        FROM players p
+        WHERE lower(p.full_name) = lower(?)
+        LIMIT 2
+        """,
+        (player_name,),
+    ).fetchall()
+    if len(row) == 1:
+        return dict(row[0])
+
+    if abbreviated:
+        row = conn.execute(
+            """
+            SELECT
+                p.id AS player_id,
+                p.full_name,
+                p.rotation_role
+            FROM players p
+            WHERE p.full_name LIKE ?
+            LIMIT 2
+            """,
+            (like_pattern,),
+        ).fetchall()
+        if len(row) == 1:
+            return dict(row[0])
+    return None
 
 
 def _player_recent_profile(conn: Any, player_id: int) -> dict[str, float | None]:
@@ -2071,7 +2106,7 @@ def _repair_current_slate_props(
     rebuild_result = rebuild_predictions_live(
         conn,
         game_ids=target_game_ids,
-        prop_line_ids=changed_prop_line_ids or None,
+        prop_line_ids=None if target_game_ids else (changed_prop_line_ids or None),
         progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
         if progress_callback is not None
         else None,
@@ -3932,7 +3967,7 @@ def _start_prop_sync_if_needed(source: str) -> bool:
                 rebuild_result = rebuild_predictions_live(
                     conn,
                     game_ids=touched_game_ids,
-                    prop_line_ids=sync_result.changed_prop_line_ids or None,
+                    prop_line_ids=None if touched_game_ids else (sync_result.changed_prop_line_ids or None),
                     progress_callback=lambda current, total, message: _set_prop_sync_progress(
                         conn=conn,
                         stage="rebuilding_predictions",
