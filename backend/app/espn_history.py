@@ -12,6 +12,7 @@ from urllib.request import Request, urlopen
 from .bootstrap import ensure_team, ensure_teams, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
 from .game_resolver import resolve_or_create_game
+from .player_identity import repair_shadow_player_identities
 from .timezone_utils import APP_TIMEZONE
 
 
@@ -291,6 +292,7 @@ def import_espn_player_boxscores(
             """,
             sorted(team_history_rows),
         )
+        repair_shadow_player_identities(conn)
         inserted_stats = len(stat_rows)
 
     conn.commit()

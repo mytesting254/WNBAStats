@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 from .bootstrap import normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
 from .db import sqlite_write_lock
+from .player_identity import repair_shadow_player_identities, resolve_player_identity
 from .timezone_utils import local_today_iso
 
 
@@ -77,6 +78,7 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
     lineup_team_ids: set[int] = set()
     try:
         with sqlite_write_lock():
+            repair_shadow_player_identities(conn)
             if source == "rotowire":
                 lineup_team_ids = _lineup_team_ids(conn, page)
             for row in rows:
@@ -370,38 +372,8 @@ def _is_time_line(line: str) -> bool:
 
 
 def _resolve_player_id(conn: sqlite3.Connection, team_abbreviation: str, player_name: str) -> int | None:
-    normalized_team = normalize_team_abbreviation(team_abbreviation) or team_abbreviation.upper()
-    row = conn.execute(
-        """
-        SELECT p.id
-        FROM players p
-        JOIN teams t ON t.id = p.team_id
-        WHERE lower(p.full_name) = lower(?)
-          AND upper(t.abbreviation) = ?
-        LIMIT 1
-        """,
-        (player_name, normalized_team),
-    ).fetchone()
-    if row:
-        return int(row["id"])
-
-    abbreviated = re.match(r"^(?P<initial>[A-Za-z])[.\s]+\s*(?P<last>[A-Za-z][A-Za-z' -]+)$", player_name)
-    if abbreviated:
-        like_pattern = f"{abbreviated.group('initial').upper()}% {abbreviated.group('last').strip()}"
-        row = conn.execute(
-            """
-            SELECT p.id
-            FROM players p
-            JOIN teams t ON t.id = p.team_id
-            WHERE p.full_name LIKE ?
-              AND upper(t.abbreviation) = ?
-            LIMIT 1
-            """,
-            (like_pattern, normalized_team),
-        ).fetchone()
-        if row:
-            return int(row["id"])
-    return None
+    resolved = resolve_player_identity(conn, team_abbreviation, player_name, prefer_rich=True)
+    return int(resolved["player_id"]) if resolved and resolved.get("player_id") is not None else None
 
 
 def _resolve_team_id(conn: sqlite3.Connection, team_abbreviation: str) -> int | None:

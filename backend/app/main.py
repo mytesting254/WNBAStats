@@ -9,7 +9,6 @@ import re
 import sqlite3
 import threading
 import time
-import unicodedata
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from typing import Annotated
@@ -46,6 +45,7 @@ from .odds_import import (
     odds_cache_summary,
     sync_prop_lines_from_sportsbook,
 )
+from .player_identity import repair_shadow_player_identities, resolve_player_identity
 from .projections import rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
@@ -1055,138 +1055,8 @@ def _client_key(request: Request) -> str:
     return "unknown"
 
 
-def _normalize_player_lookup_name(name: str | None) -> str:
-    raw = str(name or "").strip()
-    if not raw:
-        return ""
-    ascii_name = (
-        unicodedata.normalize("NFKD", raw)
-        .encode("ascii", "ignore")
-        .decode("ascii")
-        .lower()
-    )
-    return re.sub(r"[^a-z0-9]+", " ", ascii_name).strip()
-
-
-def _player_lookup_parts(name: str | None) -> tuple[str, str | None, str | None]:
-    normalized = _normalize_player_lookup_name(name)
-    if not normalized:
-        return "", None, None
-    parts = normalized.split()
-    if not parts:
-        return normalized, None, None
-    first_initial = parts[0][0] if parts[0] else None
-    last_name = parts[-1] if parts else None
-    return normalized, first_initial, last_name
-
-
 def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) -> dict[str, Any] | None:
-    normalized_team = normalize_team_abbreviation(team_abbreviation) or team_abbreviation.upper()
-    row = conn.execute(
-        """
-        SELECT
-            p.id AS player_id,
-            p.full_name,
-            p.rotation_role,
-            p.position
-        FROM players p
-        JOIN teams t ON t.id = p.team_id
-        WHERE lower(p.full_name) = lower(?)
-          AND upper(t.abbreviation) = ?
-        LIMIT 1
-        """,
-        (player_name, normalized_team),
-    ).fetchone()
-    if row:
-        return dict(row)
-
-    normalized_name, first_initial, last_name = _player_lookup_parts(player_name)
-    if normalized_name:
-        candidates = conn.execute(
-            """
-            SELECT
-                p.id AS player_id,
-                p.full_name,
-                p.rotation_role,
-                p.position
-            FROM players p
-            JOIN teams t ON t.id = p.team_id
-            WHERE upper(t.abbreviation) = ?
-            """,
-            (normalized_team,),
-        ).fetchall()
-        exact_matches = []
-        initial_last_matches = []
-        for candidate in candidates:
-            candidate_name, candidate_initial, candidate_last = _player_lookup_parts(candidate["full_name"])
-            if not candidate_name:
-                continue
-            if candidate_name == normalized_name:
-                exact_matches.append(candidate)
-                continue
-            if first_initial and last_name and candidate_initial == first_initial and candidate_last == last_name:
-                initial_last_matches.append(candidate)
-        if len(exact_matches) == 1:
-            return dict(exact_matches[0])
-        if len(initial_last_matches) == 1:
-            return dict(initial_last_matches[0])
-
-    abbreviated = re.match(r"^(?P<initial>[A-Za-z])[.\s]+\s*(?P<last>[A-Za-z][A-Za-z' -]+)$", player_name)
-    if abbreviated:
-        like_pattern = f"{abbreviated.group('initial').upper()}% {abbreviated.group('last').strip()}"
-        row = conn.execute(
-            """
-            SELECT
-                p.id AS player_id,
-                p.full_name,
-                p.rotation_role,
-                p.position
-            FROM players p
-            JOIN teams t ON t.id = p.team_id
-            WHERE p.full_name LIKE ?
-              AND upper(t.abbreviation) = ?
-            LIMIT 1
-            """,
-            (like_pattern, normalized_team),
-        ).fetchone()
-        if row:
-            return dict(row)
-
-    # Display-only fallback for provider/team mismatches: if the player name is uniquely
-    # known league-wide, still expose their role/profile instead of showing N/A.
-    row = conn.execute(
-        """
-        SELECT
-            p.id AS player_id,
-            p.full_name,
-            p.rotation_role,
-            p.position
-        FROM players p
-        WHERE lower(p.full_name) = lower(?)
-        LIMIT 2
-        """,
-        (player_name,),
-    ).fetchall()
-    if len(row) == 1:
-        return dict(row[0])
-
-    if abbreviated:
-        row = conn.execute(
-            """
-            SELECT
-                p.id AS player_id,
-                p.full_name,
-                p.rotation_role,
-                p.position
-            FROM players p
-            WHERE p.full_name LIKE ?
-            LIMIT 2
-            """,
-            (like_pattern,),
-        ).fetchall()
-        if len(row) == 1:
-            return dict(row[0])
-    return None
+    return resolve_player_identity(conn, team_abbreviation, player_name, prefer_rich=True)
 
 
 def _player_recent_profile(conn: Any, player_id: int) -> dict[str, float | None]:
@@ -1627,6 +1497,7 @@ def _roster_payload(conn) -> list[dict]:
     except Exception:
         # Keep roster payload non-fatal so cache publication can proceed even if live fetch fails.
         pass
+    repair_shadow_player_identities(conn)
     payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
     rows = payload.get("rows", []) if isinstance(payload, dict) else []
     captured_at = payload.get("captured_at") if isinstance(payload, dict) else None
