@@ -56,6 +56,9 @@ from backend.app.player_prop_model import (
     FEATURE_INDEX,
     FeatureSnapshot,
     RidgeModel,
+    _market_weight,
+    _player_market_weight,
+    _residual_market_weight,
     _classify_minutes_role,
     _historical_training_features,
     _injury_adjustment_for_prop,
@@ -1367,6 +1370,23 @@ def test_market_specific_stabilization_is_stricter_for_noisy_markets() -> None:
     assert points_note == "stabilized up (0.25x anchor)"
     assert blocks_note == "stabilized up (0.25x anchor)"
     assert blocks_projection > points_projection
+
+
+def test_market_blend_weights_stay_moderate_for_learned_projection() -> None:
+    assert _market_weight(600) == pytest.approx(0.18)
+    assert _market_weight(200) == pytest.approx(0.13)
+    assert _market_weight(50) == pytest.approx(0.09)
+
+    assert _player_market_weight(3, 28.0) == pytest.approx(0.55)
+    assert _player_market_weight(6, 28.0) == pytest.approx(0.42)
+    assert _player_market_weight(12, 12.0) == pytest.approx(0.34)
+    assert _player_market_weight(8, 24.0) == pytest.approx(0.26)
+    assert _player_market_weight(12, 24.0) == pytest.approx(0.18)
+
+    assert _residual_market_weight(40, 5, 18.0) == pytest.approx(0.12)
+    assert _residual_market_weight(80, 12, 24.0) == pytest.approx(0.17)
+    assert _residual_market_weight(150, 16, 24.0) == pytest.approx(0.22)
+    assert _residual_market_weight(260, 20, 28.0) == pytest.approx(0.28)
 
 
 def test_train_market_model_uses_active_non_sqlite_connection(monkeypatch) -> None:

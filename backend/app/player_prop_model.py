@@ -1528,10 +1528,10 @@ def _predict(model: RidgeModel, features: list[float]) -> float:
 def _market_weight(rows: int, config: ModelTuningConfig | None = None) -> float:
     tuning = config or DEFAULT_TUNING_CONFIG
     if rows >= 500:
-        return _scaled_market_weight(0.25, tuning.market_weight_scale)
-    if rows >= 150:
         return _scaled_market_weight(0.18, tuning.market_weight_scale)
-    return _scaled_market_weight(0.12, tuning.market_weight_scale)
+    if rows >= 150:
+        return _scaled_market_weight(0.13, tuning.market_weight_scale)
+    return _scaled_market_weight(0.09, tuning.market_weight_scale)
 
 
 def _player_market_weight(
@@ -1541,14 +1541,14 @@ def _player_market_weight(
 ) -> float:
     tuning = config or DEFAULT_TUNING_CONFIG
     if sample_count < 4:
-        return _scaled_market_weight(0.70, tuning.player_weight_scale)
-    if sample_count < 7:
         return _scaled_market_weight(0.55, tuning.player_weight_scale)
+    if sample_count < 7:
+        return _scaled_market_weight(0.42, tuning.player_weight_scale)
     if avg_minutes < 16:
-        return _scaled_market_weight(0.48, tuning.player_weight_scale)
+        return _scaled_market_weight(0.34, tuning.player_weight_scale)
     if sample_count < 10:
-        return _scaled_market_weight(0.38, tuning.player_weight_scale)
-    return _scaled_market_weight(0.25, tuning.player_weight_scale)
+        return _scaled_market_weight(0.26, tuning.player_weight_scale)
+    return _scaled_market_weight(0.18, tuning.player_weight_scale)
 
 
 def _residual_market_weight(
@@ -1558,14 +1558,14 @@ def _residual_market_weight(
     config: ModelTuningConfig | None = None,
 ) -> float:
     tuning = config or DEFAULT_TUNING_CONFIG
-    base = 0.18
+    base = 0.12
     if rows >= 60:
-        base = 0.24
+        base = 0.17
     if rows >= 120:
-        base = 0.30
+        base = 0.22
     if rows >= 220:
-        base = 0.36
-    player_floor = 0.08 if sample_count < 8 or avg_minutes < 20.0 else 0.12 if sample_count < 15 else 0.16
+        base = 0.28
+    player_floor = 0.06 if sample_count < 8 or avg_minutes < 20.0 else 0.09 if sample_count < 15 else 0.12
     return _scaled_market_weight(max(base, player_floor), tuning.market_weight_scale)
 
 
