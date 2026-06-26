@@ -199,8 +199,12 @@ def _lineup_team_ids(conn: sqlite3.Connection, page: str) -> set[int]:
             if len(parts) == 2 and _is_team_code(parts[0]) and _is_team_code(parts[1]):
                 matchup = (parts[0], parts[1])
         if matchup:
-            current_teams = matchup
-            for team_abbr in matchup:
+            normalized_matchup = tuple(
+                normalize_team_abbreviation(team_abbr) or team_abbr.upper()
+                for team_abbr in matchup
+            )
+            current_teams = normalized_matchup
+            for team_abbr in normalized_matchup:
                 team_id = _resolve_team_id(conn, team_abbr)
                 if team_id:
                     team_ids.add(team_id)
@@ -222,7 +226,8 @@ def _update_roster_snapshot_cache(rows: list[dict[str, str]], captured_at: str, 
     for row in rows:
         if not isinstance(row, dict):
             continue
-        team = str(row.get("team") or "").strip().upper()
+        raw_team = str(row.get("team") or "").strip()
+        team = normalize_team_abbreviation(raw_team) or raw_team.upper()
         player_name = str(row.get("player_name") or "").strip()
         status = str(row.get("status") or "").strip().upper()
         if not team or not player_name or not status:
@@ -365,6 +370,7 @@ def _is_time_line(line: str) -> bool:
 
 
 def _resolve_player_id(conn: sqlite3.Connection, team_abbreviation: str, player_name: str) -> int | None:
+    normalized_team = normalize_team_abbreviation(team_abbreviation) or team_abbreviation.upper()
     row = conn.execute(
         """
         SELECT p.id
@@ -374,7 +380,7 @@ def _resolve_player_id(conn: sqlite3.Connection, team_abbreviation: str, player_
           AND upper(t.abbreviation) = ?
         LIMIT 1
         """,
-        (player_name, team_abbreviation.upper()),
+        (player_name, normalized_team),
     ).fetchone()
     if row:
         return int(row["id"])
@@ -391,7 +397,7 @@ def _resolve_player_id(conn: sqlite3.Connection, team_abbreviation: str, player_
               AND upper(t.abbreviation) = ?
             LIMIT 1
             """,
-            (like_pattern, team_abbreviation.upper()),
+            (like_pattern, normalized_team),
         ).fetchone()
         if row:
             return int(row["id"])
@@ -399,6 +405,7 @@ def _resolve_player_id(conn: sqlite3.Connection, team_abbreviation: str, player_
 
 
 def _resolve_team_id(conn: sqlite3.Connection, team_abbreviation: str) -> int | None:
+    normalized_team = normalize_team_abbreviation(team_abbreviation) or team_abbreviation.upper()
     row = conn.execute(
         """
         SELECT id
@@ -406,7 +413,7 @@ def _resolve_team_id(conn: sqlite3.Connection, team_abbreviation: str) -> int | 
         WHERE upper(abbreviation) = ?
         LIMIT 1
         """,
-        (team_abbreviation.upper(),),
+        (normalized_team,),
     ).fetchone()
     return int(row["id"]) if row else None
 

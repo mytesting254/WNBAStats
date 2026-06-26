@@ -98,6 +98,10 @@ class ModelTuningConfig:
 
 DEFAULT_TUNING_CONFIG = ModelTuningConfig()
 
+LOCAL_COMBO_MARKETS: dict[str, tuple[str, ...]] = {
+    "points_rebounds_assists": ("points", "rebounds", "assists"),
+}
+
 _CONNECTION_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_RESIDUAL_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_MINUTES_MODEL_CACHE: dict[tuple[int, str | None, ModelTuningConfig], RidgeModel | None] = {}
@@ -180,6 +184,16 @@ def predict_player_prop(
     runtime_cache: dict[str, dict[tuple, object]] | None = None,
     allow_training: bool = True,
 ) -> tuple[float, str, str]:
+    if market in LOCAL_COMBO_MARKETS:
+        return _predict_local_combo_market(
+            conn,
+            player_id=player_id,
+            market=market,
+            game_id=game_id,
+            config=config,
+            runtime_cache=runtime_cache,
+            allow_training=allow_training,
+        )
     tuning = config or DEFAULT_TUNING_CONFIG
     snapshot_cache = runtime_cache.setdefault("feature_snapshot", {}) if runtime_cache is not None else None
     sample_cache = runtime_cache.setdefault("player_sample_quality", {}) if runtime_cache is not None else None
@@ -243,6 +257,49 @@ def predict_player_prop(
         f"{model.rows} historical rows; {market_note}; {stabilization_note}. Final projection {projection:.1f}."
     )
     return round(projection, 2), reason, MODEL_VERSION
+
+
+def _predict_local_combo_market(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    market: str,
+    game_id: int,
+    config: ModelTuningConfig | None = None,
+    runtime_cache: dict[str, dict[tuple, object]] | None = None,
+    allow_training: bool = True,
+) -> tuple[float, str, str]:
+    components = LOCAL_COMBO_MARKETS[market]
+    component_rows: list[tuple[str, float, str, str]] = []
+    for component_market in components:
+        projection, reason, model_version = predict_player_prop(
+            conn,
+            player_id=player_id,
+            market=component_market,
+            game_id=game_id,
+            line=None,
+            over_odds=None,
+            under_odds=None,
+            config=config,
+            runtime_cache=runtime_cache,
+            allow_training=allow_training,
+        )
+        component_rows.append((component_market, float(projection), reason, model_version))
+
+    total_projection = round(sum(row[1] for row in component_rows), 2)
+    component_summary = ", ".join(f"{market_name} {projection:.1f}" for market_name, projection, *_rest in component_rows)
+    component_reasons = " ".join(
+        f"{market_name}: {reason}"
+        for market_name, _projection, reason, _model_version in component_rows
+    )
+    reason = (
+        f"Local combo estimator for {market}: {component_summary}. "
+        f"Combined projection {total_projection:.1f} from component models without direct combo-line blending. "
+        f"{component_reasons}"
+    )
+    model_versions = {row[3] for row in component_rows}
+    model_version = MODEL_VERSION if len(model_versions) != 1 else next(iter(model_versions))
+    return total_projection, reason, model_version
 
 
 def _stabilize_combo_market_projection(learned: float, snapshot: FeatureSnapshot, market: str) -> float:

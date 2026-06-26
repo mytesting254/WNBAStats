@@ -29,7 +29,7 @@ from .auth import (
     get_session_user,
     session_cookie_max_age,
 )
-from .bootstrap import ensure_teams
+from .bootstrap import ensure_teams, normalize_team_abbreviation
 from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
 from .db import connect, init_db, sqlite_write_lock, using_turso
@@ -943,6 +943,7 @@ def _client_key(request: Request) -> str:
 
 
 def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) -> dict[str, Any] | None:
+    normalized_team = normalize_team_abbreviation(team_abbreviation) or team_abbreviation.upper()
     row = conn.execute(
         """
         SELECT
@@ -955,7 +956,7 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
           AND upper(t.abbreviation) = ?
         LIMIT 1
         """,
-        (player_name, team_abbreviation.upper()),
+        (player_name, normalized_team),
     ).fetchone()
     if row:
         return dict(row)
@@ -976,7 +977,7 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
           AND upper(t.abbreviation) = ?
         LIMIT 1
         """,
-        (like_pattern, team_abbreviation.upper()),
+        (like_pattern, normalized_team),
     ).fetchone()
     return dict(row) if row else None
 
@@ -1424,7 +1425,8 @@ def _roster_payload(conn) -> list[dict]:
     for row in rows:
         if not isinstance(row, dict):
             continue
-        team = str(row.get("team") or "").strip().upper()
+        raw_team = str(row.get("team") or "").strip()
+        team = normalize_team_abbreviation(raw_team) or raw_team.upper()
         player_name = str(row.get("player_name") or "").strip()
         status = str(row.get("status") or "").strip().upper()
         if not team or not player_name or not status:

@@ -699,6 +699,46 @@ def test_roster_endpoint_uses_read_cache(monkeypatch) -> None:
     assert first[0]["status"] == "GTD"
 
 
+def test_resolve_roster_player_normalizes_team_aliases() -> None:
+    load_test_history()
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (777001, "Nyara Sabally", 3, "F", "starter"),
+        )
+        player = main_module._resolve_roster_player(conn, "NYL", "Nyara Sabally")
+
+    assert player is not None
+    assert int(player["player_id"]) == 777001
+    assert player["rotation_role"] == "starter"
+
+
+def test_rotowire_snapshot_cache_normalizes_team_aliases(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(rotowire_import_module, "read_json_cache", lambda _name: None)
+    monkeypatch.setattr(
+        rotowire_import_module,
+        "write_json_cache",
+        lambda name, payload: captured.setdefault(name, payload),
+    )
+
+    rotowire_import_module._update_roster_snapshot_cache(
+        [
+            {"team": "NYL", "player_name": "Nyara Sabally", "status": "OUT"},
+            {"team": "CONN", "player_name": "Aneesah Morrow", "status": "GTD"},
+            {"team": "LVA", "player_name": "Chelsea Gray", "status": "OUT"},
+        ],
+        "2026-06-26T00:00:00+00:00",
+        "rotowire",
+    )
+
+    payload = captured[rotowire_import_module.ROSTER_SNAPSHOT_CACHE_NAME]
+    rows = payload["rows"]
+    assert rows[0]["team"] == "CON"
+    assert rows[1]["team"] == "LV"
+    assert rows[2]["team"] == "NY"
+
+
 def test_watchlist_endpoint_uses_read_cache(monkeypatch) -> None:
     cache_store: dict[str, object] = {}
     calls = {"watchlist": 0}
@@ -1773,6 +1813,39 @@ def test_predict_player_prop_blends_market_residual_model(monkeypatch) -> None:
 
     assert projection == pytest.approx(21.94, abs=0.01)
     assert "residual blend 30%" in reason
+    assert model_version == "adaptive-context-v1"
+
+
+def test_predict_player_prop_uses_local_combo_estimator_for_pra(monkeypatch) -> None:
+    component_calls: list[str] = []
+
+    def fake_predict(conn, player_id, market, game_id, line=None, over_odds=None, under_odds=None, config=None, runtime_cache=None, allow_training=True):
+        component_calls.append(market)
+        outputs = {
+            "points": (18.4, "points reason", "adaptive-context-v1"),
+            "rebounds": (7.1, "rebounds reason", "adaptive-context-v1"),
+            "assists": (5.6, "assists reason", "adaptive-context-v1"),
+        }
+        if market in outputs:
+            return outputs[market]
+        raise AssertionError(f"unexpected market {market}")
+
+    monkeypatch.setattr("backend.app.player_prop_model.predict_player_prop", fake_predict)
+
+    from backend.app.player_prop_model import _predict_local_combo_market
+
+    with connect() as conn:
+        projection, reason, model_version = _predict_local_combo_market(
+            conn,
+            player_id=1001,
+            market="points_rebounds_assists",
+            game_id=100,
+        )
+
+    assert component_calls == ["points", "rebounds", "assists"]
+    assert projection == pytest.approx(31.1)
+    assert "Local combo estimator for points_rebounds_assists" in reason
+    assert "points 18.4, rebounds 7.1, assists 5.6" in reason
     assert model_version == "adaptive-context-v1"
 
 
