@@ -699,7 +699,8 @@ export async function fetchLineDiscrepancies(): Promise<LineDiscrepancy[]> {
 export async function fetchRoster(): Promise<RosterPlayer[]> {
   const response = await apiFetch("/api/roster");
   if (!response.ok) {
-    throw new Error("Failed to load roster");
+    const detail = await readErrorDetail(response);
+    throw new Error(detail || "Failed to load roster");
   }
   return response.json();
 }
@@ -718,7 +719,8 @@ export async function importOdds(forceRefresh = false): Promise<OddsImportResult
     method: "POST",
   });
   if (!response.ok) {
-    throw new Error("Failed to import sportsbook odds");
+    const detail = await readErrorDetail(response);
+    throw new Error(detail || "Failed to import sportsbook odds");
   }
   return response.json();
 }
@@ -728,7 +730,8 @@ export async function importCoversOdds(forceRefresh = false): Promise<OddsImport
     method: "POST",
   });
   if (!response.ok) {
-    throw new Error("Failed to import Covers odds");
+    const detail = await readErrorDetail(response);
+    throw new Error(detail || "Failed to import Covers odds");
   }
   return response.json();
 }
@@ -748,7 +751,8 @@ export async function importRotowireInjuries(forceRefresh = false): Promise<{
     method: "POST",
   });
   if (!response.ok) {
-    throw new Error("Failed to import Rotowire lineups");
+    const detail = await readErrorDetail(response);
+    throw new Error(detail || "Failed to import Rotowire lineups");
   }
   return response.json();
 }

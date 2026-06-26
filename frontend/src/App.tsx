@@ -632,13 +632,22 @@ export function App() {
     setOperationStatus(null);
     try {
       const result = await importRotowireInjuries(forceRefresh);
-      const refreshedRoster = await fetchRoster();
-      setRoster(refreshedRoster);
-      void load();
       if (result.status === "db_locked") {
         setOperationStatus(result.message ?? "Roster refresh skipped because the database is busy. Try again in a few seconds.");
         return;
       }
+      try {
+        const refreshedRoster = await fetchRoster();
+        setRoster(refreshedRoster);
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : "Unable to reload roster after Rotowire refresh";
+        setOperationStatus(
+          `${forceRefresh ? "Fresh" : "Cached"} Rotowire lineup pull completed, but roster reload failed. ${detail}`
+        );
+        void load();
+        return;
+      }
+      void load();
       setOperationStatus(
         result.used_fallback_cache
           ? `Rotowire refresh fell back to saved roster data. Parsed ${result.parsed_rows ?? 0} rows${result.captured_at ? ` (${result.captured_at})` : ""}.`
