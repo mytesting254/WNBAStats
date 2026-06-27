@@ -3967,7 +3967,7 @@ function TeamSummary({
       </div>
       <div className="stat-strip">
         <MiniStat label="W-L" value={winsLosses} />
-        <MiniStat label="Rest" value={restLabel(restDays)} />
+        <MiniStat label={`${teamCode} Rest`} value={restLabel(restDays)} />
         {context === "away" ? (
           <>
             <MiniStat label="ATS" value={ats} />

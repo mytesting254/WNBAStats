@@ -819,16 +819,7 @@ def _fit_model_from_rows(
         return None
     xs = [row[0] for row in rows]
     ys = [row[1] for row in rows]
-    means = [sum(values) / len(values) for values in zip(*xs)]
-    scales = []
-    standardized = []
-    for features in xs:
-        standardized.append([])
-        for idx, value in enumerate(features):
-            if len(scales) <= idx:
-                variance = sum((item[idx] - means[idx]) ** 2 for item in xs) / max(len(xs) - 1, 1)
-                scales.append(max(variance ** 0.5, 1.0))
-            standardized[-1].append((value - means[idx]) / scales[idx])
+    means, scales, standardized = _standardize_feature_rows(xs)
 
     coefs = _ridge_regression(standardized, ys, penalty=tuning.ridge_penalty)
     return RidgeModel(
@@ -839,6 +830,31 @@ def _fit_model_from_rows(
         feature_means=means,
         feature_scales=scales,
     )
+
+
+def _standardize_feature_rows(xs: list[list[float]]) -> tuple[list[float], list[float], list[list[float]]]:
+    if np is not None:
+        design = np.asarray(xs, dtype=float)
+        means = design.mean(axis=0)
+        if design.shape[0] > 1:
+            scales = design.std(axis=0, ddof=1)
+        else:
+            scales = np.ones(design.shape[1], dtype=float)
+        scales = np.where(scales < 1.0, 1.0, scales)
+        standardized = (design - means) / scales
+        return means.tolist(), scales.tolist(), standardized.tolist()
+
+    means = [sum(values) / len(values) for values in zip(*xs)]
+    scales = []
+    standardized = []
+    for features in xs:
+        standardized.append([])
+        for idx, value in enumerate(features):
+            if len(scales) <= idx:
+                variance = sum((item[idx] - means[idx]) ** 2 for item in xs) / max(len(xs) - 1, 1)
+                scales.append(max(variance ** 0.5, 1.0))
+            standardized[-1].append((value - means[idx]) / scales[idx])
+    return means, scales, standardized
 
 
 def _training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSample]:
@@ -1952,6 +1968,13 @@ def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list
 
 
 def _predict(model: RidgeModel, features: list[float]) -> float:
+    if np is not None:
+        feature_array = np.asarray(features, dtype=float)
+        means = np.asarray(model.feature_means, dtype=float)
+        scales = np.asarray(model.feature_scales, dtype=float)
+        standardized = (feature_array - means) / scales
+        return float(model.intercept + np.dot(np.asarray(model.coefficients, dtype=float), standardized))
+
     standardized = [
         (value - model.feature_means[idx]) / model.feature_scales[idx]
         for idx, value in enumerate(features)

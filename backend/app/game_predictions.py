@@ -5,6 +5,11 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+try:
+    import numpy as np
+except ImportError:  # pragma: no cover - fallback remains exercised without numpy installed
+    np = None
+
 TOTAL_CALIBRATION_MIN_SAMPLES = 12
 TOTAL_BIAS_CORRECTION_WEIGHT = 0.8
 TOTAL_MARKET_BLEND_WEIGHT = 0.3
@@ -639,16 +644,7 @@ def _fit_game_edge_model(
 ) -> _GameEdgeModel:
     xs = [row[0] for row in rows]
     ys = [row[1] for row in rows]
-    means = [sum(values) / len(values) for values in zip(*xs)]
-    scales = []
-    standardized = []
-    for features in xs:
-        standardized.append([])
-        for idx, value in enumerate(features):
-            if len(scales) <= idx:
-                variance = sum((item[idx] - means[idx]) ** 2 for item in xs) / max(len(xs) - 1, 1)
-                scales.append(max(variance ** 0.5, 1.0))
-            standardized[-1].append((value - means[idx]) / scales[idx])
+    means, scales, standardized = _standardize_game_edge_rows(xs)
     coefficients = _ridge_regression(standardized, ys, penalty=1.0)
     return _GameEdgeModel(
         edge_type=edge_type,
@@ -660,7 +656,40 @@ def _fit_game_edge_model(
     )
 
 
+def _standardize_game_edge_rows(xs: list[list[float]]) -> tuple[list[float], list[float], list[list[float]]]:
+    if np is not None:
+        design = np.asarray(xs, dtype=float)
+        means = design.mean(axis=0)
+        if design.shape[0] > 1:
+            scales = design.std(axis=0, ddof=1)
+        else:
+            scales = np.ones(design.shape[1], dtype=float)
+        scales = np.where(scales < 1.0, 1.0, scales)
+        standardized = (design - means) / scales
+        return means.tolist(), scales.tolist(), standardized.tolist()
+
+    means = [sum(values) / len(values) for values in zip(*xs)]
+    scales = []
+    standardized = []
+    for features in xs:
+        standardized.append([])
+        for idx, value in enumerate(features):
+            if len(scales) <= idx:
+                variance = sum((item[idx] - means[idx]) ** 2 for item in xs) / max(len(xs) - 1, 1)
+                scales.append(max(variance ** 0.5, 1.0))
+            standardized[-1].append((value - means[idx]) / scales[idx])
+    return means, scales, standardized
+
+
 def _predict_game_edge(model: _GameEdgeModel, features: list[float]) -> float:
+    if np is not None:
+        feature_array = np.asarray(features, dtype=float)
+        means = np.asarray(model.feature_means, dtype=float)
+        scales = np.asarray(model.feature_scales, dtype=float)
+        standardized = (feature_array - means) / scales
+        prediction = float(model.intercept + np.dot(np.asarray(model.coefficients, dtype=float), standardized))
+        return _clamp(prediction, -GAME_EDGE_MODEL_MAX_ADJUSTMENT, GAME_EDGE_MODEL_MAX_ADJUSTMENT)
+
     standardized = [
         (value - model.feature_means[idx]) / model.feature_scales[idx]
         for idx, value in enumerate(features)

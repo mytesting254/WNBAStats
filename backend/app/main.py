@@ -45,7 +45,7 @@ from .odds_import import (
     odds_cache_summary,
     sync_prop_lines_from_sportsbook,
 )
-from .player_identity import repair_shadow_player_identities, resolve_player_identity
+from .player_identity import player_is_skeletal, repair_shadow_player_identities, resolve_player_identity
 from .projections import rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
@@ -1059,6 +1059,18 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
     return resolve_player_identity(conn, team_abbreviation, player_name, prefer_rich=True)
 
 
+def _resolve_roster_player_display(conn: Any, team_abbreviation: str, player_name: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    player = _resolve_roster_player(conn, team_abbreviation, player_name)
+    if not player or not player_is_skeletal(player):
+        return player, None
+    fallback = resolve_player_identity(conn, "", player_name, prefer_rich=True)
+    if not fallback or int(fallback["player_id"]) == int(player["player_id"]):
+        return player, None
+    if player_is_skeletal(fallback):
+        return player, None
+    return player, fallback
+
+
 def _player_recent_profile(conn: Any, player_id: int) -> dict[str, float | None]:
     row = conn.execute(
         """
@@ -1135,7 +1147,7 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
                 else {"factor": 1.0, "missing_key_players": 0, "penalty_points": 0.0}
             )
 
-        player = _resolve_roster_player(conn, team, str(row["player_name"]))
+        player, display_fallback = _resolve_roster_player_display(conn, team, str(row["player_name"]))
         if not player:
             enriched.append(
                 {
@@ -1152,15 +1164,18 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
             )
             continue
 
-        profile = _player_recent_profile(conn, int(player["player_id"]))
+        profile_player = display_fallback or player
+        profile = _player_recent_profile(conn, int(profile_player["player_id"]))
+        position = player.get("position") or (display_fallback.get("position") if display_fallback else None)
+        rotation_role = player.get("rotation_role") or (display_fallback.get("rotation_role") if display_fallback else None)
         contribution = float(profile["recent_contribution_avg"] or 0.0)
-        impact_score = contribution * _roster_status_weight(str(row["status"])) * _roster_role_weight(player.get("rotation_role"))
+        impact_score = contribution * _roster_status_weight(str(row["status"])) * _roster_role_weight(rotation_role)
         enriched.append(
             {
                 **row,
                 "player_id": int(player["player_id"]),
-                "rotation_role": player.get("rotation_role"),
-                "position": player.get("position"),
+                "rotation_role": rotation_role,
+                "position": position,
                 "recent_minutes_avg": profile["recent_minutes_avg"],
                 "recent_contribution_avg": profile["recent_contribution_avg"],
                 "player_impact_score": round(impact_score, 1) if impact_score > 0 else None,
@@ -4924,6 +4939,7 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
 def _include_watchlist_pick(item: dict) -> bool:
     confidence = str(item.get("confidence") or "").strip().lower()
     market = str(item.get("market") or "").strip().lower()
+    side = str(item.get("recommended_side") or "").strip().lower()
     try:
         edge = abs(float(item.get("edge") or 0.0))
         ev = float(item.get("expected_value") or 0.0)
@@ -4933,6 +4949,8 @@ def _include_watchlist_pick(item: dict) -> bool:
     if confidence != "low":
         return False
     if ev < 0.02 or edge < 0.05 or edge >= LOW_CONFIDENCE_EDGE_MIN:
+        return False
+    if _requires_stricter_over_edge(market, side) and edge < 0.08:
         return False
 
     # Settled watchlist history supports a tighter rebound floor and
@@ -4947,9 +4965,15 @@ def _include_watchlist_pick(item: dict) -> bool:
 def _include_value_board_pick(item: dict) -> bool:
     confidence = str(item.get("confidence") or "").strip().lower()
     market = str(item.get("market") or "").strip().lower()
+    side = str(item.get("recommended_side") or "").strip().lower()
     try:
         edge = abs(float(item.get("edge") or 0.0))
     except (TypeError, ValueError):
+        return False
+
+    # Settled history shows weak overs in scoring-heavy markets underperforming;
+    # require a stronger edge before surfacing them on the board.
+    if _requires_stricter_over_edge(market, side) and edge < 0.08:
         return False
 
     # Medium confidence has underperformed in rebounds; require stricter admission.
@@ -4971,6 +4995,12 @@ def _include_value_board_pick(item: dict) -> bool:
         return (edge >= 0.05 and edge < 0.08) or (edge >= 0.12 and edge < LOW_CONFIDENCE_EDGE_MAX)
 
     return edge >= LOW_CONFIDENCE_EDGE_MIN and edge < LOW_CONFIDENCE_EDGE_MAX
+
+
+def _requires_stricter_over_edge(market: str, side: str) -> bool:
+    if side != "over":
+        return False
+    return market in {"points", "threes", "points_rebounds", "points_assists"}
 
 
 def _blowout_display(team_spread, role: str | None) -> dict:

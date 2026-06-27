@@ -50,6 +50,10 @@ CALIBRATION_NEIGHBOR_RADIUS = 0.075
 PROJECTION_BIAS_MIN_SAMPLES = 30
 PROJECTION_BIAS_BLEND_WEIGHT = 0.7
 PROJECTION_BIAS_MAX_ADJUSTMENT = 1.5
+SIDE_PROJECTION_BIAS_MIN_SAMPLES = 12
+SIDE_PROJECTION_BIAS_BLEND_WEIGHT = 0.35
+SIDE_PROJECTION_BIAS_MAX_ADJUSTMENT = 0.75
+SCORING_OVER_EDGE_PENALTY = 0.02
 
 
 @dataclass(frozen=True)
@@ -215,6 +219,11 @@ def build_prop_projection(
         projection = round(projection + projection_bias, 2)
         reason = f"{reason} Historical market bias adjustment {projection_bias:+.2f}."
     line = float(prop["line"])
+    implied_side = "over" if projection > line else "under" if projection < line else None
+    side_projection_bias = _market_side_projection_bias_adjustment(conn, prop["market"], model_version, implied_side)
+    if side_projection_bias is not None:
+        projection = round(projection + side_projection_bias, 2)
+        reason = f"{reason} Side-aware bias adjustment {side_projection_bias:+.2f}."
     stat_sigma = _estimated_sigma(conn, prop["player_id"], prop["market"], projection, prop["game_id"])
     over_probability = 1 - _normal_cdf(line, projection, stat_sigma)
     under_probability = 1 - over_probability
@@ -243,24 +252,27 @@ def build_prop_projection(
     # especially in markets where overs have underperformed historically.
     if projection > line and (projection - line) < _over_min_margin(prop["market"]):
         edge_over -= 0.03
+    edge_over -= _scoring_over_edge_penalty(prop["market"])
     # Conservative under gating for points/rebounds: avoid medium-quality
     # under calls that have historically been less stable.
     if projection < line and (line - projection) < _under_min_margin(prop["market"]):
         edge_under -= 0.03
 
-    if projection > line:
+    # Let the calibrated market edge decide the recommendation. This avoids
+    # forcing thin-margin overs when the opposite side prices better.
+    if edge_over > edge_under:
         side = "over"
         model_probability = over_model_probability
         implied = over_implied
         edge = edge_over
         odds = over_odds
-    elif projection < line:
+    elif edge_under > edge_over:
         side = "under"
         model_probability = under_model_probability
         implied = under_implied
         edge = edge_under
         odds = under_odds
-    elif edge_over >= edge_under:
+    elif projection > line:
         side = "over"
         model_probability = over_model_probability
         implied = over_implied
@@ -1178,6 +1190,80 @@ def _market_projection_bias_adjustment(
     avg_bias = float(row["avg_bias"] or 0.0)
     adjusted = _clamp(avg_bias * PROJECTION_BIAS_BLEND_WEIGHT, -PROJECTION_BIAS_MAX_ADJUSTMENT, PROJECTION_BIAS_MAX_ADJUSTMENT)
     return round(adjusted, 3)
+
+
+def _market_side_projection_bias_adjustment(
+    conn: sqlite3.Connection,
+    market: str,
+    model_version: str,
+    side: str | None,
+) -> float | None:
+    if not _supports_side_projection_bias(market, side):
+        return None
+    row = conn.execute(
+        """
+        WITH ranked AS (
+          SELECT
+            pp.prop_line_id,
+            pp.projection,
+            pp.recommended_side,
+            pl.market,
+            ROW_NUMBER() OVER (
+              PARTITION BY pp.prop_line_id
+              ORDER BY pp.prediction_time DESC, pp.id DESC
+            ) AS rn
+          FROM prop_predictions pp
+          JOIN prop_lines pl ON pl.id = pp.prop_line_id
+          WHERE pp.model_version = ?
+        ),
+        market_bias AS (
+          SELECT
+            r.market,
+            AVG(sp.actual_result - r.projection) AS avg_market_bias
+          FROM ranked r
+          JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+          WHERE r.rn = 1
+          GROUP BY r.market
+        )
+        SELECT
+          COUNT(*) AS sample_count,
+          AVG(sp.actual_result - r.projection) AS avg_side_bias,
+          mb.avg_market_bias AS avg_market_bias
+        FROM ranked r
+        JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
+        JOIN market_bias mb ON mb.market = r.market
+        WHERE r.rn = 1
+          AND r.market = ?
+          AND lower(r.recommended_side) = ?
+          AND r.projection IS NOT NULL
+          AND sp.actual_result IS NOT NULL
+        """,
+        (model_version, market, str(side or "").lower()),
+    ).fetchone()
+    sample_count = int(row["sample_count"] or 0)
+    if sample_count < SIDE_PROJECTION_BIAS_MIN_SAMPLES:
+        return None
+    avg_side_bias = float(row["avg_side_bias"] or 0.0)
+    avg_market_bias = float(row["avg_market_bias"] or 0.0)
+    residual_bias = avg_side_bias - avg_market_bias
+    adjusted = _clamp(
+        residual_bias * SIDE_PROJECTION_BIAS_BLEND_WEIGHT,
+        -SIDE_PROJECTION_BIAS_MAX_ADJUSTMENT,
+        SIDE_PROJECTION_BIAS_MAX_ADJUSTMENT,
+    )
+    return round(adjusted, 3)
+
+
+def _supports_side_projection_bias(market: str, side: str | None) -> bool:
+    if side != "over":
+        return False
+    return market in {"points", "threes", "points_rebounds", "points_assists"}
+
+
+def _scoring_over_edge_penalty(market: str) -> float:
+    if market in {"points", "threes", "points_rebounds", "points_assists"}:
+        return SCORING_OVER_EDGE_PENALTY
+    return 0.0
 
 
 def _calibration_support(bins: dict[str, dict[str, float]], raw_probability: float) -> dict[str, float]:
