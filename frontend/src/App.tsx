@@ -1715,6 +1715,7 @@ function RosterView({
                 <th>MPG</th>
                 <th>Contrib</th>
                 <th>Impact</th>
+                <th>Out Since</th>
                 <th>Updated</th>
               </tr>
             </thead>
@@ -1736,12 +1737,15 @@ function RosterView({
                   <td>{formatMetricNumber(item.recent_minutes_avg, 1)}</td>
                   <td>{formatMetricNumber(item.recent_contribution_avg, 1)}</td>
                   <td>{formatMetricNumber(item.player_impact_score, 1)}</td>
+                  <td title={item.out_since ? formatDate(item.out_since) : undefined}>
+                    {item.out_since ? formatOutSince(item.out_since) : "—"}
+                  </td>
                   <td>{item.captured_at ? formatDate(item.captured_at) : "N/A"}</td>
                 </tr>
               ))}
               {!visibleRows.length && (
                 <tr>
-                  <td colSpan={7}>No Rotowire lineup rows available yet. Run injury import or reload matchups to refresh lineups.</td>
+                  <td colSpan={8}>No Rotowire lineup rows available yet. Run injury import or reload matchups to refresh lineups.</td>
                 </tr>
               )}
             </tbody>
@@ -4450,6 +4454,25 @@ function formatDateTime(value?: string | null) {
     return "N/A";
   }
   return formatDate(value);
+}
+
+function formatOutSince(value?: string | null) {
+  if (!value) {
+    return "—";
+  }
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) {
+    return "—";
+  }
+  const elapsedMs = Date.now() - time;
+  if (elapsedMs < 0) {
+    return "today";
+  }
+  const elapsedDays = Math.floor(elapsedMs / (1000 * 60 * 60 * 24));
+  if (elapsedDays <= 0) {
+    return "today";
+  }
+  return `${elapsedDays}d`;
 }
 
 function formatGameDateShort(value: string) {

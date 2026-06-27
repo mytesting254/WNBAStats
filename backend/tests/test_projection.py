@@ -2762,6 +2762,23 @@ def test_increased_role_flag_stays_off_for_neutral_injury_context() -> None:
     ) is False
 
 
+def test_roster_out_since_tracks_current_unavailable_streak() -> None:
+    load_test_history()
+    with connect() as conn:
+        conn.executemany(
+            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
+            [
+                (1001, "out", "older absence", "2026-05-01T12:00:00Z"),
+                (1001, "available", "cleared", "2026-05-03T12:00:00Z"),
+                (1001, "out", "new absence", "2026-05-06T12:00:00Z"),
+                (1001, "inactive", "still out", "2026-05-07T12:00:00Z"),
+            ],
+        )
+        out_since = main_module._roster_out_since(conn, 1001, "OUT")
+
+    assert out_since == "2026-05-06T12:00:00Z"
+
+
 def test_game_projection_calibrates_low_totals_upward() -> None:
     load_test_history()
     with connect() as conn:

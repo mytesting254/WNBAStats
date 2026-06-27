@@ -1157,6 +1157,7 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
                     **row,
                     "rotation_role": None,
                     "position": None,
+                    "out_since": None,
                     "recent_minutes_avg": None,
                     "recent_contribution_avg": None,
                     "player_impact_score": None,
@@ -1179,6 +1180,7 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
                 "player_id": int(player["player_id"]),
                 "rotation_role": rotation_role,
                 "position": position,
+                "out_since": _roster_out_since(conn, int(player["player_id"]), str(row["status"])),
                 "recent_minutes_avg": profile["recent_minutes_avg"],
                 "recent_contribution_avg": profile["recent_contribution_avg"],
                 "player_impact_score": round(impact_score, 1) if impact_score > 0 else None,
@@ -1188,6 +1190,30 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
             }
         )
     return enriched
+
+
+def _roster_out_since(conn: Any, player_id: int, status: str) -> str | None:
+    unavailable_statuses = {"out", "inactive", "suspended", "unavailable"}
+    if str(status or "").strip().lower() not in unavailable_statuses:
+        return None
+    rows = conn.execute(
+        """
+        SELECT lower(trim(status)) AS status, captured_at
+        FROM injuries
+        WHERE player_id = ?
+        ORDER BY captured_at DESC, id DESC
+        """,
+        (int(player_id),),
+    ).fetchall()
+    if not rows:
+        return None
+    streak_start: str | None = None
+    for row in rows:
+        row_status = str(row["status"] or "").strip().lower()
+        if row_status not in unavailable_statuses:
+            break
+        streak_start = str(row["captured_at"])
+    return streak_start
 
 
 def _protect_mutation(
@@ -1515,7 +1541,8 @@ def _roster_payload(conn) -> list[dict]:
     except Exception:
         # Keep roster payload non-fatal so cache publication can proceed even if live fetch fails.
         pass
-    repair_shadow_player_identities(conn)
+    if hasattr(conn, "execute"):
+        repair_shadow_player_identities(conn)
     payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
     rows = payload.get("rows", []) if isinstance(payload, dict) else []
     captured_at = payload.get("captured_at") if isinstance(payload, dict) else None

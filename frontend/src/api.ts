@@ -605,6 +605,7 @@ export type RosterPlayer = {
   player_name: string;
   status: string;
   captured_at?: string | null;
+  out_since?: string | null;
   player_id?: number;
   rotation_role?: string | null;
   position?: string | null;
