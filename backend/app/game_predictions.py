@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Mapping
 
 try:
@@ -20,6 +21,31 @@ GAME_EDGE_MODEL_MIN_ROWS = 15
 GAME_EDGE_MODEL_MAX_ADJUSTMENT = 8.0
 GAME_MARGIN_BLEND_WEIGHT = 0.16
 GAME_TOTAL_BLEND_WEIGHT = 0.18
+GAME_MARGIN_POST_MARKET_ANCHOR = 0.08
+GAME_TOTAL_POST_MARKET_ANCHOR = 0.10
+GAME_DIRECT_MODEL_MIN_ROWS = 120
+GAME_DIRECT_MODEL_MAX_POINTS = 25.0
+GAME_DIRECT_BLEND_MAX = 0.72
+GAME_TOTAL_DECISION_BLEND_MAX = 0.68
+GAME_TOTAL_DECISION_MODEL_MIN_ROWS = 120
+GAME_TOTAL_DECISION_MIN_EDGE = 1.0
+GAME_DIRECT_FEATURE_NAMES = [
+    "home_recent_points",
+    "away_recent_points",
+    "home_recent_allowed",
+    "away_recent_allowed",
+    "home_average_points",
+    "away_average_points",
+    "home_average_allowed",
+    "away_average_allowed",
+    "home_average_possessions",
+    "away_average_possessions",
+    "pace_factor",
+    "rest_days_home",
+    "rest_days_away",
+    "home_game_count",
+    "away_game_count",
+]
 GAME_MARGIN_FEATURE_NAMES = [
     "projected_margin",
     "market_edge",
@@ -39,6 +65,16 @@ GAME_TOTAL_FEATURE_NAMES = [
 @dataclass(frozen=True)
 class _GameEdgeModel:
     edge_type: str
+    rows: int
+    intercept: float
+    coefficients: list[float]
+    feature_means: list[float]
+    feature_scales: list[float]
+
+
+@dataclass(frozen=True)
+class _DirectGameModel:
+    target: str
     rows: int
     intercept: float
     coefficients: list[float]
@@ -145,6 +181,9 @@ class _GamePredictionCache:
         return impact
 
 
+_DIRECT_MODEL_CACHE: dict[tuple[str, str, int, int], _DirectGameModel] = {}
+
+
 def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     home_team_id = int(game["home_team_id"])
     away_team_id = int(game["away_team_id"])
@@ -176,6 +215,30 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     game_total = float(game["game_total"]) if game["game_total"] is not None and float(game["game_total"]) > 0 else None
     calibrated_total = _calibrate_total_projection(conn, projected_total, game_total)
     residual_notes: list[str] = []
+
+    direct_features = _direct_game_features(
+        cache,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        rest_days_home=int(game["rest_days_home"] or 2),
+        rest_days_away=int(game["rest_days_away"] or 2),
+    )
+    direct_margin = _predict_direct_game_value(conn, "margin", direct_features)
+    direct_total = _predict_direct_game_value(conn, "total", direct_features)
+    if direct_margin is not None:
+        weight = _direct_game_blend_weight(direct_margin.rows)
+        projected_margin = ((1 - weight) * projected_margin) + (weight * direct_margin.value)
+        residual_notes.append(f"trained margin blend {weight:.0%} ({direct_margin.rows} rows)")
+    if spread_home is not None:
+        projected_margin = ((1 - GAME_MARGIN_POST_MARKET_ANCHOR) * projected_margin) + (GAME_MARGIN_POST_MARKET_ANCHOR * (-spread_home))
+        residual_notes.append(f"market spread anchor {GAME_MARGIN_POST_MARKET_ANCHOR:.0%}")
+    if direct_total is not None:
+        weight = _direct_game_blend_weight(direct_total.rows)
+        calibrated_total = ((1 - weight) * calibrated_total) + (weight * direct_total.value)
+        residual_notes.append(f"trained total blend {weight:.0%} ({direct_total.rows} rows)")
+    if game_total is not None:
+        calibrated_total = ((1 - GAME_TOTAL_POST_MARKET_ANCHOR) * calibrated_total) + (GAME_TOTAL_POST_MARKET_ANCHOR * game_total)
+        residual_notes.append(f"market total anchor {GAME_TOTAL_POST_MARKET_ANCHOR:.0%}")
 
     adjusted_margin = projected_margin
     if spread_home is not None:
@@ -214,6 +277,10 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
     total_pick = "N/A"
     if game_total is not None:
         total_edge = adjusted_total - game_total
+        market_total_edge = _predict_market_total_edge(conn, direct_features, total_edge, game_total)
+        if market_total_edge is not None:
+            total_edge = market_total_edge.edge
+            residual_notes.append(f"trained O/U decision blend {market_total_edge.weight:.0%} ({market_total_edge.rows} rows)")
         total_pick = "Over" if total_edge > 0 else "Under"
 
     winner = game["home_team"] if adjusted_margin >= 0 else game["away_team"]
@@ -248,6 +315,15 @@ def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
 
 def format_spread(value: float) -> str:
     return f"+{value:.1f}" if value > 0 else f"{value:.1f}"
+
+
+def _coerce_float(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _insufficient_history_payload(game: Mapping[str, Any], home_history_count: int, away_history_count: int) -> dict:
@@ -398,9 +474,140 @@ def _reason(
         )
     return (
         f"Projected score {home_projection:.1f}-{away_projection:.1f}; "
-        f"margin {margin:.1f}, total {total:.1f}. Built from recent scoring, season scoring, "
-        f"opponent points allowed, pace, home/away, rest, injury availability, and settled game residuals.{injury_detail}{residual_detail}"
+        f"margin {margin:.1f}, total {total:.1f}. Built from direct historical game training, recent scoring, "
+        f"season scoring, opponent points allowed, pace, home/away, rest, injury availability, and settled game residuals.{injury_detail}{residual_detail}"
     )
+
+
+@dataclass(frozen=True)
+class _DirectPrediction:
+    rows: int
+    value: float
+
+
+@dataclass(frozen=True)
+class _MarketTotalDecision:
+    rows: int
+    edge: float
+    weight: float
+
+
+def _direct_game_features(
+    cache: _GamePredictionCache,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+    rest_days_home: int,
+    rest_days_away: int,
+) -> list[float]:
+    home_recent_points = cache.weighted_recent(home_team_id, "points")
+    away_recent_points = cache.weighted_recent(away_team_id, "points")
+    home_recent_allowed = cache.weighted_recent(home_team_id, "opponent_points")
+    away_recent_allowed = cache.weighted_recent(away_team_id, "opponent_points")
+    home_average_points = cache.team_average(home_team_id, "points")
+    away_average_points = cache.team_average(away_team_id, "points")
+    home_average_allowed = cache.team_average(home_team_id, "opponent_points")
+    away_average_allowed = cache.team_average(away_team_id, "opponent_points")
+    home_average_possessions = cache.team_average(home_team_id, "possessions")
+    away_average_possessions = cache.team_average(away_team_id, "possessions")
+    return _assemble_direct_game_features(
+        home_recent_points=home_recent_points,
+        away_recent_points=away_recent_points,
+        home_recent_allowed=home_recent_allowed,
+        away_recent_allowed=away_recent_allowed,
+        home_average_points=home_average_points,
+        away_average_points=away_average_points,
+        home_average_allowed=home_average_allowed,
+        away_average_allowed=away_average_allowed,
+        home_average_possessions=home_average_possessions,
+        away_average_possessions=away_average_possessions,
+        pace_factor=cache.pace_factor(home_team_id, away_team_id),
+        rest_days_home=rest_days_home,
+        rest_days_away=rest_days_away,
+        home_game_count=cache.team_count(home_team_id),
+        away_game_count=cache.team_count(away_team_id),
+    )
+
+
+def _assemble_direct_game_features(
+    *,
+    home_recent_points: float,
+    away_recent_points: float,
+    home_recent_allowed: float,
+    away_recent_allowed: float,
+    home_average_points: float,
+    away_average_points: float,
+    home_average_allowed: float,
+    away_average_allowed: float,
+    home_average_possessions: float,
+    away_average_possessions: float,
+    pace_factor: float,
+    rest_days_home: int,
+    rest_days_away: int,
+    home_game_count: int | float,
+    away_game_count: int | float,
+) -> list[float]:
+    return [
+        home_recent_points,
+        away_recent_points,
+        home_recent_allowed,
+        away_recent_allowed,
+        home_average_points,
+        away_average_points,
+        home_average_allowed,
+        away_average_allowed,
+        home_average_possessions,
+        away_average_possessions,
+        pace_factor,
+        float(rest_days_home),
+        float(rest_days_away),
+        float(home_game_count),
+        float(away_game_count),
+    ]
+
+
+def _predict_direct_game_value(
+    conn: sqlite3.Connection,
+    target: str,
+    features: list[float],
+) -> _DirectPrediction | None:
+    model = _train_direct_game_model(conn, target)
+    if model is None:
+        return None
+    value = _predict_direct_model(model, features)
+    return _DirectPrediction(rows=model.rows, value=value)
+
+
+def _predict_market_total_edge(
+    conn: sqlite3.Connection,
+    direct_features: list[float],
+    baseline_edge: float,
+    game_total: float,
+) -> _MarketTotalDecision | None:
+    model = _train_direct_game_model(conn, "total_market")
+    if model is None:
+        return None
+    features = [*direct_features, baseline_edge, game_total]
+    predicted_edge = _predict_direct_model(model, features)
+    weight = _direct_total_decision_blend_weight(model.rows)
+    edge = ((1 - weight) * baseline_edge) + (weight * predicted_edge)
+    if abs(edge) < GAME_TOTAL_DECISION_MIN_EDGE:
+        edge = baseline_edge
+    return _MarketTotalDecision(rows=model.rows, edge=edge, weight=weight)
+
+
+def _direct_game_blend_weight(rows: int) -> float:
+    if rows <= GAME_DIRECT_MODEL_MIN_ROWS:
+        return 0.42
+    extra = min(rows - GAME_DIRECT_MODEL_MIN_ROWS, 500)
+    return min(GAME_DIRECT_BLEND_MAX, 0.42 + (extra / 500.0) * 0.30)
+
+
+def _direct_total_decision_blend_weight(rows: int) -> float:
+    if rows <= GAME_TOTAL_DECISION_MODEL_MIN_ROWS:
+        return 0.45
+    extra = min(rows - GAME_TOTAL_DECISION_MODEL_MIN_ROWS, 500)
+    return min(GAME_TOTAL_DECISION_BLEND_MAX, 0.45 + (extra / 500.0) * 0.23)
 
 
 def _apply_game_margin_residual(
@@ -462,20 +669,26 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
     rows = conn.execute(
         """
         SELECT
+            g.id,
             g.game_date,
-            gp.id AS game_prediction_id,
-            gp.projected_margin,
-            gp.projected_total,
-            gp.spread_home,
-            gp.game_total,
-            gp.home_rest_days,
-            gp.away_rest_days,
-            sgp.actual_margin,
-            sgp.actual_total
-        FROM settled_game_predictions sgp
-        JOIN game_predictions gp ON gp.id = sgp.game_prediction_id
-        JOIN games g ON g.id = sgp.game_id
-        ORDER BY g.game_date ASC, gp.id ASC
+            g.start_time,
+            g.home_team_id,
+            g.away_team_id,
+            g.rest_days_home,
+            g.rest_days_away,
+            g.spread_home,
+            g.game_total,
+            home_result.points AS home_points,
+            away_result.points AS away_points,
+            home_result.possessions AS home_possessions,
+            away_result.possessions AS away_possessions
+        FROM games g
+        JOIN team_game_results home_result ON home_result.game_id = g.id AND home_result.team_id = g.home_team_id
+        JOIN team_game_results away_result ON away_result.game_id = g.id AND away_result.team_id = g.away_team_id
+        WHERE g.status = 'final'
+          AND home_result.points IS NOT NULL
+          AND away_result.points IS NOT NULL
+        ORDER BY g.game_date ASC, g.start_time ASC, g.id ASC
         """
     ).fetchall()
     if not rows:
@@ -486,89 +699,128 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
             "game_overall": empty.copy(),
         }
 
+    team_history: dict[int, dict[str, Any]] = {}
     margin_training_rows: list[tuple[list[float], float]] = []
     total_training_rows: list[tuple[list[float], float]] = []
+    total_market_training_rows: list[tuple[list[float], float]] = []
     ats_records: list[tuple[float, float, float]] = []
     total_records: list[tuple[float, float, float]] = []
+    margin_records: list[tuple[float, float, float]] = []
 
     for row in rows:
-        spread_home = row["spread_home"]
-        if spread_home is not None and row["projected_margin"] is not None and row["actual_margin"] is not None:
-            projected_margin = float(row["projected_margin"])
-            spread_home_value = float(spread_home)
-            rest_days_home = int(row["home_rest_days"] or 2)
-            rest_days_away = int(row["away_rest_days"] or 2)
-            baseline_edge = projected_margin + spread_home_value
-            adjusted_margin = projected_margin
-            if len(margin_training_rows) >= GAME_EDGE_MODEL_MIN_ROWS:
-                model = _fit_game_edge_model("margin", margin_training_rows)
-                features = [
-                    projected_margin,
-                    baseline_edge,
-                    spread_home_value,
-                    float(rest_days_home),
-                    float(rest_days_away),
-                ]
-                predicted_edge = _predict_game_edge(model, features)
-                margin_from_model = predicted_edge - spread_home_value
-                weight = _game_edge_blend_weight(model.rows, "margin")
-                adjusted_margin = ((1 - weight) * projected_margin) + (weight * margin_from_model)
-            adjusted_edge = adjusted_margin + spread_home_value
-            actual_edge = float(row["actual_margin"]) + spread_home_value
-            ats_records.append((baseline_edge, adjusted_edge, actual_edge))
-            margin_training_rows.append(
-                (
-                    [
-                        projected_margin,
-                        baseline_edge,
-                        spread_home_value,
-                        float(rest_days_home),
-                        float(rest_days_away),
-                    ],
-                    actual_edge,
-                )
+        home_team_id = int(row["home_team_id"])
+        away_team_id = int(row["away_team_id"])
+        home_context = _team_history_context(team_history.get(home_team_id))
+        away_context = _team_history_context(team_history.get(away_team_id))
+        if home_context["games"] >= 3 and away_context["games"] >= 3:
+            baseline_home = _baseline_points_from_context(
+                team_context=home_context,
+                opponent_context=away_context,
+                is_home=True,
+                rest_days=int(row["rest_days_home"] or 2),
             )
+            baseline_away = _baseline_points_from_context(
+                team_context=away_context,
+                opponent_context=home_context,
+                is_home=False,
+                rest_days=int(row["rest_days_away"] or 2),
+            )
+            baseline_margin = baseline_home - baseline_away
+            baseline_total = baseline_home + baseline_away
+            direct_features = _assemble_direct_game_features(
+                home_recent_points=home_context["recent_points"],
+                away_recent_points=away_context["recent_points"],
+                home_recent_allowed=home_context["recent_allowed"],
+                away_recent_allowed=away_context["recent_allowed"],
+                home_average_points=home_context["avg_points"],
+                away_average_points=away_context["avg_points"],
+                home_average_allowed=home_context["avg_allowed"],
+                away_average_allowed=away_context["avg_allowed"],
+                home_average_possessions=home_context["avg_possessions"],
+                away_average_possessions=away_context["avg_possessions"],
+                pace_factor=_historical_pace_factor(home_context, away_context, _historical_league_possessions(team_history)),
+                rest_days_home=int(row["rest_days_home"] or 2),
+                rest_days_away=int(row["rest_days_away"] or 2),
+                home_game_count=home_context["games"],
+                away_game_count=away_context["games"],
+            )
+            adjusted_margin = baseline_margin
+            adjusted_total = baseline_total
+            if len(margin_training_rows) >= GAME_DIRECT_MODEL_MIN_ROWS:
+                direct_margin_model = _fit_direct_game_model("margin", margin_training_rows)
+                direct_margin = _predict_direct_model(direct_margin_model, direct_features)
+                margin_weight = _direct_game_blend_weight(direct_margin_model.rows)
+                adjusted_margin = ((1 - margin_weight) * baseline_margin) + (margin_weight * direct_margin)
+            if row["spread_home"] is not None:
+                adjusted_margin = (
+                    (1 - GAME_MARGIN_POST_MARKET_ANCHOR) * adjusted_margin
+                ) + (GAME_MARGIN_POST_MARKET_ANCHOR * (-float(row["spread_home"])))
+            if len(total_training_rows) >= GAME_DIRECT_MODEL_MIN_ROWS:
+                direct_total_model = _fit_direct_game_model("total", total_training_rows)
+                direct_total = _predict_direct_model(direct_total_model, direct_features)
+                total_weight = _direct_game_blend_weight(direct_total_model.rows)
+                adjusted_total = ((1 - total_weight) * baseline_total) + (total_weight * direct_total)
+            game_total = row["game_total"]
+            if game_total is not None and float(game_total) > 0:
+                adjusted_total = ((1 - GAME_TOTAL_POST_MARKET_ANCHOR) * adjusted_total) + (GAME_TOTAL_POST_MARKET_ANCHOR * float(game_total))
 
-        game_total = row["game_total"]
-        if game_total is not None and float(game_total) > 0 and row["projected_total"] is not None and row["actual_total"] is not None:
-            projected_total = float(row["projected_total"])
-            game_total_value = float(game_total)
-            rest_days_home = int(row["home_rest_days"] or 2)
-            rest_days_away = int(row["away_rest_days"] or 2)
-            baseline_edge = projected_total - game_total_value
-            adjusted_total = projected_total
-            if len(total_training_rows) >= GAME_EDGE_MODEL_MIN_ROWS:
-                model = _fit_game_edge_model("total", total_training_rows)
-                features = [
-                    projected_total,
-                    baseline_edge,
-                    game_total_value,
-                    float(rest_days_home),
-                    float(rest_days_away),
-                ]
-                predicted_edge = _predict_game_edge(model, features)
-                total_from_model = game_total_value + predicted_edge
-                weight = _game_edge_blend_weight(model.rows, "total")
-                adjusted_total = ((1 - weight) * projected_total) + (weight * total_from_model)
-            adjusted_edge = adjusted_total - game_total_value
-            actual_edge = float(row["actual_total"]) - game_total_value
-            total_records.append((baseline_edge, adjusted_edge, actual_edge))
-            total_training_rows.append(
-                (
-                    [
-                        projected_total,
-                        baseline_edge,
-                        game_total_value,
-                        float(rest_days_home),
-                        float(rest_days_away),
-                    ],
-                    actual_edge,
+            actual_margin = float(row["home_points"]) - float(row["away_points"])
+            actual_total = float(row["home_points"]) + float(row["away_points"])
+            margin_records.append((baseline_margin, adjusted_margin, actual_margin))
+            if row["spread_home"] is not None:
+                spread_home = float(row["spread_home"])
+                ats_records.append(
+                    (
+                        baseline_margin + spread_home,
+                        adjusted_margin + spread_home,
+                        actual_margin + spread_home,
+                    )
                 )
-            )
+            if game_total is not None and float(game_total) > 0:
+                game_total_value = float(game_total)
+                baseline_total_edge = baseline_total - game_total_value
+                adjusted_total_edge = adjusted_total - game_total_value
+                if len(total_market_training_rows) >= GAME_TOTAL_DECISION_MODEL_MIN_ROWS:
+                    decision_model = _fit_direct_game_model("total_market", total_market_training_rows)
+                    decision_features = [*direct_features, adjusted_total_edge, game_total_value]
+                    predicted_total_edge = _predict_direct_model(decision_model, decision_features)
+                    decision_weight = _direct_total_decision_blend_weight(decision_model.rows)
+                    adjusted_total_edge = ((1 - decision_weight) * adjusted_total_edge) + (decision_weight * predicted_total_edge)
+                    if abs(adjusted_total_edge) < GAME_TOTAL_DECISION_MIN_EDGE:
+                        adjusted_total_edge = adjusted_total - game_total_value
+                total_records.append(
+                    (
+                        baseline_total_edge,
+                        adjusted_total_edge,
+                        actual_total - game_total_value,
+                    )
+                )
+            margin_training_rows.append((direct_features, actual_margin))
+            total_training_rows.append((direct_features, actual_total))
+            if game_total is not None and float(game_total) > 0:
+                total_market_training_rows.append(([*direct_features, baseline_total - float(game_total), float(game_total)], actual_total - float(game_total)))
+
+        _append_team_history(
+            team_history,
+            team_id=home_team_id,
+            game_date=str(row["game_date"]),
+            points=float(row["home_points"]),
+            opponent_points=float(row["away_points"]),
+            possessions=float(row["home_possessions"] or row["away_possessions"] or 78.0),
+        )
+        _append_team_history(
+            team_history,
+            team_id=away_team_id,
+            game_date=str(row["game_date"]),
+            points=float(row["away_points"]),
+            opponent_points=float(row["home_points"]),
+            possessions=float(row["away_possessions"] or row["home_possessions"] or 78.0),
+        )
 
     ats_metrics = _game_metric_from_records(ats_records)
     total_metrics = _game_metric_from_records(total_records)
-    overall_metrics = _combine_game_metric_rows([ats_metrics, total_metrics])
+    margin_metrics = _game_metric_from_records(margin_records)
+    overall_metrics = _combine_game_metric_rows([ats_metrics, total_metrics, margin_metrics])
     return {
         "game_ats": ats_metrics,
         "game_total": total_metrics,
@@ -636,6 +888,293 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
         ]
         samples.append((features, float(row["actual_total"]) - game_total))
     return samples
+
+
+def _train_direct_game_model(conn: sqlite3.Connection, target: str) -> _DirectGameModel | None:
+    signature = _direct_model_signature(conn)
+    cache_key = (signature[0], target, signature[1], signature[2])
+    cached = _DIRECT_MODEL_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    rows = _direct_game_training_rows(conn, target)
+    min_rows = GAME_TOTAL_DECISION_MODEL_MIN_ROWS if target in {"total_market", "ats_market"} else GAME_DIRECT_MODEL_MIN_ROWS
+    if len(rows) < min_rows:
+        return None
+    model = _fit_direct_game_model(target, rows)
+    _DIRECT_MODEL_CACHE.clear()
+    _DIRECT_MODEL_CACHE[cache_key] = model
+    return model
+
+
+def _direct_model_signature(conn: sqlite3.Connection) -> tuple[str, int, int]:
+    db_row = conn.execute("PRAGMA database_list").fetchone()
+    db_path = str(db_row["file"] if isinstance(db_row, sqlite3.Row) else db_row[2])
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id
+        FROM games
+        WHERE status = 'final'
+        """
+    ).fetchone()
+    return db_path, int(row["count"] or 0), int(row["max_id"] or 0)
+
+
+def _direct_game_training_rows(conn: sqlite3.Connection, target: str) -> list[tuple[list[float], float]]:
+    rows = conn.execute(
+        """
+        SELECT
+            g.id,
+            g.game_date,
+            g.start_time,
+            g.home_team_id,
+            g.away_team_id,
+            g.rest_days_home,
+            g.rest_days_away,
+            g.game_total,
+            g.spread_home,
+            home_result.points AS home_points,
+            away_result.points AS away_points,
+            home_result.possessions AS home_possessions,
+            away_result.possessions AS away_possessions
+        FROM games g
+        JOIN team_game_results home_result ON home_result.game_id = g.id AND home_result.team_id = g.home_team_id
+        JOIN team_game_results away_result ON away_result.game_id = g.id AND away_result.team_id = g.away_team_id
+        WHERE g.status = 'final'
+          AND home_result.points IS NOT NULL
+          AND away_result.points IS NOT NULL
+        ORDER BY g.game_date ASC, g.start_time ASC, g.id ASC
+        """
+    ).fetchall()
+    history: dict[int, dict[str, Any]] = {}
+    training_rows: list[tuple[list[float], float]] = []
+    for row in rows:
+        home_team_id = int(row["home_team_id"])
+        away_team_id = int(row["away_team_id"])
+        home_context = _team_history_context(history.get(home_team_id))
+        away_context = _team_history_context(history.get(away_team_id))
+        if home_context["games"] >= 3 and away_context["games"] >= 3:
+            pace_factor = _clamp(
+                ((home_context["avg_possessions"] + away_context["avg_possessions"]) / 2.0) / _historical_league_possessions(history),
+                0.94,
+                1.06,
+            )
+            features = _assemble_direct_game_features(
+                home_recent_points=home_context["recent_points"],
+                away_recent_points=away_context["recent_points"],
+                home_recent_allowed=home_context["recent_allowed"],
+                away_recent_allowed=away_context["recent_allowed"],
+                home_average_points=home_context["avg_points"],
+                away_average_points=away_context["avg_points"],
+                home_average_allowed=home_context["avg_allowed"],
+                away_average_allowed=away_context["avg_allowed"],
+                home_average_possessions=home_context["avg_possessions"],
+                away_average_possessions=away_context["avg_possessions"],
+                pace_factor=pace_factor,
+                rest_days_home=int(row["rest_days_home"] or 2),
+                rest_days_away=int(row["rest_days_away"] or 2),
+                home_game_count=home_context["games"],
+                away_game_count=away_context["games"],
+            )
+            if target == "margin":
+                training_rows.append((features, float(row["home_points"]) - float(row["away_points"])))
+            elif target == "total":
+                training_rows.append((features, float(row["home_points"]) + float(row["away_points"])))
+            elif target == "total_market":
+                market_total = _coerce_float(row["game_total"])
+                if market_total is not None and market_total > 0:
+                    baseline_home = _baseline_points_from_context(
+                        team_context=home_context,
+                        opponent_context=away_context,
+                        is_home=True,
+                        rest_days=int(row["rest_days_home"] or 2),
+                    )
+                    baseline_away = _baseline_points_from_context(
+                        team_context=away_context,
+                        opponent_context=home_context,
+                        is_home=False,
+                        rest_days=int(row["rest_days_away"] or 2),
+                    )
+                    baseline_total = baseline_home + baseline_away
+                    actual_total = float(row["home_points"]) + float(row["away_points"])
+                    training_rows.append(([*features, baseline_total - market_total, market_total], actual_total - market_total))
+            else:
+                spread_home = _coerce_float(row["spread_home"])
+                if spread_home is not None:
+                    baseline_home = _baseline_points_from_context(
+                        team_context=home_context,
+                        opponent_context=away_context,
+                        is_home=True,
+                        rest_days=int(row["rest_days_home"] or 2),
+                    )
+                    baseline_away = _baseline_points_from_context(
+                        team_context=away_context,
+                        opponent_context=home_context,
+                        is_home=False,
+                        rest_days=int(row["rest_days_away"] or 2),
+                    )
+                    baseline_margin = baseline_home - baseline_away
+                    actual_margin = float(row["home_points"]) - float(row["away_points"])
+                    training_rows.append(([*features, baseline_margin + spread_home, spread_home], actual_margin + spread_home))
+        _append_team_history(
+            history,
+            team_id=home_team_id,
+            game_date=str(row["game_date"]),
+            points=float(row["home_points"]),
+            opponent_points=float(row["away_points"]),
+            possessions=float(row["home_possessions"] or row["away_possessions"] or 78.0),
+        )
+        _append_team_history(
+            history,
+            team_id=away_team_id,
+            game_date=str(row["game_date"]),
+            points=float(row["away_points"]),
+            opponent_points=float(row["home_points"]),
+            possessions=float(row["away_possessions"] or row["home_possessions"] or 78.0),
+        )
+    return training_rows
+
+
+def _fit_direct_game_model(
+    target: str,
+    rows: list[tuple[list[float], float]],
+) -> _DirectGameModel:
+    xs = [row[0] for row in rows]
+    ys = [row[1] for row in rows]
+    means, scales, standardized = _standardize_game_edge_rows(xs)
+    coefficients = _ridge_regression(standardized, ys, penalty=2.5)
+    return _DirectGameModel(
+        target=target,
+        rows=len(rows),
+        intercept=coefficients[0],
+        coefficients=coefficients[1:],
+        feature_means=means,
+        feature_scales=scales,
+    )
+
+
+def _predict_direct_model(model: _DirectGameModel, features: list[float]) -> float:
+    if np is not None:
+        feature_array = np.asarray(features, dtype=float)
+        means = np.asarray(model.feature_means, dtype=float)
+        scales = np.asarray(model.feature_scales, dtype=float)
+        standardized = (feature_array - means) / scales
+        prediction = float(model.intercept + np.dot(np.asarray(model.coefficients, dtype=float), standardized))
+    else:
+        standardized = [
+            (value - model.feature_means[idx]) / model.feature_scales[idx]
+            for idx, value in enumerate(features)
+        ]
+        prediction = model.intercept + sum(coef * value for coef, value in zip(model.coefficients, standardized))
+    if model.target == "margin":
+        return _clamp(prediction, -GAME_DIRECT_MODEL_MAX_POINTS, GAME_DIRECT_MODEL_MAX_POINTS)
+    if model.target in {"total_market", "ats_market"}:
+        return _clamp(prediction, -30.0, 30.0)
+    return _clamp(prediction, 120.0, 220.0)
+
+
+def _baseline_points_from_context(
+    *,
+    team_context: Mapping[str, float],
+    opponent_context: Mapping[str, float],
+    is_home: bool,
+    rest_days: int,
+) -> float:
+    home_factor = 1.025 if is_home else 0.985
+    offense = (
+        (0.52 * float(team_context["recent_points"]))
+        + (0.23 * float(team_context["avg_points"]))
+        + (0.25 * float(opponent_context["avg_allowed"]))
+    )
+    pace_factor = _historical_pace_factor(team_context, opponent_context, 78.0)
+    return offense * pace_factor * home_factor * _rest_factor(rest_days)
+
+
+def _historical_pace_factor(
+    team_context: Mapping[str, float],
+    opponent_context: Mapping[str, float],
+    league_possessions: float,
+) -> float:
+    return _clamp(
+        ((float(team_context["avg_possessions"]) + float(opponent_context["avg_possessions"])) / 2.0)
+        / float(league_possessions),
+        0.94,
+        1.06,
+    )
+
+
+def _team_history_context(state: Mapping[str, Any] | None) -> dict[str, float]:
+    if not state:
+        return {
+            "games": 0.0,
+            "avg_points": 80.0,
+            "avg_allowed": 80.0,
+            "avg_possessions": 78.0,
+            "recent_points": 80.0,
+            "recent_allowed": 80.0,
+            "recent_possessions": 78.0,
+        }
+    recent_points = state["recent_points"]
+    recent_allowed = state["recent_allowed"]
+    recent_possessions = state["recent_possessions"]
+    return {
+        "games": float(state["games"]),
+        "avg_points": float(state["points_sum"]) / max(float(state["games"]), 1.0),
+        "avg_allowed": float(state["allowed_sum"]) / max(float(state["games"]), 1.0),
+        "avg_possessions": float(state["possessions_sum"]) / max(float(state["games"]), 1.0),
+        "recent_points": sum(recent_points) / len(recent_points) if recent_points else float(state["points_sum"]) / max(float(state["games"]), 1.0),
+        "recent_allowed": sum(recent_allowed) / len(recent_allowed) if recent_allowed else float(state["allowed_sum"]) / max(float(state["games"]), 1.0),
+        "recent_possessions": (
+            sum(recent_possessions) / len(recent_possessions)
+            if recent_possessions
+            else float(state["possessions_sum"]) / max(float(state["games"]), 1.0)
+        ),
+    }
+
+
+def _historical_league_possessions(history: Mapping[int, Mapping[str, Any]]) -> float:
+    total_games = 0.0
+    total_possessions = 0.0
+    for item in history.values():
+        total_games += float(item["games"])
+        total_possessions += float(item["possessions_sum"])
+    if total_games <= 0:
+        return 78.0
+    return total_possessions / total_games
+
+
+def _append_team_history(
+    history: dict[int, dict[str, Any]],
+    *,
+    team_id: int,
+    game_date: str,
+    points: float,
+    opponent_points: float,
+    possessions: float,
+) -> None:
+    state = history.setdefault(
+        team_id,
+        {
+            "games": 0,
+            "points_sum": 0.0,
+            "allowed_sum": 0.0,
+            "possessions_sum": 0.0,
+            "recent_points": [],
+            "recent_allowed": [],
+            "recent_possessions": [],
+            "last_game_date": None,
+        },
+    )
+    state["games"] += 1
+    state["points_sum"] += points
+    state["allowed_sum"] += opponent_points
+    state["possessions_sum"] += possessions
+    state["recent_points"].append(points)
+    state["recent_allowed"].append(opponent_points)
+    state["recent_possessions"].append(possessions)
+    state["recent_points"] = state["recent_points"][-5:]
+    state["recent_allowed"] = state["recent_allowed"][-5:]
+    state["recent_possessions"] = state["recent_possessions"][-5:]
+    state["last_game_date"] = game_date
 
 
 def _fit_game_edge_model(

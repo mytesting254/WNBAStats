@@ -29,6 +29,7 @@ LOCAL_TZ = APP_TIMEZONE
 DEFAULT_REGIONS = "us"
 DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars,espnbet,fanatics,betrivers"
 RAW_CACHE_NAME = "sportsbook_props_raw.json"
+HISTORICAL_GAME_MARKETS_CACHE_PREFIX = "historical_game_markets_"
 COMPLETED_GAME_GRACE_HOURS = 4
 GAME_MARKETS = ("h2h", "spreads", "totals")
 PLAYER_MARKET_BATCH_SIZE = 3
@@ -80,6 +81,111 @@ def import_the_odds_api_props(
     progress_callback: Callable[[str, int, int, str | None], None] | None = None,
 ) -> dict:
     return _import_the_odds_api_props(conn, force_refresh=force_refresh, progress_callback=progress_callback)
+
+
+def import_historical_odds_api_game_markets(
+    conn: sqlite3.Connection,
+    *,
+    selected_date: str,
+    snapshot_time_utc: str = "16:00:00Z",
+    force_refresh: bool = False,
+) -> dict:
+    load_dotenv()
+    api_key = os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")
+    if not api_key:
+        return {
+            "status": "missing_api_key",
+            "message": "Set ODDS_API_KEY to import historical Odds API game markets.",
+            "selected_date": selected_date,
+            "imported": 0,
+        }
+
+    snapshot_at = _historical_snapshot_at(selected_date, snapshot_time_utc)
+    cache_name = f"{HISTORICAL_GAME_MARKETS_CACHE_PREFIX}{selected_date}_{snapshot_time_utc.replace(':', '').replace('Z', 'z')}.json"
+    payload: object
+    if not force_refresh:
+        payload = read_json_cache(cache_name)
+        if payload is None:
+            payload = _fetch_historical_game_markets(api_key=api_key, snapshot_at=snapshot_at)
+            write_json_cache(cache_name, payload)
+    else:
+        payload = _fetch_historical_game_markets(api_key=api_key, snapshot_at=snapshot_at)
+        write_json_cache(cache_name, payload)
+
+    events = _historical_payload_events(payload)
+    fetched_events = 0
+    matched_games = 0
+    updated_games = 0
+    skipped_events = 0
+    event_errors: list[dict[str, str]] = []
+
+    for event in events:
+        if not isinstance(event, dict):
+            skipped_events += 1
+            continue
+        commence_time = str(event.get("commence_time") or "")
+        if not commence_time or _game_date(commence_time) != selected_date:
+            continue
+        fetched_events += 1
+        game_id = _match_or_create_local_game(conn, event)
+        if game_id is None:
+            skipped_events += 1
+            event_errors.append(
+                {
+                    "event_id": str(event.get("id") or ""),
+                    "error": "Could not match event to a local game.",
+                }
+            )
+            continue
+        matched_games += 1
+        before = conn.execute(
+            """
+            SELECT spread_home, game_total, home_moneyline, away_moneyline,
+                   home_spread_price, away_spread_price, over_price, under_price
+            FROM games
+            WHERE id = ?
+            """,
+            (game_id,),
+        ).fetchone()
+        _update_game_market_from_event(conn, event, game_id)
+        after = conn.execute(
+            """
+            SELECT spread_home, game_total, home_moneyline, away_moneyline,
+                   home_spread_price, away_spread_price, over_price, under_price
+            FROM games
+            WHERE id = ?
+            """,
+            (game_id,),
+        ).fetchone()
+        if before is None or after is None:
+            continue
+        tracked_columns = (
+            "spread_home",
+            "game_total",
+            "home_moneyline",
+            "away_moneyline",
+            "home_spread_price",
+            "away_spread_price",
+            "over_price",
+            "under_price",
+        )
+        if any(before[column] != after[column] for column in tracked_columns):
+            updated_games += 1
+
+    conn.commit()
+    return {
+        "status": "imported",
+        "source": "historical_odds_api",
+        "selected_date": selected_date,
+        "snapshot_at": snapshot_at,
+        "fetched_events": fetched_events,
+        "matched_games": matched_games,
+        "updated_games": updated_games,
+        "skipped_events": skipped_events,
+        "imported": updated_games,
+        "errors": event_errors,
+        "cache_name": cache_name,
+    }
 
 
 def _import_the_odds_api_props(
@@ -1064,6 +1170,38 @@ def _fetch_event_odds(event_id: str, *, api_key: str) -> tuple[dict | None, list
     if not payloads:
         return None, errors
     return _merge_event_market_payloads(payloads), errors
+
+
+def _fetch_historical_game_markets(*, api_key: str, snapshot_at: str) -> object:
+    params = {
+        "apiKey": api_key,
+        "regions": os.getenv("ODDS_API_REGIONS", DEFAULT_REGIONS),
+        "bookmakers": os.getenv("ODDS_API_BOOKMAKERS", DEFAULT_BOOKMAKERS),
+        "markets": ",".join(GAME_MARKETS),
+        "oddsFormat": "american",
+        "date": snapshot_at,
+    }
+    return _fetch_json(f"{BASE_URL}/historical/sports/{SPORT_KEY}/odds?{urlencode(params)}")
+
+
+def _historical_payload_events(payload: object) -> list[dict]:
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
+def _historical_snapshot_at(selected_date: str, snapshot_time_utc: str) -> str:
+    try:
+        datetime.fromisoformat(f"{selected_date}T{snapshot_time_utc.replace('Z', '+00:00')}")
+    except ValueError as exc:
+        raise RuntimeError(
+            "snapshot_time_utc must look like HH:MM:SSZ, for example 16:00:00Z."
+        ) from exc
+    return f"{selected_date}T{snapshot_time_utc}"
 
 
 def _merge_event_market_payloads(payloads: list[dict]) -> dict:

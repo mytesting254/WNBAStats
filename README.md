@@ -178,6 +178,7 @@ POST /api/history/import/espn
 POST /api/history/import/espn-missing
 POST /api/history/recompute-ats
 POST /api/history/backfill-covers-lines
+POST /api/history/backfill-odds-lines
 POST /api/gems/snapshot
 POST /api/gems/sync-settlements
 POST /api/watchlist/snapshot
@@ -208,6 +209,7 @@ Preferred browser/admin path:
   - `POST /api/history/import/espn-missing`
   - `POST /api/history/recompute-ats`
   - `POST /api/history/backfill-covers-lines`
+  - `POST /api/history/backfill-odds-lines`
 
 `force_refresh=true` on these read endpoints also requires the API key:
 
@@ -457,6 +459,12 @@ Backfill historical Covers lines over a date range (then recompute ATS/total res
 POST /api/history/backfill-covers-lines?start_date=2025-05-01&end_date=2025-05-31&force_refresh=true
 ```
 
+Backfill historical game markets from The Odds API over a date range. This path writes daily raw payload snapshots under `data/cache/` and updates `games.spread_home`, `games.game_total`, moneylines, and market prices before recomputing ATS/total results:
+
+```text
+POST /api/history/backfill-odds-lines?start_date=2024-05-01&end_date=2025-10-31&force_refresh=true
+```
+
 Recompute ATS/total outcomes from currently stored `games.spread_home` and `games.game_total`:
 
 ```text
@@ -472,6 +480,11 @@ POST /api/covers/import?selected_date=2026-05-10&force_refresh=true
 Covers supplies pregame market context and is the preferred source for player prop lines. When a game has Covers prop rows in `sportsbook_prop_lines`, the model prop-line sync builds `prop_lines` from Covers rows for that game and ignores overlapping The Odds API rows. Other providers are only used as a fallback for games without Covers props. ESPN remains the completed-game source for final scores and player box scores.
 
 Historical Covers matchup pages can differ from current pregame pages. The importer now supports older matchup layouts that expose only visible-text market blocks such as `Betting Information Team ATS (Margin) O/U (Margin)` and can backfill `games.spread_home` / `games.game_total` even when no player prop rows are present for that page. That historical backfill path is useful when early-season or repaired dates have completed box scores and settled props but are still missing matchup market context.
+
+Historical game-market backfill now has two paths:
+
+- Covers backfill is useful when archived matchup pages still expose visible pregame spread/total context.
+- The Odds API backfill is the preferred bulk repair path for completed game markets because it can backfill spreads, totals, moneylines, and market prices in one pass and keep a dated raw cache for replay/audit.
 
 On app load, Covers records shown in matchups are read from `data/cache/covers_props_raw.json` only when `cache_date` matches the current local date. If the cache date is stale, that cache file is deleted and Covers records are not displayed until a fresh Covers import runs.
 
@@ -889,6 +902,14 @@ adaptive-context-v1
 
 Each training action saves both runs to Turso in `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. Learned-run payloads now also include game residual evaluation rows (`game_ats`, `game_total`, and `game_overall`) with both baseline and blended metrics so saved game predictions can be compared before and after the residual layer. The Model Lab now shows those game residual deltas directly alongside the existing player-market training tables. The comparison table shows the latest run for each model version side by side. Prediction-time learned models also train from the active connection when the app is using Turso, instead of reopening a local SQLite file.
 
+The current saved game evaluation signature is `v6`. Recent game-model runs use:
+
+- historical game-market backfill from The Odds API for 2024-2025 spreads/totals/moneylines
+- direct historical game models for raw margin and raw total
+- a small market spread anchor for ATS trustworthiness
+- settled-game residual layers for ATS and totals
+- a conservative O/U decision rule that falls back to the raw total edge when the learned market-relative edge is under `1.0`
+
 Training auth expectations:
 
 - If `Train` returns `401`, there is no valid admin session. Sign in again from the `Data` tab.
@@ -927,12 +948,20 @@ over/under pick and edge
 confidence
 ```
 
-The game model combines recent scoring, longer team scoring, opponent points allowed, pace, home/away, and rest. It compares projected margin to `spread_home` and projected total to `game_total`.
+The game model is no longer just a heuristic score formula. Live matchup output now layers:
 
-Game projections now also include a first-pass settled-history residual layer:
+- team scoring context: recent scoring, season scoring, opponent points allowed, pace, home/away, rest, and injury availability
+- direct historical game training: raw margin and raw total models trained from prior final games only
+- market anchoring: a small spread anchor for margin and a small total anchor for totals when a real line exists
+- settled-history correction: ATS and total residual models trained on saved game predictions versus final results
+- conservative O/U pick logic: if the learned market-relative total edge is too small, the app keeps the raw total edge instead of forcing a noisy flip
 
-- ATS residual model: learns historical cover-margin outcome (`actual_margin + spread_home`) from saved game predictions.
-- Total residual model: learns historical total-vs-market outcome (`actual_total - game_total`) from saved game predictions.
-- Live output blends those learned residual edges back into the heuristic base projection with a low weight, so the market-relative history can correct recurring margin/total bias without discarding the existing team-form model.
+Latest saved walk-forward game metrics (`game_eval_signature=v6`) are:
+
+- `game_ats`: `10.431` MAE, `13.024` RMSE, `0.522` directional accuracy
+- `game_total`: `12.284` MAE, `15.717` RMSE, `0.462` directional accuracy
+- `game_overall`: `11.110` MAE, `13.992` RMSE, `0.535` directional accuracy
+
+Relative to the baseline game formulas, the saved blended model currently improves ATS and overall direction while keeping materially better raw total error. Total market-direction still lags the baseline slightly, so future work should target total-pick calibration rather than more raw total regression weight.
 
 Matchup predictions are saved when `/api/matchups` is built. Recalculation and ESPN history imports call the game settlement flow, so final ESPN scores can be compared against the model's saved winner, ATS, and over/under predictions.

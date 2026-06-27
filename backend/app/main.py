@@ -37,6 +37,7 @@ from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .game_prediction_tracking import settle_completed_game_predictions
 from .game_predictions import _team_injury_impact, project_game
 from .odds_import import (
+    import_historical_odds_api_game_markets,
     RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME,
     SyncPropLinesResult,
     import_the_odds_api_props,
@@ -3690,6 +3691,68 @@ def backfill_covers_lines(
         "imported_events": imported_events,
         "imported_rows": imported_rows,
         "synced_props": synced_props,
+        "ats_backfill": ats,
+        "errors": errors,
+        "published_payloads": published_payloads,
+    }
+
+
+@app.post("/api/history/backfill-odds-lines", dependencies=[Depends(_protect_mutation)])
+def backfill_historical_odds_lines(
+    start_date: str,
+    end_date: str | None = None,
+    snapshot_time_utc: str = "16:00:00Z",
+    force_refresh: bool = False,
+    max_days: int = 14,
+) -> dict:
+    start = _parse_iso_date(start_date, "start_date")
+    end = _parse_iso_date(end_date or start_date, "end_date")
+    if end < start:
+        raise HTTPException(status_code=400, detail="end_date must be on or after start_date")
+    total_days = (end - start).days + 1
+    if total_days > max_days:
+        raise HTTPException(status_code=400, detail=f"Date range too large: {total_days} days (max {max_days})")
+
+    selected_dates = [(start + timedelta(days=offset)).isoformat() for offset in range(total_days)]
+    fetched_events = 0
+    matched_games = 0
+    updated_games = 0
+    skipped_events = 0
+    errors = []
+    with connect() as conn:
+        for day in selected_dates:
+            try:
+                result = import_historical_odds_api_game_markets(
+                    conn,
+                    selected_date=day,
+                    snapshot_time_utc=snapshot_time_utc,
+                    force_refresh=force_refresh,
+                )
+                fetched_events += int(result.get("fetched_events", 0) or 0)
+                matched_games += int(result.get("matched_games", 0) or 0)
+                updated_games += int(result.get("updated_games", 0) or 0)
+                skipped_events += int(result.get("skipped_events", 0) or 0)
+                for item in result.get("errors", []) or []:
+                    errors.append({"date": day, **item})
+                if result.get("status") == "missing_api_key":
+                    errors.append({"date": day, "error": str(result.get("message") or "missing_api_key")})
+                    break
+            except Exception as exc:
+                errors.append({"date": day, "error": str(exc)})
+        ats = _recompute_team_results_from_game_lines(conn)
+    _invalidate_read_caches()
+    with connect() as conn:
+        published_payloads = _publish_post_mutation_read_payloads(conn)
+    return {
+        "source": "historical_odds_api",
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "dates": selected_dates,
+        "snapshot_time_utc": snapshot_time_utc,
+        "fetched_events": fetched_events,
+        "matched_games": matched_games,
+        "updated_games": updated_games,
+        "skipped_events": skipped_events,
         "ats_backfill": ats,
         "errors": errors,
         "published_payloads": published_payloads,

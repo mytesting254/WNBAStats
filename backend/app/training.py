@@ -17,11 +17,19 @@ from .player_prop_model import ModelTuningConfig, TRAINING_MARKETS, evaluate_mar
 TRAINING_MODEL_VERSION = LEARNED_MODEL_VERSION
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
 DATA_SIGNATURE_LABEL = "data_signature="
+GAME_EVAL_SIGNATURE_LABEL = "game_eval_signature="
+GAME_EVAL_SIGNATURE = "v6"
 
 
 def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
     data_signature = _training_data_signature(conn)
-    cached_learned = _latest_matching_run(conn, model_version=TRAINING_MODEL_VERSION, run_type="walk_forward_segments", data_signature=data_signature)
+    cached_learned = _latest_matching_run(
+        conn,
+        model_version=TRAINING_MODEL_VERSION,
+        run_type="walk_forward_segments",
+        data_signature=data_signature,
+        game_eval_signature=GAME_EVAL_SIGNATURE,
+    )
     if cached_learned is not None:
         return cached_learned
 
@@ -30,6 +38,7 @@ def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
         model_version=COMPONENT_MODEL_VERSION,
         run_type="walk_forward_backtest",
         data_signature=data_signature,
+        game_eval_signature=GAME_EVAL_SIGNATURE,
     )
     if component_run is None:
         component_run = _run_component_benchmark(conn)
@@ -78,6 +87,7 @@ def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
             f"{DATA_SIGNATURE_LABEL}{data_signature}"
         ),
     }
+    learned_run["notes"] = _append_game_eval_signature(learned_run.get("notes"), GAME_EVAL_SIGNATURE)
     _save_model_run(conn, learned_run)
     conn.commit()
     return learned_run
@@ -177,6 +187,7 @@ def latest_model_run(conn: sqlite3.Connection) -> dict | None:
 def _run_component_benchmark(conn: sqlite3.Connection) -> dict:
     started_at = datetime.now(timezone.utc).isoformat()
     metrics = _evaluate_all_component_markets(conn)
+    metrics.update(evaluate_game_residual_models(conn))
     total_rows = sum(int(metric["rows"]) for metric in metrics.values())
     _ensure_overall_metrics(metrics)
     finished_at = datetime.now(timezone.utc).isoformat()
@@ -189,7 +200,10 @@ def _run_component_benchmark(conn: sqlite3.Connection) -> dict:
         "training_rows": total_rows,
         "markets": TRAINING_MARKETS,
         "metrics": metrics,
-        "notes": "Component formula benchmark using only prior player games for each target row.",
+        "notes": _append_game_eval_signature(
+            "Component formula benchmark using only prior player games for each target row.",
+            GAME_EVAL_SIGNATURE,
+        ),
     }
 
 
@@ -243,6 +257,7 @@ def _latest_matching_run(
     model_version: str,
     run_type: str,
     data_signature: str,
+    game_eval_signature: str,
 ) -> dict | None:
     row = conn.execute(
         """
@@ -257,7 +272,7 @@ def _latest_matching_run(
     ).fetchall()
     for item in row:
         notes = item["notes"] if isinstance(item, sqlite3.Row) else item[9]
-        if _extract_data_signature(notes) == data_signature:
+        if _extract_data_signature(notes) == data_signature and _extract_game_eval_signature(notes) == game_eval_signature:
             return _serialize_run(conn, item)
     return None
 
@@ -272,10 +287,27 @@ def _append_data_signature(notes: str | None, data_signature: str) -> str:
     return f"{base} {suffix}"
 
 
+def _append_game_eval_signature(notes: str | None, game_eval_signature: str) -> str:
+    base = (notes or "").strip()
+    suffix = f"{GAME_EVAL_SIGNATURE_LABEL}{game_eval_signature}"
+    if not base:
+        return suffix
+    if suffix in base:
+        return base
+    return f"{base} {suffix}"
+
+
 def _extract_data_signature(notes: str | None) -> str | None:
     if not notes:
         return None
     match = re.search(rf"{re.escape(DATA_SIGNATURE_LABEL)}([0-9a-f]+)", str(notes))
+    return match.group(1) if match else None
+
+
+def _extract_game_eval_signature(notes: str | None) -> str | None:
+    if not notes:
+        return None
+    match = re.search(rf"{re.escape(GAME_EVAL_SIGNATURE_LABEL)}([A-Za-z0-9._-]+)", str(notes))
     return match.group(1) if match else None
 
 
