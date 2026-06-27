@@ -50,7 +50,7 @@ from .player_identity import player_is_skeletal, repair_shadow_player_identities
 from .projections import rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
-from .player_prop_model import _injury_adjustment_for_prop, prewarm_model_cache
+from .player_prop_model import prewarm_model_cache
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
 from .timezone_utils import APP_TIMEZONE, local_today_iso
 from .paths import get_cache_dir, get_db_path
@@ -4751,7 +4751,6 @@ def _value_board_payload(
     payload = []
     fallback_payload = []
     freshness_cache: dict[tuple[int, int], dict[str, Any]] = {}
-    increased_role_cache: dict[tuple[int, int, str, str], bool] = {}
     for row in rows:
         is_active_time = _is_active_game_time(row["start_time"])
         item = dict(row)
@@ -4787,14 +4786,7 @@ def _value_board_payload(
             game_id=int(item["game_id"]),
             limit=5,
         )
-        item["increased_role"] = _has_increased_role(
-            conn,
-            player_id=int(item["player_id"]),
-            team_id=int(item["resolved_team_id"]),
-            rotation_role=item["rotation_role"],
-            game_date=str(item["game_date"] or ""),
-            cache=increased_role_cache,
-        )
+        item["increased_role"] = _has_increased_role(reason=item.get("reason"))
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         fallback_payload.append(item)
         if game_id is None and not is_active_time:
@@ -4929,39 +4921,26 @@ def _market_value_from_stats_row(row, market: str) -> float | None:
 
 
 def _has_increased_role(
-    conn,
     *,
-    player_id: int,
-    team_id: int,
-    rotation_role: str | None,
-    game_date: str | None,
-    cache: dict[tuple[int, int, str, str], bool],
+    reason: str | None,
 ) -> bool:
-    cache_key = (
-        int(player_id),
-        int(team_id),
-        str(rotation_role or "").strip().lower(),
-        str(game_date or "").strip(),
+    text = str(reason or "")
+    injury_match = re.search(
+        r"injury\s+([a-z_]+)\s+\(avail\s+([0-9]+(?:\.[0-9]+)?),\s+team usage\s+([0-9]+(?:\.[0-9]+)?),\s+min\s+([+-]?[0-9]+(?:\.[0-9]+)?)\)",
+        text,
+        flags=re.IGNORECASE,
     )
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return cached
-    injury = _injury_adjustment_for_prop(
-        conn,
-        int(player_id),
-        int(team_id),
-        rotation_role,
-        as_of_date=game_date,
+    if not injury_match:
+        return False
+    status = str(injury_match.group(1) or "").strip().lower()
+    usage_multiplier = float(injury_match.group(3))
+    minutes_delta = float(injury_match.group(4))
+    if status in {"out", "inactive", "suspended", "unavailable"}:
+        return False
+    return bool(
+        usage_multiplier >= INCREASED_ROLE_USAGE_THRESHOLD
+        or minutes_delta >= INCREASED_ROLE_MINUTES_THRESHOLD
     )
-    increased = bool(
-        not injury["hard_cap_zero"]
-        and (
-            float(injury["usage_multiplier"]) >= INCREASED_ROLE_USAGE_THRESHOLD
-            or float(injury["minutes_delta"]) >= INCREASED_ROLE_MINUTES_THRESHOLD
-        )
-    )
-    cache[cache_key] = increased
-    return increased
 
 
 def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit: int = 60) -> list[dict]:

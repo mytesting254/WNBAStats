@@ -2745,50 +2745,21 @@ def test_game_projection_applies_injury_penalty_for_key_starter() -> None:
 
 
 def test_increased_role_flag_turns_on_for_teammate_replacement() -> None:
-    load_test_history()
-    with connect() as conn:
-        conn.execute(
-            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
-            (1005, "Replacement Guard", 10, "G", "rotation"),
-        )
-        conn.execute(
-            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
-            (1001, "out", "test absence", "2026-05-08T12:00:00Z"),
-        )
-        increased = main_module._has_increased_role(
-            conn,
-            player_id=1005,
-            team_id=10,
-            rotation_role="rotation",
-            game_date="2026-05-08",
-            cache={},
-        )
-
-    assert increased is True
+    assert main_module._has_increased_role(
+        reason="injury available (avail 1.00, team usage 1.08, min +1.2); manual adjustment applied."
+    ) is True
 
 
-def test_increased_role_flag_stays_off_for_mild_bump(monkeypatch) -> None:
-    monkeypatch.setattr(
-        main_module,
-        "_injury_adjustment_for_prop",
-        lambda conn, player_id, team_id, rotation_role, as_of_date=None: {
-            "hard_cap_zero": False,
-            "usage_multiplier": 1.03,
-            "minutes_delta": 0.5,
-        },
-    )
+def test_increased_role_flag_stays_off_for_mild_bump() -> None:
+    assert main_module._has_increased_role(
+        reason="injury available (avail 1.00, team usage 1.03, min +0.5); manual adjustment applied."
+    ) is False
 
-    with connect() as conn:
-        increased = main_module._has_increased_role(
-            conn,
-            player_id=1001,
-            team_id=10,
-            rotation_role="starter",
-            game_date="2026-05-08",
-            cache={},
-        )
 
-    assert increased is False
+def test_increased_role_flag_stays_off_for_neutral_injury_context() -> None:
+    assert main_module._has_increased_role(
+        reason="injury available (avail 1.00, team usage 1.00, min +0.0); no manual adjustment."
+    ) is False
 
 
 def test_game_projection_calibrates_low_totals_upward() -> None:
