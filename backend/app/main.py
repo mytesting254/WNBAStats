@@ -5078,7 +5078,6 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
     gem_prop_line_ids = {int(item["prop_line_id"]) for item in _build_current_gems(conn, "balanced")}
     payload = []
     freshness_cache: dict[tuple[int, int], dict[str, Any]] = {}
-    increased_role_cache: dict[tuple[int, int, str, str], bool] = {}
     for row in rows:
         item = dict(row)
         item = _repair_prediction_item_if_needed(conn, item)
@@ -5118,14 +5117,7 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
             game_id=int(item["game_id"]),
             limit=5,
         )
-        item["increased_role"] = _has_increased_role(
-            conn,
-            player_id=int(item["player_id"]),
-            team_id=int(item["resolved_team_id"]),
-            rotation_role=item["rotation_role"],
-            game_date=str(item["game_date"] or ""),
-            cache=increased_role_cache,
-        )
+        item["increased_role"] = _has_increased_role(reason=item.get("reason"))
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         payload.append(item)
     return payload[: max(1, min(int(limit), 200))]
