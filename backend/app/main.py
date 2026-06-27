@@ -5182,14 +5182,13 @@ def _game_total_result(row) -> str:
 
 
 def _rest_days_before_game(conn, team_id: int, start_time: str, game_date: str | None = None) -> int | None:
-    current_date = _parse_game_date(game_date) if game_date else None
-    if current_date is None:
-        current_start = _parse_game_start(start_time)
-        if current_start is None:
-            return None
+    current_start = _parse_game_start(start_time)
+    if current_start is not None:
         current_date = current_start.astimezone(LOCAL_TZ).date()
     else:
-        current_start = _parse_game_start(start_time)
+        current_date = _parse_game_date(game_date) if game_date else None
+        if current_date is None:
+            return None
     rows = conn.execute(
         """
         SELECT g.start_time, g.game_date
@@ -5205,9 +5204,9 @@ def _rest_days_before_game(conn, team_id: int, start_time: str, game_date: str |
         previous_start = _parse_game_start(row["start_time"])
         if current_start is not None and (previous_start is None or previous_start >= current_start):
             continue
-        previous_date = _parse_game_date(row["game_date"])
-        if previous_date is None and previous_start is not None:
-            previous_date = previous_start.astimezone(LOCAL_TZ).date()
+        previous_date = previous_start.astimezone(LOCAL_TZ).date() if previous_start is not None else None
+        if previous_date is None:
+            previous_date = _parse_game_date(row["game_date"])
         if previous_date and previous_date < current_date:
             previous_dates.append(previous_date)
     if not previous_dates:

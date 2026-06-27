@@ -2618,6 +2618,64 @@ def test_matchups_payload_prefers_game_markets_over_covers_override(monkeypatch)
     assert payload[0]["moneyline_market"]["home_price"] == -250.0
 
 
+def test_matchups_payload_uses_local_calendar_for_rest_days(monkeypatch) -> None:
+    with connect() as conn:
+        atl = conn.execute("SELECT id FROM teams WHERE abbreviation = 'ATL'").fetchone()["id"]
+        sea = conn.execute("SELECT id FROM teams WHERE abbreviation = 'SEA'").fetchone()["id"]
+        gs = conn.execute("SELECT id FROM teams WHERE abbreviation = 'GS'").fetchone()["id"]
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)
+            """,
+            (910001, "2026-06-26", "2026-06-27T02:00Z", gs, atl, 4.5, 165.5),
+        )
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)
+            """,
+            (910002, "2026-06-28", "2026-06-28T01:00:00+00:00", sea, atl, 8.5, 166.5),
+        )
+        conn.commit()
+
+        monkeypatch.setattr(main_module, "import_rotowire_lineups", lambda conn, force_refresh=False: {"source": "cache", "captured_at": None, "from_cache": True})
+        monkeypatch.setattr(main_module, "_covers_records_by_game", lambda conn: {})
+        monkeypatch.setattr(main_module, "_covers_market_odds_by_game", lambda: {})
+        monkeypatch.setattr(main_module, "_team_last_10_summary", lambda conn, team_id: {})
+        monkeypatch.setattr(main_module, "_value_board_payload_for_games", lambda conn, game_ids, include_filtered_only=False: [])
+        monkeypatch.setattr(main_module, "_sportsbook_props_for_games", lambda conn, game_ids: [])
+        monkeypatch.setattr(main_module, "_line_discrepancies_for_games", lambda conn, game_ids: [])
+        monkeypatch.setattr(main_module, "_is_today_active_game_time", lambda start_time: "2026-06-28T01:00:00+00:00" in str(start_time))
+        monkeypatch.setattr(
+            main_module,
+            "project_game",
+            lambda conn, game: {
+                "home_projected_points": 81.0,
+                "away_projected_points": 74.0,
+                "projected_margin": 7.0,
+                "projected_total": 155.0,
+                "winner_pick": "SEA",
+                "ats_pick": "SEA",
+                "ats_edge": 0.05,
+                "total_pick": "Under",
+                "total_edge": 0.02,
+                "game_confidence": "medium",
+                "game_reason": "test",
+            },
+        )
+
+        payload = main_module._matchups_payload(conn)
+
+    matchup = next(item for item in payload if item["id"] == 910002)
+    assert matchup["away_team"] == "ATL"
+    assert matchup["away_rest_days"] == 1
+
+
 def test_game_projection_returns_picks() -> None:
     load_test_history()
     with connect() as conn:
