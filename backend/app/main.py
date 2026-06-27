@@ -34,7 +34,7 @@ from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
 from .db import connect, init_db, sqlite_write_lock, using_turso
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
-from .game_prediction_tracking import settle_completed_game_predictions
+from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
 from .game_predictions import _team_injury_impact, project_game
 from .odds_import import (
     import_historical_odds_api_game_markets,
@@ -2144,6 +2144,66 @@ def _scheduled_game_ids(conn) -> list[int]:
     ]
 
 
+def rebuild_game_predictions_live(
+    conn,
+    *,
+    game_ids: list[int] | None = None,
+    progress_callback: Callable[[int, int, str | None], None] | None = None,
+) -> dict[str, int]:
+    target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+    game_filter = ""
+    params: tuple[object, ...] = ()
+    if target_game_ids:
+        placeholders = ",".join("?" for _ in target_game_ids)
+        game_filter = f" AND g.id IN ({placeholders})"
+        params = tuple(target_game_ids)
+    rows = conn.execute(
+        """
+        SELECT
+            g.id,
+            g.game_date,
+            g.start_time,
+            g.home_team_id,
+            g.away_team_id,
+            home.abbreviation AS home_team,
+            away.abbreviation AS away_team,
+            g.rest_days_home,
+            g.rest_days_away,
+            g.spread_home,
+            g.game_total,
+            g.home_moneyline,
+            g.away_moneyline,
+            g.home_spread_price,
+            g.away_spread_price,
+            g.over_price,
+            g.under_price
+        FROM games g
+        JOIN teams home ON home.id = g.home_team_id
+        JOIN teams away ON away.id = g.away_team_id
+        WHERE g.status = 'scheduled'
+        """
+        + game_filter
+        + """
+        ORDER BY g.start_time, g.id
+        """,
+        params,
+    ).fetchall()
+    total_games = len(rows)
+    if total_games == 0:
+        if progress_callback is not None:
+            progress_callback(0, 0, "No scheduled games needed rebuilding.")
+        return {"attempted": 0, "written": 0}
+
+    written = 0
+    for index, game in enumerate(rows, start=1):
+        prediction = project_game(conn, game)
+        save_game_prediction(conn, game, prediction)
+        written += 1
+        if progress_callback is not None:
+            progress_callback(index, total_games, f"Built {written} of {total_games} game predictions.")
+    return {"attempted": total_games, "written": written}
+
+
 def _repair_current_slate_target(conn) -> tuple[str, list[int]]:
     target_game_ids = _active_slate_game_ids(conn)
     scope = "current_slate"
@@ -2197,8 +2257,15 @@ def _repair_current_slate_props(
         if progress_callback is not None
         else None,
     )
+    game_rebuild_result = rebuild_game_predictions_live(
+        conn,
+        game_ids=target_game_ids,
+        progress_callback=lambda current, total, message: progress_callback("rebuilding_games", current, total, message)
+        if progress_callback is not None
+        else None,
+    )
     if progress_callback is not None:
-        progress_callback("rebuilding_predictions", rebuild_result.attempted, rebuild_result.attempted, "Refreshing watchlist snapshot.")
+        progress_callback("rebuilding_games", game_rebuild_result["attempted"], game_rebuild_result["attempted"], "Refreshing watchlist snapshot.")
     watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     return {
         "scope": scope,
@@ -2210,6 +2277,8 @@ def _repair_current_slate_props(
         "rebuilt_predictions": int(rebuild_result.written),
         "skipped_predictions": int(rebuild_result.skipped),
         "rebuild_errors": list(rebuild_result.errors[:20]),
+        "attempted_game_predictions": int(game_rebuild_result["attempted"]),
+        "rebuilt_game_predictions": int(game_rebuild_result["written"]),
         "watchlist_snapshot": watchlist_snapshot,
     }
 
@@ -2341,14 +2410,14 @@ def props_sync_status() -> dict:
 
 
 def _run_current_slate_repair_job() -> dict[str, Any]:
-    total_stages = 3
+    total_stages = 4
     with connect() as conn:
         result = _repair_current_slate_props(
             conn,
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
                 conn=conn,
                 stage=stage,
-                stage_index=1 if stage == "syncing_props" else 2,
+                stage_index=1 if stage == "syncing_props" else (2 if stage == "rebuilding_predictions" else 3),
                 stage_total=total_stages,
                 current=current,
                 total=total,
@@ -2359,7 +2428,7 @@ def _run_current_slate_repair_job() -> dict[str, Any]:
     with connect() as conn:
         _set_prop_sync_progress(
             stage="publishing_payloads",
-            stage_index=3,
+            stage_index=4,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -2368,7 +2437,7 @@ def _run_current_slate_repair_job() -> dict[str, Any]:
         result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
     _set_prop_sync_progress(
         stage="publishing_payloads",
-        stage_index=3,
+        stage_index=4,
         stage_total=total_stages,
         current=1,
         total=1,

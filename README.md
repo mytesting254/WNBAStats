@@ -515,6 +515,9 @@ POST /api/injuries/import/rotowire?force_refresh=true
 ```
 
 `/api/matchups` also performs a cache-aware RotoWire refresh to keep injury-adjusted projections current without forcing repeated fetches.
+The `Refresh Roster` UI action uses the same RotoWire injury import path, so it updates the `injuries` table before reloading roster status.
+Keep that action lightweight: it refreshes injury context and roster/matchup payloads, but the heavier projection rebuild still belongs to `Recalculate`.
+`POST /api/props/repair-current-slate` now rebuilds both scheduled player prop predictions and saved game predictions for the active slate, so the normal operator flow is `Refresh Roster` followed by `Recalculate`.
 
 The roster API is Rotowire-driven (not ESPN-player-table driven):
 
@@ -964,4 +967,4 @@ Latest saved walk-forward game metrics (`game_eval_signature=v6`) are:
 
 Relative to the baseline game formulas, the saved blended model currently improves ATS and overall direction while keeping materially better raw total error. Total market-direction still lags the baseline slightly, so future work should target total-pick calibration rather than more raw total regression weight.
 
-Matchup predictions are saved when `/api/matchups` is built. Recalculation and ESPN history imports call the game settlement flow, so final ESPN scores can be compared against the model's saved winner, ATS, and over/under predictions.
+Matchup predictions are saved when `/api/matchups` is built, and current-slate recalculation also rewrites saved game predictions for the active/scheduled slate before caches are republished. ESPN history imports and settlement flows then compare final scores against those saved winner, ATS, and over/under predictions.

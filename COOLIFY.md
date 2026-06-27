@@ -92,9 +92,10 @@ After deployment, verify:
 Recommended first live checks:
 
 1. sign in on the `Data` tab
-2. run `Recalculate`
-3. run `Refresh ESPN`
-4. verify `Roster` tab loads and only shows `Refresh Roster` for admins
+2. run `Refresh Roster` so Rotowire injury status is current
+3. run `Recalculate` to rebuild player props and saved game predictions for the active slate
+4. run `Refresh ESPN`
+5. verify `Roster` tab loads and only shows `Refresh Roster` for admins
 
 ### Run Live Maintenance From The Repo Shell
 
