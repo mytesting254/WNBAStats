@@ -2213,7 +2213,7 @@ function PropsView({
                     <div className="player-cell">
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
-                        <PlayerLabel name={prop.player} position={prop.position} />
+                        <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
                         <span>{prop.team} | {prop.sportsbook}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-l5`)}
                       </div>
@@ -2248,7 +2248,7 @@ function PropsView({
                 <TeamLogo src={selected.team_logo_url} alt={`${selected.team} logo`} />
                 <div>
                   <p className="eyebrow">{selected.team} | {selected.sportsbook}</p>
-                  <h3>{selected.player}</h3>
+                  <h3><PlayerLabel name={selected.player} position={selected.position} increasedRole={selected.increased_role} /></h3>
                 </div>
               </div>
               <p className="recommendation">
@@ -3450,7 +3450,7 @@ function WatchlistView({
                         <div className="player-cell">
                           <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                           <div>
-                        <PlayerLabel name={prop.player} position={prop.position} />
+                        <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
                         <span>{prop.team} | {prop.sportsbook}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-watch-l5`)}
                           </div>
@@ -3749,7 +3749,7 @@ function MatchupProps({
           {shortlist.map((prop) => (
             <div key={`candidate-${prop.id}`} className="candidate-card">
               <span>{prop.team} | {marketLabel(prop.market)}</span>
-              <PlayerLabel name={prop.player} position={prop.position} />
+              <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
               <em className={`candidate-side-${prop.recommended_side}`}>
                 {prop.recommended_side.toUpperCase()} {prop.line.toFixed(1)} | EV {formatPercent(prop.expected_value)}
               </em>
@@ -3795,7 +3795,7 @@ function MatchupProps({
                     <div className="player-cell">
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
-                        <PlayerLabel name={prop.player} position={prop.position} />
+                        <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
                         <span>{prop.team} | {prop.sportsbook}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-matchup-l5`)}
                       </div>
@@ -4004,13 +4004,22 @@ function TeamLogo({ src, alt }: { src?: string | null; alt: string }) {
   return <img className="team-logo" src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} />;
 }
 
-function PlayerLabel({ name, position }: { name: string; position?: string | null }) {
+function PlayerLabel({
+  name,
+  position,
+  increasedRole = false
+}: {
+  name: string;
+  position?: string | null;
+  increasedRole?: boolean;
+}) {
   const safeName = String(name ?? "").trim() || "Unknown";
   const pos = String(position || "").trim().toUpperCase();
   return (
     <strong className="player-label">
       {safeName}
       {pos ? <sup className="player-label-pos">{pos}</sup> : null}
+      {increasedRole ? <span className="role-boost-indicator" title="Increased role due to teammate absence">↑</span> : null}
     </strong>
   );
 }

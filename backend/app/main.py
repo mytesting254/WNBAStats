@@ -50,7 +50,7 @@ from .player_identity import player_is_skeletal, repair_shadow_player_identities
 from .projections import rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
-from .player_prop_model import prewarm_model_cache
+from .player_prop_model import _injury_adjustment_for_prop, prewarm_model_cache
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
 from .timezone_utils import APP_TIMEZONE, local_today_iso
 from .paths import get_cache_dir, get_db_path
@@ -78,6 +78,8 @@ APP_RESPONSE_CACHE_PREFIX = "app_response_cache_"
 GEM_MIN_EV = float(os.getenv("GEM_MIN_EV", "0.02"))
 GEM_MIN_EDGE = float(os.getenv("GEM_MIN_EDGE", "0.05"))
 READ_CACHE_VERSION = 1
+INCREASED_ROLE_USAGE_THRESHOLD = 1.04
+INCREASED_ROLE_MINUTES_THRESHOLD = 1.0
 APP_RESPONSE_CACHE_VERSION = 1
 APP_RESPONSE_CACHE_TTL_SECONDS = int(os.getenv("APP_RESPONSE_CACHE_TTL_SECONDS", "3600"))
 VALUE_BOARD_TTL_SECONDS = int(os.getenv("VALUE_BOARD_TTL_SECONDS", "300"))
@@ -4652,6 +4654,7 @@ def _value_board_payload(
                 pp.reason,
                 pp.prediction_time,
                 g.start_time,
+                g.game_date,
                 p.rotation_role,
                 g.spread_home,
                 g.game_total,
@@ -4748,6 +4751,7 @@ def _value_board_payload(
     payload = []
     fallback_payload = []
     freshness_cache: dict[tuple[int, int], dict[str, Any]] = {}
+    increased_role_cache: dict[tuple[int, int, str, str], bool] = {}
     for row in rows:
         is_active_time = _is_active_game_time(row["start_time"])
         item = dict(row)
@@ -4782,6 +4786,14 @@ def _value_board_payload(
             player_id=int(item["player_id"]),
             game_id=int(item["game_id"]),
             limit=5,
+        )
+        item["increased_role"] = _has_increased_role(
+            conn,
+            player_id=int(item["player_id"]),
+            team_id=int(item["resolved_team_id"]),
+            rotation_role=item["rotation_role"],
+            game_date=str(item["game_date"] or ""),
+            cache=increased_role_cache,
         )
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         fallback_payload.append(item)
@@ -4916,6 +4928,42 @@ def _market_value_from_stats_row(row, market: str) -> float | None:
     return mapping.get(key)
 
 
+def _has_increased_role(
+    conn,
+    *,
+    player_id: int,
+    team_id: int,
+    rotation_role: str | None,
+    game_date: str | None,
+    cache: dict[tuple[int, int, str, str], bool],
+) -> bool:
+    cache_key = (
+        int(player_id),
+        int(team_id),
+        str(rotation_role or "").strip().lower(),
+        str(game_date or "").strip(),
+    )
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return cached
+    injury = _injury_adjustment_for_prop(
+        conn,
+        int(player_id),
+        int(team_id),
+        rotation_role,
+        as_of_date=game_date,
+    )
+    increased = bool(
+        not injury["hard_cap_zero"]
+        and (
+            float(injury["usage_multiplier"]) >= INCREASED_ROLE_USAGE_THRESHOLD
+            or float(injury["minutes_delta"]) >= INCREASED_ROLE_MINUTES_THRESHOLD
+        )
+    )
+    cache[cache_key] = increased
+    return increased
+
+
 def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit: int = 60) -> list[dict]:
     rows = conn.execute(
         """
@@ -4946,6 +4994,7 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
                 pp.reason,
                 pp.prediction_time,
                 g.start_time,
+                g.game_date,
                 p.rotation_role,
                 g.spread_home,
                 g.game_total,
@@ -5050,6 +5099,7 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
     gem_prop_line_ids = {int(item["prop_line_id"]) for item in _build_current_gems(conn, "balanced")}
     payload = []
     freshness_cache: dict[tuple[int, int], dict[str, Any]] = {}
+    increased_role_cache: dict[tuple[int, int, str, str], bool] = {}
     for row in rows:
         item = dict(row)
         item = _repair_prediction_item_if_needed(conn, item)
@@ -5088,6 +5138,14 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
             player_id=int(item["player_id"]),
             game_id=int(item["game_id"]),
             limit=5,
+        )
+        item["increased_role"] = _has_increased_role(
+            conn,
+            player_id=int(item["player_id"]),
+            team_id=int(item["resolved_team_id"]),
+            rotation_role=item["rotation_role"],
+            game_date=str(item["game_date"] or ""),
+            cache=increased_role_cache,
         )
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         payload.append(item)

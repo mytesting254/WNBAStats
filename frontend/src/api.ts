@@ -28,6 +28,7 @@
   blowout_risk: string;
   blowout_probability: number;
   blowout_minutes_impact: number;
+  increased_role?: boolean;
   recent_values?: number[];
   recent_minutes?: number[];
 };
