@@ -117,11 +117,17 @@ def import_covers_props(
     selected_date: str | None = None,
     force_refresh: bool = False,
     sync_props: bool = True,
+    update_game_markets: bool = True,
 ) -> dict:
     captured_at = datetime.now(timezone.utc).isoformat()
     cached_payload = read_json_cache(RAW_CACHE_NAME)
     if selected_date is None and not force_refresh and _covers_cache_is_current(cached_payload):
-        result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
+        result = _replace_covers_rows(
+            conn,
+            cached_payload["rows"],
+            cached_payload.get("games", []),
+            update_game_markets=update_game_markets,
+        )
         synced = 0
         sync_error = None
         if sync_props:
@@ -142,7 +148,12 @@ def import_covers_props(
         games = covers_matchup_links(selected_date)
     except Exception as exc:
         if isinstance(cached_payload, dict) and cached_payload.get("rows"):
-            result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
+            result = _replace_covers_rows(
+                conn,
+                cached_payload["rows"],
+                cached_payload.get("games", []),
+                update_game_markets=update_game_markets,
+            )
             return {
                 **result,
                 "synced_props": 0,
@@ -206,7 +217,8 @@ def import_covers_props(
     game_payload = [_metadata_to_row(row) for row in metadata_rows]
     if not row_payload:
         if game_payload:
-            _update_covers_game_markets(conn, game_payload)
+            if update_game_markets:
+                _update_covers_game_markets(conn, game_payload)
             conn.commit()
             return {
                 "events": len(game_payload),
@@ -219,7 +231,12 @@ def import_covers_props(
                 "errors": errors,
             }
         if isinstance(cached_payload, dict) and cached_payload.get("rows"):
-            result = _replace_covers_rows(conn, cached_payload["rows"], cached_payload.get("games", []))
+            result = _replace_covers_rows(
+                conn,
+                cached_payload["rows"],
+                cached_payload.get("games", []),
+                update_game_markets=update_game_markets,
+            )
             return {
                 **result,
                 "synced_props": 0,
@@ -250,7 +267,12 @@ def import_covers_props(
             "games": game_payload,
         },
     )
-    result = _replace_covers_rows(conn, row_payload, game_payload)
+    result = _replace_covers_rows(
+        conn,
+        row_payload,
+        game_payload,
+        update_game_markets=update_game_markets,
+    )
     synced = 0
     sync_error = None
     if sync_props:
@@ -269,9 +291,16 @@ def import_covers_props(
     }
 
 
-def _replace_covers_rows(conn: sqlite3.Connection, row_payload: list[dict], game_payload: list[dict] | None = None) -> dict:
+def _replace_covers_rows(
+    conn: sqlite3.Connection,
+    row_payload: list[dict],
+    game_payload: list[dict] | None = None,
+    *,
+    update_game_markets: bool = True,
+) -> dict:
     rows = [_row_to_tuple(row) for row in row_payload if isinstance(row, dict)]
-    _update_covers_game_markets(conn, game_payload or [])
+    if update_game_markets:
+        _update_covers_game_markets(conn, game_payload or [])
     conn.execute("DELETE FROM sportsbook_prop_lines WHERE provider = ?", (PROVIDER,))
     conn.executemany(
         """

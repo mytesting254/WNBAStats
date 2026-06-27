@@ -155,7 +155,11 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - provider key is attached to the active backend resource
 - the deployed backend includes the queued `/api/odds/import` implementation and the `Data` tab shows the `Live Pipeline` card
 - the active runtime cache path contains `sportsbook_props_raw.json`
+  the correct path is the backend runtime cache, not necessarily repo-local `data/cache/`
+- `/api/odds/cache` reports the expected runtime `path`
 - the cached event dates inside `sportsbook_props_raw.json` match the app's current local date if you expect `Load Saved Odds` to replay them
+- if player props load but matchup spread/total/moneyline do not, confirm the saved payload includes `h2h`, `spreads`, and `totals` markets and that those values were written onto `games`
+- if same-day Covers cache exists, verify matchup payloads are using Covers game markets only as fallback, not overwriting already-populated Odds API game fields
 
 ## SQLite And Persistence Problems
 

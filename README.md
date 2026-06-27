@@ -348,13 +348,15 @@ Live sportsbook prop import uses The Odds API from the backend only. Set an API 
 $env:ODDS_API_KEY="your_key_here"
 ```
 
-Click `Load Saved Odds` in the app to reload the most recent JSON file from `data/cache/sportsbook_props_raw.json` without calling the provider. The import still syncs `sportsbook_prop_lines -> prop_lines` and refreshes model predictions so value-board/watchlist/gem views update immediately.
+Click `Load Saved Odds` in the app to reload the most recent `sportsbook_props_raw.json` file from the active backend runtime cache without calling the provider. In local repo runs that is usually `data/cache/sportsbook_props_raw.json`; in deployed container runs it is usually `/data/cache/sportsbook_props_raw.json`. The import still syncs `sportsbook_prop_lines -> prop_lines` and refreshes model predictions so value-board/watchlist/gem views update immediately.
 
-Click `Refresh Odds` only when you want a fresh provider call. The request now queues immediately in the backend, writes successful raw provider responses into `sportsbook_props_raw.json`, then continues import/sync/publish work in the background. Watch the `Live Pipeline` card in the `Data` tab for request, sync, and publish progress.
+Click `Refresh Odds` only when you want a fresh provider call. The request now queues immediately in the backend, writes successful raw provider responses into `sportsbook_props_raw.json`, then continues import/sync/publish work in the background. Odds API game markets (`h2h`, `spreads`, `totals`) are saved in that raw payload and update `games` market fields such as spread, total, and moneyline during import. Watch the `Live Pipeline` card in the `Data` tab for request, sync, and publish progress.
 
 Fresh calls merge by provider event id, so future events already saved in `sportsbook_props_raw.json` remain cached instead of being discarded.
 
 The raw Odds API cache is a single rolling file, not a dated archive. `Load Saved Odds` only replays cached events whose game date matches the app's current local date, so yesterday's payload can still exist in the JSON file but will be ignored on today's replay path.
+
+When same-day Covers cache is also present, matchup payloads now treat Covers game markets as fallback-only. Existing `games` spread/total/moneyline values from Odds API stay primary unless those fields are missing.
 
 ## Deployment Checklist
 

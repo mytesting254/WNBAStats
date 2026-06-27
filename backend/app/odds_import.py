@@ -17,6 +17,7 @@ from .bootstrap import ensure_team
 from .cache import read_json_cache, write_json_cache
 from .db import sqlite_write_lock
 from .game_resolver import resolve_or_create_game
+from .paths import get_cache_dir
 from .projections import rebuild_predictions, rebuild_predictions_live
 from .timezone_utils import APP_TIMEZONE, local_today_iso
 
@@ -928,9 +929,16 @@ def list_sportsbook_props(conn: sqlite3.Connection, game_id: int | None = None) 
 
 
 def odds_cache_summary() -> dict:
+    cache_path = get_cache_dir() / RAW_CACHE_NAME
     payload = read_json_cache(RAW_CACHE_NAME)
     if not isinstance(payload, list):
-        return {"exists": False, "events": 0, "future_events": 0, "latest_commence_time": None}
+        return {
+            "exists": False,
+            "path": str(cache_path),
+            "events": 0,
+            "future_events": 0,
+            "latest_commence_time": None,
+        }
     now = datetime.now(timezone.utc)
     future_events = [
         event for event in payload
@@ -941,6 +949,7 @@ def odds_cache_summary() -> dict:
     latest = max((str(event.get("commence_time")) for event in payload if isinstance(event, dict) and event.get("commence_time")), default=None)
     return {
         "exists": True,
+        "path": str(cache_path),
         "events": len(payload),
         "future_events": len(future_events),
         "latest_commence_time": latest,

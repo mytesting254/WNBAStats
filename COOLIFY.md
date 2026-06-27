@@ -128,6 +128,13 @@ stored in the resolved runtime cache directory as `sportsbook_props_raw.json`;
 do not inspect repo-local `data/cache/` unless that checkout is explicitly the
 active runtime root returned by `host-runtime-info` / `live_env.sh`.
 
+Odds API game markets such as `h2h`, `spreads`, and `totals` are also only
+authoritative in that active runtime. They are saved in the raw Odds payload
+and used to update live `games` market fields there. Covers refreshes can still
+populate missing game markets, but same-day Covers cache should be treated as a
+fallback for matchup game lines instead of overwriting already-populated Odds
+API game fields.
+
 If auto-detection is ambiguous, pass the container explicitly:
 
 ```bash

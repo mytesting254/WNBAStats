@@ -1803,18 +1803,32 @@ def _matchups_payload(conn) -> list[dict]:
         home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
         away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
         game_context = dict(game)
-        for field in (
-            "spread_home",
-            "game_total",
-            "home_moneyline",
-            "away_moneyline",
-            "home_spread_price",
-            "away_spread_price",
-            "over_price",
-            "under_price",
-        ):
-            if market_override.get(field) is not None:
-                game_context[field] = market_override[field]
+        game_context["spread_home"] = _prefer_market_value(
+            game_context.get("spread_home"),
+            market_override.get("spread_home"),
+            _is_real_spread,
+        )
+        game_context["game_total"] = _prefer_market_value(
+            game_context.get("game_total"),
+            market_override.get("game_total"),
+            _is_real_total,
+        )
+        game_context["home_moneyline"] = _prefer_market_value(
+            game_context.get("home_moneyline"),
+            market_override.get("home_moneyline"),
+            _is_real_moneyline,
+        )
+        game_context["away_moneyline"] = _prefer_market_value(
+            game_context.get("away_moneyline"),
+            market_override.get("away_moneyline"),
+            _is_real_moneyline,
+        )
+        for field in ("home_spread_price", "away_spread_price", "over_price", "under_price"):
+            game_context[field] = _prefer_market_value(
+                game_context.get(field),
+                market_override.get(field),
+                _is_real_moneyline,
+            )
         game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
         game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
         prediction = project_game(conn, game_context)
@@ -1853,7 +1867,6 @@ def _matchups_payload(conn) -> list[dict]:
                 "over_price": game_context.get("over_price"),
                 "under_price": game_context.get("under_price"),
                 **market_payload,
-                **market_override,
                 **prediction_state,
                 "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
                 **prediction,
@@ -1940,6 +1953,18 @@ def _matchup_game_markets(game: dict[str, Any]) -> dict[str, dict[str, float | N
             "home_price": float(home_moneyline) if isinstance(home_moneyline, (int, float)) else None,
         },
     }
+
+
+def _prefer_market_value(
+    current: Any,
+    fallback: Any,
+    validator: Callable[[Any], bool],
+) -> Any:
+    if validator(current):
+        return current
+    if validator(fallback):
+        return fallback
+    return current
 
 
 def _latest_game_prediction_id(conn, game_id: int) -> int | None:
@@ -2438,6 +2463,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
                 selected_date=_local_today_iso(),
                 force_refresh=True,
                 sync_props=False,
+                update_game_markets=False,
             )
         _set_prop_sync_progress(
             stage="refreshing_covers_context",

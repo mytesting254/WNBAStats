@@ -2548,6 +2548,76 @@ def test_matchups_payload_does_not_write_game_predictions(monkeypatch) -> None:
     assert int(saved["count"]) == 0
 
 
+def test_matchups_payload_prefers_game_markets_over_covers_override(monkeypatch) -> None:
+    load_test_history()
+
+    monkeypatch.setattr(main_module, "import_rotowire_lineups", lambda conn, force_refresh=False: {"source": "cache", "captured_at": None, "from_cache": True})
+    monkeypatch.setattr(main_module, "_covers_records_by_game", lambda conn: {})
+    monkeypatch.setattr(
+        main_module,
+        "_covers_market_odds_by_game",
+        lambda: {
+            2010: {
+                "spread_home": 4.5,
+                "game_total": 149.5,
+                "home_moneyline": 140.0,
+                "away_moneyline": -160.0,
+                "home_spread_price": -102.0,
+                "away_spread_price": -118.0,
+                "over_price": -108.0,
+                "under_price": -112.0,
+                "spread_market": {"away_line": -4.5, "away_price": -118.0, "home_line": 4.5, "home_price": -102.0},
+                "total_market": {"over_line": 149.5, "over_price": -108.0, "under_line": 149.5, "under_price": -112.0},
+                "moneyline_market": {"away_price": -160.0, "home_price": 140.0},
+            }
+        },
+    )
+    monkeypatch.setattr(main_module, "_team_last_10_summary", lambda conn, team_id: {})
+    monkeypatch.setattr(main_module, "_is_today_active_game_time", lambda start_time: True)
+    monkeypatch.setattr(main_module, "_value_board_payload_for_games", lambda conn, game_ids, include_filtered_only=False: [])
+    monkeypatch.setattr(main_module, "_sportsbook_props_for_games", lambda conn, game_ids: [])
+    monkeypatch.setattr(main_module, "_line_discrepancies_for_games", lambda conn, game_ids: [])
+    monkeypatch.setattr(
+        main_module,
+        "project_game",
+        lambda conn, game: {
+            "home_projected_points": 80.0,
+            "away_projected_points": 75.0,
+            "projected_margin": 5.0,
+            "projected_total": 155.0,
+            "winner_pick": "NY",
+            "ats_pick": "NY",
+            "ats_edge": 0.04,
+            "total_pick": "Under",
+            "total_edge": 0.03,
+            "game_confidence": "medium",
+            "game_reason": "test",
+        },
+    )
+
+    with connect() as conn:
+        conn.execute(
+            """
+            UPDATE games
+            SET spread_home = ?, game_total = ?, home_moneyline = ?, away_moneyline = ?,
+                home_spread_price = ?, away_spread_price = ?, over_price = ?, under_price = ?
+            WHERE id = 2010
+            """,
+            (-6.5, 166.5, -250.0, 215.0, -110.0, -110.0, -105.0, -115.0),
+        )
+        conn.commit()
+        payload = main_module._matchups_payload(conn)
+
+    assert payload
+    assert payload[0]["spread_home"] == -6.5
+    assert payload[0]["game_total"] == 166.5
+    assert payload[0]["home_moneyline"] == -250.0
+    assert payload[0]["away_moneyline"] == 215.0
+    assert payload[0]["spread_market"]["home_line"] == -6.5
+    assert payload[0]["total_market"]["over_line"] == 166.5
+    assert payload[0]["moneyline_market"]["home_price"] == -250.0
+
+
 def test_game_projection_returns_picks() -> None:
     load_test_history()
     with connect() as conn:
@@ -3260,6 +3330,60 @@ def test_odds_import_returns_provider_error_when_all_event_requests_fail(monkeyp
     assert len(rows) == 0
     assert len(result["errors"]) == 5
     assert "failed" in str(result["message"]).lower()
+
+
+def test_odds_cache_summary_reports_active_cache_path(monkeypatch, tmp_path) -> None:
+    class FixedDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 5, 8, 12, 0, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(odds_import_module, "get_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        odds_import_module,
+        "read_json_cache",
+        lambda _: [{"id": "event-1", "commence_time": "2026-05-08T23:30:00Z"}],
+    )
+    monkeypatch.setattr(odds_import_module, "datetime", FixedDateTime)
+
+    summary = odds_import_module.odds_cache_summary()
+
+    assert summary["exists"] is True
+    assert summary["path"] == str(tmp_path / RAW_CACHE_NAME)
+    assert summary["events"] == 1
+    assert summary["future_events"] == 1
+
+
+def test_run_odds_import_job_refreshes_covers_without_overwriting_game_markets(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        main_module,
+        "import_the_odds_api_props",
+        lambda conn, force_refresh=False, progress_callback=None: {"status": "imported", "message": "ok"},
+    )
+
+    def fake_import_covers_props(conn, selected_date=None, force_refresh=False, sync_props=True, update_game_markets=True):
+        captured["selected_date"] = selected_date
+        captured["force_refresh"] = force_refresh
+        captured["sync_props"] = sync_props
+        captured["update_game_markets"] = update_game_markets
+        return {"status": "imported", "message": "covers ok"}
+
+    monkeypatch.setattr(main_module, "import_covers_props", fake_import_covers_props)
+    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"matchups": 1})
+    monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
+    monkeypatch.setattr(main_module, "_set_prop_sync_progress", lambda *args, **kwargs: None)
+
+    result = main_module._run_odds_import_job(True)
+
+    assert captured == {
+        "selected_date": main_module._local_today_iso(),
+        "force_refresh": True,
+        "sync_props": False,
+        "update_game_markets": False,
+    }
+    assert result["covers_context"]["status"] == "imported"
 
 
 def test_odds_sync_prefers_covers_lines_when_available() -> None:
@@ -4504,7 +4628,11 @@ def test_covers_import_force_refresh_uses_cache_when_fresh_scrape_returns_no_row
     monkeypatch.setattr(
         covers_import_module,
         "_replace_covers_rows",
-        lambda conn, rows, games=None: {"events": 1, "imported": 1, "captured_at": "2026-05-22T20:00:00+00:00"},
+        lambda conn, rows, games=None, update_game_markets=True: {
+            "events": 1,
+            "imported": 1,
+            "captured_at": "2026-05-22T20:00:00+00:00",
+        },
     )
     monkeypatch.setattr(covers_import_module, "sync_prop_lines_from_sportsbook", lambda conn: 0)
     with connect() as conn:
