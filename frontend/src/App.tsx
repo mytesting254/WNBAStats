@@ -4477,17 +4477,21 @@ function marketLabel(market: string) {
   return labels[market] ?? market;
 }
 
+const APP_TIME_ZONE = "America/New_York";
+const APP_TIME_ZONE_LABEL = "ET";
+
 function formatDate(value: string) {
   const time = new Date(value).getTime();
   if (Number.isNaN(time)) {
     return "Scheduled";
   }
   return new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIME_ZONE,
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit"
-  }).format(new Date(time));
+  }).format(new Date(time)) + ` ${APP_TIME_ZONE_LABEL}`;
 }
 
 function formatDateTime(value?: string | null) {
@@ -4521,9 +4525,15 @@ function formatOutSince(value?: string | null) {
 }
 
 function localIsoDate(value = new Date()) {
-  const year = value.getFullYear();
-  const month = `${value.getMonth() + 1}`.padStart(2, "0");
-  const day = `${value.getDate()}`.padStart(2, "0");
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(value);
+  const year = parts.find((part) => part.type === "year")?.value ?? "0000";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
   return `${year}-${month}-${day}`;
 }
 
@@ -4533,6 +4543,7 @@ function formatGameDateShort(value: string) {
     return value;
   }
   return new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIME_ZONE,
     month: "short",
     day: "numeric",
     year: "2-digit"
@@ -4540,10 +4551,7 @@ function formatGameDateShort(value: string) {
 }
 
 function todayInputValue() {
-  const date = new Date();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${date.getFullYear()}-${month}-${day}`;
+  return localIsoDate();
 }
 
 function dateRangeValues(startDate: string, endDate: string) {
