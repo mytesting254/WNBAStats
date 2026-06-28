@@ -1115,6 +1115,7 @@ export function App() {
         ) : activeTab === "roster" ? (
           <RosterView
             roster={roster}
+            matchups={matchups}
             loading={loading}
             error={error}
             status={operationStatus}
@@ -1618,6 +1619,7 @@ function DataView({
 
 function RosterView({
   roster,
+  matchups,
   loading,
   error,
   status,
@@ -1626,6 +1628,7 @@ function RosterView({
   canRefresh = true
 }: {
   roster: RosterPlayer[];
+  matchups: Matchup[];
   loading: boolean;
   error: string | null;
   status: string | null;
@@ -1634,6 +1637,7 @@ function RosterView({
   canRefresh?: boolean;
 }) {
   const teams = useMemo(() => Array.from(new Set(roster.map((item) => item.team))).sort(), [roster]);
+  const todayIso = localIsoDate();
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
   useEffect(() => {
     if (!teams.length) {
@@ -1659,6 +1663,46 @@ function RosterView({
       return left.player_name.localeCompare(right.player_name);
     });
   }, [roster, selectedTeam]);
+  const latestCapturedAt = useMemo(() => {
+    const timestamps = roster
+      .map((item) => item.captured_at)
+      .filter((value): value is string => Boolean(value))
+      .map((value) => new Date(value).getTime())
+      .filter((value) => !Number.isNaN(value));
+    if (!timestamps.length) {
+      return null;
+    }
+    return new Date(Math.max(...timestamps)).toISOString();
+  }, [roster]);
+  const rosterCapturedDate = latestCapturedAt ? latestCapturedAt.slice(0, 10) : null;
+  const todaysMatchupTeams = useMemo(() => {
+    const currentTeams = new Set<string>();
+    for (const matchup of matchups) {
+      if (matchup.game_date !== todayIso) {
+        continue;
+      }
+      currentTeams.add(matchup.home_team);
+      currentTeams.add(matchup.away_team);
+    }
+    return Array.from(currentTeams).sort();
+  }, [matchups, todayIso]);
+  const missingTodayTeams = useMemo(
+    () => todaysMatchupTeams.filter((team) => !teams.includes(team)),
+    [todaysMatchupTeams, teams]
+  );
+  const rosterFreshnessWarning = useMemo(() => {
+    if (!latestCapturedAt && missingTodayTeams.length) {
+      return `Rotowire roster feed has no current timestamp. Today's slate includes ${missingTodayTeams.join(", ")}, but those teams are missing from the roster feed.`;
+    }
+    const warningParts: string[] = [];
+    if (latestCapturedAt && rosterCapturedDate && rosterCapturedDate < todayIso) {
+      warningParts.push(`Rotowire roster feed last updated ${formatDateTime(latestCapturedAt)}.`);
+    }
+    if (missingTodayTeams.length) {
+      warningParts.push(`Today's slate includes ${missingTodayTeams.join(", ")}, but those teams are missing from the roster feed.`);
+    }
+    return warningParts.length ? warningParts.join(" ") : null;
+  }, [latestCapturedAt, missingTodayTeams, rosterCapturedDate, todayIso]);
   const teamSummary = visibleRows[0] ?? null;
   const teamImpactPercent = teamSummary?.team_injury_factor != null
     ? (1 - teamSummary.team_injury_factor) * 100
@@ -1684,6 +1728,7 @@ function RosterView({
         ) : null}
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
+        {rosterFreshnessWarning && <div className="warning">{rosterFreshnessWarning}</div>}
         <div className="game-tabs roster-tabs" aria-label="Roster team tabs">
           {teams.map((team) => (
             <button key={team} className={selectedTeam === team ? "active" : ""} onClick={() => setSelectedTeam(team)}>
@@ -4473,6 +4518,13 @@ function formatOutSince(value?: string | null) {
     return "today";
   }
   return `${elapsedDays}d`;
+}
+
+function localIsoDate(value = new Date()) {
+  const year = value.getFullYear();
+  const month = `${value.getMonth() + 1}`.padStart(2, "0");
+  const day = `${value.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function formatGameDateShort(value: string) {

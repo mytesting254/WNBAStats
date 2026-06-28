@@ -1589,6 +1589,15 @@ tbody tr.selected {
   font-weight: 700;
 }
 
+.warning {
+  margin: 18px;
+  padding: 14px;
+  border-radius: 8px;
+  background: #fff7e6;
+  color: #b54708;
+  font-weight: 700;
+}
+
 .availability-toast {
   position: fixed;
   top: 24px;

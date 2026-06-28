@@ -869,7 +869,7 @@ def test_read_cache_invalidation_clears_app_response_cache_files(tmp_path, monke
     assert main_module.VALUE_BOARD_CACHE_NAME in deleted
 
 
-def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_refreshes_roster_payloads(monkeypatch) -> None:
+def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_roster(monkeypatch) -> None:
     connect_calls = 0
     deleted: list[str] = []
 
@@ -908,7 +908,6 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_refreshes_rost
         "_refresh_roster_read_payloads",
         lambda conn: {
             main_module.ROSTER_CACHE_NAME: 12,
-            main_module.MATCHUPS_CACHE_NAME: 4,
         },
     )
 
@@ -921,7 +920,6 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_refreshes_rost
     assert result["affected_game_ids"] == [991, 992]
     assert result["published_payloads"] == {
         main_module.ROSTER_CACHE_NAME: 12,
-        main_module.MATCHUPS_CACHE_NAME: 4,
     }
 
 

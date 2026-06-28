@@ -248,6 +248,14 @@ So an absent or very small H2H view is not always a bug.
 - abbreviated or accented player spellings such as `C. Vandersloot`, `D. Carrington`, `K. Samuelson`, or `Luisa Geiselsöder` should resolve to the local player profile if the player exists in the DB
 - if only `position` / `role` / impact fields are `N/A`, but `player_name`, `team`, and `status` are present, inspect roster-player resolution before changing Rotowire parsing
 
+### If Today's Teams Are Missing From The Roster Tab
+
+- first compare the roster tab against today's matchup slate; if the matchup view shows a team but the roster tabs do not, suspect stale Rotowire source data before changing name resolution
+- `Refresh Roster` can fall back to the last saved `rotowire_lineups_raw.json` when the live fetch fails; a fresh API cache does not guarantee a fresh provider snapshot
+- check the roster panel warning banner and the latest `captured_at` value; if it predates today, inspect the latest Rotowire fetch error before changing parser or player-matching code
+- a DNS / network failure such as `<urlopen error [Errno -3] Temporary failure in name resolution>` will produce exactly this pattern: today's games exist in `games`, but roster rows still reflect an older Rotowire pull
+- if you need to separate parser issues from fetch issues, verify whether the live Rotowire HTML contains the missing matchup before touching `_parse_lineup_injuries`
+
 If the roster tab is missing entirely or the `Data` tab breaks after roster changes, compare the current frontend against the last known-good tab layout before changing backend behavior.
 
 ## Deployment Recovery Workflow

@@ -2055,7 +2055,6 @@ def _refresh_roster_read_payloads(conn) -> dict[str, int]:
     published: dict[str, int] = {}
     payloads = [
         (ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn)),
-        (MATCHUPS_CACHE_NAME, MATCHUPS_TTL_SECONDS, lambda: _matchups_payload(conn)),
     ]
     for name, ttl_seconds, compute in payloads:
         payload = compute()

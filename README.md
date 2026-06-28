@@ -516,7 +516,7 @@ POST /api/injuries/import/rotowire?force_refresh=true
 
 `/api/matchups` also performs a cache-aware RotoWire refresh to keep injury-adjusted projections current without forcing repeated fetches.
 The `Refresh Roster` UI action uses the same RotoWire injury import path, so it updates the `injuries` table before reloading roster status.
-Keep that action lightweight: it refreshes injury context and roster/matchup payloads, but the heavier projection rebuild still belongs to `Recalculate`.
+Keep that action lightweight: it refreshes injury context, republishes the roster payload immediately, and invalidates matchup cache for lazy rebuild on next read. The heavier projection rebuild still belongs to `Recalculate`.
 `POST /api/props/repair-current-slate` now rebuilds both scheduled player prop predictions and saved game predictions for the active slate, so the normal operator flow is `Refresh Roster` followed by `Recalculate`.
 
 The roster API is Rotowire-driven (not ESPN-player-table driven):
@@ -528,6 +528,8 @@ GET /api/roster
 `/api/roster` reads the Rotowire lineup pull/cache rows and returns `team`, `player_name`, `status`, and `captured_at` so team tabs can render current lineup status even when ESPN player IDs are not yet present.
 
 Roster enrichment still attempts to match those provider names back to local player profiles for `position`, `rotation_role`, and impact metrics. Team normalization is shared with ESPN imports, and player matching now tolerates abbreviated first names plus accent/punctuation differences so provider naming drift is less likely to produce `N/A` roster metadata.
+
+Important failure mode: if the live Rotowire fetch fails, the importer falls back to the last saved raw lineup cache when one exists. That keeps the roster endpoint non-fatal, but it also means the roster tab can show stale provider data even when the API read cache itself is fresh. The roster UI now warns when the latest Rotowire timestamp predates today or when today's matchup teams are missing from the roster feed.
 
 Each Rotowire pull also writes a normalized roster snapshot cache:
 
