@@ -218,9 +218,7 @@ export type DbLockAudit = {
   };
 };
 
-const RUNTIME_API_KEY = (window.__APP_CONFIG__?.apiKey ?? "").trim();
-const BUILD_API_KEY = (import.meta.env.VITE_API_KEY ?? "").trim();
-const API_KEY = RUNTIME_API_KEY || BUILD_API_KEY;
+const API_KEY = (window.__APP_CONFIG__?.apiKey ?? "").trim();
 let csrfToken = "";
 
 export function setCsrfToken(nextToken: string | null | undefined) {

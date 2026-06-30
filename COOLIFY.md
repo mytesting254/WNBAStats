@@ -49,6 +49,7 @@ Important:
 - Session-authenticated admin POST routes also require a CSRF token header, which the frontend now manages automatically.
 - Leave `VITE_API_KEY` unset for public deployments so the browser does not receive a shared mutation secret.
 - `API_KEY` remains available as a fallback for server-to-server or manual admin requests that send `X-API-Key`.
+- `runtime-config.js` must never fall back to `API_KEY`; only `VITE_API_KEY` may be emitted to the browser.
 - If you intentionally use `VITE_API_KEY`, it is embedded into the frontend bundle and visible to any browser user.
 
 ## 3. Attach Persistent Storage

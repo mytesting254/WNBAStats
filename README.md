@@ -225,6 +225,7 @@ Environment behavior:
 Important:
 
 - Do not expose `VITE_API_KEY` in public deployments unless you explicitly want every browser to hold a shared admin secret.
+- `runtime-config.js` should only ever emit `VITE_API_KEY`, never fall back to backend `API_KEY`.
 - If admin login works but protected POST routes return `403`, check proxy origin forwarding before assuming route/auth code is broken.
 
 Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed in API responses.
