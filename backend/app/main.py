@@ -1209,7 +1209,7 @@ def _roster_out_since(conn: Any, player_id: int, status: str) -> str | None:
     streak_start: str | None = None
     for row in rows:
         row_status = str(row["status"] or "").strip().lower()
-        if row_status not in unavailable_statuses:
+        if row_status not in _UNAVAILABLE_PLAYER_STATUSES:
             break
         streak_start = str(row["captured_at"])
     return streak_start
