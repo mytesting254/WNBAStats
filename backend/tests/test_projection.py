@@ -4164,6 +4164,50 @@ def test_watchlist_payload_applies_market_specific_low_confidence_filters(monkey
     assert [item["market"] for item in payload] == ["assists"]
 
 
+def test_watchlist_hides_props_for_unavailable_players(monkeypatch) -> None:
+    now = datetime.now(timezone.utc)
+    with connect() as conn:
+        conn.executemany(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            [
+                (2005, "Unavailable Watchlist Player", 10, "G", "starter"),
+                (2006, "Available Watchlist Player", 3, "G", "starter"),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)",
+            (20005, "2026-06-06", (now + timedelta(hours=4)).isoformat(), 10, 3, -1.5, 158.5),
+        )
+        conn.executemany(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (200051, 20005, 2005, "DraftKings", "assists", 5.5, -110, -110, now.isoformat()),
+                (200052, 20005, 2006, "DraftKings", "assists", 4.5, -110, -110, now.isoformat()),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (2000511, 200051, MODEL_VERSION, now.isoformat(), 5.0, "under", 0.56, 0.50, 0.055, 0.03, "low", "should hide"),
+                (2000521, 200052, MODEL_VERSION, now.isoformat(), 4.0, "under", 0.56, 0.50, 0.055, 0.03, "low", "should show"),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
+            (2005, "inactive", "rest", now.isoformat()),
+        )
+
+        monkeypatch.setattr(main_module, "_is_active_game_time", lambda _start_time: True)
+        payload = main_module._watchlist_payload(conn)
+
+    assert [item["player"] for item in payload] == ["Available Watchlist Player"]
+
+
 def test_watchlist_performance_uses_market_specific_low_confidence_filters() -> None:
     with connect() as conn:
         conn.execute(
@@ -5318,6 +5362,49 @@ def test_value_board_excludes_settled_props() -> None:
 
     assert settled["settled"] == 1
     assert rows == []
+
+
+def test_value_board_hides_props_for_unavailable_players() -> None:
+    now = datetime.now(timezone.utc)
+    with connect() as conn:
+        conn.executemany(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            [
+                (2201, "Unavailable Value Board Player", 10, "G", "starter"),
+                (2202, "Available Value Board Player", 3, "G", "starter"),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)",
+            (22001, "2026-06-06", (now + timedelta(hours=4)).isoformat(), 10, 3, -2.5, 160.5),
+        )
+        conn.executemany(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (220011, 22001, 2201, "DraftKings", "points", 18.5, -110, -110, now.isoformat()),
+                (220012, 22001, 2202, "DraftKings", "points", 14.5, -110, -110, now.isoformat()),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (2200111, 220011, MODEL_VERSION, now.isoformat(), 20.0, "over", 0.58, 0.52, 0.06, 0.03, "medium", "should hide"),
+                (2200121, 220012, MODEL_VERSION, now.isoformat(), 16.0, "over", 0.58, 0.52, 0.06, 0.03, "medium", "should show"),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
+            (2201, "OUT", "rest", now.isoformat()),
+        )
+
+        rows = main_module._value_board_payload(conn, game_id=22001, include_filtered_only=False)
+
+    assert [row["player"] for row in rows] == ["Available Value Board Player"]
 
 
 def test_gems_keep_one_direction_per_player_market_game(monkeypatch) -> None:

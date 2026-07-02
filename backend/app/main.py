@@ -1193,8 +1193,7 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
 
 
 def _roster_out_since(conn: Any, player_id: int, status: str) -> str | None:
-    unavailable_statuses = {"out", "inactive", "suspended", "unavailable"}
-    if str(status or "").strip().lower() not in unavailable_statuses:
+    if str(status or "").strip().lower() not in _UNAVAILABLE_PLAYER_STATUSES:
         return None
     rows = conn.execute(
         """
@@ -1214,6 +1213,31 @@ def _roster_out_since(conn: Any, player_id: int, status: str) -> str | None:
             break
         streak_start = str(row["captured_at"])
     return streak_start
+
+
+_UNAVAILABLE_PLAYER_STATUSES = {"out", "inactive", "suspended", "unavailable"}
+
+
+def _latest_player_injury_status(conn: Any, player_id: int) -> str | None:
+    row = conn.execute(
+        """
+        SELECT lower(trim(status)) AS status
+        FROM injuries
+        WHERE player_id = ?
+        ORDER BY captured_at DESC, id DESC
+        LIMIT 1
+        """,
+        (int(player_id),),
+    ).fetchone()
+    if not row:
+        return None
+    status = str(row["status"] or "").strip().lower()
+    return status or None
+
+
+def _player_is_unavailable(conn: Any, player_id: int) -> bool:
+    status = _latest_player_injury_status(conn, player_id)
+    return status in _UNAVAILABLE_PLAYER_STATUSES
 
 
 def _protect_mutation(
@@ -4782,6 +4806,8 @@ def _value_board_payload(
         item = dict(row)
         item["prop_line_id"] = int(item["id"])
         item = _repair_prediction_item_if_needed(conn, item)
+        if _player_is_unavailable(conn, int(item["player_id"])):
+            continue
         if include_filtered_only and not _include_value_board_pick(item):
             continue
         if ENABLE_PLAYER_FRESHNESS_GATE:
@@ -4961,7 +4987,7 @@ def _has_increased_role(
     status = str(injury_match.group(1) or "").strip().lower()
     usage_multiplier = float(injury_match.group(3))
     minutes_delta = float(injury_match.group(4))
-    if status in {"out", "inactive", "suspended", "unavailable"}:
+    if status in _UNAVAILABLE_PLAYER_STATUSES:
         return False
     return bool(
         usage_multiplier >= INCREASED_ROLE_USAGE_THRESHOLD
@@ -5107,6 +5133,8 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
     for row in rows:
         item = dict(row)
         item = _repair_prediction_item_if_needed(conn, item)
+        if _player_is_unavailable(conn, int(item["player_id"])):
+            continue
         if not _include_watchlist_pick(item):
             continue
         if int(item["id"]) in value_board_prediction_ids:
