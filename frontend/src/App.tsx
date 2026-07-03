@@ -90,6 +90,28 @@ type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "p
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
 
+const INITIAL_LOAD_TIMEOUT_MS = 45000;
+const AUTH_LOAD_TIMEOUT_MS = 15000;
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.floor(timeoutMs / 1000)}s`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 type NormalizedCoversRecords = {
   head_to_head: CoversRecordRow[];
   away_last_10: CoversRecordRow[];
@@ -249,17 +271,17 @@ export function App() {
         opsHealthResult,
         cacheStatusResult
       ] = await Promise.allSettled([
-        fetchValueBoard(),
-        fetchPerformance(),
-        fetchGemPerformance(),
-        fetchWatchlistPerformance(),
-        fetchWatchlist(),
-        fetchMatchups(),
-        fetchLineDiscrepancies(),
-        fetchModelRuns(),
-        fetchRoster(),
-        fetchOpsHealth(),
-        fetchCacheStatus()
+        withTimeout(fetchValueBoard(), INITIAL_LOAD_TIMEOUT_MS, "value board"),
+        withTimeout(fetchPerformance(), INITIAL_LOAD_TIMEOUT_MS, "model performance"),
+        withTimeout(fetchGemPerformance(), INITIAL_LOAD_TIMEOUT_MS, "gem performance"),
+        withTimeout(fetchWatchlistPerformance(), INITIAL_LOAD_TIMEOUT_MS, "watchlist performance"),
+        withTimeout(fetchWatchlist(), INITIAL_LOAD_TIMEOUT_MS, "watchlist"),
+        withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups"),
+        withTimeout(fetchLineDiscrepancies(), INITIAL_LOAD_TIMEOUT_MS, "line discrepancies"),
+        withTimeout(fetchModelRuns(), INITIAL_LOAD_TIMEOUT_MS, "model runs"),
+        withTimeout(fetchRoster(), INITIAL_LOAD_TIMEOUT_MS, "roster"),
+        withTimeout(fetchOpsHealth(), INITIAL_LOAD_TIMEOUT_MS, "operations health"),
+        withTimeout(fetchCacheStatus(), INITIAL_LOAD_TIMEOUT_MS, "cache status")
       ]);
 
       const failures: string[] = [];
@@ -364,7 +386,7 @@ export function App() {
   async function loadAuth() {
     setAuthLoading(true);
     try {
-      const result = await fetchAuthState();
+      const result = await withTimeout(fetchAuthState(), AUTH_LOAD_TIMEOUT_MS, "auth state");
       setCsrfToken(result.csrf_token);
       setAuthState(result);
     } catch (err) {
