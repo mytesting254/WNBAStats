@@ -439,6 +439,32 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS player_game_availability (
+                id INTEGER PRIMARY KEY,
+                player_id INTEGER NOT NULL,
+                game_id INTEGER NOT NULL,
+                team_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                did_not_play INTEGER NOT NULL DEFAULT 0,
+                status_reason TEXT,
+                minutes_text TEXT,
+                observed_at TEXT NOT NULL,
+                FOREIGN KEY (player_id) REFERENCES players(id),
+                FOREIGN KEY (game_id) REFERENCES games(id),
+                FOREIGN KEY (team_id) REFERENCES teams(id),
+                UNIQUE(player_id, game_id, source)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_player_game_availability_game
+            ON player_game_availability(game_id, player_id)
+            """
+        )
+        conn.execute(
+            """
             CREATE INDEX IF NOT EXISTS idx_games_status_date
             ON games(status, game_date)
             """
@@ -749,6 +775,23 @@ CREATE TABLE IF NOT EXISTS player_game_stats (
     FOREIGN KEY (game_id) REFERENCES games(id)
 );
 
+CREATE TABLE IF NOT EXISTS player_game_availability (
+    id INTEGER PRIMARY KEY,
+    player_id INTEGER NOT NULL,
+    game_id INTEGER NOT NULL,
+    team_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    did_not_play INTEGER NOT NULL DEFAULT 0,
+    status_reason TEXT,
+    minutes_text TEXT,
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY (player_id) REFERENCES players(id),
+    FOREIGN KEY (game_id) REFERENCES games(id),
+    FOREIGN KEY (team_id) REFERENCES teams(id),
+    UNIQUE(player_id, game_id, source)
+);
+
 CREATE TABLE IF NOT EXISTS team_game_results (
     id INTEGER PRIMARY KEY,
     team_id INTEGER NOT NULL,
@@ -981,6 +1024,7 @@ CREATE TABLE IF NOT EXISTS prop_sync_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_player_stats_player_game ON player_game_stats(player_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_team_results_team_game ON team_game_results(team_id, game_id);
+CREATE INDEX IF NOT EXISTS idx_player_game_availability_game ON player_game_availability(game_id, player_id);
 CREATE INDEX IF NOT EXISTS idx_prop_lines_game ON prop_lines(game_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_prop ON prop_predictions(prop_line_id);
 CREATE INDEX IF NOT EXISTS idx_game_predictions_game ON game_predictions(game_id);

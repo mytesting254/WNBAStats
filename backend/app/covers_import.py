@@ -13,7 +13,7 @@ from urllib.request import Request, urlopen
 from .bootstrap import ensure_team, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
 from .game_resolver import resolve_or_create_game
-from .odds_import import sync_prop_lines_from_sportsbook
+from .odds_import import _backfill_provider_player_ids, sync_prop_lines_from_sportsbook
 from .timezone_utils import APP_TIMEZONE, local_today_iso
 
 
@@ -311,11 +311,13 @@ def _replace_covers_rows(
         """,
         rows,
     )
+    provider_player_ids_filled = _backfill_provider_player_ids(conn, provider=PROVIDER)
     conn.commit()
     return {
         "events": len({row[1] for row in rows}),
         "imported": len(rows),
         "captured_at": max((row[15] for row in rows), default=None),
+        "provider_player_ids_filled": provider_player_ids_filled,
     }
 
 

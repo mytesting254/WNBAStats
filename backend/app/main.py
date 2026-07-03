@@ -101,6 +101,8 @@ _PROP_SYNC_LOCK = threading.Lock()
 _MODEL_TRAIN_LOCK = threading.Lock()
 _DB_MAINTENANCE_LOCK = threading.Lock()
 _ESPN_HISTORY_IMPORT_LOCK = threading.Lock()
+PROP_SYNC_STALE_SECONDS = int(os.getenv("PROP_SYNC_STALE_SECONDS", "1800"))
+RECENT_FINALS_SETTLEMENT_LOOKBACK_DAYS = int(os.getenv("RECENT_FINALS_SETTLEMENT_LOOKBACK_DAYS", "3"))
 _PROP_SYNC_STATE: dict[str, Any] = {
     "job_id": None,
     "running": False,
@@ -558,7 +560,7 @@ def _row_to_prop_sync_state(row) -> dict[str, Any] | None:
         last_result = json.loads(row["last_result_json"]) if row["last_result_json"] else None
     except (TypeError, json.JSONDecodeError):
         last_result = None
-    return {
+    state = {
         "job_id": int(row["id"]),
         "running": str(row["status"] or "") in {"queued", "running"},
         "started_at": row["started_at"],
@@ -577,6 +579,35 @@ def _row_to_prop_sync_state(row) -> dict[str, Any] | None:
         "message": row["message"],
         "updated_at": row["updated_at"],
     }
+    return _mark_stale_prop_sync_state(state)
+
+
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _mark_stale_prop_sync_state(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if state is None or not state.get("running"):
+        return state
+    updated_at = _parse_iso_datetime(state.get("updated_at")) or _parse_iso_datetime(state.get("started_at"))
+    if updated_at is None:
+        return state
+    age_seconds = (datetime.now(timezone.utc) - updated_at.astimezone(timezone.utc)).total_seconds()
+    if age_seconds < PROP_SYNC_STALE_SECONDS:
+        return state
+    stale_state = dict(state)
+    stale_state["running"] = False
+    stale_state["status"] = "stale"
+    stale_state["message"] = stale_state.get("message") or "Recovered stale queued/running job."
+    stale_state["finished_at"] = stale_state.get("finished_at") or stale_state.get("updated_at") or stale_state.get("started_at")
+    stale_state["last_error"] = stale_state.get("last_error") or "Recovered stale queued/running job."
+    return stale_state
 
 
 def _latest_prop_sync_job_state() -> dict[str, Any] | None:
@@ -2265,6 +2296,50 @@ def _repair_current_slate_target(conn) -> tuple[str, list[int]]:
     return scope, target_game_ids
 
 
+def _recent_unsettled_final_dates(conn) -> list[str]:
+    cutoff = (datetime.now(LOCAL_TZ).date() - timedelta(days=RECENT_FINALS_SETTLEMENT_LOOKBACK_DAYS)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT DISTINCT game_date
+        FROM (
+            SELECT g.game_date
+            FROM games g
+            JOIN prop_lines pl ON pl.game_id = g.id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE g.status = 'final'
+              AND g.game_date >= ?
+              AND sp.id IS NULL
+            UNION
+            SELECT g.game_date
+            FROM games g
+            JOIN game_predictions gp ON gp.game_id = g.id
+            LEFT JOIN settled_game_predictions sgp ON sgp.game_prediction_id = gp.id
+            WHERE g.status = 'final'
+              AND g.game_date >= ?
+              AND sgp.id IS NULL
+        )
+        ORDER BY game_date
+        """,
+        (cutoff, cutoff),
+    ).fetchall()
+    return [str(row["game_date"]) for row in rows if row["game_date"]]
+
+
+def _settle_recent_completed_games(conn) -> dict[str, Any]:
+    target_dates = _recent_unsettled_final_dates(conn)
+    if not target_dates:
+        return {
+            "selected_dates": [],
+            "prop_settlements": {"settled": 0, "repaired": 0, "skipped": 0},
+            "game_settlements": {"settled": 0},
+        }
+    return {
+        "selected_dates": target_dates,
+        "prop_settlements": settle_completed_props(conn, selected_dates=target_dates),
+        "game_settlements": settle_completed_game_predictions(conn, selected_dates=target_dates),
+    }
+
+
 def _repair_current_slate_props(
     conn,
     *,
@@ -2462,7 +2537,7 @@ def props_sync_status() -> dict:
 
 
 def _run_current_slate_repair_job() -> dict[str, Any]:
-    total_stages = 4
+    total_stages = 5
     with connect() as conn:
         result = _repair_current_slate_props(
             conn,
@@ -2476,11 +2551,21 @@ def _run_current_slate_repair_job() -> dict[str, Any]:
                 message=message,
             ),
         )
+        _set_prop_sync_progress(
+            conn=conn,
+            stage="settling_recent_finals",
+            stage_index=4,
+            stage_total=total_stages,
+            current=0,
+            total=1,
+            message="Settling recent completed games.",
+        )
+        result["recent_finals_settlement"] = _settle_recent_completed_games(conn)
     _invalidate_read_caches()
     with connect() as conn:
         _set_prop_sync_progress(
             stage="publishing_payloads",
-            stage_index=4,
+            stage_index=5,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -2489,7 +2574,7 @@ def _run_current_slate_repair_job() -> dict[str, Any]:
         result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
     _set_prop_sync_progress(
         stage="publishing_payloads",
-        stage_index=4,
+        stage_index=5,
         stage_total=total_stages,
         current=1,
         total=1,
@@ -2541,7 +2626,7 @@ def _queue_current_slate_repair_job() -> dict[str, Any]:
 
 
 def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
-    total_stages = 4
+    total_stages = 5
     with connect() as conn:
         result = import_the_odds_api_props(
             conn,
@@ -2556,6 +2641,16 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
                 message=message,
             ),
         )
+        _set_prop_sync_progress(
+            conn=conn,
+            stage="settling_recent_finals",
+            stage_index=3,
+            stage_total=total_stages,
+            current=0,
+            total=1,
+            message="Settling recent completed games.",
+        )
+        result["recent_finals_settlement"] = _settle_recent_completed_games(conn)
     if result.get("status") in {"missing_api_key", "provider_error"}:
         message = str(result.get("message") or "Odds import failed.")
         _mutate_prop_sync_state(
@@ -2573,7 +2668,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
     try:
         _set_prop_sync_progress(
             stage="refreshing_covers_context",
-            stage_index=3,
+            stage_index=4,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -2589,7 +2684,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             )
         _set_prop_sync_progress(
             stage="refreshing_covers_context",
-            stage_index=3,
+            stage_index=4,
             stage_total=total_stages,
             current=1,
             total=1,
@@ -2599,7 +2694,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
         covers_error = str(exc)
         _set_prop_sync_progress(
             stage="refreshing_covers_context",
-            stage_index=3,
+            stage_index=4,
             stage_total=total_stages,
             current=1,
             total=1,
@@ -2609,7 +2704,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
     with connect() as conn:
         _set_prop_sync_progress(
             stage="publishing_payloads",
-            stage_index=4,
+            stage_index=5,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -2624,7 +2719,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
         result["covers_context_error"] = covers_error
     _set_prop_sync_progress(
         stage="publishing_payloads",
-        stage_index=4,
+        stage_index=5,
         stage_total=total_stages,
         current=1,
         total=1,

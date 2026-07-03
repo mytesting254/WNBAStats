@@ -220,6 +220,7 @@ def import_espn_player_boxscores(
     players_by_id: dict[int, dict] = {}
     team_votes_by_player: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     stat_rows: list[tuple] = []
+    availability_rows: list[tuple] = []
     team_history_rows: set[tuple[int, int, int, str, float, str]] = set()
     game_ids_to_replace = []
 
@@ -229,18 +230,28 @@ def import_espn_player_boxscores(
             continue
 
         player_rows = _player_stat_rows(conn, game_id, payload)
-        if not player_rows:
+        injury_rows = _injury_availability_rows(conn, game_id, payload, player_rows)
+        if not player_rows and not injury_rows:
             skipped_games += 1
             continue
 
         game_ids_to_replace.append(game_id)
-        for player in player_rows["players"]:
+        for player in (player_rows["players"] if player_rows else []):
             player_id = int(player["id"])
             team_id = int(player["team_id"])
             players_by_id[player_id] = player
             team_votes_by_player[player_id][team_id] += 1
             team_history_rows.add((player_id, team_id, int(game_id), "espn_boxscore", 0.95, datetime.now(timezone.utc).isoformat()))
-        stat_rows.extend(player_rows["stats"])
+        if player_rows:
+            stat_rows.extend(player_rows["stats"])
+            availability_rows.extend(player_rows["availability"])
+        for player in injury_rows["players"]:
+            player_id = int(player["id"])
+            team_id = int(player["team_id"])
+            players_by_id[player_id] = player
+            team_votes_by_player[player_id][team_id] += 1
+            team_history_rows.add((player_id, team_id, int(game_id), "espn_summary_injury", 0.8, datetime.now(timezone.utc).isoformat()))
+        availability_rows.extend(injury_rows["availability"])
 
     if game_ids_to_replace:
         new_player_ids = set(players_by_id) - existing_player_ids
@@ -248,6 +259,10 @@ def import_espn_player_boxscores(
         conn.executemany(
             "DELETE FROM player_game_stats WHERE game_id = ?",
             [(game_id,) for game_id in game_ids_to_replace],
+        )
+        conn.executemany(
+            "DELETE FROM player_game_availability WHERE game_id = ? AND source = ?",
+            [(game_id, "espn_boxscore") for game_id in game_ids_to_replace],
         )
         conn.executemany(
             """
@@ -283,6 +298,21 @@ def import_espn_player_boxscores(
         )
         conn.executemany(
             """
+            INSERT INTO player_game_availability (
+                player_id, game_id, team_id, source, is_active, did_not_play, status_reason, minutes_text, observed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(player_id, game_id, source) DO UPDATE SET
+                team_id = excluded.team_id,
+                is_active = excluded.is_active,
+                did_not_play = excluded.did_not_play,
+                status_reason = excluded.status_reason,
+                minutes_text = excluded.minutes_text,
+                observed_at = excluded.observed_at
+            """,
+            availability_rows,
+        )
+        conn.executemany(
+            """
             INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at)
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(player_id, game_id, source) DO UPDATE SET
@@ -294,6 +324,9 @@ def import_espn_player_boxscores(
         )
         repair_shadow_player_identities(conn)
         inserted_stats = len(stat_rows)
+        deleted_dnp_prop_lines = _delete_explicit_dnp_prop_lines(conn, game_ids_to_replace)
+    else:
+        deleted_dnp_prop_lines = 0
 
     conn.commit()
     return {
@@ -303,6 +336,8 @@ def import_espn_player_boxscores(
         "skipped_games": skipped_games,
         "inserted_players": inserted_players,
         "inserted_player_game_stats": inserted_stats,
+        "recorded_player_game_availability": len(availability_rows),
+        "deleted_dnp_prop_lines": deleted_dnp_prop_lines,
         "missing_only": missing_only,
         "source": "espn_summary",
     }
@@ -393,6 +428,8 @@ def _player_stat_rows(conn: sqlite3.Connection, game_id: int, payload: dict[str,
     teams = payload.get("boxscore", {}).get("players", [])
     players = []
     stats = []
+    availability = []
+    observed_at = datetime.now(timezone.utc).isoformat()
     for team_box in teams:
         team_id = _boxscore_team_id(conn, team_box)
         if not team_id:
@@ -401,18 +438,12 @@ def _player_stat_rows(conn: sqlite3.Connection, game_id: int, payload: dict[str,
             labels = stat_group.get("labels") or []
             label_index = {str(label).upper(): index for index, label in enumerate(labels)}
             for row in stat_group.get("athletes", []):
-                if row.get("didNotPlay"):
-                    continue
                 athlete = row.get("athlete") or {}
                 raw_stats = row.get("stats") or []
                 player_id = _parse_int(athlete.get("id"))
                 full_name = str(athlete.get("displayName") or "").strip()
-                if not player_id or not full_name or not raw_stats:
+                if not player_id or not full_name:
                     continue
-                minutes = _parse_minutes(_stat(raw_stats, label_index, "MIN"))
-                if minutes <= 0:
-                    continue
-                threes = _made_from_attempt(_stat(raw_stats, label_index, "3PT"))
                 position = str(((athlete.get("position") or {}).get("abbreviation")) or "")
                 rotation_role = "starter" if row.get("starter") else "rotation"
                 players.append(
@@ -424,6 +455,28 @@ def _player_stat_rows(conn: sqlite3.Connection, game_id: int, payload: dict[str,
                         "rotation_role": rotation_role,
                     }
                 )
+                minutes_text = _stat(raw_stats, label_index, "MIN") if raw_stats else ""
+                did_not_play = bool(row.get("didNotPlay"))
+                is_active = 0 if did_not_play or row.get("active") is False else 1
+                availability.append(
+                    (
+                        player_id,
+                        game_id,
+                        team_id,
+                        "espn_boxscore",
+                        is_active,
+                        1 if did_not_play else 0,
+                        str(row.get("reason") or "").strip() or None,
+                        minutes_text or None,
+                        observed_at,
+                    )
+                )
+                if did_not_play or not raw_stats:
+                    continue
+                minutes = _parse_minutes(minutes_text)
+                if minutes <= 0:
+                    continue
+                threes = _made_from_attempt(_stat(raw_stats, label_index, "3PT"))
                 stats.append(
                     (
                         player_id,
@@ -438,9 +491,9 @@ def _player_stat_rows(conn: sqlite3.Connection, game_id: int, payload: dict[str,
                         _parse_int(_stat(raw_stats, label_index, "TO")) or 0,
                     )
                 )
-    if not stats:
+    if not stats and not availability:
         return None
-    return {"players": players, "stats": stats}
+    return {"players": players, "stats": stats, "availability": availability}
 
 
 def _boxscore_team_id(conn: sqlite3.Connection, team_box: dict[str, Any]) -> int | None:
@@ -448,6 +501,96 @@ def _boxscore_team_id(conn: sqlite3.Connection, team_box: dict[str, Any]) -> int
     team = team_box.get("team") or {}
     display_name = str(team.get("displayName") or team.get("shortDisplayName") or abbreviation).strip()
     return ensure_team(conn, abbreviation or display_name)
+
+
+def _delete_explicit_dnp_prop_lines(conn: sqlite3.Connection, game_ids: list[int]) -> int:
+    if not game_ids:
+        return 0
+    placeholders = ",".join("?" for _ in game_ids)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT pl.id
+        FROM prop_lines pl
+        JOIN games g ON g.id = pl.game_id
+        JOIN player_game_availability pga
+          ON pga.game_id = pl.game_id
+         AND pga.player_id = pl.player_id
+        LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+        WHERE g.status = 'final'
+          AND sp.id IS NULL
+          AND pga.did_not_play = 1
+          AND pga.source IN ('espn_boxscore', 'espn_summary_injury')
+          AND pl.game_id IN ({placeholders})
+        """,
+        tuple(game_ids),
+    ).fetchall()
+    prop_line_ids = [int(row["id"]) for row in rows]
+    if not prop_line_ids:
+        return 0
+    delete_placeholders = ",".join("?" for _ in prop_line_ids)
+    params = tuple(prop_line_ids)
+    conn.execute(f"DELETE FROM watchlist_snapshot_items WHERE prop_line_id IN ({delete_placeholders})", params)
+    conn.execute(f"DELETE FROM gem_snapshot_items WHERE prop_line_id IN ({delete_placeholders})", params)
+    conn.execute(f"DELETE FROM prop_predictions WHERE prop_line_id IN ({delete_placeholders})", params)
+    conn.execute(f"DELETE FROM prop_lines WHERE id IN ({delete_placeholders})", params)
+    return len(prop_line_ids)
+
+
+def _injury_availability_rows(
+    conn: sqlite3.Connection,
+    game_id: int,
+    payload: dict[str, Any],
+    player_rows: dict[str, list] | None,
+) -> dict[str, list]:
+    boxscore_player_ids = {
+        int(player["id"])
+        for player in (player_rows or {}).get("players", [])
+        if player.get("id") is not None
+    }
+    players: list[dict[str, Any]] = []
+    availability: list[tuple] = []
+    observed_at = datetime.now(timezone.utc).isoformat()
+    for team_block in payload.get("injuries") or []:
+        team = team_block.get("team") or {}
+        team_id = ensure_team(
+            conn,
+            normalize_team_abbreviation(str(team.get("abbreviation") or "")) or str(team.get("displayName") or "").strip(),
+        )
+        if not team_id:
+            continue
+        for item in team_block.get("injuries") or []:
+            athlete = item.get("athlete") or {}
+            player_id = _parse_int(athlete.get("id"))
+            full_name = str(athlete.get("displayName") or athlete.get("fullName") or "").strip()
+            if not player_id or not full_name or player_id in boxscore_player_ids:
+                continue
+            position = str(((athlete.get("position") or {}).get("abbreviation")) or "")
+            status_text = str(item.get("status") or "").strip()
+            detail_type = str(((item.get("details") or {}).get("type")) or "").strip()
+            reason = " ".join(part for part in [status_text, detail_type] if part).strip() or None
+            players.append(
+                {
+                    "id": player_id,
+                    "full_name": full_name,
+                    "team_id": int(team_id),
+                    "position": position,
+                    "rotation_role": "rotation",
+                }
+            )
+            availability.append(
+                (
+                    player_id,
+                    game_id,
+                    int(team_id),
+                    "espn_summary_injury",
+                    0,
+                    1,
+                    reason,
+                    None,
+                    observed_at,
+                )
+            )
+    return {"players": players, "availability": availability}
 
 
 def _stat(raw_stats: list[Any], label_index: dict[str, int], label: str) -> str:

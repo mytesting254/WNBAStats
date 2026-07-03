@@ -47,6 +47,7 @@ from backend.app.odds_import import (
     RAW_CACHE_NAME,
     SyncPropLinesResult,
     _merge_event_cache,
+    _fuzzy_player_name_match,
     import_the_odds_api_props,
     line_discrepancies,
     list_sportsbook_props,
@@ -2485,6 +2486,91 @@ def test_start_prop_sync_if_needed_tracks_progress(monkeypatch) -> None:
     }
 
 
+def test_row_to_prop_sync_state_marks_stale_jobs() -> None:
+    stale_started_at = "2026-07-01T00:00:00+00:00"
+    stale_updated_at = "2026-07-01T00:05:00+00:00"
+
+    row = {
+        "id": 11,
+        "status": "queued",
+        "started_at": stale_started_at,
+        "finished_at": None,
+        "last_error": None,
+        "last_result_json": None,
+        "scope": "legacy_recalculate",
+        "target_game_ids_json": "[]",
+        "stage": "queued",
+        "stage_index": 0,
+        "stage_total": 1,
+        "current_count": 0,
+        "total_count": 0,
+        "percent": 0.0,
+        "message": "Queued for background processing.",
+        "updated_at": stale_updated_at,
+    }
+
+    state = main_module._row_to_prop_sync_state(row)
+
+    assert state is not None
+    assert state["running"] is False
+    assert state["status"] == "stale"
+    assert state["finished_at"] == stale_updated_at
+    assert "stale" in str(state["last_error"]).lower()
+
+
+def test_settle_recent_completed_games_repairs_recent_final_props(monkeypatch) -> None:
+    load_test_history()
+    monkeypatch.setattr(main_module, "RECENT_FINALS_SETTLEMENT_LOOKBACK_DAYS", 1000)
+
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (9901, 100, 1001, "DraftKings", "points", 20.5, -110, -110, "2026-05-08T18:00:00+00:00"),
+        )
+        conn.execute(
+            """
+            INSERT INTO game_predictions (
+                game_id, model_version, prediction_time, home_projected_points, away_projected_points,
+                projected_margin, projected_total, winner_pick, ats_pick, ats_edge, total_pick, total_edge,
+                confidence, reason, spread_home, game_total, home_rest_days, away_rest_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                100,
+                "component-game-v2",
+                "2026-05-08T18:00:00+00:00",
+                80.0,
+                75.0,
+                5.0,
+                155.0,
+                "LV",
+                "LV -5.5",
+                1.0,
+                "Under",
+                1.0,
+                "medium",
+                "test",
+                -5.5,
+                155.0,
+                2,
+                2,
+            ),
+        )
+        result = main_module._settle_recent_completed_games(conn)
+        settled_prop = conn.execute("SELECT * FROM settled_props WHERE prop_line_id = 9901").fetchone()
+        settled_game = conn.execute("SELECT COUNT(*) FROM settled_game_predictions WHERE game_id = 100").fetchone()[0]
+
+    assert result["selected_dates"]
+    assert result["prop_settlements"]["settled"] == 1
+    assert result["game_settlements"]["settled"] == 1
+    assert settled_prop is not None
+    assert settled_game == 1
+
+
 def test_matchups_payload_survives_rotowire_failure(monkeypatch) -> None:
     load_test_history()
 
@@ -3049,6 +3135,56 @@ def test_odds_import_loads_saved_json_without_api_key(monkeypatch) -> None:
     assert result["source"] == "cache"
     assert result["imported"] == 2
     assert len(rows) == 2
+
+
+def test_odds_import_backfills_provider_player_ids(monkeypatch) -> None:
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
+    load_test_history()
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-05-08")
+    monkeypatch.setattr(
+        "backend.app.odds_import.read_json_cache",
+        lambda name: [
+            {
+                "id": "cached-event",
+                "commence_time": "2026-05-08T23:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+                "bookmakers": [
+                    {
+                        "key": "draftkings",
+                        "title": "DraftKings",
+                        "markets": [
+                            {
+                                "key": "player_points",
+                                "outcomes": [
+                                    {"name": "Over", "description": "Breanna Stewart", "price": -110, "point": 21.5},
+                                    {"name": "Under", "description": "Breanna Stewart", "price": -110, "point": 21.5},
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            }
+        ] if name == RAW_CACHE_NAME else None,
+    )
+    with connect() as conn:
+        result = import_the_odds_api_props(conn)
+        player_ids = [
+            int(row["provider_player_id"])
+            for row in conn.execute(
+                "SELECT provider_player_id FROM sportsbook_prop_lines ORDER BY id"
+            ).fetchall()
+        ]
+
+    assert result["provider_player_ids_filled"] == 2
+    assert player_ids == [1001, 1001]
+
+
+def test_fuzzy_player_name_match_accepts_token_superset() -> None:
+    assert _fuzzy_player_name_match("Skylar Diggins", "Skylar Diggins-Smith") is True
+    assert _fuzzy_player_name_match("A'ja Wilson", "A'ja Wilson") is True
+    assert _fuzzy_player_name_match("Breanna Stewart", "Sabrina Ionescu") is False
 
 
 def test_odds_import_ignores_cached_future_events(monkeypatch) -> None:
@@ -5123,6 +5259,184 @@ def test_espn_boxscore_uses_mapped_event_id(monkeypatch) -> None:
     assert fetched_game_ids == [401999999]
     assert result["inserted_player_game_stats"] == 1
     assert stat["points"] == 18
+
+
+def test_espn_boxscore_records_dnp_and_deletes_open_props(monkeypatch) -> None:
+    def fake_fetch_summary(game_id: int, force_refresh: bool = False) -> dict:
+        return {
+            "boxscore": {
+                "players": [
+                    {
+                        "team": {"abbreviation": "WSH"},
+                        "statistics": [
+                            {
+                                "labels": ["MIN", "PTS", "REB", "AST", "3PT", "STL", "BLK", "TO"],
+                                "athletes": [
+                                    {
+                                        "athlete": {
+                                            "id": "4433524",
+                                            "displayName": "Sonia Citron",
+                                            "position": {"abbreviation": "G"},
+                                        },
+                                        "didNotPlay": True,
+                                        "active": False,
+                                        "reason": "COACH'S DECISION",
+                                        "starter": False,
+                                        "stats": [],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr("backend.app.espn_history.fetch_summary", fake_fetch_summary)
+
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO players (id, full_name, team_id, position, rotation_role)
+            VALUES (4433524, 'Sonia Citron', 11, 'G', 'starter')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (401857034, '2026-07-02', '2026-07-02T23:30:00Z', 11, 8, 'final', 2, 2, -2.5, 162.5, 401857034)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9001, 401857034, 4433524, 'DraftKings', 'points', 17.5, -110, -110, '2026-07-02T20:00:00+00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9001, 'adaptive-context-v1', '2026-07-02T20:00:00+00:00', 18.2, 'over', 0.55, 0.52, 0.03, 0.02, 'medium', 'test')
+            """
+        )
+
+        result = import_espn_player_boxscores(conn, 2026, selected_date="2026-07-02", missing_only=True)
+        availability = conn.execute(
+            """
+            SELECT *
+            FROM player_game_availability
+            WHERE player_id = 4433524 AND game_id = 401857034 AND source = 'espn_boxscore'
+            """
+        ).fetchone()
+        remaining_prop = conn.execute("SELECT COUNT(*) FROM prop_lines WHERE id = 9001").fetchone()[0]
+        remaining_prediction = conn.execute("SELECT COUNT(*) FROM prop_predictions WHERE prop_line_id = 9001").fetchone()[0]
+
+    assert result["inserted_player_game_stats"] == 0
+    assert result["recorded_player_game_availability"] == 1
+    assert result["deleted_dnp_prop_lines"] == 1
+    assert availability["did_not_play"] == 1
+    assert availability["status_reason"] == "COACH'S DECISION"
+    assert remaining_prop == 0
+    assert remaining_prediction == 0
+
+
+def test_espn_summary_injury_without_boxscore_entry_deletes_open_props(monkeypatch) -> None:
+    def fake_fetch_summary(game_id: int, force_refresh: bool = False) -> dict:
+        return {
+            "boxscore": {
+                "players": [
+                    {
+                        "team": {"abbreviation": "LV"},
+                        "statistics": [
+                            {
+                                "labels": ["MIN", "PTS", "REB", "AST", "3PT", "STL", "BLK", "TO"],
+                                "athletes": [
+                                    {
+                                        "athlete": {
+                                            "id": "4281190",
+                                            "displayName": "Dana Evans",
+                                            "position": {"abbreviation": "G"},
+                                        },
+                                        "starter": False,
+                                        "stats": ["12", "4", "1", "2", "0-2", "0", "0", "1"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ]
+            },
+            "injuries": [
+                {
+                    "team": {"abbreviation": "LV", "displayName": "Las Vegas Aces"},
+                    "injuries": [
+                        {
+                            "status": "Day-To-Day",
+                            "athlete": {
+                                "id": "3149391",
+                                "displayName": "A'ja Wilson",
+                                "position": {"abbreviation": "C"},
+                            },
+                            "details": {"type": "Leg"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+    monkeypatch.setattr("backend.app.espn_history.fetch_summary", fake_fetch_summary)
+
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO players (id, full_name, team_id, position, rotation_role)
+            VALUES (3149391, 'A''ja Wilson', 1, 'C', 'star')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (401857321, '2026-06-30', '2026-06-30T23:00:00Z', 3, 1, 'final', 2, 2, 1.5, 167.5, 401857321)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9011, 401857321, 3149391, 'DraftKings', 'points_rebounds', 34.5, -110, -110, '2026-06-30T20:00:00+00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9011, 'adaptive-context-v1', '2026-06-30T20:00:00+00:00', 35.2, 'over', 0.54, 0.52, 0.02, 0.01, 'medium', 'test')
+            """
+        )
+
+        result = import_espn_player_boxscores(conn, 2026, selected_date="2026-06-30", missing_only=True)
+        availability = conn.execute(
+            """
+            SELECT *
+            FROM player_game_availability
+            WHERE player_id = 3149391 AND game_id = 401857321 AND source = 'espn_summary_injury'
+            """
+        ).fetchone()
+        remaining_prop = conn.execute("SELECT COUNT(*) FROM prop_lines WHERE id = 9011").fetchone()[0]
+
+    assert result["deleted_dnp_prop_lines"] == 1
+    assert availability["did_not_play"] == 1
+    assert availability["is_active"] == 0
+    assert "day-to-day" in str(availability["status_reason"]).lower()
+    assert remaining_prop == 0
 
 
 def test_espn_scoreboard_imports_scheduled_games(monkeypatch) -> None:

@@ -18,6 +18,7 @@ from .cache import read_json_cache, write_json_cache
 from .db import sqlite_write_lock
 from .game_resolver import resolve_or_create_game
 from .paths import get_cache_dir
+from .player_identity import normalize_player_lookup_name
 from .projections import rebuild_predictions, rebuild_predictions_live
 from .timezone_utils import APP_TIMEZONE, local_today_iso
 
@@ -65,6 +66,52 @@ TEAM_ALIASES = {
     "toronto tempo": "TOR",
     "washington mystics": "WSH",
 }
+
+
+def _normalized_name_expr(column: str) -> str:
+    return (
+        "lower("
+        "replace("
+        "replace("
+        "replace("
+        "replace("
+        f"replace({column}, ' ', ''),"
+        "'''',"
+        "''"
+        "),"
+        "'.',"
+        "''"
+        "),"
+        "'-',"
+        "''"
+        "),"
+        "'’',"
+        "''"
+        ")"
+        ")"
+    )
+
+
+def _player_name_match_clause(player_column: str, provider_column: str) -> str:
+    return (
+        f"lower({player_column}) = lower({provider_column}) "
+        f"OR {_normalized_name_expr(player_column)} = {_normalized_name_expr(provider_column)}"
+    )
+
+
+def _fuzzy_player_name_match(player_name: str, provider_name: str) -> bool:
+    player_tokens = normalize_player_lookup_name(player_name).split()
+    provider_tokens = normalize_player_lookup_name(provider_name).split()
+    if not player_tokens or not provider_tokens:
+        return False
+    if player_tokens == provider_tokens:
+        return True
+    smaller, larger = (player_tokens, provider_tokens)
+    if len(smaller) > len(larger):
+        smaller, larger = larger, smaller
+    if len(smaller) < 2 or smaller[0] != larger[0]:
+        return False
+    return set(smaller).issubset(set(larger))
 
 
 @dataclass(frozen=True)
@@ -353,44 +400,9 @@ def sync_prop_lines_from_sportsbook(
         FROM sportsbook_prop_lines spl
         JOIN players p ON (
             (spl.provider_player_id IS NOT NULL AND p.id = spl.provider_player_id)
-            OR lower(p.full_name) = lower(spl.player_name)
-            OR lower(
-                replace(
-                    replace(
-                        replace(
-                            replace(
-                                replace(p.full_name, ' ', ''),
-                                '''',
-                                ''
-                            ),
-                            '.',
-                            ''
-                        ),
-                        '-',
-                        ''
-                    ),
-                    '’',
-                    ''
-                )
-            ) = lower(
-                replace(
-                    replace(
-                        replace(
-                            replace(
-                                replace(spl.player_name, ' ', ''),
-                                '''',
-                                ''
-                            ),
-                            '.',
-                            ''
-                        ),
-                        '-',
-                        ''
-                    ),
-                    '’',
-                    ''
-                )
-            )
+            OR """
+        + _player_name_match_clause("p.full_name", "spl.player_name")
+        + """
         )
         WHERE spl.game_id IS NOT NULL
           AND EXISTS (
@@ -758,12 +770,123 @@ def _replace_sportsbook_rows(conn: sqlite3.Connection, raw_payload: list[dict], 
         """,
         imported_rows,
     )
+    provider_player_ids_filled = _backfill_provider_player_ids(conn, provider=PROVIDER)
     conn.commit()
     return {
         "events": len(active_payload),
         "imported": len(imported_rows),
         "captured_at": captured_at,
+        "provider_player_ids_filled": provider_player_ids_filled,
     }
+
+
+def _backfill_provider_player_ids(conn: sqlite3.Connection, *, provider: str | None = None) -> int:
+    where_clause = "WHERE spl.provider_player_id IS NULL AND spl.game_id IS NOT NULL"
+    params: tuple[object, ...] = ()
+    if provider is not None:
+        where_clause += " AND spl.provider = ?"
+        params = (provider,)
+    conn.execute(
+        f"""
+        WITH candidate_matches AS (
+            SELECT
+                spl.id AS sportsbook_prop_line_id,
+                p.id AS player_id,
+                ROW_NUMBER() OVER (
+                    PARTITION BY spl.id
+                    ORDER BY
+                        CASE WHEN lower(p.full_name) = lower(spl.player_name) THEN 0 ELSE 1 END,
+                        p.id
+                ) AS rn,
+                COUNT(*) OVER (PARTITION BY spl.id) AS match_count
+            FROM sportsbook_prop_lines spl
+            JOIN games g ON g.id = spl.game_id
+            JOIN players p ON {_player_name_match_clause("p.full_name", "spl.player_name")}
+            LEFT JOIN player_team_history h
+                ON h.player_id = p.id
+               AND h.game_id = spl.game_id
+            {where_clause}
+              AND COALESCE(h.team_id, p.team_id) IN (g.home_team_id, g.away_team_id)
+              AND EXISTS (
+                  SELECT 1
+                  FROM player_game_stats stats
+                  WHERE stats.player_id = p.id
+              )
+        )
+        UPDATE sportsbook_prop_lines
+        SET provider_player_id = (
+            SELECT candidate.player_id
+            FROM candidate_matches candidate
+            WHERE candidate.sportsbook_prop_line_id = sportsbook_prop_lines.id
+              AND candidate.rn = 1
+        )
+        WHERE id IN (
+            SELECT candidate.sportsbook_prop_line_id
+            FROM candidate_matches candidate
+            WHERE candidate.rn = 1
+              AND candidate.match_count = 1
+        )
+        """,
+        params,
+    )
+    filled = int(conn.execute("SELECT changes()").fetchone()[0] or 0)
+    return filled + _backfill_provider_player_ids_fuzzy(conn, provider=provider)
+
+
+def _backfill_provider_player_ids_fuzzy(conn: sqlite3.Connection, *, provider: str | None = None) -> int:
+    where_clause = "WHERE spl.provider_player_id IS NULL AND spl.game_id IS NOT NULL"
+    params: tuple[object, ...] = ()
+    if provider is not None:
+        where_clause += " AND spl.provider = ?"
+        params = (provider,)
+    rows = conn.execute(
+        f"""
+        SELECT
+            spl.id,
+            spl.player_name,
+            g.home_team_id,
+            g.away_team_id
+        FROM sportsbook_prop_lines spl
+        JOIN games g ON g.id = spl.game_id
+        {where_clause}
+        ORDER BY spl.id
+        """,
+        params,
+    ).fetchall()
+    updates: list[tuple[int, int]] = []
+    candidate_cache: dict[tuple[int, int], list[sqlite3.Row]] = {}
+    for row in rows:
+        team_key = (int(row["home_team_id"]), int(row["away_team_id"]))
+        candidates = candidate_cache.get(team_key)
+        if candidates is None:
+            candidates = conn.execute(
+                """
+                SELECT DISTINCT p.id, p.full_name
+                FROM players p
+                WHERE p.team_id IN (?, ?)
+                  AND EXISTS (
+                      SELECT 1
+                      FROM player_game_stats stats
+                      WHERE stats.player_id = p.id
+                  )
+                ORDER BY p.id
+                """,
+                team_key,
+            ).fetchall()
+            candidate_cache[team_key] = candidates
+        matches = [
+            int(candidate["id"])
+            for candidate in candidates
+            if _fuzzy_player_name_match(str(candidate["full_name"] or ""), str(row["player_name"] or ""))
+        ]
+        if len(matches) == 1:
+            updates.append((matches[0], int(row["id"])))
+    if updates:
+        conn.executemany(
+            "UPDATE sportsbook_prop_lines SET provider_player_id = ? WHERE id = ?",
+            updates,
+        )
+    return len(updates)
 
 
 def _open_scheduled_prop_line_ids(conn: sqlite3.Connection, game_ids: list[int]) -> list[int]:
