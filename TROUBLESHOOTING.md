@@ -180,12 +180,16 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - `/data/wnba.sqlite` exists in the active backend container
 - Coolify volume is attached to `/data`
 - cache and snapshot directories also point to `/data`
+- the canonical Docker volume name should be `wnbastats-data` unless you
+  intentionally overrode `WNBA_DOCKER_VOLUME_NAME`
 - restored file is the actual runtime DB, not a stale or partial backup
 - from the repo shell, `python scripts/live_backend.py host-runtime-info` points
   to the same host-side runtime root you expect
 - if you run host-side maintenance directly, load `source scripts/live_env.sh`
   first so `WNBA_DB_PATH` resolves to the active backend volume instead of a
   shadow `/data` or repo-local SQLite file
+- if repo `data/` is a symlink into the live volume, treat it as runtime state
+  and do not commit git deletions for `data/snapshots/*`
 
 ## SQLite Locking Or Concurrency Issues
 

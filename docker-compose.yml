@@ -75,3 +75,4 @@ services:
     init: true
 volumes:
   wnba_data:
+    name: ${WNBA_DOCKER_VOLUME_NAME:-wnbastats-data}

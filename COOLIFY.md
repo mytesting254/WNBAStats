@@ -5,6 +5,7 @@ This repo can be deployed on Coolify as a Docker Compose application with:
 - `frontend`: one multi-stage image that builds the Vite app, then serves the built files from nginx on the public URL
 - `backend`: FastAPI on the private Docker network
 - `wnba_data`: persistent volume for SQLite, caches, and snapshots
+  - default Docker volume name: `wnbastats-data`
 
 For broader failure patterns and recovery notes, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 
@@ -51,6 +52,7 @@ Important:
 - `API_KEY` remains available as a fallback for server-to-server or manual admin requests that send `X-API-Key`.
 - `runtime-config.js` must never fall back to `API_KEY`; only `VITE_API_KEY` may be emitted to the browser.
 - If you intentionally use `VITE_API_KEY`, it is embedded into the frontend bundle and visible to any browser user.
+- `WNBA_DOCKER_VOLUME_NAME` optionally overrides the Docker volume name. It defaults to `wnbastats-data` so the host mount path is stable and recognizable.
 
 ## 3. Attach Persistent Storage
 
@@ -76,6 +78,10 @@ On the first deploy, the backend will:
 
 If you already have an existing SQLite database, restore it into the persistent
 volume before treating the new instance as primary.
+
+If you are changing from an older auto-generated Docker volume name to
+`wnbastats-data`, migrate the contents first or reattach the existing volume
+under that explicit name before making the new deployment primary.
 
 ## 5. Verify The Deployment
 

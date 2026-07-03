@@ -100,6 +100,11 @@ Use `python scripts/live_backend.py host-runtime-info` to see the real mounted
 runtime root, or `source scripts/live_env.sh` before any host-side maintenance
 command that should target the live deployment.
 
+Docker Compose deployments now pin the persistent volume name to
+`wnbastats-data` by default. In an ops-oriented checkout, `data/` may be a
+symlink into that live Docker volume rather than a separate repo-local runtime
+copy.
+
 ## Troubleshooting
 
 For common deployment, auth, proxy, SQLite, and provider failure cases, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
@@ -378,6 +383,8 @@ Before treating a deployment as production-ready, verify all of the following:
    - `Refresh Covers`
 9. `ODDS_API_KEY` is set if you expect The Odds API imports to work.
 10. Existing snapshots/backups are stored somewhere outside the live volume.
+11. If `data/` is symlinked to the live Docker volume, git status noise from
+    missing `data/snapshots/*` files is not committed as a source change.
 
 ## Troubleshooting Notes
 

@@ -164,6 +164,23 @@ def resolve_player_identity(
     if candidate:
         return candidate
 
+    if last_name and normalized_team:
+        team_last_name_matches = []
+        for row in filtered:
+            if str(row["team_abbreviation"] or "").upper() != normalized_team:
+                continue
+            _, _, candidate_last = player_lookup_parts(row["full_name"])
+            if candidate_last == last_name:
+                team_last_name_matches.append(row)
+        candidate = _pick_best_candidate(
+            conn,
+            team_last_name_matches,
+            preferred_team=normalized_team,
+            prefer_rich=prefer_rich,
+        )
+        if candidate:
+            return candidate
+
     global_matches: list[sqlite3.Row] = []
     if normalized_name:
         for row in filtered:

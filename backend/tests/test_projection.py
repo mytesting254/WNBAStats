@@ -729,6 +729,23 @@ def test_resolve_roster_player_falls_back_to_unique_league_wide_name() -> None:
     assert player["rotation_role"] == "starter"
 
 
+def test_resolve_roster_player_falls_back_to_unique_team_last_name() -> None:
+    load_test_history()
+    with connect() as conn:
+        min_team_id = conn.execute(
+            "SELECT id FROM teams WHERE abbreviation = 'MIN'"
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (777201, "Napheesa Collier", int(min_team_id), "F", "starter"),
+        )
+        player = main_module._resolve_roster_player(conn, "MIN", "Phee Collier")
+
+    assert player is not None
+    assert int(player["player_id"]) == 777201
+    assert player["position"] == "F"
+
+
 def test_rotowire_snapshot_cache_normalizes_team_aliases(monkeypatch) -> None:
     captured: dict[str, object] = {}
     monkeypatch.setattr(rotowire_import_module, "read_json_cache", lambda _name: None)
