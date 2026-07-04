@@ -3395,7 +3395,8 @@ function WatchlistView({
     return Array.from(map.values()).sort((a, b) => new Date(a.startTime).getTime() - new Date(b.startTime).getTime());
   }, [watchlist]);
 
-  const selected = selectedGameId ?? gameGroups[0]?.gameId ?? null;
+  const selectedGroup = gameGroups.find((group) => group.gameId === selectedGameId) ?? gameGroups[0] ?? null;
+  const selected = selectedGroup?.gameId ?? null;
   const filtered = watchlist
     .filter((prop) => prop.game_id === selected)
     .filter((prop) => (marketFilter === "all" || prop.market === marketFilter))

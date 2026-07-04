@@ -239,7 +239,7 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 
 - `Pregame Props`: ranked prop predictions with projection, line, model probability, edge, EV, and confidence.
 - `Gems`: ranked high-value props combining model edge, EV, and discrepancy signals with conservative/balanced/aggressive presets, optional matchup grouping, and per-matchup caps.
-- `Watchlist`: low-confidence props that still clear minimum EV/edge thresholds for optional tracking.
+- `Watchlist`: low-confidence props that still clear minimum EV/edge thresholds for optional tracking. If one matchup drops out after settlement, the view automatically falls forward to the next remaining game tab instead of staying pinned to the removed game.
 - `Matchups`: active upcoming games only, with projected score, spread edge, total edge, and confidence.
 - `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Player rows include an `L5` strip (last 5 market outcomes) with hit/miss color coding against the current side+line. Completed games are removed from this view after the stale-game grace window.
 - `Discrepancies`: cross-book line gaps and price gaps.
@@ -341,6 +341,8 @@ GET /api/watchlist/snapshots?limit=30
 ```
 
 Watchlist settlements are synced from `settled_props` and run automatically on prop settle and ESPN history imports.
+
+When a game is settled and removed from the active slate, the Watchlist tab now reselects the next available matchup automatically so later games on the same slate stay visible without a manual reload.
 
 Manual settlement sync (if needed):
 
