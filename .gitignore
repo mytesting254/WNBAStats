@@ -4,14 +4,7 @@ __pycache__/
 .venv-linux/
 node_modules/
 dist/
-data/*.sqlite
-data/*.sqlite-shm
-data/*.sqlite-wal
-data/*.sqlite-journal
-data/snapshots/*.sqlite
-!data/snapshots/*.manifest.json
-data/wnba.sqlite.deploy
-data/cache/
+data/
 .env
 *.pyc
 *.log

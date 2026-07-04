@@ -188,8 +188,8 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - if you run host-side maintenance directly, load `source scripts/live_env.sh`
   first so `WNBA_DB_PATH` resolves to the active backend volume instead of a
   shadow `/data` or repo-local SQLite file
-- if repo `data/` is a symlink into the live volume, treat it as runtime state
-  and do not commit git deletions for `data/snapshots/*`
+- do not symlink repo `data/` into the live volume; keep the repo checkout
+  code-only and let the app-attached volume remain the runtime source of truth
 
 ## SQLite Locking Or Concurrency Issues
 

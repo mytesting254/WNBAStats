@@ -129,7 +129,9 @@ python scripts/import_espn_history.py --dates 2026-06-25
 
 This resolves the host-side `WNBA_DB_PATH`, `WNBA_CACHE_DIR`, and
 `WNBA_SNAPSHOT_DIR` from the active backend container mount. Do not point host
-commands at `/data/wnba.sqlite` or `data/wnba.sqlite` by assumption.
+commands at `/data/wnba.sqlite` or a repo-local `data/wnba.sqlite` by
+assumption. Keep runtime state on the attached app volume, not in the repo
+checkout.
 
 The same rule applies to raw provider caches. The live Odds API payload is
 stored in the resolved runtime cache directory as `sportsbook_props_raw.json`;
