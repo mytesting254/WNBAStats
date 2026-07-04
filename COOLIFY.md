@@ -138,6 +138,28 @@ stored in the resolved runtime cache directory as `sportsbook_props_raw.json`;
 do not inspect repo-local `data/cache/` unless that checkout is explicitly the
 active runtime root returned by `host-runtime-info` / `live_env.sh`.
 
+### Live Snapshot Recovery
+
+The backend already supports filesystem DB snapshots on the attached app volume.
+Keep them under `/data/snapshots` and treat them as runtime state, not repo
+artifacts.
+
+Create a live snapshot:
+
+```bash
+python scripts/live_backend.py exec -- python scripts/snapshot_create.py --name wnba-runtime
+```
+
+Restore from a live snapshot:
+
+```bash
+python scripts/live_backend.py exec -- python scripts/snapshot_restore.py /data/snapshots/wnba-runtime.sqlite --force
+```
+
+If you need host-side maintenance instead of container-exec, load
+`source scripts/live_env.sh` first so `WNBA_DB_PATH` and `WNBA_SNAPSHOT_DIR`
+resolve to the same attached volume.
+
 Odds API game markets such as `h2h`, `spreads`, and `totals` are also only
 authoritative in that active runtime. They are saved in the raw Odds payload
 and used to update live `games` market fields there. Covers refreshes can still

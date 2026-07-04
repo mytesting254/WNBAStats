@@ -766,6 +766,37 @@ What the scripts do:
 - `snapshot_restore.py`: validates checksum + schema version, creates a timestamped backup of the current DB, removes stale `-wal/-shm`, then atomically replaces the DB file.
 - `dev.sh` and `dev.ps1` default snapshot/dev startup to local SQLite by exporting `USE_TURSO=0` and `WNBA_DB_PATH=data/wnba.sqlite` unless you override them explicitly.
 
+## Live App Volume Snapshot Workflow
+
+For deployed app recovery, keep snapshot files on the attached app volume under `/data/snapshots`, not in Git and not in a repo-local `data/` tree.
+
+Inspect the live runtime first:
+
+```bash
+python scripts/live_backend.py runtime-info
+python scripts/live_backend.py host-runtime-info
+```
+
+Create a live snapshot on the app volume:
+
+```bash
+python scripts/live_backend.py exec -- python scripts/snapshot_create.py --name wnba-runtime
+```
+
+Restore the live DB from a snapshot already stored on the app volume:
+
+```bash
+python scripts/live_backend.py exec -- python scripts/snapshot_restore.py /data/snapshots/wnba-runtime.sqlite --force
+```
+
+If you need host-side access to the same live files instead of running inside the container, load:
+
+```bash
+source scripts/live_env.sh
+```
+
+That resolves `WNBA_DB_PATH`, `WNBA_CACHE_DIR`, and `WNBA_SNAPSHOT_DIR` to the active app-attached volume before you run maintenance commands.
+
 Network access notes:
 
 - `dev.sh` defaults to `127.0.0.1` outside Codespaces and `0.0.0.0` inside Codespaces. Override with `BACKEND_HOST` or `FRONTEND_HOST` if needed.
