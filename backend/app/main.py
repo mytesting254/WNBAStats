@@ -75,6 +75,7 @@ WATCHLIST_PERFORMANCE_CACHE_NAME = "watchlist_performance.json"
 MODEL_RUNS_CACHE_NAME = "model_runs.json"
 ROSTER_CACHE_NAME = "roster.json"
 APP_RESPONSE_CACHE_PREFIX = "app_response_cache_"
+MATCHUP_SNAPSHOT_CACHE_PREFIX = "matchup_snapshot_"
 GEM_MIN_EV = float(os.getenv("GEM_MIN_EV", "0.02"))
 GEM_MIN_EDGE = float(os.getenv("GEM_MIN_EDGE", "0.05"))
 READ_CACHE_VERSION = 1
@@ -1463,6 +1464,31 @@ def _cache_envelope(payload: Any, ttl_seconds: int) -> dict[str, Any]:
     }
 
 
+def _matchup_snapshot_cache_name(snapshot_key: str) -> str:
+    digest = hashlib.sha256(snapshot_key.encode("utf-8")).hexdigest()
+    return f"{MATCHUP_SNAPSHOT_CACHE_PREFIX}{digest}.json"
+
+
+def _matchup_snapshot_payload(
+    matchup: dict[str, Any],
+    *,
+    game_ids: list[int],
+    value_board_props: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "snapshot_key": _matchup_snapshot_key(matchup),
+        "game_id": int(matchup["id"]),
+        "game_ids": sorted({int(game_id) for game_id in game_ids if int(game_id) > 0}),
+        "matchup": matchup,
+        "value_board_props": value_board_props,
+    }
+
+
+def _read_matchup_snapshot(snapshot_key: str, *, allow_stale: bool = False) -> dict[str, Any] | None:
+    cached = _read_cached_payload(_matchup_snapshot_cache_name(snapshot_key), allow_stale=allow_stale)
+    return cached if isinstance(cached, dict) else None
+
+
 def _read_cached_payload(cache_name: str, *, allow_stale: bool = False) -> Any | None:
     cached = read_json_cache(cache_name)
     if not isinstance(cached, dict):
@@ -1828,17 +1854,16 @@ def _watchlist_performance_payload(conn) -> dict:
         }
 
 
-def _matchups_payload(conn) -> list[dict]:
-    try:
-        injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
-    except Exception as exc:
-        injury_refresh = {
-            "source": "unavailable",
-            "captured_at": None,
-            "from_cache": False,
-            "status": "failed",
-            "message": str(exc),
-        }
+def _scheduled_matchup_game_groups(conn, game_ids: list[int] | None = None) -> list[tuple[dict, list[int]]]:
+    params: tuple[int, ...] = ()
+    game_filter = ""
+    if game_ids:
+        normalized_ids = sorted({int(game_id) for game_id in game_ids if int(game_id) > 0})
+        if not normalized_ids:
+            return []
+        placeholders = ",".join("?" for _ in normalized_ids)
+        game_filter = f" AND g.id IN ({placeholders})"
+        params = tuple(normalized_ids)
     games = conn.execute(
         """
         SELECT
@@ -1867,104 +1892,144 @@ def _matchups_payload(conn) -> list[dict]:
         JOIN teams home ON home.id = g.home_team_id
         JOIN teams away ON away.id = g.away_team_id
         WHERE g.status = 'scheduled'
-        ORDER BY g.start_time
         """
+        + game_filter
+        + """
+        ORDER BY g.start_time
+        """,
+        params,
     ).fetchall()
     games = [game for game in games if _is_today_active_game_time(game["start_time"])]
-    game_groups = _coalesce_matchup_games(games)
+    return _coalesce_matchup_games(games)
+
+
+def _build_matchup_payload_item(
+    conn,
+    game,
+    game_ids: list[int],
+    *,
+    injury_refresh: dict[str, Any],
+    covers_records: dict[int, dict],
+    covers_market_odds: dict[int, dict],
+    prediction_state_by_game: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
+    away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
+    game_id = int(game["id"])
+    market_override = covers_market_odds.get(game_id, {})
+    group_covers_records = next(
+        (covers_records.get(int(candidate_id)) for candidate_id in game_ids if covers_records.get(int(candidate_id))),
+        covers_records.get(game_id),
+    )
+    home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
+    away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
+    game_context = dict(game)
+    game_context["spread_home"] = _prefer_market_value(
+        game_context.get("spread_home"),
+        market_override.get("spread_home"),
+        _is_real_spread,
+    )
+    game_context["game_total"] = _prefer_market_value(
+        game_context.get("game_total"),
+        market_override.get("game_total"),
+        _is_real_total,
+    )
+    game_context["home_moneyline"] = _prefer_market_value(
+        game_context.get("home_moneyline"),
+        market_override.get("home_moneyline"),
+        _is_real_moneyline,
+    )
+    game_context["away_moneyline"] = _prefer_market_value(
+        game_context.get("away_moneyline"),
+        market_override.get("away_moneyline"),
+        _is_real_moneyline,
+    )
+    for field in ("home_spread_price", "away_spread_price", "over_price", "under_price"):
+        game_context[field] = _prefer_market_value(
+            game_context.get(field),
+            market_override.get(field),
+            _is_real_moneyline,
+        )
+    game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
+    game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
+    prediction = project_game(conn, game_context)
+    game_prediction_id = _latest_game_prediction_id(conn, game_id)
+    market_payload = _matchup_game_markets(game_context)
+    prediction_state = next(
+        (prediction_state_by_game.get(int(candidate_id)) for candidate_id in game_ids if prediction_state_by_game.get(int(candidate_id))),
+        prediction_state_by_game.get(game_id),
+    ) or {
+        "model_prop_count": 0,
+        "prediction_count": 0,
+        "sportsbook_prop_count": 0,
+        "model_props_ready": False,
+        "model_props_status": "empty",
+    }
+    return {
+        "id": game["id"],
+        "game_ids": sorted({int(candidate_id) for candidate_id in game_ids}),
+        "game_prediction_id": game_prediction_id,
+        "game_date": game["game_date"],
+        "start_time": game["start_time"],
+        "home_team": game["home_team"],
+        "home_team_name": game["home_team_name"],
+        "home_logo_url": game["home_logo_url"],
+        "away_team": game["away_team"],
+        "away_team_name": game["away_team_name"],
+        "away_logo_url": game["away_logo_url"],
+        "home_rest_days": home_rest_days,
+        "away_rest_days": away_rest_days,
+        "spread_home": game_context["spread_home"],
+        "game_total": game_context["game_total"],
+        "home_moneyline": game_context["home_moneyline"],
+        "away_moneyline": game_context["away_moneyline"],
+        "home_spread_price": game_context.get("home_spread_price"),
+        "away_spread_price": game_context.get("away_spread_price"),
+        "over_price": game_context.get("over_price"),
+        "under_price": game_context.get("under_price"),
+        **market_payload,
+        **prediction_state,
+        "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
+        **prediction,
+        "home": home_summary,
+        "away": away_summary,
+        "covers_records": group_covers_records,
+        "props": _value_board_payload_for_games(conn, game_ids, include_filtered_only=False),
+        "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
+        "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
+        "injury_source": injury_refresh.get("source"),
+        "injury_captured_at": injury_refresh.get("captured_at"),
+        "injury_from_cache": injury_refresh.get("from_cache"),
+    }
+
+
+def _matchups_payload(conn, game_ids: list[int] | None = None) -> list[dict]:
+    try:
+        injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
+    except Exception as exc:
+        injury_refresh = {
+            "source": "unavailable",
+            "captured_at": None,
+            "from_cache": False,
+            "status": "failed",
+            "message": str(exc),
+        }
+    game_groups = _scheduled_matchup_game_groups(conn, game_ids=game_ids)
     covers_records = _covers_records_by_game(conn)
     covers_market_odds = _covers_market_odds_by_game()
     prediction_state_by_game = _prediction_state_by_game(conn)
     payload = []
     for game, game_ids in game_groups:
-        home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
-        away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
-        game_id = int(game["id"])
-        market_override = covers_market_odds.get(game_id, {})
-        group_covers_records = next(
-            (covers_records.get(int(candidate_id)) for candidate_id in game_ids if covers_records.get(int(candidate_id))),
-            covers_records.get(game_id),
-        )
-        home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
-        away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
-        game_context = dict(game)
-        game_context["spread_home"] = _prefer_market_value(
-            game_context.get("spread_home"),
-            market_override.get("spread_home"),
-            _is_real_spread,
-        )
-        game_context["game_total"] = _prefer_market_value(
-            game_context.get("game_total"),
-            market_override.get("game_total"),
-            _is_real_total,
-        )
-        game_context["home_moneyline"] = _prefer_market_value(
-            game_context.get("home_moneyline"),
-            market_override.get("home_moneyline"),
-            _is_real_moneyline,
-        )
-        game_context["away_moneyline"] = _prefer_market_value(
-            game_context.get("away_moneyline"),
-            market_override.get("away_moneyline"),
-            _is_real_moneyline,
-        )
-        for field in ("home_spread_price", "away_spread_price", "over_price", "under_price"):
-            game_context[field] = _prefer_market_value(
-                game_context.get(field),
-                market_override.get(field),
-                _is_real_moneyline,
-            )
-        game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
-        game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
-        prediction = project_game(conn, game_context)
-        game_prediction_id = _latest_game_prediction_id(conn, game_id)
-        market_payload = _matchup_game_markets(game_context)
-        prediction_state = next(
-            (prediction_state_by_game.get(int(candidate_id)) for candidate_id in game_ids if prediction_state_by_game.get(int(candidate_id))),
-            prediction_state_by_game.get(game_id),
-        ) or {
-            "model_prop_count": 0,
-            "prediction_count": 0,
-            "sportsbook_prop_count": 0,
-            "model_props_ready": False,
-            "model_props_status": "empty",
-        }
         payload.append(
-            {
-                "id": game["id"],
-                "game_prediction_id": game_prediction_id,
-                "game_date": game["game_date"],
-                "start_time": game["start_time"],
-                "home_team": game["home_team"],
-                "home_team_name": game["home_team_name"],
-                "home_logo_url": game["home_logo_url"],
-                "away_team": game["away_team"],
-                "away_team_name": game["away_team_name"],
-                "away_logo_url": game["away_logo_url"],
-                "home_rest_days": home_rest_days,
-                "away_rest_days": away_rest_days,
-                "spread_home": game_context["spread_home"],
-                "game_total": game_context["game_total"],
-                "home_moneyline": game_context["home_moneyline"],
-                "away_moneyline": game_context["away_moneyline"],
-                "home_spread_price": game_context.get("home_spread_price"),
-                "away_spread_price": game_context.get("away_spread_price"),
-                "over_price": game_context.get("over_price"),
-                "under_price": game_context.get("under_price"),
-                **market_payload,
-                **prediction_state,
-                "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
-                **prediction,
-                "home": home_summary,
-                "away": away_summary,
-                "covers_records": group_covers_records,
-                "props": _value_board_payload_for_games(conn, game_ids, include_filtered_only=False),
-                "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
-                "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
-                "injury_source": injury_refresh.get("source"),
-                "injury_captured_at": injury_refresh.get("captured_at"),
-                "injury_from_cache": injury_refresh.get("from_cache"),
-            }
+            _build_matchup_payload_item(
+                conn,
+                game,
+                game_ids,
+                injury_refresh=injury_refresh,
+                covers_records=covers_records,
+                covers_market_odds=covers_market_odds,
+                prediction_state_by_game=prediction_state_by_game,
+            )
         )
     return payload
 
@@ -2068,7 +2133,98 @@ def _latest_game_prediction_id(conn, game_id: int) -> int | None:
     return int(row["id"])
 
 
-def _publish_current_read_payloads(conn, *, include_matchups: bool = True) -> dict[str, int]:
+def _publish_matchup_snapshot_payloads(conn, game_ids: list[int] | None = None) -> dict[str, int]:
+    published: dict[str, int] = {}
+    try:
+        injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
+    except Exception as exc:
+        injury_refresh = {
+            "source": "unavailable",
+            "captured_at": None,
+            "from_cache": False,
+            "status": "failed",
+            "message": str(exc),
+        }
+    covers_records = _covers_records_by_game(conn)
+    covers_market_odds = _covers_market_odds_by_game()
+    prediction_state_by_game = _prediction_state_by_game(conn)
+    for game, grouped_game_ids in _scheduled_matchup_game_groups(conn, game_ids=game_ids):
+        matchup = _build_matchup_payload_item(
+            conn,
+            game,
+            grouped_game_ids,
+            injury_refresh=injury_refresh,
+            covers_records=covers_records,
+            covers_market_odds=covers_market_odds,
+            prediction_state_by_game=prediction_state_by_game,
+        )
+        snapshot_payload = _matchup_snapshot_payload(
+            matchup,
+            game_ids=grouped_game_ids,
+            value_board_props=_value_board_payload_for_games(conn, grouped_game_ids, include_filtered_only=True),
+        )
+        snapshot_key = _matchup_snapshot_key(game)
+        write_json_cache(_matchup_snapshot_cache_name(snapshot_key), _cache_envelope(snapshot_payload, MATCHUPS_TTL_SECONDS))
+        published[_matchup_snapshot_cache_name(snapshot_key)] = len(grouped_game_ids)
+    return published
+
+
+def _active_matchup_snapshot_keys(conn) -> list[str]:
+    return [_matchup_snapshot_key(game) for game, _ in _scheduled_matchup_game_groups(conn)]
+
+
+def _aggregate_matchup_snapshot_payloads(conn, *, allow_stale: bool = False) -> tuple[list[dict], list[dict]] | None:
+    snapshot_items: list[dict[str, Any]] = []
+    for snapshot_key in _active_matchup_snapshot_keys(conn):
+        snapshot = _read_matchup_snapshot(snapshot_key, allow_stale=allow_stale)
+        if snapshot is None:
+            return None
+        matchup = snapshot.get("matchup")
+        value_board_props = snapshot.get("value_board_props")
+        if not isinstance(matchup, dict) or not isinstance(value_board_props, list):
+            return None
+        snapshot_items.append(snapshot)
+    matchups_payload = [dict(item["matchup"]) for item in snapshot_items]
+    matchups_payload.sort(key=lambda item: (str(item.get("start_time") or ""), int(item.get("id") or 0)))
+    value_board_payload: list[dict] = []
+    for item in snapshot_items:
+        value_board_payload.extend([dict(prop) for prop in item["value_board_props"] if isinstance(prop, dict)])
+    value_board_payload.sort(key=_value_prop_rank, reverse=True)
+    return value_board_payload, matchups_payload
+
+
+def _publish_matchup_snapshot_aggregates(
+    conn,
+    *,
+    game_ids: list[int] | None = None,
+    full_refresh: bool = True,
+) -> dict[str, int]:
+    published: dict[str, int] = {}
+    if full_refresh:
+        published.update(_publish_matchup_snapshot_payloads(conn))
+    elif game_ids is not None:
+        published.update(_publish_matchup_snapshot_payloads(conn, game_ids=game_ids))
+    aggregates = _aggregate_matchup_snapshot_payloads(conn)
+    if aggregates is None:
+        published.update(_publish_matchup_snapshot_payloads(conn))
+        aggregates = _aggregate_matchup_snapshot_payloads(conn)
+    if aggregates is None:
+        raise RuntimeError("Unable to assemble matchup snapshot aggregates.")
+    value_board_payload, matchups_payload = aggregates
+    write_json_cache(VALUE_BOARD_CACHE_NAME, _cache_envelope(value_board_payload, VALUE_BOARD_TTL_SECONDS))
+    write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(matchups_payload, MATCHUPS_TTL_SECONDS))
+    published[VALUE_BOARD_CACHE_NAME] = len(value_board_payload)
+    published[MATCHUPS_CACHE_NAME] = len(matchups_payload)
+    return published
+
+
+def _publish_current_read_payloads(
+    conn,
+    *,
+    include_matchups: bool = True,
+    matchup_game_ids: list[int] | None = None,
+    full_matchup_refresh: bool = True,
+) -> dict[str, int]:
     published: dict[str, int] = {}
 
     def publish(name: str, ttl_seconds: int, payload: Any, count: int) -> None:
@@ -2076,7 +2232,6 @@ def _publish_current_read_payloads(conn, *, include_matchups: bool = True) -> di
         published[name] = count
 
     payload_builders = [
-        (VALUE_BOARD_CACHE_NAME, VALUE_BOARD_TTL_SECONDS, lambda: _value_board_payload(conn)),
         (WATCHLIST_CACHE_NAME, WATCHLIST_TTL_SECONDS, lambda: _watchlist_payload(conn)),
         (LINE_DISCREPANCIES_CACHE_NAME, LINE_DISCREPANCIES_TTL_SECONDS, lambda: line_discrepancies(conn, None)),
         (ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn)),
@@ -2085,8 +2240,6 @@ def _publish_current_read_payloads(conn, *, include_matchups: bool = True) -> di
         (GEM_PERFORMANCE_CACHE_NAME, GEM_PERFORMANCE_TTL_SECONDS, lambda: _gem_performance_payload(conn)),
         (WATCHLIST_PERFORMANCE_CACHE_NAME, WATCHLIST_PERFORMANCE_TTL_SECONDS, lambda: _watchlist_performance_payload(conn)),
     ]
-    if include_matchups:
-        payload_builders.append((MATCHUPS_CACHE_NAME, MATCHUPS_TTL_SECONDS, lambda: _matchups_payload(conn)))
 
     for name, ttl_seconds, compute in payload_builders:
         try:
@@ -2099,11 +2252,32 @@ def _publish_current_read_payloads(conn, *, include_matchups: bool = True) -> di
         except Exception as exc:
             print(f"[startup] {name} prewarm skipped: {exc}")
 
+    if include_matchups:
+        try:
+            published.update(
+                _publish_matchup_snapshot_aggregates(
+                    conn,
+                    game_ids=matchup_game_ids,
+                    full_refresh=full_matchup_refresh,
+                )
+            )
+        except Exception as exc:
+            print(f"[startup] matchup snapshot publish skipped: {exc}")
+
     return published
 
 
-def _publish_post_mutation_read_payloads(conn) -> dict[str, int]:
-    return _publish_current_read_payloads(conn)
+def _publish_post_mutation_read_payloads(
+    conn,
+    *,
+    matchup_game_ids: list[int] | None = None,
+    full_matchup_refresh: bool = True,
+) -> dict[str, int]:
+    return _publish_current_read_payloads(
+        conn,
+        matchup_game_ids=matchup_game_ids,
+        full_matchup_refresh=full_matchup_refresh,
+    )
 
 
 def _refresh_roster_read_payloads(conn) -> dict[str, int]:
@@ -2408,6 +2582,34 @@ def _repair_current_slate_props(
         "rebuilt_game_predictions": int(game_rebuild_result["written"]),
         "watchlist_snapshot": watchlist_snapshot,
     }
+
+
+def _maybe_repair_current_slate_after_settlement(conn) -> dict[str, Any] | None:
+    scope, target_game_ids = _repair_current_slate_target(conn)
+    if not target_game_ids:
+        return None
+    placeholders = ",".join("?" for _ in target_game_ids)
+    rows = conn.execute(
+        f"""
+        SELECT DISTINCT pl.game_id
+        FROM prop_predictions pp
+        JOIN prop_lines pl ON pl.id = pp.prop_line_id
+        JOIN games g ON g.id = pl.game_id
+        LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+        WHERE g.status = 'scheduled'
+          AND sp.id IS NULL
+          AND pl.game_id IN ({placeholders})
+        """,
+        tuple(target_game_ids),
+    ).fetchall()
+    covered_game_ids = {int(row["game_id"]) for row in rows if row["game_id"] is not None}
+    if covered_game_ids.issuperset(target_game_ids):
+        return None
+    repair_result = _repair_current_slate_props(conn)
+    repair_result["repair_reason"] = "scheduled_predictions_missing_after_settlement"
+    repair_result["scope"] = scope
+    repair_result["missing_game_ids"] = [game_id for game_id in target_game_ids if game_id not in covered_game_ids]
+    return repair_result
 
 
 @app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
@@ -2793,14 +2995,20 @@ def settle_props(
         games = settle_completed_game_predictions(conn, selected_date=selected_date, selected_dates=selected_dates)
         gems = _sync_gem_snapshot_settlements(conn)
         watchlist = _sync_watchlist_snapshot_settlements(conn)
+        scheduled_repair = _maybe_repair_current_slate_after_settlement(conn)
     _invalidate_read_caches()
     with connect() as conn:
-        published_payloads = _publish_post_mutation_read_payloads(conn)
+        published_payloads = _publish_post_mutation_read_payloads(
+            conn,
+            matchup_game_ids=list(scheduled_repair.get("target_game_ids") or []) if isinstance(scheduled_repair, dict) else [],
+            full_matchup_refresh=False,
+        )
     return {
         "props": props,
         "games": games,
         "gems": gems,
         "watchlist": watchlist,
+        "scheduled_repair": scheduled_repair,
         "published_payloads": published_payloads,
         "selected_date": selected_date,
         "selected_dates": selected_dates or [],
@@ -2812,14 +3020,18 @@ def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
     if force_refresh:
         started = datetime.now(timezone.utc)
         with connect() as conn:
-            payload = _value_board_payload(conn)
+            _publish_matchup_snapshot_aggregates(conn)
+            payload = _read_cached_payload(VALUE_BOARD_CACHE_NAME) or []
         compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
-        write_json_cache(VALUE_BOARD_CACHE_NAME, _cache_envelope(payload, VALUE_BOARD_TTL_SECONDS))
         _set_observability_headers(response, VALUE_BOARD_CACHE_NAME, "BYPASS", round(compute_ms, 2))
         return payload
     def compute() -> list[dict]:
         with connect() as conn:
-            return _value_board_payload(conn)
+            aggregates = _aggregate_matchup_snapshot_payloads(conn)
+            if aggregates is not None:
+                return aggregates[0]
+            _publish_matchup_snapshot_aggregates(conn)
+            return _read_cached_payload(VALUE_BOARD_CACHE_NAME) or []
     payload, status, compute_ms = _read_through_cache_with_meta(
         VALUE_BOARD_CACHE_NAME,
         VALUE_BOARD_TTL_SECONDS,
@@ -4417,8 +4629,13 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
     started = datetime.now(timezone.utc)
     try:
         with connect() as conn:
-            payload = _matchups_payload(conn)
-        write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(payload, MATCHUPS_TTL_SECONDS))
+            aggregates = _aggregate_matchup_snapshot_payloads(conn)
+            if aggregates is None or force_refresh:
+                _publish_matchup_snapshot_aggregates(conn)
+                payload = _read_cached_payload(MATCHUPS_CACHE_NAME) or []
+            else:
+                payload = aggregates[1]
+                write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(payload, MATCHUPS_TTL_SECONDS))
         compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
         _set_observability_headers(response, MATCHUPS_CACHE_NAME, "BYPASS" if force_refresh else "MISS", round(compute_ms, 2))
         return payload
@@ -4634,6 +4851,17 @@ def _covers_market_odds_by_game() -> dict[int, dict]:
             },
         }
     return odds_by_game
+
+
+def _matchup_snapshot_key(game) -> str:
+    normalized_start = _normalized_start_key(_game_row_value(game, "start_time"))
+    return "|".join(
+        [
+            normalized_start or str(_game_row_value(game, "start_time") or ""),
+            str(int(_game_row_value(game, "home_team_id"))),
+            str(int(_game_row_value(game, "away_team_id"))),
+        ]
+    )
 
 
 def _coalesce_matchup_games(games) -> list[tuple[dict, list[int]]]:
@@ -5492,13 +5720,14 @@ def _game_total_result(row) -> str:
 
 
 def _rest_days_before_game(conn, team_id: int, start_time: str, game_date: str | None = None) -> int | None:
-    current_start = _parse_game_start(start_time)
-    if current_start is not None:
+    current_date = _parse_game_date(game_date) if game_date else None
+    if current_date is None:
+        current_start = _parse_game_start(start_time)
+        if current_start is None:
+            return None
         current_date = current_start.astimezone(LOCAL_TZ).date()
     else:
-        current_date = _parse_game_date(game_date) if game_date else None
-        if current_date is None:
-            return None
+        current_start = _parse_game_start(start_time)
     rows = conn.execute(
         """
         SELECT g.start_time, g.game_date
@@ -5514,9 +5743,9 @@ def _rest_days_before_game(conn, team_id: int, start_time: str, game_date: str |
         previous_start = _parse_game_start(row["start_time"])
         if current_start is not None and (previous_start is None or previous_start >= current_start):
             continue
-        previous_date = previous_start.astimezone(LOCAL_TZ).date() if previous_start is not None else None
-        if previous_date is None:
-            previous_date = _parse_game_date(row["game_date"])
+        previous_date = _parse_game_date(row["game_date"])
+        if previous_date is None and previous_start is not None:
+            previous_date = previous_start.astimezone(LOCAL_TZ).date()
         if previous_date and previous_date < current_date:
             previous_dates.append(previous_date)
     if not previous_dates:
