@@ -930,6 +930,7 @@ def test_targeted_matchup_snapshot_publish_preserves_untouched_matchups(tmp_path
 
     existing_snapshot = main_module._matchup_snapshot_payload(
         fake_matchup(None, game_b, [9920]),
+        snapshot_key=main_module._matchup_snapshot_key(game_b),
         game_ids=[9920],
         value_board_props=fake_value_board(None, [9920]),
     )

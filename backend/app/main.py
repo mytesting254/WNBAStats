@@ -1472,11 +1472,12 @@ def _matchup_snapshot_cache_name(snapshot_key: str) -> str:
 def _matchup_snapshot_payload(
     matchup: dict[str, Any],
     *,
+    snapshot_key: str,
     game_ids: list[int],
     value_board_props: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
-        "snapshot_key": _matchup_snapshot_key(matchup),
+        "snapshot_key": snapshot_key,
         "game_id": int(matchup["id"]),
         "game_ids": sorted({int(game_id) for game_id in game_ids if int(game_id) > 0}),
         "matchup": matchup,
@@ -2158,12 +2159,13 @@ def _publish_matchup_snapshot_payloads(conn, game_ids: list[int] | None = None) 
             covers_market_odds=covers_market_odds,
             prediction_state_by_game=prediction_state_by_game,
         )
+        snapshot_key = _matchup_snapshot_key(game)
         snapshot_payload = _matchup_snapshot_payload(
             matchup,
+            snapshot_key=snapshot_key,
             game_ids=grouped_game_ids,
             value_board_props=_value_board_payload_for_games(conn, grouped_game_ids, include_filtered_only=True),
         )
-        snapshot_key = _matchup_snapshot_key(game)
         write_json_cache(_matchup_snapshot_cache_name(snapshot_key), _cache_envelope(snapshot_payload, MATCHUPS_TTL_SECONDS))
         published[_matchup_snapshot_cache_name(snapshot_key)] = len(grouped_game_ids)
     return published
