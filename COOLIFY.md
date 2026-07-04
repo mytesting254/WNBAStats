@@ -150,6 +150,12 @@ Create a live snapshot:
 python scripts/live_backend.py exec -- python scripts/snapshot_create.py --name wnba-runtime
 ```
 
+Recommended scheduled wrapper:
+
+```bash
+scripts/live_snapshot_backup.sh
+```
+
 Restore from a live snapshot:
 
 ```bash
@@ -159,6 +165,11 @@ python scripts/live_backend.py exec -- python scripts/snapshot_restore.py /data/
 If you need host-side maintenance instead of container-exec, load
 `source scripts/live_env.sh` first so `WNBA_DB_PATH` and `WNBA_SNAPSHOT_DIR`
 resolve to the same attached volume.
+
+For production scheduling, use a host timer/cron job. Example systemd units:
+
+- `deploy/wnba-live-snapshot.service`
+- `deploy/wnba-live-snapshot.timer`
 
 Odds API game markets such as `h2h`, `spreads`, and `totals` are also only
 authoritative in that active runtime. They are saved in the raw Odds payload

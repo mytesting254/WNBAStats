@@ -1,0 +1,11 @@
+[Unit]
+Description=Run WNBA live SQLite snapshot backup on schedule
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:00:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=wnba-live-snapshot.service
+
+[Install]
+WantedBy=timers.target

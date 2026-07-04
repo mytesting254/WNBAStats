@@ -1,0 +1,15 @@
+[Unit]
+Description=WNBA live SQLite snapshot backup
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/WNBAStats
+Environment=ROLLING_NAME=wnba-runtime
+Environment=ROLLING_KEEP_LATEST=7
+Environment=DAILY_KEEP_LATEST=14
+Environment=CREATE_DAILY=1
+ExecStart=/root/WNBAStats/scripts/live_snapshot_backup.sh
+

@@ -783,6 +783,17 @@ Create a live snapshot on the app volume:
 python scripts/live_backend.py exec -- python scripts/snapshot_create.py --name wnba-runtime
 ```
 
+Recommended scheduled backup wrapper:
+
+```bash
+scripts/live_snapshot_backup.sh
+```
+
+This creates:
+
+- one rolling snapshot named `wnba-runtime.sqlite`
+- one timestamped daily snapshot like `wnba-20260704T120000Z.sqlite`
+
 Restore the live DB from a snapshot already stored on the app volume:
 
 ```bash
@@ -796,6 +807,11 @@ source scripts/live_env.sh
 ```
 
 That resolves `WNBA_DB_PATH`, `WNBA_CACHE_DIR`, and `WNBA_SNAPSHOT_DIR` to the active app-attached volume before you run maintenance commands.
+
+For automated production backups, prefer a host scheduler instead of an app-process watcher. Example systemd units are provided at:
+
+- `deploy/wnba-live-snapshot.service`
+- `deploy/wnba-live-snapshot.timer`
 
 Network access notes:
 
