@@ -964,6 +964,21 @@ Each training action saves both runs to Turso in `model_runs` with rows, markets
 
 Learned player, minutes, residual, and game-model training defaults to a rolling previous-season window: January 1 of the prior Eastern calendar year through the latest ingested history. For example, 2026 runs train on rows dated `2025-01-01` or later. Set `WNBA_TRAINING_START_DATE=YYYY-MM-DD` for a one-off override. The resolved training start date is part of the model cache key and `model_runs` data signature, so changing the window cannot reuse stale cached models or stale Model Lab results.
 
+PowerShell local/server workflow:
+
+```powershell
+.\scripts\run_sync_retrain_upload.ps1
+```
+
+That command resolves the live Coolify volume path, downloads the active SQLite DB to `data\wnba.sqlite`, runs local training validation with two workers, and then triggers `/api/models/train` inside the live backend container. WNBA does not upload local model cache files back to the server: cached model filenames include the SQLite database path marker, so local cache artifacts are only valid for the local DB path. The live trigger trains against the live DB/cache so production uses the new models.
+
+Useful options:
+
+- `-SkipLocalTraining` syncs the DB and only triggers live training.
+- `-SkipServerTraining` runs local validation only.
+- `-TrainingStartDate YYYY-MM-DD` overrides the dynamic rolling window for that run.
+- `-PollServer` prints the live `/api/ops/health` payload after queueing training.
+
 The current saved game evaluation signature is `v6`. Recent game-model runs use:
 
 - historical game-market backfill from The Odds API for 2024-2025 spreads/totals/moneylines
