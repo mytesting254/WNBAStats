@@ -207,8 +207,7 @@ def repair_shadow_player_identities(conn: sqlite3.Connection) -> dict[str, int]:
             p.position
         FROM players p
         JOIN teams t ON t.id = p.team_id
-        WHERE (p.position IS NULL OR trim(p.position) = '' OR p.rotation_role IS NULL OR trim(p.rotation_role) = '')
-          AND p.full_name GLOB '[A-Za-z]. *'
+                WHERE (p.position IS NULL OR trim(p.position) = '' OR p.rotation_role IS NULL OR trim(p.rotation_role) = '')
         """
     ).fetchall()
 
