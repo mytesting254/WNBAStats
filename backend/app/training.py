@@ -19,6 +19,7 @@ COMPONENT_MODEL_VERSION = "component-pregame-v2"
 DATA_SIGNATURE_LABEL = "data_signature="
 GAME_EVAL_SIGNATURE_LABEL = "game_eval_signature="
 GAME_EVAL_SIGNATURE = "v6"
+DEFAULT_TRAINING_MAX_WORKERS = 2
 
 
 def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
@@ -357,8 +358,7 @@ def _parallel_worker_count(task_count: int) -> int:
             return max(1, min(int(configured), task_count))
         except ValueError:
             pass
-    cpu_count = os.cpu_count() or 1
-    return max(1, min(task_count, cpu_count))
+    return max(1, min(task_count, DEFAULT_TRAINING_MAX_WORKERS))
 
 
 def _market_metric_worker(args: tuple[str, str, ModelTuningConfig | None]) -> tuple[str, dict]:

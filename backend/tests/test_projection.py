@@ -20,6 +20,7 @@ from backend.app import paths as paths_module
 from backend.app import player_prop_model as player_prop_model_module
 from backend.app import projections as projections_module
 from backend.app import rotowire_import as rotowire_import_module
+from backend.app import training as training_module
 from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
 from backend.app.covers_import import (
@@ -115,6 +116,24 @@ def test_before_training_start_compares_iso_dates() -> None:
     assert player_prop_model_module._before_training_start("2024-12-31", "2025-01-01") is True
     assert player_prop_model_module._before_training_start("2025-01-01", "2025-01-01") is False
     assert player_prop_model_module._before_training_start("2025-06-01T00:00:00Z", "2025-01-01") is False
+
+
+def test_parallel_worker_count_defaults_to_two(monkeypatch) -> None:
+    monkeypatch.delenv("WNBA_TRAINING_MAX_WORKERS", raising=False)
+
+    assert training_module._parallel_worker_count(11) == 2
+
+
+def test_parallel_worker_count_uses_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("WNBA_TRAINING_MAX_WORKERS", "4")
+
+    assert training_module._parallel_worker_count(11) == 4
+
+
+def test_parallel_worker_count_caps_env_override_to_task_count(monkeypatch) -> None:
+    monkeypatch.setenv("WNBA_TRAINING_MAX_WORKERS", "4")
+
+    assert training_module._parallel_worker_count(2) == 2
 
 
 def load_test_history() -> None:
