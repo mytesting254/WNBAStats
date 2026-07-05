@@ -118,6 +118,20 @@ def test_before_training_start_compares_iso_dates() -> None:
     assert player_prop_model_module._before_training_start("2025-06-01T00:00:00Z", "2025-01-01") is False
 
 
+def test_model_cache_key_is_windows_safe() -> None:
+    with connect() as conn:
+        cache_key = player_prop_model_module._model_cache_key(
+            conn,
+            "C:\\Users\\me\\WNBAStats\\data\\wnba.sqlite",
+            "residual:points",
+            player_prop_model_module.DEFAULT_TUNING_CONFIG,
+            kind="residual",
+        )
+
+    assert ":" not in cache_key
+    assert "residual_points" in cache_key
+
+
 def test_parallel_worker_count_defaults_to_two(monkeypatch) -> None:
     monkeypatch.delenv("WNBA_TRAINING_MAX_WORKERS", raising=False)
 

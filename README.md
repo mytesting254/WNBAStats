@@ -970,14 +970,17 @@ PowerShell local/server workflow:
 .\scripts\run_sync_retrain_upload.ps1
 ```
 
-That command resolves the live Coolify volume path, downloads the active SQLite DB to `data\wnba.sqlite`, runs local training validation with two workers, and then triggers `/api/models/train` inside the live backend container. WNBA does not upload local model cache files back to the server: cached model filenames include the SQLite database path marker, so local cache artifacts are only valid for the local DB path. The live trigger trains against the live DB/cache so production uses the new models.
+That command resolves the live Coolify volume path, downloads the active SQLite DB to `data\wnba.sqlite`, runs local training validation with two workers, rewrites the learned model cache filenames for the live DB path marker, and uploads the processed cache JSON files into the live cache directory. This makes locally trained player/minutes/residual projection caches usable by production as long as the live DB has not changed since the sync.
+
+WNBA still stores Model Lab run history in the database, not in artifact files. Uploading processed cache files warms production projections, but it does not add local validation rows to live `model_runs`. Pass `-RunServerTraining` when you also want the live backend to record a server-side training run.
 
 Useful options:
 
-- `-SkipLocalTraining` syncs the DB and only triggers live training.
-- `-SkipServerTraining` runs local validation only.
+- `-SkipLocalTraining` syncs the DB and only uploads any existing processed cache files.
+- `-SkipCacheUpload` runs local validation only.
 - `-TrainingStartDate YYYY-MM-DD` overrides the dynamic rolling window for that run.
-- `-PollServer` prints the live `/api/ops/health` payload after queueing training.
+- `-RunServerTraining` queues `/api/models/train` inside the live backend after uploading cache files.
+- `-PollServer` prints the live `/api/ops/health` payload after queueing server training.
 
 The current saved game evaluation signature is `v6`. Recent game-model runs use:
 

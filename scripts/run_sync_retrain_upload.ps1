@@ -8,7 +8,8 @@ param(
     [switch]$SkipLocalDbBackup,
     [switch]$SkipLocalTraining,
     [switch]$SkipPrewarm,
-    [switch]$SkipServerTraining,
+    [switch]$SkipCacheUpload,
+    [switch]$RunServerTraining,
     [switch]$PollServer
 )
 
@@ -18,9 +19,10 @@ $ErrorActionPreference = "Stop"
 $scriptsDir = $PSScriptRoot
 $syncScript = Join-Path $scriptsDir "sync_server_db_to_local.ps1"
 $retrainScript = Join-Path $scriptsDir "retrain_local_models.ps1"
+$uploadScript = Join-Path $scriptsDir "upload_model_cache_to_server.ps1"
 $triggerScript = Join-Path $scriptsDir "trigger_server_training.ps1"
 
-foreach ($requiredScript in @($syncScript, $retrainScript, $triggerScript)) {
+foreach ($requiredScript in @($syncScript, $retrainScript, $uploadScript, $triggerScript)) {
     if (-not (Test-Path $requiredScript)) {
         throw "Required script not found: $requiredScript"
     }
@@ -60,8 +62,23 @@ else {
     Write-Host "[2/3] Skipping local WNBA training validation."
 }
 
-if (-not $SkipServerTraining) {
-    Write-Host "[3/3] Triggering live WNBA training..."
+if (-not $SkipCacheUpload) {
+    Write-Host "[3/3] Processing and uploading WNBA model cache..."
+    $uploadParams = @{
+        Server = $Server
+        RemoteRoot = $RemoteRoot
+    }
+    & $uploadScript @uploadParams
+    if ($LASTEXITCODE -ne 0) {
+        throw "Step 3 failed (process/upload WNBA model cache)."
+    }
+}
+else {
+    Write-Host "[3/3] Skipping WNBA model cache upload."
+}
+
+if ($RunServerTraining) {
+    Write-Host "[4/4] Triggering live WNBA training..."
     $triggerParams = @{
         Server = $Server
         RemoteRoot = $RemoteRoot
@@ -71,11 +88,11 @@ if (-not $SkipServerTraining) {
     }
     & $triggerScript @triggerParams
     if ($LASTEXITCODE -ne 0) {
-        throw "Step 3 failed (trigger live WNBA training)."
+        throw "Step 4 failed (trigger live WNBA training)."
     }
 }
 else {
-    Write-Host "[3/3] Skipping live WNBA training trigger."
+    Write-Host "[4/4] Skipping live WNBA training trigger."
 }
 
 Write-Host "Completed WNBA sync/training workflow."

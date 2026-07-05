@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 from dataclasses import asdict, dataclass
 from datetime import date, datetime
@@ -2132,8 +2133,9 @@ def _model_cache_key(
     kind: str,
 ) -> str:
     db_marker = hashlib.sha1(str(db_path).encode("utf-8")).hexdigest()[:12]
+    safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
     training_marker = hashlib.sha1(_training_start_date().encode("utf-8")).hexdigest()[:8]
-    return f"{MODEL_CACHE_PREFIX}-{kind}-{name}-{db_marker}-{_model_fingerprint(conn)}-{_config_fingerprint(config)}-{training_marker}.json"
+    return f"{MODEL_CACHE_PREFIX}-{kind}-{safe_name}-{db_marker}-{_model_fingerprint(conn)}-{_config_fingerprint(config)}-{training_marker}.json"
 
 
 def _load_cached_model(cache_key: str) -> RidgeModel | None:
