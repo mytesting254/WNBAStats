@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import runpy
 from types import SimpleNamespace
@@ -91,6 +91,30 @@ def isolated_db(tmp_path, monkeypatch):
     with connect() as conn:
         ensure_teams(conn)
     yield
+
+
+def test_training_start_date_defaults_to_previous_eastern_year(monkeypatch) -> None:
+    monkeypatch.delenv("WNBA_TRAINING_START_DATE", raising=False)
+
+    assert player_prop_model_module._training_start_date(date(2026, 7, 5)) == "2025-01-01"
+
+
+def test_training_start_date_uses_valid_override(monkeypatch) -> None:
+    monkeypatch.setenv("WNBA_TRAINING_START_DATE", "2024-05-01")
+
+    assert player_prop_model_module._training_start_date(date(2026, 7, 5)) == "2024-05-01"
+
+
+def test_training_start_date_ignores_invalid_override(monkeypatch) -> None:
+    monkeypatch.setenv("WNBA_TRAINING_START_DATE", "not-a-date")
+
+    assert player_prop_model_module._training_start_date(date(2026, 7, 5)) == "2025-01-01"
+
+
+def test_before_training_start_compares_iso_dates() -> None:
+    assert player_prop_model_module._before_training_start("2024-12-31", "2025-01-01") is True
+    assert player_prop_model_module._before_training_start("2025-01-01", "2025-01-01") is False
+    assert player_prop_model_module._before_training_start("2025-06-01T00:00:00Z", "2025-01-01") is False
 
 
 def load_test_history() -> None:

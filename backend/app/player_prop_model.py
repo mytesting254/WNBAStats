@@ -3,9 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 
 try:
@@ -14,6 +15,7 @@ except ImportError:  # pragma: no cover - fallback remains exercised without num
     np = None
 
 from .odds import american_to_implied_probability
+from .timezone_utils import APP_TIMEZONE
 
 
 MODEL_VERSION = "adaptive-context-v1"
@@ -102,6 +104,7 @@ class ModelTuningConfig:
 
 
 DEFAULT_TUNING_CONFIG = ModelTuningConfig()
+TRAINING_START_DATE_ENV = "WNBA_TRAINING_START_DATE"
 
 LOCAL_COMBO_MARKETS: dict[str, tuple[str, ...]] = {
     "points_rebounds_assists": ("points", "rebounds", "assists"),
@@ -655,7 +658,7 @@ def _shared_projection_context(
 
 
 @lru_cache(maxsize=32)
-def _train_market_model_cached(db_path: str, market: str, config: ModelTuningConfig) -> RidgeModel | None:
+def _train_market_model_cached(db_path: str, market: str, config: ModelTuningConfig, training_start: str) -> RidgeModel | None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -671,8 +674,9 @@ def train_market_model(
     allow_training: bool = True,
 ) -> RidgeModel | None:
     tuning = config or DEFAULT_TUNING_CONFIG
+    training_start = _training_start_date()
     if not isinstance(conn, sqlite3.Connection):
-        key = (id(conn), market, tuning)
+        key = (id(conn), market, tuning, training_start)
         if key not in _CONNECTION_MODEL_CACHE:
             if not allow_training:
                 return None
@@ -685,11 +689,11 @@ def train_market_model(
         return cached_model
     if not allow_training:
         return None
-    return _train_market_model_cached(db_path, market, tuning)
+    return _train_market_model_cached(db_path, market, tuning, training_start)
 
 
 @lru_cache(maxsize=32)
-def _train_market_residual_model_cached(db_path: str, market: str, config: ModelTuningConfig) -> RidgeModel | None:
+def _train_market_residual_model_cached(db_path: str, market: str, config: ModelTuningConfig, training_start: str) -> RidgeModel | None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -705,9 +709,10 @@ def train_market_residual_model(
     allow_training: bool = True,
 ) -> RidgeModel | None:
     tuning = config or DEFAULT_TUNING_CONFIG
+    training_start = _training_start_date()
     cache_market = f"residual:{market}"
     if not isinstance(conn, sqlite3.Connection):
-        key = (id(conn), market, tuning)
+        key = (id(conn), market, tuning, training_start)
         if key not in _CONNECTION_RESIDUAL_MODEL_CACHE:
             if not allow_training:
                 return None
@@ -720,7 +725,7 @@ def train_market_residual_model(
         return cached_model
     if not allow_training:
         return None
-    return _train_market_residual_model_cached(db_path, market, tuning)
+    return _train_market_residual_model_cached(db_path, market, tuning, training_start)
 
 
 def clear_model_cache() -> None:
@@ -859,12 +864,16 @@ def _standardize_feature_rows(xs: list[list[float]]) -> tuple[list[float], list[
 
 def _training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSample]:
     samples: list[TrainingSample] = []
+    training_start = _training_start_date()
     players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
     for player in players:
         rows = _player_training_rows(conn, int(player["id"]))
         values = [_market_value(row, market) for row in rows]
         minutes = [float(row["minutes"]) for row in rows]
         for idx in range(5, len(rows)):
+            game_date = str(rows[idx]["game_date"])
+            if _before_training_start(game_date, training_start):
+                continue
             history = values[max(0, idx - 10):idx]
             minute_history = minutes[max(0, idx - 10):idx]
             recent_rows = rows[max(0, idx - 10):idx]
@@ -880,7 +889,6 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSam
                 player_rows=rows,
                 row_index=idx,
             )
-            game_date = str(rows[idx]["game_date"])
             samples.append(
                 TrainingSample(
                     features=features,
@@ -900,6 +908,7 @@ def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[flo
 
 def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSample]:
     samples: list[TrainingSample] = []
+    training_start = _training_start_date()
     rows = conn.execute(
         """
         SELECT
@@ -920,6 +929,9 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[Tr
         (market,),
     ).fetchall()
     for row in rows:
+        game_date = str(row["game_date"])
+        if _before_training_start(game_date, training_start):
+            continue
         snapshot = feature_snapshot(
             conn,
             int(row["player_id"]),
@@ -930,7 +942,6 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[Tr
         if not snapshot.values:
             continue
         target = float(row["actual_result"]) - float(row["line"])
-        game_date = str(row["game_date"])
         samples.append(
             TrainingSample(
                 features=snapshot.values,
@@ -1337,6 +1348,7 @@ def _train_minutes_model_cached(
     db_path: str,
     config: ModelTuningConfig,
     role_bucket: str | None = None,
+    training_start: str = "",
 ) -> RidgeModel | None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -1354,9 +1366,10 @@ def train_minutes_model(
 ) -> RidgeModel | None:
     tuning = config or DEFAULT_TUNING_CONFIG
     bucket = role_bucket if role_bucket in set(MINUTES_ROLE_BUCKETS) else None
+    training_start = _training_start_date()
     cache_market = f"minutes:{bucket or 'all'}"
     if not isinstance(conn, sqlite3.Connection):
-        key = (id(conn), bucket, tuning)
+        key = (id(conn), bucket, tuning, training_start)
         if key not in _CONNECTION_MINUTES_MODEL_CACHE:
             if not allow_training:
                 return None
@@ -1369,7 +1382,7 @@ def train_minutes_model(
         return cached_model
     if not allow_training:
         return None
-    return _train_minutes_model_cached(db_path, tuning, bucket)
+    return _train_minutes_model_cached(db_path, tuning, bucket, training_start)
 
 
 def prewarm_model_cache(conn: sqlite3.Connection, config: ModelTuningConfig | None = None) -> dict[str, int]:
@@ -1409,16 +1422,19 @@ def _minutes_training_rows(
     role_bucket: str | None = None,
 ) -> list[tuple[list[float], float]]:
     samples = []
+    training_start = _training_start_date()
     bucket_filter = role_bucket if role_bucket in set(MINUTES_ROLE_BUCKETS) else None
     players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
     for player in players:
         rows = _player_training_rows(conn, int(player["id"]))
         minutes = [float(row["minutes"]) for row in rows]
         for idx in range(5, len(rows)):
+            current = rows[idx]
+            if _before_training_start(str(current["game_date"]), training_start):
+                continue
             newest_minutes = list(reversed(minutes[max(0, idx - 10):idx]))
             if len(newest_minutes) < 5:
                 continue
-            current = rows[idx]
             previous_game_date = str(rows[idx - 1]["game_date"]) if idx > 0 else None
             context = _historical_game_context(current)
             minute_volatility = _minute_volatility(newest_minutes)
@@ -1462,6 +1478,23 @@ def _minutes_training_rows(
             )
             samples.append((features, float(current["minutes"])))
     return samples
+
+
+def _training_start_date(today: date | None = None) -> str:
+    configured = os.getenv(TRAINING_START_DATE_ENV, "").strip()
+    if configured:
+        try:
+            return date.fromisoformat(configured).isoformat()
+        except ValueError:
+            pass
+    current = today or datetime.now(APP_TIMEZONE).date()
+    return date(current.year - 1, 1, 1).isoformat()
+
+
+def _before_training_start(game_date: str | None, training_start: str) -> bool:
+    if not game_date:
+        return True
+    return str(game_date)[:10] < training_start
 
 
 def _project_minutes(
@@ -2099,7 +2132,8 @@ def _model_cache_key(
     kind: str,
 ) -> str:
     db_marker = hashlib.sha1(str(db_path).encode("utf-8")).hexdigest()[:12]
-    return f"{MODEL_CACHE_PREFIX}-{kind}-{name}-{db_marker}-{_model_fingerprint(conn)}-{_config_fingerprint(config)}.json"
+    training_marker = hashlib.sha1(_training_start_date().encode("utf-8")).hexdigest()[:8]
+    return f"{MODEL_CACHE_PREFIX}-{kind}-{name}-{db_marker}-{_model_fingerprint(conn)}-{_config_fingerprint(config)}-{training_marker}.json"
 
 
 def _load_cached_model(cache_key: str) -> RidgeModel | None:

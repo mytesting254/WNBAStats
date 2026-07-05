@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 from .game_predictions import evaluate_game_residual_models
 from .player_prop_model import DEFAULT_TUNING_CONFIG, MODEL_VERSION as LEARNED_MODEL_VERSION
-from .player_prop_model import ModelTuningConfig, TRAINING_MARKETS, evaluate_market_model, evaluate_market_residual_model
+from .player_prop_model import ModelTuningConfig, TRAINING_MARKETS, _training_start_date, evaluate_market_model, evaluate_market_residual_model
 
 TRAINING_MODEL_VERSION = LEARNED_MODEL_VERSION
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
@@ -230,7 +230,7 @@ def _save_model_run(conn: sqlite3.Connection, run: dict) -> None:
 
 
 def _training_data_signature(conn: sqlite3.Connection) -> str:
-    payload = {}
+    payload = {"training_start_date": _training_start_date()}
     for table in (
         "games",
         "player_game_stats",

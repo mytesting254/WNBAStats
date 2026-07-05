@@ -962,6 +962,8 @@ adaptive-context-v1
 
 Each training action saves both runs to Turso in `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. Learned-run payloads now also include game residual evaluation rows (`game_ats`, `game_total`, and `game_overall`) with both baseline and blended metrics so saved game predictions can be compared before and after the residual layer. The Model Lab now shows those game residual deltas directly alongside the existing player-market training tables. The comparison table shows the latest run for each model version side by side. Prediction-time learned models also train from the active connection when the app is using Turso, instead of reopening a local SQLite file.
 
+Learned player, minutes, residual, and game-model training defaults to a rolling previous-season window: January 1 of the prior Eastern calendar year through the latest ingested history. For example, 2026 runs train on rows dated `2025-01-01` or later. Set `WNBA_TRAINING_START_DATE=YYYY-MM-DD` for a one-off override. The resolved training start date is part of the model cache key and `model_runs` data signature, so changing the window cannot reuse stale cached models or stale Model Lab results.
+
 The current saved game evaluation signature is `v6`. Recent game-model runs use:
 
 - historical game-market backfill from The Odds API for 2024-2025 spreads/totals/moneylines

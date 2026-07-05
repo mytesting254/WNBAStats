@@ -138,6 +138,28 @@ stored in the resolved runtime cache directory as `sportsbook_props_raw.json`;
 do not inspect repo-local `data/cache/` unless that checkout is explicitly the
 active runtime root returned by `host-runtime-info` / `live_env.sh`.
 
+### Daily Prop Settlement And Odds Refresh
+
+Use host cron for the daily prop workflow. The settlement job runs at 2am
+Eastern, then the Odds API refresh runs at 3am Eastern only when `/api/matchups`
+has scheduled games.
+
+Install with `crontab -e` on the Docker/Coolify host:
+
+```cron
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 02 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh settle >> /var/log/wnba-daily-props.log 2>&1
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 03 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh odds-if-matchups >> /var/log/wnba-daily-props.log 2>&1
+```
+
+`WNBA_USE_LIVE_CONTAINER=true` runs the HTTP calls inside the detected backend
+container, so `API_KEY` and `ODDS_API_KEY` come from the Coolify container
+environment. If cron runs from a different checkout path, adjust `cd`.
+Debian/Ubuntu cron does not support `CRON_TZ` for scheduling, so the hourly
+entries use `date` to run only when the current `America/New_York` hour is 2am
+or 3am. Keep the percent signs escaped when editing the crontab.
+
+A copy/paste template is also available at `deploy/wnba-daily-props.cron`.
+
 ### Live Snapshot Recovery
 
 The backend already supports filesystem DB snapshots on the attached app volume.

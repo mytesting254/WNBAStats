@@ -1,0 +1,12 @@
+# Install with:
+#   crontab deploy/wnba-daily-props.cron
+#
+# Adjust the checkout path if needed. Debian/Ubuntu cron does not support
+# CRON_TZ for scheduling, so these hourly entries guard on Eastern time with
+# date(1). Percent signs must stay escaped in crontab commands.
+#
+# This runs the HTTP calls inside the detected backend container, so API_KEY
+# and ODDS_API_KEY are read from the Coolify container environment.
+
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 02 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh settle >> /var/log/wnba-daily-props.log 2>&1
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 03 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh odds-if-matchups >> /var/log/wnba-daily-props.log 2>&1

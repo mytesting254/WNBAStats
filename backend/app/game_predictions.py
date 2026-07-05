@@ -11,6 +11,8 @@ try:
 except ImportError:  # pragma: no cover - fallback remains exercised without numpy installed
     np = None
 
+from .player_prop_model import _before_training_start, _training_start_date
+
 TOTAL_CALIBRATION_MIN_SAMPLES = 12
 TOTAL_BIAS_CORRECTION_WEIGHT = 0.8
 TOTAL_MARKET_BLEND_WEIGHT = 0.3
@@ -706,8 +708,10 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
     ats_records: list[tuple[float, float, float]] = []
     total_records: list[tuple[float, float, float]] = []
     margin_records: list[tuple[float, float, float]] = []
+    training_start = _training_start_date()
 
     for row in rows:
+        use_target_row = not _before_training_start(str(row["game_date"]), training_start)
         home_team_id = int(row["home_team_id"])
         away_team_id = int(row["away_team_id"])
         home_context = _team_history_context(team_history.get(home_team_id))
@@ -766,16 +770,18 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
 
             actual_margin = float(row["home_points"]) - float(row["away_points"])
             actual_total = float(row["home_points"]) + float(row["away_points"])
-            margin_records.append((baseline_margin, adjusted_margin, actual_margin))
+            if use_target_row:
+                margin_records.append((baseline_margin, adjusted_margin, actual_margin))
             if row["spread_home"] is not None:
                 spread_home = float(row["spread_home"])
-                ats_records.append(
-                    (
-                        baseline_margin + spread_home,
-                        adjusted_margin + spread_home,
-                        actual_margin + spread_home,
+                if use_target_row:
+                    ats_records.append(
+                        (
+                            baseline_margin + spread_home,
+                            adjusted_margin + spread_home,
+                            actual_margin + spread_home,
+                        )
                     )
-                )
             if game_total is not None and float(game_total) > 0:
                 game_total_value = float(game_total)
                 baseline_total_edge = baseline_total - game_total_value
@@ -788,17 +794,19 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                     adjusted_total_edge = ((1 - decision_weight) * adjusted_total_edge) + (decision_weight * predicted_total_edge)
                     if abs(adjusted_total_edge) < GAME_TOTAL_DECISION_MIN_EDGE:
                         adjusted_total_edge = adjusted_total - game_total_value
-                total_records.append(
-                    (
-                        baseline_total_edge,
-                        adjusted_total_edge,
-                        actual_total - game_total_value,
+                if use_target_row:
+                    total_records.append(
+                        (
+                            baseline_total_edge,
+                            adjusted_total_edge,
+                            actual_total - game_total_value,
+                        )
                     )
-                )
-            margin_training_rows.append((direct_features, actual_margin))
-            total_training_rows.append((direct_features, actual_total))
-            if game_total is not None and float(game_total) > 0:
-                total_market_training_rows.append(([*direct_features, baseline_total - float(game_total), float(game_total)], actual_total - float(game_total)))
+            if use_target_row:
+                margin_training_rows.append((direct_features, actual_margin))
+                total_training_rows.append((direct_features, actual_total))
+                if game_total is not None and float(game_total) > 0:
+                    total_market_training_rows.append(([*direct_features, baseline_total - float(game_total), float(game_total)], actual_total - float(game_total)))
 
         _append_team_history(
             team_history,
@@ -829,10 +837,12 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
 
 
 def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[tuple[list[float], float]]:
+    training_start = _training_start_date()
     if edge_type == "margin":
         rows = conn.execute(
             """
             SELECT
+                g.game_date,
                 gp.projected_margin,
                 gp.spread_home,
                 gp.home_rest_days,
@@ -840,6 +850,7 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
                 sgp.actual_margin
             FROM settled_game_predictions sgp
             JOIN game_predictions gp ON gp.id = sgp.game_prediction_id
+            JOIN games g ON g.id = gp.game_id
             WHERE gp.projected_margin IS NOT NULL
               AND gp.spread_home IS NOT NULL
               AND sgp.actual_margin IS NOT NULL
@@ -847,6 +858,8 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
         ).fetchall()
         samples = []
         for row in rows:
+            if _before_training_start(str(row["game_date"]), training_start):
+                continue
             projected_margin = float(row["projected_margin"])
             spread_home = float(row["spread_home"])
             features = [
@@ -862,6 +875,7 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
     rows = conn.execute(
         """
         SELECT
+            g.game_date,
             gp.projected_total,
             gp.game_total,
             gp.home_rest_days,
@@ -869,6 +883,7 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
             sgp.actual_total
         FROM settled_game_predictions sgp
         JOIN game_predictions gp ON gp.id = sgp.game_prediction_id
+        JOIN games g ON g.id = gp.game_id
         WHERE gp.projected_total IS NOT NULL
           AND gp.game_total IS NOT NULL
           AND gp.game_total > 0
@@ -877,6 +892,8 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
     ).fetchall()
     samples = []
     for row in rows:
+        if _before_training_start(str(row["game_date"]), training_start):
+            continue
         projected_total = float(row["projected_total"])
         game_total = float(row["game_total"])
         features = [
@@ -892,7 +909,7 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
 
 def _train_direct_game_model(conn: sqlite3.Connection, target: str) -> _DirectGameModel | None:
     signature = _direct_model_signature(conn)
-    cache_key = (signature[0], target, signature[1], signature[2])
+    cache_key = (signature[0], target, signature[1], signature[2], signature[3])
     cached = _DIRECT_MODEL_CACHE.get(cache_key)
     if cached is not None:
         return cached
@@ -906,7 +923,7 @@ def _train_direct_game_model(conn: sqlite3.Connection, target: str) -> _DirectGa
     return model
 
 
-def _direct_model_signature(conn: sqlite3.Connection) -> tuple[str, int, int]:
+def _direct_model_signature(conn: sqlite3.Connection) -> tuple[str, int, int, str]:
     db_row = conn.execute("PRAGMA database_list").fetchone()
     db_path = str(db_row["file"] if isinstance(db_row, sqlite3.Row) else db_row[2])
     row = conn.execute(
@@ -916,7 +933,7 @@ def _direct_model_signature(conn: sqlite3.Connection) -> tuple[str, int, int]:
         WHERE status = 'final'
         """
     ).fetchone()
-    return db_path, int(row["count"] or 0), int(row["max_id"] or 0)
+    return db_path, int(row["count"] or 0), int(row["max_id"] or 0), _training_start_date()
 
 
 def _direct_game_training_rows(conn: sqlite3.Connection, target: str) -> list[tuple[list[float], float]]:
@@ -947,7 +964,9 @@ def _direct_game_training_rows(conn: sqlite3.Connection, target: str) -> list[tu
     ).fetchall()
     history: dict[int, dict[str, Any]] = {}
     training_rows: list[tuple[list[float], float]] = []
+    training_start = _training_start_date()
     for row in rows:
+        use_target_row = not _before_training_start(str(row["game_date"]), training_start)
         home_team_id = int(row["home_team_id"])
         away_team_id = int(row["away_team_id"])
         home_context = _team_history_context(history.get(home_team_id))
@@ -975,7 +994,9 @@ def _direct_game_training_rows(conn: sqlite3.Connection, target: str) -> list[tu
                 home_game_count=home_context["games"],
                 away_game_count=away_context["games"],
             )
-            if target == "margin":
+            if not use_target_row:
+                pass
+            elif target == "margin":
                 training_rows.append((features, float(row["home_points"]) - float(row["away_points"])))
             elif target == "total":
                 training_rows.append((features, float(row["home_points"]) + float(row["away_points"])))
