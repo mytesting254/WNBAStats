@@ -3283,7 +3283,7 @@ def _build_current_gems(conn, preset: str) -> list[dict]:
             continue
         scored.append(
             {
-                "prop_line_id": int(prop["id"]),
+                "prop_line_id": int(prop["prop_line_id"]),
                 "game_id": int(prop["game_id"]),
                 "player_id": int(prop["player_id"]),
                 "player": str(prop["player"]),
@@ -5129,7 +5129,7 @@ def _value_board_payload(
     for row in rows:
         is_active_time = _is_active_game_time(row["start_time"])
         item = dict(row)
-        item["prop_line_id"] = int(item["id"])
+        item["prop_line_id"] = int(item["prop_line_id"])
         item = _repair_prediction_item_if_needed(conn, item)
         if _player_is_unavailable(conn, int(item["player_id"])):
             continue

@@ -879,6 +879,15 @@ game_start_time
 
 That lets us evaluate only predictions made before tipoff.
 
+Read payloads keep both identifiers:
+
+- `id`: the `prop_predictions.id` row id for the current model output
+- `prop_line_id`: the underlying `prop_lines.id` sportsbook line key
+
+Matchup, value-board, watchlist, and gem payloads should preserve `prop_line_id`
+exactly so snapshots, settlement joins, and follow-up rebuilds point back to the
+correct source line.
+
 Every game prediction is tied to:
 
 ```text

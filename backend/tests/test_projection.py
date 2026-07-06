@@ -5887,6 +5887,44 @@ def test_value_board_filters_low_confidence_unless_edge_is_high() -> None:
     assert ("Sonia Citron", "assists") in player_market
 
 
+def test_value_board_preserves_prop_line_id() -> None:
+    load_test_history()
+    with connect() as conn:
+        start_time = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (9913, '2026-05-23', ?, 10, 3, 'scheduled', 2, 2, -2.5, 161.5)
+            """,
+            (start_time,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9914, 9913, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9914, 'adaptive-context-v1', ?, 23.0, 'over', 0.55, 0.52, 0.08, 0.03, 'medium', 'test')
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+
+        rows = main_module._value_board_payload(conn, 9913, include_filtered_only=False)
+
+    assert len(rows) == 1
+    assert rows[0]["prop_line_id"] == 9914
+    assert rows[0]["id"] != rows[0]["prop_line_id"]
+
+
 def test_value_board_excludes_settled_props() -> None:
     now = datetime.now(timezone.utc)
     with connect() as conn:
@@ -6027,6 +6065,47 @@ def test_gems_keep_one_direction_per_player_market_game(monkeypatch) -> None:
     assert gems
     assert gems[0]["side"] == "under"
     assert all(item["side"] == "under" for item in gems)
+
+
+def test_gems_preserve_prop_line_id(monkeypatch) -> None:
+    with connect() as conn:
+        monkeypatch.setattr(
+            main_module,
+            "_value_board_payload",
+            lambda _conn: [
+                {
+                    "id": 7,
+                    "prop_line_id": 9007,
+                    "game_id": 401856946,
+                    "player_id": 2566106,
+                    "player": "Dearica Hamby",
+                    "market": "threes",
+                    "line": 2.5,
+                    "recommended_side": "under",
+                    "edge": 0.11,
+                    "expected_value": 0.26,
+                    "confidence": "medium",
+                },
+            ],
+        )
+        monkeypatch.setattr(
+            main_module,
+            "line_discrepancies",
+            lambda _conn: [
+                {
+                    "game_id": 401856946,
+                    "player_name": "Dearica Hamby",
+                    "market": "threes",
+                    "side": "under",
+                    "line_gap": 1.0,
+                    "price_gap": 20,
+                },
+            ],
+        )
+        gems = main_module._build_current_gems(conn, "balanced")
+
+    assert gems
+    assert gems[0]["prop_line_id"] == 9007
 
 
 def test_coalesce_matchup_games_handles_sqlite_rows_with_moneylines() -> None:
