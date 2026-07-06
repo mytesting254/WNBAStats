@@ -129,10 +129,13 @@ def _cmd_container(args: argparse.Namespace) -> int:
 
 
 def _cmd_exec(args: argparse.Namespace) -> int:
-    if not args.command:
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
         raise RuntimeError("exec requires a command after --")
     container = _select_container(args.container)
-    return _docker_exec(container, args.command, workdir=args.workdir)
+    return _docker_exec(container, command, workdir=args.workdir)
 
 
 def _cmd_runtime_info(args: argparse.Namespace) -> int:
