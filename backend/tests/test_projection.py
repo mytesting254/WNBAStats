@@ -1463,6 +1463,80 @@ def test_injury_adjustment_ignores_teammate_games_after_as_of_date() -> None:
     assert injury["usage_multiplier"] == pytest.approx(1.1125)
 
 
+def test_injury_adjustment_reuses_cached_teammate_snapshot_for_same_team_and_date() -> None:
+    load_test_history()
+    with connect() as base_conn:
+        team_id = 78
+        base_conn.execute(
+            "INSERT INTO teams (id, name, abbreviation) VALUES (?, ?, ?)",
+            (team_id, "Cache Team", "CTM"),
+        )
+        base_conn.executemany(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            [
+                (9201, "Cache One", team_id, "G", "starter"),
+                (9202, "Cache Two", team_id, "F", "starter"),
+            ],
+        )
+        for game_id, game_date in [(9301, "2026-05-01"), (9302, "2026-05-03"), (9303, "2026-05-05"), (9304, "2026-05-07"), (9305, "2026-05-09")]:
+            base_conn.execute(
+                """
+                INSERT INTO games (
+                    id, game_date, start_time, home_team_id, away_team_id, status,
+                    rest_days_home, rest_days_away, spread_home, game_total
+                ) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, -4.5, 162.0)
+                """,
+                (game_id, game_date, f"{game_date}T23:00:00Z", team_id, 2),
+            )
+            base_conn.executemany(
+                """
+                INSERT INTO player_game_stats (
+                    player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (9201, game_id, 30, 15, 4, 5, 1, 1, 0, 2),
+                    (9202, game_id, 29, 12, 8, 2, 0, 0, 1, 1),
+                ],
+            )
+        base_conn.execute(
+            "INSERT INTO injuries (player_id, status, note, captured_at) VALUES (?, ?, ?, ?)",
+            (9202, "out", "cache injury", "2026-05-08T12:00:00Z"),
+        )
+
+        expensive_query_count = 0
+
+        class CountingConn:
+            def __init__(self, conn):
+                self._conn = conn
+
+            def execute(self, sql, params=()):
+                nonlocal expensive_query_count
+                normalized = " ".join(str(sql).split()).lower()
+                if "from injuries i join players p on p.id = i.player_id" in normalized:
+                    expensive_query_count += 1
+                return self._conn.execute(sql, params)
+
+        conn = CountingConn(base_conn)
+        first = _injury_adjustment_for_prop(
+            conn,
+            player_id=9201,
+            team_id=team_id,
+            rotation_role="starter",
+            as_of_date="2026-05-09",
+        )
+        second = _injury_adjustment_for_prop(
+            conn,
+            player_id=9201,
+            team_id=team_id,
+            rotation_role="starter",
+            as_of_date="2026-05-09",
+        )
+
+    assert expensive_query_count == 1
+    assert first == second
+
+
 def test_walk_forward_training_saves_model_run() -> None:
     load_test_history()
     with connect() as conn:

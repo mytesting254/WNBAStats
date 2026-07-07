@@ -2816,44 +2816,48 @@ def _injury_adjustment_for_prop(
     availability_factor = status_weight.get(status, 1.0)
     hard_cap_zero = availability_factor == 0.0
 
+    teammate_cache = _connection_training_cache_bucket(conn, "injury_teammates")
+    teammate_cache_key = (int(team_id), str(as_of_date or ""))
     injury_cutoff_clause = "AND DATE(i.captured_at) <= DATE(?)" if as_of_date else ""
     injury_cutoff_params: tuple[object, ...] = (as_of_date,) if as_of_date else ()
-    teammate_rows = conn.execute(
-        f"""
-        SELECT
-            p.id AS player_id,
-            lower(trim(i.status)) AS status,
-            p.rotation_role,
-            COALESCE(
-                (
-                    SELECT AVG(sample.contrib)
-                    FROM (
-                        SELECT
-                            (s.points + (0.70 * s.rebounds) + (0.70 * s.assists)) AS contrib
-                        FROM player_game_stats s
-                        JOIN games g ON g.id = s.game_id
-                        WHERE s.player_id = p.id
-                          {"AND DATE(g.game_date) <= DATE(?)" if as_of_date else ""}
-                        ORDER BY g.game_date DESC
-                        LIMIT 10
-                    ) sample
-                ),
-                0.0
-            ) AS contribution
-        FROM injuries i
-        JOIN players p ON p.id = i.player_id
-        WHERE p.team_id = ?
-          AND p.id != ?
-          {injury_cutoff_clause}
-          AND i.captured_at = (
-              SELECT MAX(i2.captured_at)
-              FROM injuries i2
-              WHERE i2.player_id = i.player_id
-                {"AND DATE(i2.captured_at) <= DATE(?)" if as_of_date else ""}
-          )
-        """,
-        (*injury_cutoff_params, team_id, player_id, *injury_cutoff_params, *injury_cutoff_params),
-    ).fetchall()
+    teammate_rows = teammate_cache.get(teammate_cache_key)
+    if teammate_rows is None:
+        teammate_rows = conn.execute(
+            f"""
+            SELECT
+                p.id AS player_id,
+                lower(trim(i.status)) AS status,
+                p.rotation_role,
+                COALESCE(
+                    (
+                        SELECT AVG(sample.contrib)
+                        FROM (
+                            SELECT
+                                (s.points + (0.70 * s.rebounds) + (0.70 * s.assists)) AS contrib
+                            FROM player_game_stats s
+                            JOIN games g ON g.id = s.game_id
+                            WHERE s.player_id = p.id
+                              {"AND DATE(g.game_date) <= DATE(?)" if as_of_date else ""}
+                            ORDER BY g.game_date DESC
+                            LIMIT 10
+                        ) sample
+                    ),
+                    0.0
+                ) AS contribution
+            FROM injuries i
+            JOIN players p ON p.id = i.player_id
+            WHERE p.team_id = ?
+              {injury_cutoff_clause}
+              AND i.captured_at = (
+                  SELECT MAX(i2.captured_at)
+                  FROM injuries i2
+                  WHERE i2.player_id = i.player_id
+                    {"AND DATE(i2.captured_at) <= DATE(?)" if as_of_date else ""}
+              )
+            """,
+            (*injury_cutoff_params, team_id, *injury_cutoff_params, *injury_cutoff_params),
+        ).fetchall()
+        teammate_cache[teammate_cache_key] = teammate_rows
     miss_weight = {
         "out": 1.0,
         "inactive": 1.0,
@@ -2867,6 +2871,8 @@ def _injury_adjustment_for_prop(
     teammate_penalty = 0.0
     missing_key = 0
     for row in teammate_rows:
+        if int(row["player_id"]) == int(player_id):
+            continue
         s = str(row["status"] or "").strip()
         s_weight = miss_weight.get(s)
         if s_weight is None:
