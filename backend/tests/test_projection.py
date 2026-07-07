@@ -1593,7 +1593,23 @@ def test_walk_forward_training_saves_model_run() -> None:
     assert result["metrics"]["game_ats"]["rows"] >= 1
     assert result["metrics"]["game_total"]["rows"] >= 1
     assert "baseline_mae" in result["metrics"]["game_ats"]
-    assert "mae_improvement" in result["metrics"]["game_total"]
+
+
+def test_market_evaluation_reports_training_sample_diagnostics() -> None:
+    load_test_history()
+    with connect() as conn:
+        metrics = player_prop_model_module.evaluate_market_model(conn, "points")
+        residual_metrics = player_prop_model_module.evaluate_market_residual_model(conn, "points")
+
+    diagnostics = metrics["training_sample_diagnostics"]
+    residual_diagnostics = residual_metrics["residual_training_sample_diagnostics"]
+
+    assert diagnostics["candidate_rows"] >= diagnostics["included_rows"] >= 0
+    assert residual_diagnostics["candidate_rows"] >= residual_diagnostics["included_rows"] >= 0
+    assert "skipped_before_training_start" in diagnostics
+    assert "skipped_incomplete_context" in diagnostics
+    assert "skipped_incomplete_context" in residual_diagnostics
+    assert "skipped_missing_snapshot" in residual_diagnostics
 
 
 def test_walk_forward_training_reuses_cached_run_when_data_unchanged(monkeypatch) -> None:

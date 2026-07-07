@@ -150,6 +150,26 @@ class TrainingSample:
 
 
 @dataclass(frozen=True)
+class TrainingSampleDiagnostics:
+    candidate_rows: int = 0
+    included_rows: int = 0
+    skipped_before_training_start: int = 0
+    skipped_missing_history_window: int = 0
+    skipped_incomplete_context: int = 0
+    skipped_missing_snapshot: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "candidate_rows": int(self.candidate_rows),
+            "included_rows": int(self.included_rows),
+            "skipped_before_training_start": int(self.skipped_before_training_start),
+            "skipped_missing_history_window": int(self.skipped_missing_history_window),
+            "skipped_incomplete_context": int(self.skipped_incomplete_context),
+            "skipped_missing_snapshot": int(self.skipped_missing_snapshot),
+        }
+
+
+@dataclass(frozen=True)
 class MinutesRoleState:
     bucket: str
     lower_bound: float
@@ -767,7 +787,8 @@ def _train_market_model_uncached(
     market: str,
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
-    rows = [(sample.features, sample.target) for sample in _training_samples(conn, market)]
+    samples, _diagnostics = _training_samples(conn, market)
+    rows = [(sample.features, sample.target) for sample in samples]
     model = _fit_model_from_rows(market, rows, config=config)
     if model is not None:
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
@@ -781,7 +802,8 @@ def _train_market_residual_model_uncached(
     market: str,
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
-    rows = [(sample.features, sample.target) for sample in _residual_training_samples(conn, market)]
+    samples, _diagnostics = _residual_training_samples(conn, market)
+    rows = [(sample.features, sample.target) for sample in samples]
     model = _fit_model_from_rows(f"residual:{market}", rows, config=config)
     if model is not None:
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
@@ -796,10 +818,19 @@ def evaluate_market_model(
     config: ModelTuningConfig | None = None,
 ) -> dict:
     tuning = config or DEFAULT_TUNING_CONFIG
-    samples = _training_samples(conn, market)
+    samples, diagnostics = _training_samples(conn, market)
     if len(samples) < 20:
-        return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
-    return _evaluate_walk_forward_samples(market, samples, config=tuning)
+        return {
+            "rows": 0,
+            "mae": None,
+            "rmse": None,
+            "bias": None,
+            "directional_accuracy": None,
+            "training_sample_diagnostics": diagnostics.to_dict(),
+        }
+    metrics = _evaluate_walk_forward_samples(market, samples, config=tuning)
+    metrics["training_sample_diagnostics"] = diagnostics.to_dict()
+    return metrics
 
 
 def evaluate_market_residual_model(
@@ -808,7 +839,7 @@ def evaluate_market_residual_model(
     config: ModelTuningConfig | None = None,
 ) -> dict:
     tuning = config or DEFAULT_TUNING_CONFIG
-    samples = _residual_training_samples(conn, market)
+    samples, diagnostics = _residual_training_samples(conn, market)
     if len(samples) < 20:
         return {
             "residual_rows": 0,
@@ -816,6 +847,7 @@ def evaluate_market_residual_model(
             "residual_rmse": None,
             "residual_bias": None,
             "residual_directional_accuracy": None,
+            "residual_training_sample_diagnostics": diagnostics.to_dict(),
         }
     metrics = _evaluate_walk_forward_samples(f"residual:{market}", samples, config=tuning)
     return {
@@ -834,6 +866,7 @@ def evaluate_market_residual_model(
         "residual_skipped_segments": metrics.get("skipped_segments"),
         "residual_seasons": metrics.get("seasons"),
         "residual_segments": metrics.get("segments"),
+        "residual_training_sample_diagnostics": diagnostics.to_dict(),
     }
 
 
@@ -885,8 +918,15 @@ def _standardize_feature_rows(xs: list[list[float]]) -> tuple[list[float], list[
     return means, scales, standardized
 
 
-def _training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSample]:
+def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
+    cache = _connection_training_cache_bucket(conn, "training_samples")
+    cache_key = ("base", str(market))
+    if cache_key in cache:
+        return cache[cache_key]  # type: ignore[return-value]
     samples: list[TrainingSample] = []
+    candidate_rows = 0
+    skipped_before_training_start = 0
+    skipped_incomplete_context = 0
     training_start = _training_start_date()
     players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
     for player in players:
@@ -894,8 +934,13 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSam
         values = [_market_value(row, market) for row in rows]
         minutes = [float(row["minutes"]) for row in rows]
         for idx in range(5, len(rows)):
+            candidate_rows += 1
             game_date = str(rows[idx]["game_date"])
             if _before_training_start(game_date, training_start):
+                skipped_before_training_start += 1
+                continue
+            if not _has_complete_training_context(rows[idx]):
+                skipped_incomplete_context += 1
                 continue
             history = values[max(0, idx - 10):idx]
             minute_history = minutes[max(0, idx - 10):idx]
@@ -922,15 +967,31 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSam
                     baseline=float(features[FEATURE_NAMES.index("last_10_avg")]),
                 )
             )
-    return samples
+    diagnostics = TrainingSampleDiagnostics(
+        candidate_rows=candidate_rows,
+        included_rows=len(samples),
+        skipped_before_training_start=skipped_before_training_start,
+        skipped_incomplete_context=skipped_incomplete_context,
+    )
+    cache[cache_key] = (samples, diagnostics)
+    return samples, diagnostics
 
 
 def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
-    return [(sample.features, sample.target) for sample in _training_samples(conn, market)]
+    samples, _diagnostics = _training_samples(conn, market)
+    return [(sample.features, sample.target) for sample in samples]
 
 
-def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[TrainingSample]:
+def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
+    cache = _connection_training_cache_bucket(conn, "residual_training_samples")
+    cache_key = ("residual", str(market))
+    if cache_key in cache:
+        return cache[cache_key]  # type: ignore[return-value]
     samples: list[TrainingSample] = []
+    candidate_rows = 0
+    skipped_before_training_start = 0
+    skipped_incomplete_context = 0
+    skipped_missing_snapshot = 0
     training_start = _training_start_date()
     rows = conn.execute(
         """
@@ -941,7 +1002,9 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[Tr
             pl.market,
             pl.line,
             sp.actual_result,
-            g.game_date
+            g.game_date,
+            g.spread_home,
+            g.game_total
         FROM settled_props sp
         JOIN prop_lines pl ON pl.id = sp.prop_line_id
         JOIN games g ON g.id = pl.game_id
@@ -952,8 +1015,13 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[Tr
         (market,),
     ).fetchall()
     for row in rows:
+        candidate_rows += 1
         game_date = str(row["game_date"])
         if _before_training_start(game_date, training_start):
+            skipped_before_training_start += 1
+            continue
+        if not _has_complete_training_context(row):
+            skipped_incomplete_context += 1
             continue
         snapshot = feature_snapshot(
             conn,
@@ -965,6 +1033,7 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[Tr
             use_live_minutes_context=False,
         )
         if not snapshot.values:
+            skipped_missing_snapshot += 1
             continue
         target = float(row["actual_result"]) - float(row["line"])
         samples.append(
@@ -977,11 +1046,33 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[Tr
                 baseline=0.0,
             )
         )
-    return samples
+    diagnostics = TrainingSampleDiagnostics(
+        candidate_rows=candidate_rows,
+        included_rows=len(samples),
+        skipped_before_training_start=skipped_before_training_start,
+        skipped_incomplete_context=skipped_incomplete_context,
+        skipped_missing_snapshot=skipped_missing_snapshot,
+    )
+    cache[cache_key] = (samples, diagnostics)
+    return samples, diagnostics
 
 
 def _residual_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
-    return [(sample.features, sample.target) for sample in _residual_training_samples(conn, market)]
+    samples, _diagnostics = _residual_training_samples(conn, market)
+    return [(sample.features, sample.target) for sample in samples]
+
+
+def _has_complete_training_context(row: sqlite3.Row) -> bool:
+    spread_home = row["spread_home"] if "spread_home" in row.keys() else None
+    game_total = row["game_total"] if "game_total" in row.keys() else None
+    if spread_home is None:
+        return False
+    if game_total is None:
+        return False
+    try:
+        return float(game_total) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _evaluate_walk_forward_samples(

@@ -2014,6 +2014,30 @@ function ModelsView({
               <Metric label="Bias" value={formatMetricSigned(overallMetric?.bias, 3)} />
               <Metric label="Base bias" value={formatMetricSigned(overallMetric?.baseline_bias, 3)} />
             </div>
+            <div className="detail-grid model-validation-grid">
+              <Metric
+                label="Train kept"
+                value={formatTrainingKept(
+                  overallMetric?.training_sample_diagnostics?.included_rows,
+                  overallMetric?.training_sample_diagnostics?.candidate_rows
+                )}
+              />
+              <Metric
+                label="Ctx skips"
+                value={formatCount(overallMetric?.training_sample_diagnostics?.skipped_incomplete_context)}
+              />
+              <Metric
+                label="Residual kept"
+                value={formatTrainingKept(
+                  overallMetric?.residual_training_sample_diagnostics?.included_rows,
+                  overallMetric?.residual_training_sample_diagnostics?.candidate_rows
+                )}
+              />
+              <Metric
+                label="Residual ctx skips"
+                value={formatCount(overallMetric?.residual_training_sample_diagnostics?.skipped_incomplete_context)}
+              />
+            </div>
           </div>
           <div className="model-card">
             <p className="eyebrow">Market metrics</p>
@@ -2034,6 +2058,10 @@ function ModelsView({
                     <th>Direction</th>
                     <th>Segments</th>
                     <th>Skipped</th>
+                    <th>Train kept</th>
+                    <th>Ctx skips</th>
+                    <th>Residual kept</th>
+                    <th>Residual ctx skips</th>
                     <th>Settled</th>
                     <th>Win rate</th>
                     <th>Cal gap</th>
@@ -2059,6 +2087,10 @@ function ModelsView({
                       <td>{formatPercent(metric.directional_accuracy ?? undefined)}</td>
                       <td>{formatCount(metric.segment_count)}</td>
                       <td>{formatCount(metric.skipped_segments)}</td>
+                      <td>{formatTrainingKept(metric.training_sample_diagnostics?.included_rows, metric.training_sample_diagnostics?.candidate_rows)}</td>
+                      <td>{formatCount(metric.training_sample_diagnostics?.skipped_incomplete_context)}</td>
+                      <td>{formatTrainingKept(metric.residual_training_sample_diagnostics?.included_rows, metric.residual_training_sample_diagnostics?.candidate_rows)}</td>
+                      <td>{formatCount(metric.residual_training_sample_diagnostics?.skipped_incomplete_context)}</td>
                       <td>{formatCount(metric.settled_rows)}</td>
                       <td>{formatMetricPercent(metric.side_accuracy)}</td>
                       <td>{formatMetricPercent(metric.calibration_gap)}</td>
@@ -2070,7 +2102,7 @@ function ModelsView({
                   ))}
                   {!playerMetrics.length && (
                     <tr>
-                      <td colSpan={18}>No model metrics yet.</td>
+                      <td colSpan={24}>No model metrics yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -4256,6 +4288,15 @@ function latestRunsByModel(runs: ModelRun[]) {
 
 function formatMetricMae(run: ModelRun, market: string) {
   return formatNumber(run.metrics[market]?.mae ?? null);
+}
+
+function formatTrainingKept(included?: number | null, candidate?: number | null) {
+  if (included == null && candidate == null) {
+    return "N/A";
+  }
+  const includedLabel = included == null ? "N/A" : formatCount(included);
+  const candidateLabel = candidate == null ? "N/A" : formatCount(candidate);
+  return `${includedLabel}/${candidateLabel}`;
 }
 
 function formatAverageDirection(run: ModelRun) {

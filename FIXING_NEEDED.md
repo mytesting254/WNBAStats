@@ -45,11 +45,13 @@
 ## Current Model Quality Follow-Up
 
 - [ ] Prioritize settled prop history expansion before further model complexity work; current residual markets are still thin (`points 354`, `rebounds 299`, `threes 204`, `assists 67`, `PRA 71`, `PR 37`, `PA 34`, `RA 26`).
+- [ ] Make training-row quality explicit in `model_runs` / Model Lab: track per-market candidate rows, included rows, and exclusion reasons before changing model complexity further.
 - [x] Import at least one additional full WNBA season of player/game history to improve early-season stability, rookie handling, and matchup/context coverage.
 - [x] Upgrade evaluation from simple chronological 80/20 holdout to season-aware walk-forward backtests segmented by market and season/month window.
 - [x] Add explicit baseline comparisons in Model Lab / reporting against `last_10_avg` and the component model so learned-model gains are measurable.
 - [ ] Separate model strategy by market depth: keep stronger learned/residual behavior for deeper markets and use more conservative shrinkage for sparse combo markets.
 - [ ] Focus the next feature pass on minutes and role-change prediction quality before trying more complex regressors.
+- [ ] Add stricter row-quality gates after diagnostics land: ambiguous player/team identity, incomplete context, and weak historical windows should be excluded intentionally instead of blended silently.
 - [ ] Review active-slate props after the residual-model rollout to see which markets still look too aggressive or too weak.
 - [ ] Re-run before/after projection comparison after the archetype restore to quantify how many rows moved.
 - [ ] Measure how often the residual model changes recommended side versus the raw stat model.

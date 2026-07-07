@@ -616,6 +616,22 @@ export type RosterPlayer = {
 };
 
 export type ModelRunMetric = {
+  training_sample_diagnostics?: {
+    candidate_rows: number;
+    included_rows: number;
+    skipped_before_training_start: number;
+    skipped_missing_history_window?: number;
+    skipped_incomplete_context?: number;
+    skipped_missing_snapshot?: number;
+  };
+  residual_training_sample_diagnostics?: {
+    candidate_rows: number;
+    included_rows: number;
+    skipped_before_training_start: number;
+    skipped_missing_history_window?: number;
+    skipped_incomplete_context?: number;
+    skipped_missing_snapshot?: number;
+  };
   rows: number;
   mae: number | null;
   rmse: number | null;
