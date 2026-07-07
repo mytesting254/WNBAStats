@@ -9,18 +9,22 @@ USE_LIVE_CONTAINER="${WNBA_USE_LIVE_CONTAINER:-false}"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/live_daily_props.sh settle|odds-if-matchups
+Usage: scripts/live_daily_props.sh settle|train-model|settle-and-train|odds-if-matchups
 
 Environment:
   WNBA_API_BASE  Backend base URL. Default: http://127.0.0.1:8010
   WNBA_API_KEY   Shared API key for protected mutation routes.
+  WNBA_TRAIN_POLL_TIMEOUT_SECONDS
+                Max seconds to wait for background model training. Default: 1200
+  WNBA_TRAIN_POLL_INTERVAL_SECONDS
+                Seconds between training-status polls. Default: 5
   WNBA_USE_LIVE_CONTAINER=true
                 Run the HTTP calls inside the detected backend container so
                 API_KEY and ODDS_API_KEY are read from the container env.
 
 Cron example for 2am/3am Eastern:
   CRON_TZ=America/New_York
-  0 2 * * * cd /root/WNBAStats && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh settle >> /var/log/wnba-daily-props.log 2>&1
+  0 2 * * * cd /root/WNBAStats && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh settle-and-train >> /var/log/wnba-daily-props.log 2>&1
   0 3 * * * cd /root/WNBAStats && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh odds-if-matchups >> /var/log/wnba-daily-props.log 2>&1
 EOF
 }
@@ -44,6 +48,60 @@ api_post() {
   curl "${curl_args[@]}" -X POST "${API_BASE}${path}"
 }
 
+train_started_at() {
+  python3 -c 'import json, sys; payload = json.load(sys.stdin); print(payload.get("started_at") or "")'
+}
+
+train_message() {
+  python3 -c 'import json, sys; payload = json.load(sys.stdin); print(payload.get("message") or "")'
+}
+
+train_status() {
+  python3 -c 'import json, sys; payload = json.load(sys.stdin); print(payload.get("status") or "")'
+}
+
+model_health_summary() {
+  python3 -c 'import json, sys; payload = json.load(sys.stdin); job = payload.get("model_training") or {}; print(json.dumps({"running": job.get("running"), "started_at": job.get("started_at"), "status": job.get("status"), "last_error": job.get("last_error"), "finished_at": job.get("finished_at"), "last_result": job.get("last_result")}, separators=(",", ":")))'
+}
+
+wait_for_model_training() {
+  local started_at="$1"
+  local timeout_seconds="${WNBA_TRAIN_POLL_TIMEOUT_SECONDS:-1200}"
+  local poll_interval="${WNBA_TRAIN_POLL_INTERVAL_SECONDS:-5}"
+  local deadline=$(( $(date +%s) + timeout_seconds ))
+
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    local payload
+    payload="$(api_get "/api/ops/health")"
+    local summary
+    summary="$(printf '%s' "$payload" | model_health_summary)"
+    local current_started_at
+    current_started_at="$(printf '%s' "$summary" | python3 -c 'import json, sys; print((json.load(sys.stdin).get("started_at") or ""))')"
+    if [ "$current_started_at" != "$started_at" ]; then
+      sleep "$poll_interval"
+      continue
+    fi
+    local last_error
+    last_error="$(printf '%s' "$summary" | python3 -c 'import json, sys; print((json.load(sys.stdin).get("last_error") or ""))')"
+    if [ -n "$last_error" ]; then
+      echo "[$(timestamp)] model training failed: $last_error" >&2
+      printf '%s\n' "$summary" >&2
+      return 1
+    fi
+    local running
+    running="$(printf '%s' "$summary" | python3 -c 'import json, sys; print("true" if bool(json.load(sys.stdin).get("running")) else "false")')"
+    if [ "$running" = "false" ]; then
+      echo "[$(timestamp)] model training finished"
+      printf '%s\n' "$summary"
+      return 0
+    fi
+    sleep "$poll_interval"
+  done
+
+  echo "[$(timestamp)] model training timed out after ${timeout_seconds}s" >&2
+  return 1
+}
+
 matchup_count() {
   python3 -c 'import json, sys; payload = json.load(sys.stdin); print(len(payload) if isinstance(payload, list) else 0)'
 }
@@ -59,6 +117,31 @@ run_settle() {
   echo "[$(timestamp)] settling completed props"
   api_post "/api/settle-props"
   echo
+}
+
+run_train_model() {
+  require_api_key_for_prod_hint
+  echo "[$(timestamp)] queueing model training"
+  local payload
+  payload="$(api_post "/api/models/train")"
+  printf '%s\n' "$payload"
+  local started_at
+  started_at="$(printf '%s' "$payload" | train_started_at)"
+  if [ -z "$started_at" ]; then
+    echo "[$(timestamp)] model training response did not include started_at" >&2
+    return 1
+  fi
+  local message
+  message="$(printf '%s' "$payload" | train_message)"
+  if [ -n "$message" ]; then
+    echo "[$(timestamp)] $message"
+  fi
+  wait_for_model_training "$started_at"
+}
+
+run_settle_and_train() {
+  run_settle
+  run_train_model
 }
 
 run_odds_if_matchups() {
@@ -87,6 +170,12 @@ main() {
   case "${1:-}" in
     settle)
       run_settle
+      ;;
+    train-model)
+      run_train_model
+      ;;
+    settle-and-train)
+      run_settle_and_train
       ;;
     odds-if-matchups)
       run_odds_if_matchups

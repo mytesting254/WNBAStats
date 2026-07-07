@@ -140,14 +140,15 @@ active runtime root returned by `host-runtime-info` / `live_env.sh`.
 
 ### Daily Prop Settlement And Odds Refresh
 
-Use host cron for the daily prop workflow. The settlement job runs at 2am
-Eastern, then the Odds API refresh runs at 3am Eastern only when `/api/matchups`
-has scheduled games.
+Use host cron for the daily prop workflow. The 2am Eastern job now settles
+completed props and waits for model training to finish. The Odds API refresh
+still runs at 3am Eastern only when `/api/matchups` has scheduled games, so the
+newly rebuilt props use the updated trained models.
 
 Install with `crontab -e` on the Docker/Coolify host:
 
 ```cron
-0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 02 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh settle >> /var/log/wnba-daily-props.log 2>&1
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 02 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh settle-and-train >> /var/log/wnba-daily-props.log 2>&1
 0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 03 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh odds-if-matchups >> /var/log/wnba-daily-props.log 2>&1
 ```
 
@@ -157,6 +158,12 @@ environment. If cron runs from a different checkout path, adjust `cd`.
 Debian/Ubuntu cron does not support `CRON_TZ` for scheduling, so the hourly
 entries use `date` to run only when the current `America/New_York` hour is 2am
 or 3am. Keep the percent signs escaped when editing the crontab.
+
+`settle-and-train` polls `/api/ops/health` until the background
+`/api/models/train` job finishes or times out. Optional tuning:
+
+- `WNBA_TRAIN_POLL_TIMEOUT_SECONDS` defaults to `1200`
+- `WNBA_TRAIN_POLL_INTERVAL_SECONDS` defaults to `5`
 
 A copy/paste template is also available at `deploy/wnba-daily-props.cron`.
 
