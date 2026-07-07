@@ -36,6 +36,7 @@ from backend.app.covers_import import (
 )
 from backend.app.db import connect, init_db
 from backend.app.espn_history import import_espn_player_boxscores, import_espn_scoreboard
+from backend.app.history_expansion import audit_settled_prop_history_gaps, expand_settled_prop_history
 from backend.app.game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
 from backend.app.game_predictions import evaluate_game_residual_models, project_game
 from backend.app.history_import import determine_ats_result
@@ -1662,6 +1663,66 @@ def test_training_samples_skip_ambiguous_historical_team_identity() -> None:
 
     diagnostics = metrics["training_sample_diagnostics"]
     assert diagnostics["skipped_ambiguous_team_identity"] > 0
+
+
+def test_audit_settled_prop_history_gaps_reports_missing_dates() -> None:
+    load_test_history()
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9801, 100, 1001, 'DraftKings', 'points', 21.5, -110, -110, '2026-06-01T00:00:00Z')
+            """
+        )
+        audit = audit_settled_prop_history_gaps(conn, start_date="2026-04-01", end_date="2026-06-30")
+
+    assert audit["missing_dates_count"] >= 1
+    assert "2026-04-01" in audit["missing_dates"]
+    assert audit["strict_ok"] is False
+
+
+def test_expand_settled_prop_history_targets_missing_dates(monkeypatch) -> None:
+    load_test_history()
+    scoreboard_calls = []
+    boxscore_calls = []
+    settlement_calls = []
+
+    def fake_scoreboard(conn, season, force_refresh=False, selected_date=None):
+        scoreboard_calls.append((season, force_refresh, selected_date))
+        return {"season": season, "selected_date": selected_date}
+
+    def fake_boxscores(conn, season, force_refresh=False, missing_only=False, selected_date=None):
+        boxscore_calls.append((season, force_refresh, missing_only, selected_date))
+        return {"season": season, "selected_date": selected_date, "missing_only": missing_only}
+
+    def fake_settle(conn, *, selected_date=None, selected_dates=None):
+        settlement_calls.append((selected_date, selected_dates))
+        return {"settled": 3, "selected_dates": selected_dates or []}
+
+    monkeypatch.setattr("backend.app.history_expansion.import_espn_scoreboard", fake_scoreboard)
+    monkeypatch.setattr("backend.app.history_expansion.import_espn_player_boxscores", fake_boxscores)
+    monkeypatch.setattr("backend.app.history_expansion.settle_completed_props", fake_settle)
+
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9802, 100, 1001, 'DraftKings', 'points', 22.5, -110, -110, '2026-06-01T00:00:00Z')
+            """
+        )
+        result = expand_settled_prop_history(
+            conn,
+            start_date="2026-04-01",
+            end_date="2026-06-30",
+            force_refresh=False,
+        )
+
+    assert result["attempted_dates"] == ["2026-04-01"]
+    assert scoreboard_calls == [(2026, False, "2026-04-01")]
+    assert boxscore_calls == [(2026, False, True, "2026-04-01")]
+    assert settlement_calls == [(None, ["2026-04-01"])]
 
 
 def test_training_sample_weights_bias_fit_toward_recent_results() -> None:

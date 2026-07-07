@@ -45,6 +45,7 @@
 ## Current Model Quality Follow-Up
 
 - [ ] Prioritize settled prop history expansion before further model complexity work; current residual markets are still thin (`points 354`, `rebounds 299`, `threes 204`, `assists 67`, `PRA 71`, `PR 37`, `PA 34`, `RA 26`).
+- [x] Add a repeatable settled-history gap audit/backfill workflow so missing settled prop dates can be expanded without manual date-by-date repair.
 - [ ] Make training-row quality explicit in `model_runs` / Model Lab: track per-market candidate rows, included rows, and exclusion reasons before changing model complexity further.
 - [x] Import at least one additional full WNBA season of player/game history to improve early-season stability, rookie handling, and matchup/context coverage.
 - [x] Upgrade evaluation from simple chronological 80/20 holdout to season-aware walk-forward backtests segmented by market and season/month window.
