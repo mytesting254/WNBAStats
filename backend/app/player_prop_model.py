@@ -1444,13 +1444,16 @@ def _minutes_training_rows(
             recent_minutes_avg = sum(newest_minutes[:5]) / min(len(newest_minutes), 5)
             last_10_minutes_avg = sum(newest_minutes) / len(newest_minutes)
             recent_absence_days = _days_between_game_dates(previous_game_date, str(current["game_date"]))
-            injury = _injury_adjustment_for_prop(
-                conn,
-                player_id=int(current["player_id"]),
-                team_id=int(current["team_id"]),
-                rotation_role=str(current["rotation_role"] or "starter"),
-                as_of_date=str(current["game_date"]),
-            )
+            # Historical minutes-model training already uses completed boxscore rows.
+            # Replaying live teammate-injury context across every historical sample is
+            # extremely expensive and not required to classify the observed row.
+            injury = {
+                "status": "available",
+                "availability_factor": 1.0,
+                "usage_multiplier": 1.0,
+                "minutes_delta": 0.0,
+                "hard_cap_zero": False,
+            }
             role_state = _classify_minutes_role(
                 rotation_role=str(current["rotation_role"] or "starter"),
                 recent_minutes_avg=recent_minutes_avg,
