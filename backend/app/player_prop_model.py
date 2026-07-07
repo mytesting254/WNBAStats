@@ -427,6 +427,7 @@ def feature_snapshot(
     before_game_date: str | None = None,
     allow_training: bool = True,
     use_injury_context: bool = True,
+    use_live_minutes_context: bool = True,
     runtime_cache: dict[str, dict[tuple, object]] | None = None,
 ) -> FeatureSnapshot:
     shared = _shared_projection_context(
@@ -436,6 +437,7 @@ def feature_snapshot(
         before_game_date=before_game_date,
         allow_training=allow_training,
         use_injury_context=use_injury_context,
+        use_live_minutes_context=use_live_minutes_context,
         runtime_cache=runtime_cache,
     )
     context = shared["context"]
@@ -568,6 +570,7 @@ def _shared_projection_context(
     before_game_date: str | None,
     allow_training: bool,
     use_injury_context: bool = True,
+    use_live_minutes_context: bool = True,
     runtime_cache: dict[str, dict[tuple, object]] | None = None,
 ) -> dict[str, object]:
     cache = runtime_cache.setdefault("shared_projection_context", {}) if runtime_cache is not None else None
@@ -577,6 +580,7 @@ def _shared_projection_context(
         str(before_game_date or ""),
         bool(allow_training),
         bool(use_injury_context),
+        bool(use_live_minutes_context),
     )
     if cache is not None and cache_key in cache:
         return cache[cache_key]  # type: ignore[return-value]
@@ -635,7 +639,7 @@ def _shared_projection_context(
             "hard_cap_zero": False,
         }
     projected_minutes, minutes_note = _project_minutes(
-        conn,
+        conn if use_live_minutes_context else None,
         player_id=player_id,
         game_id=game_id,
         rotation_role=rotation_role,
@@ -653,7 +657,7 @@ def _shared_projection_context(
             reference_game_date,
         ),
         before_game_date=before_game_date,
-        allow_training=allow_training,
+        allow_training=allow_training and use_live_minutes_context,
     )
     usage_multiplier, adjustment_note = _manual_adjustment(conn, player_id)
     shared = {
@@ -958,6 +962,7 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[Tr
             int(row["game_id"]),
             before_game_date=str(row["game_date"]) if row["game_date"] is not None else None,
             use_injury_context=False,
+            use_live_minutes_context=False,
         )
         if not snapshot.values:
             continue
