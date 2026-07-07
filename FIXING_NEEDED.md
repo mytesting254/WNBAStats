@@ -51,7 +51,7 @@
 - [x] Add explicit baseline comparisons in Model Lab / reporting against `last_10_avg` and the component model so learned-model gains are measurable.
 - [x] Separate model strategy by market depth: keep stronger learned/residual behavior for deeper markets and use more conservative shrinkage for sparse combo markets.
 - [x] Focus the next feature pass on minutes and role-change prediction quality before trying more complex regressors.
-- [ ] Add stricter row-quality gates after diagnostics land: ambiguous player/team identity, incomplete context, and weak historical windows should be excluded intentionally instead of blended silently.
+- [x] Add stricter row-quality gates after diagnostics land: ambiguous player/team identity, incomplete context, and weak historical windows should be excluded intentionally instead of blended silently.
 - [ ] Review active-slate props after the residual-model rollout to see which markets still look too aggressive or too weak.
 - [ ] Re-run before/after projection comparison after the archetype restore to quantify how many rows moved.
 - [ ] Measure how often the residual model changes recommended side versus the raw stat model.

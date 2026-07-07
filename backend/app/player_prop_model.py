@@ -159,6 +159,7 @@ class TrainingSampleDiagnostics:
     skipped_before_training_start: int = 0
     skipped_missing_history_window: int = 0
     skipped_incomplete_context: int = 0
+    skipped_ambiguous_team_identity: int = 0
     skipped_missing_snapshot: int = 0
 
     def to_dict(self) -> dict[str, int]:
@@ -168,6 +169,7 @@ class TrainingSampleDiagnostics:
             "skipped_before_training_start": int(self.skipped_before_training_start),
             "skipped_missing_history_window": int(self.skipped_missing_history_window),
             "skipped_incomplete_context": int(self.skipped_incomplete_context),
+            "skipped_ambiguous_team_identity": int(self.skipped_ambiguous_team_identity),
             "skipped_missing_snapshot": int(self.skipped_missing_snapshot),
         }
 
@@ -993,7 +995,9 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[Train
     samples: list[TrainingSample] = []
     candidate_rows = 0
     skipped_before_training_start = 0
+    skipped_missing_history_window = 0
     skipped_incomplete_context = 0
+    skipped_ambiguous_team_identity = 0
     training_start = _training_start_date()
     players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
     for player in players:
@@ -1006,12 +1010,18 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[Train
             if _before_training_start(game_date, training_start):
                 skipped_before_training_start += 1
                 continue
+            if not _has_unambiguous_historical_team(rows[idx]):
+                skipped_ambiguous_team_identity += 1
+                continue
             if not _has_complete_training_context(rows[idx]):
                 skipped_incomplete_context += 1
                 continue
             history = values[max(0, idx - 10):idx]
             minute_history = minutes[max(0, idx - 10):idx]
             recent_rows = rows[max(0, idx - 10):idx]
+            if not _has_strong_training_history_window(history, minute_history):
+                skipped_missing_history_window += 1
+                continue
             previous_game_date = str(rows[idx - 1]["game_date"]) if idx > 0 else None
             features = _historical_training_features(
                 conn,
@@ -1038,7 +1048,9 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[Train
         candidate_rows=candidate_rows,
         included_rows=len(samples),
         skipped_before_training_start=skipped_before_training_start,
+        skipped_missing_history_window=skipped_missing_history_window,
         skipped_incomplete_context=skipped_incomplete_context,
+        skipped_ambiguous_team_identity=skipped_ambiguous_team_identity,
     )
     cache[cache_key] = (samples, diagnostics)
     return samples, diagnostics
@@ -1057,7 +1069,9 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[l
     samples: list[TrainingSample] = []
     candidate_rows = 0
     skipped_before_training_start = 0
+    skipped_missing_history_window = 0
     skipped_incomplete_context = 0
+    skipped_ambiguous_team_identity = 0
     skipped_missing_snapshot = 0
     training_start = _training_start_date()
     rows = conn.execute(
@@ -1087,8 +1101,23 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[l
         if _before_training_start(game_date, training_start):
             skipped_before_training_start += 1
             continue
+        training_row = _player_training_row_for_game(conn, int(row["player_id"]), int(row["game_id"]))
+        if training_row is None or not _has_unambiguous_historical_team(training_row):
+            skipped_ambiguous_team_identity += 1
+            continue
         if not _has_complete_training_context(row):
             skipped_incomplete_context += 1
+            continue
+        recent_rows = _player_recent_feature_rows(
+            conn,
+            int(row["player_id"]),
+            str(row["game_date"]) if row["game_date"] is not None else None,
+            exclude_game_id=int(row["game_id"]),
+        )
+        recent_values = [_market_value(prior_row, market) for prior_row in recent_rows]
+        recent_minutes = [float(prior_row["minutes"]) for prior_row in recent_rows]
+        if not _has_strong_training_history_window(recent_values, recent_minutes):
+            skipped_missing_history_window += 1
             continue
         snapshot = feature_snapshot(
             conn,
@@ -1117,7 +1146,9 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[l
         candidate_rows=candidate_rows,
         included_rows=len(samples),
         skipped_before_training_start=skipped_before_training_start,
+        skipped_missing_history_window=skipped_missing_history_window,
         skipped_incomplete_context=skipped_incomplete_context,
+        skipped_ambiguous_team_identity=skipped_ambiguous_team_identity,
         skipped_missing_snapshot=skipped_missing_snapshot,
     )
     cache[cache_key] = (samples, diagnostics)
@@ -1140,6 +1171,14 @@ def _has_complete_training_context(row: sqlite3.Row) -> bool:
         return float(game_total) > 0
     except (TypeError, ValueError):
         return False
+
+
+def _has_strong_training_history_window(history: list[float], minutes: list[float]) -> bool:
+    if len(history) < 7 or len(minutes) < 7:
+        return False
+    recent_minutes = list(minutes[-7:])
+    recent_active_games = sum(1 for value in recent_minutes if float(value) >= 8.0)
+    return recent_active_games >= 4
 
 
 def _evaluate_walk_forward_samples(
@@ -1849,10 +1888,11 @@ def _game_total_or_neutral(conn: sqlite3.Connection, game_total: float | None) -
 
 
 def _historical_game_context(row: sqlite3.Row) -> dict[str, float | int | bool | str | None]:
-    is_home = int(row["team_id"]) == int(row["home_team_id"])
+    team_id = _historical_row_team_id(row)
+    is_home = team_id == int(row["home_team_id"])
     spread_home = float(row["spread_home"]) if row["spread_home"] is not None else None
     return {
-        "team_id": int(row["team_id"]),
+        "team_id": team_id,
         "opponent_id": int(row["away_team_id"] if is_home else row["home_team_id"]),
         "is_home": is_home,
         "rest_days": int(row["rest_days_home"] if is_home else row["rest_days_away"] or 2),
@@ -2732,7 +2772,23 @@ def _player_training_rows(conn: sqlite3.Connection, player_id: int) -> list[sqli
                 g.game_total,
                 p.position,
                 p.team_id,
-                p.rotation_role
+                p.rotation_role,
+                COALESCE(
+                    (
+                        SELECT h.team_id
+                        FROM player_team_history h
+                        LEFT JOIN games hg ON hg.id = h.game_id
+                        WHERE h.player_id = s.player_id
+                          AND (
+                            h.game_id IS NULL
+                            OR hg.game_date IS NULL
+                            OR hg.game_date <= g.game_date
+                          )
+                        ORDER BY hg.game_date DESC, h.id DESC
+                        LIMIT 1
+                    ),
+                    p.team_id
+                ) AS resolved_team_id
             FROM player_game_stats s
             JOIN games g ON g.id = s.game_id
             JOIN players p ON p.id = s.player_id
@@ -2742,6 +2798,17 @@ def _player_training_rows(conn: sqlite3.Connection, player_id: int) -> list[sqli
             (int(player_id),),
         ).fetchall()
     return cache[key]  # type: ignore[return-value]
+
+
+def _player_training_row_for_game(
+    conn: sqlite3.Connection,
+    player_id: int,
+    game_id: int,
+) -> sqlite3.Row | None:
+    for row in _player_training_rows(conn, player_id):
+        if int(row["game_id"]) == int(game_id):
+            return row
+    return None
 
 
 def _cached_pace_factor(conn: sqlite3.Connection, team_id: int, opponent_id: int) -> float:
@@ -2911,8 +2978,20 @@ def _cached_player_h2h_rows(
 
 
 def _historical_row_opponent_id(row: sqlite3.Row) -> int:
-    is_home = int(row["team_id"]) == int(row["home_team_id"])
+    team_id = _historical_row_team_id(row)
+    is_home = team_id == int(row["home_team_id"])
     return int(row["away_team_id"] if is_home else row["home_team_id"])
+
+
+def _historical_row_team_id(row: sqlite3.Row) -> int:
+    if "resolved_team_id" in row.keys() and row["resolved_team_id"] is not None:
+        return int(row["resolved_team_id"])
+    return int(row["team_id"])
+
+
+def _has_unambiguous_historical_team(row: sqlite3.Row) -> bool:
+    team_id = _historical_row_team_id(row)
+    return team_id in {int(row["home_team_id"]), int(row["away_team_id"])}
 
 
 def _common_opponent_factor_from_rows(

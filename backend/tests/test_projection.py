@@ -1644,9 +1644,24 @@ def test_market_evaluation_reports_training_sample_diagnostics() -> None:
     assert diagnostics["candidate_rows"] >= diagnostics["included_rows"] >= 0
     assert residual_diagnostics["candidate_rows"] >= residual_diagnostics["included_rows"] >= 0
     assert "skipped_before_training_start" in diagnostics
+    assert "skipped_missing_history_window" in diagnostics
     assert "skipped_incomplete_context" in diagnostics
+    assert "skipped_ambiguous_team_identity" in diagnostics
     assert "skipped_incomplete_context" in residual_diagnostics
+    assert "skipped_missing_history_window" in residual_diagnostics
+    assert "skipped_ambiguous_team_identity" in residual_diagnostics
     assert "skipped_missing_snapshot" in residual_diagnostics
+
+
+def test_training_samples_skip_ambiguous_historical_team_identity() -> None:
+    load_test_history()
+    with connect() as conn:
+        conn.execute("INSERT INTO teams (id, name, abbreviation) VALUES (999, 'Ambiguous Team', 'AMB')")
+        conn.execute("UPDATE players SET team_id = 999 WHERE id = 1001")
+        metrics = player_prop_model_module.evaluate_market_model(conn, "points")
+
+    diagnostics = metrics["training_sample_diagnostics"]
+    assert diagnostics["skipped_ambiguous_team_identity"] > 0
 
 
 def test_training_sample_weights_bias_fit_toward_recent_results() -> None:
