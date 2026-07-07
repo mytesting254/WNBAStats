@@ -788,8 +788,7 @@ def _train_market_model_uncached(
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
     samples, _diagnostics = _training_samples(conn, market)
-    rows = [(sample.features, sample.target) for sample in samples]
-    model = _fit_model_from_rows(market, rows, config=config)
+    model = _fit_model_from_samples(market, samples, config=config)
     if model is not None:
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
         cache_key = _model_cache_key(conn, db_path, market, config or DEFAULT_TUNING_CONFIG, kind="market")
@@ -803,8 +802,7 @@ def _train_market_residual_model_uncached(
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
     samples, _diagnostics = _residual_training_samples(conn, market)
-    rows = [(sample.features, sample.target) for sample in samples]
-    model = _fit_model_from_rows(f"residual:{market}", rows, config=config)
+    model = _fit_model_from_samples(f"residual:{market}", samples, config=config)
     if model is not None:
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
         cache_key = _model_cache_key(conn, db_path, f"residual:{market}", config or DEFAULT_TUNING_CONFIG, kind="residual")
@@ -874,15 +872,16 @@ def _fit_model_from_rows(
     market: str,
     rows: list[tuple[list[float], float]],
     config: ModelTuningConfig | None = None,
+    weights: list[float] | None = None,
 ) -> RidgeModel | None:
     tuning = config or DEFAULT_TUNING_CONFIG
     if len(rows) < 20:
         return None
     xs = [row[0] for row in rows]
     ys = [row[1] for row in rows]
-    means, scales, standardized = _standardize_feature_rows(xs)
+    means, scales, standardized = _standardize_feature_rows(xs, weights=weights)
 
-    coefs = _ridge_regression(standardized, ys, penalty=tuning.ridge_penalty)
+    coefs = _ridge_regression(standardized, ys, penalty=tuning.ridge_penalty, weights=weights)
     return RidgeModel(
         market=market,
         rows=len(rows),
@@ -893,26 +892,80 @@ def _fit_model_from_rows(
     )
 
 
-def _standardize_feature_rows(xs: list[list[float]]) -> tuple[list[float], list[float], list[list[float]]]:
+def _fit_model_from_samples(
+    market: str,
+    samples: list[TrainingSample],
+    config: ModelTuningConfig | None = None,
+) -> RidgeModel | None:
+    rows = [(sample.features, sample.target) for sample in samples]
+    return _fit_model_from_rows(market, rows, config=config, weights=_training_sample_weights(samples))
+
+
+def _training_sample_weights(samples: list[TrainingSample]) -> list[float]:
+    if not samples:
+        return []
+    ordinals = [_training_sample_ordinal(sample) for sample in samples]
+    min_ordinal = min(ordinals)
+    span = max(max(ordinals) - min_ordinal, 1)
+    weights = []
+    for ordinal in ordinals:
+        recency = (ordinal - min_ordinal) / span
+        weights.append(1.0 + (recency * 1.5))
+    return weights
+
+
+def _training_sample_ordinal(sample: TrainingSample) -> int:
+    try:
+        return date.fromisoformat(sample.game_date).toordinal()
+    except ValueError:
+        return 0
+
+
+def _standardize_feature_rows(
+    xs: list[list[float]],
+    *,
+    weights: list[float] | None = None,
+) -> tuple[list[float], list[float], list[list[float]]]:
     if np is not None:
         design = np.asarray(xs, dtype=float)
-        means = design.mean(axis=0)
-        if design.shape[0] > 1:
-            scales = design.std(axis=0, ddof=1)
+        if weights is not None:
+            weight_array = np.asarray(weights, dtype=float)
+            weight_array = weight_array / max(weight_array.sum(), 1e-9)
+            means = np.average(design, axis=0, weights=weight_array)
+            centered = design - means
+            scales = np.sqrt(np.average(centered * centered, axis=0, weights=weight_array))
         else:
-            scales = np.ones(design.shape[1], dtype=float)
+            means = design.mean(axis=0)
+            if design.shape[0] > 1:
+                scales = design.std(axis=0, ddof=1)
+            else:
+                scales = np.ones(design.shape[1], dtype=float)
         scales = np.where(scales < 1.0, 1.0, scales)
         standardized = (design - means) / scales
         return means.tolist(), scales.tolist(), standardized.tolist()
 
-    means = [sum(values) / len(values) for values in zip(*xs)]
+    if weights is not None:
+        total_weight = max(sum(weights), 1e-9)
+        normalized = [float(weight) / total_weight for weight in weights]
+        means = [
+            sum(feature_row[idx] * normalized[row_idx] for row_idx, feature_row in enumerate(xs))
+            for idx in range(len(xs[0]))
+        ]
+    else:
+        means = [sum(values) / len(values) for values in zip(*xs)]
     scales = []
     standardized = []
     for features in xs:
         standardized.append([])
         for idx, value in enumerate(features):
             if len(scales) <= idx:
-                variance = sum((item[idx] - means[idx]) ** 2 for item in xs) / max(len(xs) - 1, 1)
+                if weights is not None:
+                    variance = sum(
+                        normalized[row_idx] * ((item[idx] - means[idx]) ** 2)
+                        for row_idx, item in enumerate(xs)
+                    )
+                else:
+                    variance = sum((item[idx] - means[idx]) ** 2 for item in xs) / max(len(xs) - 1, 1)
                 scales.append(max(variance ** 0.5, 1.0))
             standardized[-1].append((value - means[idx]) / scales[idx])
     return means, scales, standardized
@@ -1089,7 +1142,7 @@ def _evaluate_walk_forward_samples(
     for sample in ordered:
         grouped_segments.setdefault(sample.segment, []).append(sample)
 
-    history: list[tuple[list[float], float]] = []
+    history_samples: list[TrainingSample] = []
     evaluated_segments: list[dict[str, object]] = []
     season_rollup: dict[str, dict[str, float | int]] = {}
     errors: list[float] = []
@@ -1102,13 +1155,13 @@ def _evaluate_walk_forward_samples(
     skipped_segments = 0
 
     for segment, segment_samples in grouped_segments.items():
-        if len(history) < 20:
-            history.extend((sample.features, sample.target) for sample in segment_samples)
+        if len(history_samples) < 20:
+            history_samples.extend(segment_samples)
             skipped_segments += 1
             continue
-        model = _fit_model_from_rows(market, history, config=config)
+        model = _fit_model_from_samples(market, history_samples, config=config)
         if model is None:
-            history.extend((sample.features, sample.target) for sample in segment_samples)
+            history_samples.extend(segment_samples)
             skipped_segments += 1
             continue
         segment_errors: list[float] = []
@@ -1177,7 +1230,7 @@ def _evaluate_walk_forward_samples(
         season_bucket["baseline_mae_sum"] = float(season_bucket["baseline_mae_sum"]) + float(segment_metric["baseline_mae"]) * row_count
         season_bucket["baseline_rmse_sum"] = float(season_bucket["baseline_rmse_sum"]) + float(segment_metric["baseline_rmse"]) * row_count
         season_bucket["baseline_bias_sum"] = float(season_bucket["baseline_bias_sum"]) + float(segment_metric["baseline_bias"]) * row_count
-        history.extend((sample.features, sample.target) for sample in segment_samples)
+        history_samples.extend(segment_samples)
 
     row_count = len(errors)
     if row_count == 0:
@@ -1238,9 +1291,9 @@ def _evaluate_holdout_samples(
     if len(samples) < 20:
         return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
     split = max(int(len(samples) * 0.8), 10)
-    train_rows = [(sample.features, sample.target) for sample in samples[:split]]
+    train_samples = samples[:split]
     test_samples = samples[split:]
-    model = _fit_model_from_rows(market, train_rows, config=config)
+    model = _fit_model_from_samples(market, train_samples, config=config)
     if model is None or not test_samples:
         return {"rows": 0, "mae": None, "rmse": None, "bias": None, "directional_accuracy": None}
 
@@ -2066,28 +2119,46 @@ def _training_rows_slow(conn: sqlite3.Connection, market: str) -> list[tuple[lis
     return samples
 
 
-def _ridge_regression(xs: list[list[float]], ys: list[float], penalty: float) -> list[float]:
+def _ridge_regression(
+    xs: list[list[float]],
+    ys: list[float],
+    penalty: float,
+    weights: list[float] | None = None,
+) -> list[float]:
     if np is not None:
-        return _ridge_regression_numpy(xs, ys, penalty)
+        return _ridge_regression_numpy(xs, ys, penalty, weights=weights)
     feature_count = len(xs[0]) + 1
     matrix = [[0.0 for _ in range(feature_count)] for _ in range(feature_count)]
     vector = [0.0 for _ in range(feature_count)]
-    for features, target in zip(xs, ys):
+    if weights is None:
+        row_weights = [1.0 for _ in xs]
+    else:
+        row_weights = [max(float(weight), 1e-9) for weight in weights]
+    for features, target, row_weight in zip(xs, ys, row_weights):
         row = [1.0, *features]
         for i in range(feature_count):
-            vector[i] += row[i] * target
+            vector[i] += row_weight * row[i] * target
             for j in range(feature_count):
-                matrix[i][j] += row[i] * row[j]
+                matrix[i][j] += row_weight * row[i] * row[j]
     for i in range(1, feature_count):
         matrix[i][i] += penalty
     return _solve_linear_system(matrix, vector)
 
 
-def _ridge_regression_numpy(xs: list[list[float]], ys: list[float], penalty: float) -> list[float]:
+def _ridge_regression_numpy(
+    xs: list[list[float]],
+    ys: list[float],
+    penalty: float,
+    weights: list[float] | None = None,
+) -> list[float]:
     design = np.asarray(xs, dtype=float)
     targets = np.asarray(ys, dtype=float)
     intercept = np.ones((design.shape[0], 1), dtype=float)
     design = np.concatenate((intercept, design), axis=1)
+    if weights is not None:
+        sqrt_weights = np.sqrt(np.asarray(weights, dtype=float)).reshape(-1, 1)
+        design = design * sqrt_weights
+        targets = targets * sqrt_weights[:, 0]
 
     xtx = design.T @ design
     regularization = np.eye(xtx.shape[0], dtype=float)

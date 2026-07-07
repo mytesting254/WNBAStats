@@ -1612,6 +1612,33 @@ def test_market_evaluation_reports_training_sample_diagnostics() -> None:
     assert "skipped_missing_snapshot" in residual_diagnostics
 
 
+def test_training_sample_weights_bias_fit_toward_recent_results() -> None:
+    samples = []
+    for idx in range(20):
+        target = 10.0 if idx < 10 else 30.0
+        samples.append(
+            player_prop_model_module.TrainingSample(
+                features=[1.0 for _ in FEATURE_NAMES],
+                target=target,
+                game_date=f"2025-06-{idx + 1:02d}",
+                season="2025",
+                segment=f"2025-W{idx // 5}",
+                baseline=20.0,
+            )
+        )
+
+    weighted_model = player_prop_model_module._fit_model_from_samples("points", samples)
+    unweighted_model = player_prop_model_module._fit_model_from_rows(
+        "points",
+        [(sample.features, sample.target) for sample in samples],
+    )
+
+    assert weighted_model is not None
+    assert unweighted_model is not None
+    assert weighted_model.intercept > unweighted_model.intercept
+    assert weighted_model.intercept > 20.0
+
+
 def test_walk_forward_training_reuses_cached_run_when_data_unchanged(monkeypatch) -> None:
     load_test_history()
     with connect() as conn:
