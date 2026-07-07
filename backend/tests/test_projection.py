@@ -59,6 +59,8 @@ from backend.app.player_prop_model import (
     FEATURE_INDEX,
     FeatureSnapshot,
     RidgeModel,
+    _market_depth_scale,
+    _market_line_weight,
     _market_weight,
     _player_market_weight,
     _residual_market_weight,
@@ -1708,10 +1710,24 @@ def test_market_blend_weights_stay_moderate_for_learned_projection() -> None:
     assert _player_market_weight(8, 24.0) == pytest.approx(0.26)
     assert _player_market_weight(12, 24.0) == pytest.approx(0.18)
 
-    assert _residual_market_weight(40, 5, 18.0) == pytest.approx(0.12)
-    assert _residual_market_weight(80, 12, 24.0) == pytest.approx(0.17)
-    assert _residual_market_weight(150, 16, 24.0) == pytest.approx(0.22)
-    assert _residual_market_weight(260, 20, 28.0) == pytest.approx(0.28)
+    assert _residual_market_weight("points", 40, 5, 18.0) == pytest.approx(0.12)
+    assert _residual_market_weight("points", 80, 12, 24.0) == pytest.approx(0.17)
+    assert _residual_market_weight("points", 150, 16, 24.0) == pytest.approx(0.22)
+    assert _residual_market_weight("points", 260, 20, 28.0) == pytest.approx(0.28)
+
+
+def test_sparse_combo_markets_use_more_conservative_blend_weights() -> None:
+    assert _market_depth_scale("points") == pytest.approx(1.0)
+    assert _market_depth_scale("points_rebounds_assists") < _market_depth_scale("points_rebounds")
+    assert _market_depth_scale("blocks_steals") < _market_depth_scale("assists")
+
+    points_weight = _market_line_weight("points", 220, 12, 28.0)
+    pra_weight = _market_line_weight("points_rebounds_assists", 220, 12, 28.0)
+    blocks_steals_weight = _market_line_weight("blocks_steals", 220, 12, 28.0)
+
+    assert pra_weight < points_weight
+    assert blocks_steals_weight < points_weight
+    assert _residual_market_weight("points_rebounds_assists", 260, 20, 28.0) < _residual_market_weight("points", 260, 20, 28.0)
 
 
 def test_train_market_model_uses_active_non_sqlite_connection(monkeypatch) -> None:

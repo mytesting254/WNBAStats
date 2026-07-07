@@ -273,14 +273,25 @@ def predict_player_prop(
     market_note = "no sportsbook line blend"
 
     if line is not None:
-        market_weight = _market_weight(model.rows, config=tuning)
-        market_weight = max(market_weight, _player_market_weight(sample_count, avg_minutes, config=tuning))
+        market_weight = _market_line_weight(
+            market,
+            model.rows,
+            sample_count,
+            avg_minutes,
+            config=tuning,
+        )
         projection = ((1 - market_weight) * learned) + (market_weight * float(line))
         residual_model = train_market_residual_model(conn, market, config=tuning, allow_training=allow_training)
         if residual_model is not None:
             residual_prediction = _predict(residual_model, snapshot.values)
             residual_projection = float(line) + residual_prediction
-            residual_weight = _residual_market_weight(residual_model.rows, sample_count, avg_minutes, config=tuning)
+            residual_weight = _residual_market_weight(
+                market,
+                residual_model.rows,
+                sample_count,
+                avg_minutes,
+                config=tuning,
+            )
             projection = ((1 - residual_weight) * projection) + (residual_weight * residual_projection)
             market_note = (
                 f"line blend {market_weight:.0%} at {float(line):.1f}; "
@@ -2231,7 +2242,37 @@ def _player_market_weight(
     return _scaled_market_weight(0.18, tuning.player_weight_scale)
 
 
+def _market_depth_scale(market: str) -> float:
+    if market in {"points", "rebounds"}:
+        return 1.0
+    if market == "assists":
+        return 0.95
+    if market == "threes":
+        return 0.88
+    if market in {"points_rebounds", "points_assists", "rebounds_assists"}:
+        return 0.78
+    if market == "points_rebounds_assists":
+        return 0.68
+    if market in {"steals", "blocks", "blocks_steals"}:
+        return 0.72
+    return 0.85
+
+
+def _market_line_weight(
+    market: str,
+    rows: int,
+    sample_count: int,
+    avg_minutes: float,
+    config: ModelTuningConfig | None = None,
+) -> float:
+    depth_scale = _market_depth_scale(market)
+    market_weight = _market_weight(rows, config=config) * depth_scale
+    player_weight = _player_market_weight(sample_count, avg_minutes, config=config) * depth_scale
+    return max(market_weight, player_weight)
+
+
 def _residual_market_weight(
+    market: str,
     rows: int,
     sample_count: int,
     avg_minutes: float,
@@ -2246,7 +2287,7 @@ def _residual_market_weight(
     if rows >= 220:
         base = 0.28
     player_floor = 0.06 if sample_count < 8 or avg_minutes < 20.0 else 0.09 if sample_count < 15 else 0.12
-    return _scaled_market_weight(max(base, player_floor), tuning.market_weight_scale)
+    return _scaled_market_weight(max(base, player_floor) * _market_depth_scale(market), tuning.market_weight_scale)
 
 
 def _scaled_market_weight(weight: float, scale: float) -> float:
