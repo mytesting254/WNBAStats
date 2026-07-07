@@ -461,6 +461,7 @@ def rebuild_predictions_live(
             progress_callback(0, 0, "No scheduled props needed rebuilding.")
         return LiveRebuildResult(projections=[], attempted=0, written=0, skipped=0, errors=[])
 
+    prewarm_model_cache(conn)
     runtime_cache: dict[str, dict[tuple, object]] = {}
     projections: list[PropProjection] = []
     errors: list[str] = []
@@ -477,7 +478,7 @@ def rebuild_predictions_live(
                         conn,
                         int(prop_line_id),
                         runtime_cache=runtime_cache,
-                        allow_training=False,
+                        allow_training=True,
                     )
                 )
             except Exception as exc:

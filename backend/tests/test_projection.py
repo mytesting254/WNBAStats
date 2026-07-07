@@ -2271,9 +2271,15 @@ def test_rebuild_predictions_skips_model_prewarm_when_refresh_disabled(monkeypat
     assert all(flag is False for flag in build_flags)
 
 
-def test_rebuild_predictions_live_writes_incrementally_without_training(monkeypatch) -> None:
+def test_rebuild_predictions_live_prewarms_and_writes_incrementally_with_training(monkeypatch) -> None:
     load_test_history()
     build_flags: list[bool] = []
+    prewarm_calls = 0
+
+    def fake_prewarm(conn):
+        nonlocal prewarm_calls
+        prewarm_calls += 1
+        return {}
 
     def fake_build(conn, prop_line_id, *, runtime_cache=None, allow_training=True):
         build_flags.append(bool(allow_training))
@@ -2291,6 +2297,7 @@ def test_rebuild_predictions_live_writes_incrementally_without_training(monkeypa
             reason="test",
         )
 
+    monkeypatch.setattr(projections_module, "prewarm_model_cache", fake_prewarm)
     monkeypatch.setattr(projections_module, "build_prop_projection", fake_build)
 
     with connect() as conn:
@@ -2325,8 +2332,9 @@ def test_rebuild_predictions_live_writes_incrementally_without_training(monkeypa
     assert result.skipped == 0
     assert result.errors == []
     assert count == result.written
+    assert prewarm_calls == 1
     assert build_flags
-    assert all(flag is False for flag in build_flags)
+    assert all(flag is True for flag in build_flags)
 
 
 def test_rebuild_predictions_live_keeps_existing_predictions_when_a_rebuild_fails(monkeypatch) -> None:

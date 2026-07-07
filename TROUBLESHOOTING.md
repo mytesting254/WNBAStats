@@ -111,6 +111,31 @@ If login still works but POSTs fail, inspect the backend log line and response b
 - `401`: no valid admin session; sign in again on the `Data` tab
 - `403`: admin session exists, but CSRF/origin/session verification failed; sign out, sign back in, then retry from the same public domain
 
+## Live Props Use `component` Instead Of `adaptive-context-v1`
+
+### Symptom
+
+- recent rows in `prop_predictions` show `model_version = 'component'`
+- live props still build, but they are not using the learned player model
+
+### Likely Cause
+
+- uploaded learned-model cache files no longer match the active live DB fingerprint
+- the runtime was rebuilt against newer history/settlement data than the uploaded cache files were produced from
+- the backend container has not yet been restarted onto code that prewarms learned models during live rebuilds
+
+### What To Check
+
+- latest backend image/container includes the projection rebuild change
+- backend startup completed normally after deploy/restart
+- a fresh live prop rebuild has been triggered after the container came up
+- recent `prop_predictions.model_version` rows switch back to `adaptive-context-v1`
+
+### Expected Behavior
+
+- uploaded cache files warm startup when their DB fingerprint matches
+- if they do not match, live prop rebuilds train from the active runtime DB instead of silently downgrading to `component`
+
 ## Covers Refresh Fails
 
 ### Symptom

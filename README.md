@@ -979,9 +979,15 @@ PowerShell local/server workflow:
 .\scripts\run_sync_retrain_upload.ps1
 ```
 
-That command resolves the live Coolify volume path, downloads the active SQLite DB to `data\wnba.sqlite`, runs local training validation with two workers, rewrites the learned model cache filenames for the live DB path marker, and uploads the processed cache JSON files into the live cache directory. This makes locally trained player/minutes/residual projection caches usable by production as long as the live DB has not changed since the sync.
+That command resolves the live Coolify volume path, downloads the active SQLite DB to `data\wnba.sqlite`, runs local training validation with two workers, rewrites the learned model cache filenames for the live DB path marker, and uploads the processed cache JSON files into the live cache directory. This warms production with matching player/minutes/residual caches when the live DB fingerprint still matches the synced copy.
 
 WNBA still stores Model Lab run history in the database, not in artifact files. Uploading processed cache files warms production projections, but it does not add local validation rows to live `model_runs`. Pass `-RunServerTraining` when you also want the live backend to record a server-side training run.
+
+Runtime behavior:
+
+- normal live prop rebuilds now prewarm learned player/minutes/residual models before writing predictions
+- if uploaded cache files do not match the active live DB fingerprint, the backend retrains from the active runtime instead of silently downgrading prop predictions to `component`
+- `adaptive-context-v1` should therefore remain the default live prop model after deploy/restart, with uploaded cache files acting as a warm start rather than a hard dependency
 
 Useful options:
 

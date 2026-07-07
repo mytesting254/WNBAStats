@@ -160,6 +160,13 @@ or 3am. Keep the percent signs escaped when editing the crontab.
 
 A copy/paste template is also available at `deploy/wnba-daily-props.cron`.
 
+Live learned-model note:
+
+- uploaded learned-model cache files are a startup optimization, not the source of truth
+- live prop rebuilds now prewarm learned models against the active runtime DB before writing predictions
+- if the cache filenames no longer match the active runtime DB fingerprint after new ingest/history, the backend retrains from live data instead of silently falling back to `component`
+- after deploying a backend change that affects learned-model fingerprints, restart the backend container and trigger a prop rebuild once so fresh `adaptive-context-v1` predictions are written into `prop_predictions`
+
 ### Live Snapshot Recovery
 
 The backend already supports filesystem DB snapshots on the attached app volume.
