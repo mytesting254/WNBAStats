@@ -58,10 +58,12 @@ from backend.app.player_prop_model import (
     FEATURE_NAMES,
     FEATURE_INDEX,
     FeatureSnapshot,
+    MINUTES_FEATURE_NAMES,
     RidgeModel,
     _market_depth_scale,
     _market_line_weight,
     _market_weight,
+    _minutes_feature_values,
     _player_market_weight,
     _residual_market_weight,
     _classify_minutes_role,
@@ -1345,6 +1347,39 @@ def test_minutes_projection_expands_upside_for_injury_replacement_spike() -> Non
     assert role_state.recent_spike is True
     assert projected >= 23.0
     assert "starter_volatile" in note or "rotation" in note
+
+
+def test_minutes_feature_values_include_role_shift_signals() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=24.0,
+        last_10_minutes_avg=18.0,
+        ewma_minutes=20.0,
+        minutes_trend=4.0,
+        minute_volatility=5.5,
+        injury_status="available",
+        injury_delta=1.5,
+        recent_absence_days=8.0,
+    )
+
+    features = _minutes_feature_values(
+        role_state=role_state,
+        ewma_minutes=20.0,
+        recent_minutes_avg=24.0,
+        last_10_minutes_avg=18.0,
+        minutes_trend=4.0,
+        minute_volatility=5.5,
+        rest_days=2,
+        is_home=True,
+        spread_abs=6.5,
+        injury_delta=1.5,
+        recent_absence_days=8.0,
+    )
+    feature_map = dict(zip(MINUTES_FEATURE_NAMES, features))
+
+    assert feature_map["recent_change_ratio"] == pytest.approx(24.0 / 18.0)
+    assert feature_map["recent_vs_ewma_gap"] == pytest.approx(4.0)
+    assert feature_map["absence_return_flag"] == pytest.approx(1.0)
 
 
 def test_train_minutes_model_returns_model_with_history() -> None:

@@ -67,6 +67,9 @@ MINUTES_FEATURE_NAMES = [
     "last_10_minutes_avg",
     "minutes_trend",
     "minute_volatility",
+    "recent_change_ratio",
+    "recent_vs_ewma_gap",
+    "absence_return_flag",
     "rest_days",
     "is_home",
     "spread_abs",
@@ -2060,12 +2063,18 @@ def _minutes_feature_values(
         "fringe": 0.0,
     }
     role_flags[role_state.bucket] = 1.0
+    recent_change_ratio = recent_minutes_avg / max(last_10_minutes_avg, 1.0)
+    recent_vs_ewma_gap = recent_minutes_avg - ewma_minutes
+    absence_return_flag = 1.0 if recent_absence_days is not None and recent_absence_days >= 7 else 0.0
     return [
         ewma_minutes,
         recent_minutes_avg,
         last_10_minutes_avg,
         minutes_trend,
         minute_volatility,
+        float(recent_change_ratio),
+        float(recent_vs_ewma_gap),
+        absence_return_flag,
         float(rest_days),
         1.0 if is_home else 0.0,
         float(spread_abs),
@@ -2365,7 +2374,8 @@ def _model_cache_key(
     db_marker = hashlib.sha1(str(db_path).encode("utf-8")).hexdigest()[:12]
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
     training_marker = hashlib.sha1(_training_start_date().encode("utf-8")).hexdigest()[:8]
-    return f"{MODEL_CACHE_PREFIX}-{kind}-{safe_name}-{db_marker}-{_model_fingerprint(conn)}-{_config_fingerprint(config)}-{training_marker}.json"
+    version_marker = hashlib.sha1(MODEL_VERSION.encode("utf-8")).hexdigest()[:8]
+    return f"{MODEL_CACHE_PREFIX}-{kind}-{safe_name}-{db_marker}-{_model_fingerprint(conn)}-{_config_fingerprint(config)}-{training_marker}-{version_marker}.json"
 
 
 def _load_cached_model(cache_key: str) -> RidgeModel | None:
