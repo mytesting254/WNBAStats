@@ -426,6 +426,7 @@ def feature_snapshot(
     game_id: int,
     before_game_date: str | None = None,
     allow_training: bool = True,
+    use_injury_context: bool = True,
     runtime_cache: dict[str, dict[tuple, object]] | None = None,
 ) -> FeatureSnapshot:
     shared = _shared_projection_context(
@@ -434,6 +435,7 @@ def feature_snapshot(
         game_id=game_id,
         before_game_date=before_game_date,
         allow_training=allow_training,
+        use_injury_context=use_injury_context,
         runtime_cache=runtime_cache,
     )
     context = shared["context"]
@@ -565,10 +567,17 @@ def _shared_projection_context(
     game_id: int,
     before_game_date: str | None,
     allow_training: bool,
+    use_injury_context: bool = True,
     runtime_cache: dict[str, dict[tuple, object]] | None = None,
 ) -> dict[str, object]:
     cache = runtime_cache.setdefault("shared_projection_context", {}) if runtime_cache is not None else None
-    cache_key = (int(player_id), int(game_id), str(before_game_date or ""), bool(allow_training))
+    cache_key = (
+        int(player_id),
+        int(game_id),
+        str(before_game_date or ""),
+        bool(allow_training),
+        bool(use_injury_context),
+    )
     if cache is not None and cache_key in cache:
         return cache[cache_key]  # type: ignore[return-value]
 
@@ -609,13 +618,22 @@ def _shared_projection_context(
     last_10_minutes_avg = sum(minutes) / len(minutes)
     minute_volatility = _minute_volatility(minutes)
     blowout = _blowout_adjustment(conn, context, rotation_role)
-    injury = _injury_adjustment_for_prop(
-        conn,
-        player_id,
-        int(context["team_id"]),
-        rotation_role,
-        as_of_date=reference_game_date,
-    )
+    if use_injury_context:
+        injury = _injury_adjustment_for_prop(
+            conn,
+            player_id,
+            int(context["team_id"]),
+            rotation_role,
+            as_of_date=reference_game_date,
+        )
+    else:
+        injury = {
+            "status": "available",
+            "availability_factor": 1.0,
+            "usage_multiplier": 1.0,
+            "minutes_delta": 0.0,
+            "hard_cap_zero": False,
+        }
     projected_minutes, minutes_note = _project_minutes(
         conn,
         player_id=player_id,
@@ -939,6 +957,7 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> list[Tr
             market,
             int(row["game_id"]),
             before_game_date=str(row["game_date"]) if row["game_date"] is not None else None,
+            use_injury_context=False,
         )
         if not snapshot.values:
             continue
