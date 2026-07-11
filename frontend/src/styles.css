@@ -1084,6 +1084,19 @@ tbody tr.selected {
   vertical-align: middle;
 }
 
+.special-props-table-wrap {
+  margin: 0 18px 18px;
+  overflow-x: auto;
+  border: 1px solid rgba(8, 47, 73, 0.1);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+}
+
+.special-props-table {
+  min-width: 1180px;
+}
+
 .special-props-table td:nth-child(n + 2):nth-child(-n + 9) {
   text-align: right;
   font-variant-numeric: tabular-nums;
@@ -1096,6 +1109,10 @@ tbody tr.selected {
 .special-player-cell strong {
   font-size: 14px;
   color: #101828;
+}
+
+.special-props-table td:nth-child(10) {
+  min-width: 220px;
 }
 
 .roster-player-cell .player-label {

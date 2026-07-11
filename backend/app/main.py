@@ -1013,6 +1013,23 @@ def special_stocks() -> list[dict[str, Any]]:
                 item["recent_values"] = []
                 item["recent_minutes"] = []
                 continue
+            game_row = conn.execute(
+                """
+                SELECT
+                    g.start_time,
+                    home.abbreviation AS home_team,
+                    away.abbreviation AS away_team
+                FROM games g
+                JOIN teams home ON home.id = g.home_team_id
+                JOIN teams away ON away.id = g.away_team_id
+                WHERE g.id = ?
+                """,
+                (int(game_id),),
+            ).fetchone()
+            if game_row is not None:
+                item["start_time"] = game_row["start_time"]
+                item["home_team"] = game_row["home_team"]
+                item["away_team"] = game_row["away_team"]
             item["recent_values"] = _recent_market_values(
                 conn,
                 player_id=int(player_id),

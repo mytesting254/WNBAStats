@@ -3899,7 +3899,14 @@ function SpecialStocksView({
 }) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const cards = useMemo(() => {
-    const grouped = new Map<number, { gameId: number; gameDate: string; players: SpecialStocksSnapshot[] }>();
+    const grouped = new Map<number, {
+      gameId: number;
+      gameDate: string;
+      startTime: string | null;
+      homeTeam: string | null;
+      awayTeam: string | null;
+      players: SpecialStocksSnapshot[];
+    }>();
     for (const snapshot of snapshots) {
       const current = grouped.get(snapshot.game_id);
       if (current) {
@@ -3908,6 +3915,9 @@ function SpecialStocksView({
         grouped.set(snapshot.game_id, {
           gameId: snapshot.game_id,
           gameDate: snapshot.game_date,
+          startTime: snapshot.start_time ?? null,
+          homeTeam: snapshot.home_team ?? null,
+          awayTeam: snapshot.away_team ?? null,
           players: [snapshot],
         });
       }
@@ -3944,8 +3954,8 @@ function SpecialStocksView({
               className={selectedCard?.gameId === card.gameId ? "active" : ""}
               onClick={() => setSelectedGameId(card.gameId)}
             >
-              <span>{formatDate(card.gameDate)}</span>
-              <strong>Game {card.gameId}</strong>
+              <span>{formatDate(card.startTime || card.gameDate)}</span>
+              <strong>{card.awayTeam && card.homeTeam ? `${card.awayTeam} at ${card.homeTeam}` : `Game ${card.gameId}`}</strong>
               <em>{`${card.players.length} model-only props`}</em>
             </button>
           ))}
@@ -3960,7 +3970,7 @@ function SpecialStocksView({
                   <p>No sportsbook line is attached. These rows are for internal tracking and UI review.</p>
                 </div>
               </div>
-              <div className="props-table-wrapper roster-table-wrapper">
+              <div className="table-wrap special-props-table-wrap">
                 <table className="props-table roster-table special-props-table">
                   <thead>
                     <tr>
