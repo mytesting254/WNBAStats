@@ -1210,11 +1210,23 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
     return resolve_player_identity(conn, team_abbreviation, player_name, prefer_rich=True)
 
 
-def _resolve_roster_player_display(conn: Any, team_abbreviation: str, player_name: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    player = _resolve_roster_player(conn, team_abbreviation, player_name)
+def _resolve_roster_player_display(
+    conn: Any,
+    team_abbreviation: str,
+    player_name: str,
+    *,
+    player_rows: list[Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    player = resolve_player_identity(
+        conn,
+        team_abbreviation,
+        player_name,
+        prefer_rich=True,
+        player_rows=player_rows,
+    )
     if not player or not player_is_skeletal(player):
         return player, None
-    fallback = resolve_player_identity(conn, "", player_name, prefer_rich=True)
+    fallback = resolve_player_identity(conn, "", player_name, prefer_rich=True, player_rows=player_rows)
     if not fallback or int(fallback["player_id"]) == int(player["player_id"]):
         return player, None
     if player_is_skeletal(fallback):
@@ -1278,27 +1290,66 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
     if not hasattr(conn, "execute"):
         return rows
 
-    team_impact_cache: dict[str, dict[str, float | int | str]] = {}
-    enriched: list[dict[str, Any]] = []
-    for row in rows:
-        team = str(row["team"])
-        if team not in team_impact_cache:
-            team_row = conn.execute(
-                """
-                SELECT id
-                FROM teams
-                WHERE upper(abbreviation) = ?
-                LIMIT 1
-                """,
-                (team,),
-            ).fetchone()
-            team_impact_cache[team] = (
-                _team_injury_impact(conn, int(team_row["id"]))
-                if team_row and team_row["id"] is not None
-                else {"factor": 1.0, "missing_key_players": 0, "penalty_points": 0.0}
-            )
+    default_team_impact = {"factor": 1.0, "missing_key_players": 0, "penalty_points": 0.0}
+    teams = sorted({str(row["team"]) for row in rows})
+    team_ids: dict[str, int] = {}
+    if teams:
+        placeholders = ",".join("?" for _ in teams)
+        team_rows = conn.execute(
+            f"""
+            SELECT id, upper(abbreviation) AS abbreviation
+            FROM teams
+            WHERE upper(abbreviation) IN ({placeholders})
+            """,
+            tuple(teams),
+        ).fetchall()
+        team_ids = {
+            str(team_row["abbreviation"]): int(team_row["id"])
+            for team_row in team_rows
+            if team_row["id"] is not None and team_row["abbreviation"] is not None
+        }
+    team_impact_cache = {
+        team: (_team_injury_impact(conn, team_ids[team]) if team in team_ids else dict(default_team_impact))
+        for team in teams
+    }
 
-        player, display_fallback = _resolve_roster_player_display(conn, team, str(row["player_name"]))
+    player_rows = conn.execute(
+        """
+        SELECT
+            p.id AS player_id,
+            p.full_name,
+            p.team_id,
+            t.abbreviation AS team_abbreviation,
+            p.rotation_role,
+            p.position
+        FROM players p
+        LEFT JOIN teams t ON t.id = p.team_id
+        """
+    ).fetchall()
+
+    resolved_rows: list[tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]] = []
+    profile_player_ids: set[int] = set()
+    out_since_player_ids: set[int] = set()
+    for row in rows:
+        player, display_fallback = _resolve_roster_player_display(
+            conn,
+            str(row["team"]),
+            str(row["player_name"]),
+            player_rows=player_rows,
+        )
+        resolved_rows.append((row, player, display_fallback))
+        if player:
+            out_since_player_ids.add(int(player["player_id"]))
+            profile_player = display_fallback or player
+            profile_player_ids.add(int(profile_player["player_id"]))
+
+    profile_by_player = _player_recent_profiles(conn, profile_player_ids)
+    out_since_by_player = _roster_out_since_map(conn, out_since_player_ids)
+
+    enriched: list[dict[str, Any]] = []
+    for row, player, display_fallback in resolved_rows:
+        team = str(row["team"])
+        team_impact = team_impact_cache.get(team, default_team_impact)
         if not player:
             enriched.append(
                 {
@@ -1309,15 +1360,15 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
                     "recent_minutes_avg": None,
                     "recent_contribution_avg": None,
                     "player_impact_score": None,
-                    "team_injury_factor": team_impact_cache[team]["factor"],
-                    "team_missing_key_players": team_impact_cache[team]["missing_key_players"],
-                    "team_penalty_points": team_impact_cache[team]["penalty_points"],
+                    "team_injury_factor": team_impact["factor"],
+                    "team_missing_key_players": team_impact["missing_key_players"],
+                    "team_penalty_points": team_impact["penalty_points"],
                 }
             )
             continue
 
         profile_player = display_fallback or player
-        profile = _player_recent_profile(conn, int(profile_player["player_id"]))
+        profile = profile_by_player.get(int(profile_player["player_id"]), {"recent_minutes_avg": None, "recent_contribution_avg": None})
         position = player.get("position") or (display_fallback.get("position") if display_fallback else None)
         rotation_role = player.get("rotation_role") or (display_fallback.get("rotation_role") if display_fallback else None)
         contribution = float(profile["recent_contribution_avg"] or 0.0)
@@ -1328,16 +1379,87 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
                 "player_id": int(player["player_id"]),
                 "rotation_role": rotation_role,
                 "position": position,
-                "out_since": _roster_out_since(conn, int(player["player_id"]), str(row["status"])),
+                "out_since": out_since_by_player.get(int(player["player_id"])) if str(row["status"] or "").strip().lower() in _UNAVAILABLE_PLAYER_STATUSES else None,
                 "recent_minutes_avg": profile["recent_minutes_avg"],
                 "recent_contribution_avg": profile["recent_contribution_avg"],
                 "player_impact_score": round(impact_score, 1) if impact_score > 0 else None,
-                "team_injury_factor": team_impact_cache[team]["factor"],
-                "team_missing_key_players": team_impact_cache[team]["missing_key_players"],
-                "team_penalty_points": team_impact_cache[team]["penalty_points"],
+                "team_injury_factor": team_impact["factor"],
+                "team_missing_key_players": team_impact["missing_key_players"],
+                "team_penalty_points": team_impact["penalty_points"],
             }
         )
     return enriched
+
+
+def _player_recent_profiles(conn: Any, player_ids: set[int]) -> dict[int, dict[str, float | None]]:
+    if not player_ids:
+        return {}
+    ordered_ids = sorted(int(player_id) for player_id in player_ids)
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"""
+        WITH ranked AS (
+            SELECT
+                s.player_id,
+                s.minutes AS minutes,
+                (s.points + (0.70 * s.rebounds) + (0.70 * s.assists)) AS contrib,
+                ROW_NUMBER() OVER (
+                    PARTITION BY s.player_id
+                    ORDER BY g.game_date DESC, s.game_id DESC
+                ) AS rn
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            WHERE s.player_id IN ({placeholders})
+        )
+        SELECT
+            player_id,
+            AVG(minutes) AS recent_minutes_avg,
+            AVG(contrib) AS recent_contribution_avg
+        FROM ranked
+        WHERE rn <= 10
+        GROUP BY player_id
+        """,
+        tuple(ordered_ids),
+    ).fetchall()
+    profiles = {
+        int(row["player_id"]): {
+            "recent_minutes_avg": round(float(row["recent_minutes_avg"]), 1) if row["recent_minutes_avg"] is not None else None,
+            "recent_contribution_avg": round(float(row["recent_contribution_avg"]), 1) if row["recent_contribution_avg"] is not None else None,
+        }
+        for row in rows
+        if row["player_id"] is not None
+    }
+    for player_id in ordered_ids:
+        profiles.setdefault(player_id, {"recent_minutes_avg": None, "recent_contribution_avg": None})
+    return profiles
+
+
+def _roster_out_since_map(conn: Any, player_ids: set[int]) -> dict[int, str | None]:
+    if not player_ids:
+        return {}
+    ordered_ids = sorted(int(player_id) for player_id in player_ids)
+    placeholders = ",".join("?" for _ in ordered_ids)
+    rows = conn.execute(
+        f"""
+        SELECT player_id, lower(trim(status)) AS status, captured_at
+        FROM injuries
+        WHERE player_id IN ({placeholders})
+        ORDER BY player_id, captured_at DESC, id DESC
+        """,
+        tuple(ordered_ids),
+    ).fetchall()
+    out_since: dict[int, str | None] = {player_id: None for player_id in ordered_ids}
+    resolved_players: set[int] = set()
+    for row in rows:
+        player_id = int(row["player_id"])
+        if player_id in resolved_players:
+            continue
+        status = str(row["status"] or "").strip().lower()
+        if status not in _UNAVAILABLE_PLAYER_STATUSES:
+            resolved_players.add(player_id)
+            continue
+        out_since[player_id] = str(row["captured_at"])
+    return out_since
 
 
 def _roster_out_since(conn: Any, player_id: int, status: str) -> str | None:

@@ -129,10 +129,11 @@ def resolve_player_identity(
     *,
     exclude_player_id: int | None = None,
     prefer_rich: bool = True,
+    player_rows: list[sqlite3.Row] | None = None,
 ) -> dict[str, Any] | None:
     normalized_team = normalize_team_abbreviation(team_abbreviation) or team_abbreviation.upper()
     normalized_name, first_initial, last_name = player_lookup_parts(player_name)
-    rows = _player_rows(conn)
+    rows = player_rows if player_rows is not None else _player_rows(conn)
     filtered = [
         row for row in rows
         if exclude_player_id is None or int(row["player_id"]) != int(exclude_player_id)
