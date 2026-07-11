@@ -64,11 +64,11 @@
 
 ## Current Model Quality Follow-Up
 
-- [ ] Keep the component baseline as the live default until a revised learned layer beats it out-of-sample by market and season; the current three-season learned MAE is `2.800` versus baseline `2.638`.
+- [ ] Keep the component baseline as the live default until a revised learned layer beats it out-of-sample by market and season; `adaptive-context-v3-team-transition` scored MAE `2.802` versus its component baseline `2.638` on the mounted three-season DB. Tuning away extra recency weighting improved the candidate to `2.771`, but it still must not be promoted.
 - [x] Replace the universal residual blend with market-specific eligibility: verified in deployed `adaptive-context-v2-residual-guard`; it improved overall walk-forward MAE from `2.800` to `2.797`, keeps only the 200+ support `points_assists` experiment, and disables negative/sparse residual markets.
-- [ ] Add explicit post-transfer/team-change features: game-specific resolved team history is now available in recent feature rows; next add games since joining, new-team minutes trend, teammate usage redistribution, and rotation stability, then evaluate them separately for transferred players.
-- [ ] Add recency-weighted training/backtests so 2024 improves coverage without dominating current-season player roles, teams, and rotations.
-- [ ] Compare direct line-relative training (`actual_result - line`) against the current secondary residual blend per market; promote only configurations that improve walk-forward MAE, calibration, and recommendation accuracy.
+- [x] Add explicit post-transfer/team-change features: `adaptive-context-v3-team-transition` now includes games since joining, new-team minutes trend, teammate-minutes redistribution, and rotation stability. Its mounted three-season walk-forward result was worse overall (MAE `2.802` vs component `2.638`); the verified recent-transfer subset (`408` rows) was worse than the component baseline across all evaluated markets (points MAE `6.750` vs `4.524`). Retain it only as a candidate; do not enable a transfer-specific live adjustment.
+- [x] Make recency weighting tunable in training/backtests. Mounted-DB walk-forward tuning found the prior `1.0x` scale (MAE `2.802`) and stronger `1.5x` scale (MAE `2.811`) worse than no extra recency weighting (MAE `2.771`), so the current candidate default is `0.0x`; retain `2024` for coverage without overweighting it.
+- [x] Compare direct line-relative training (`actual_result - line`) against the current secondary residual blend per market. On the mounted run, only `points_assists` improved (MAE gain `0.614` across `203` rows); every other tested market was neutral or worse, so retain the existing `points_assists`-only residual gate and do not promote direct line-relative training end-to-end.
 - [ ] Refit market-specific probability calibration and recommendation thresholds on the expanded `2024`–`2026` settled history, with minimum-support gates for sparse markets.
 - [x] Prioritize settled prop history expansion before further model complexity work; historical Odds API event-player-prop imports now provide settled coverage across `2024` (381), `2025` (600), and `2026` (5,986) seasons.
 - [x] Add a repeatable settled-history gap audit/backfill workflow so missing settled prop dates can be expanded without manual date-by-date repair.
@@ -101,7 +101,8 @@
 
 ## Infrastructure / Test Follow-Up
 
-- [ ] Decide whether to repair the unrelated baseline failures in `backend/tests/test_projection.py` so full-file runs are clean again.
+- [x] Repair stale `backend/tests/test_projection.py` expectations so the full file is clean again (`186 passed` on `2026-07-11`).
+- [ ] Finish the model-only `Special` steals/blocks tracker: isolated `stocks_tracking.sqlite` schema and post-rebuild hook exist, but its scheduled-player source must use live roster availability rather than stale `players.team_id` before snapshots can populate; keep it separate from sportsbook EV and recommendations.
 - [ ] Keep frontend asset deployment reliable so manual volume syncs are not needed after every WNBA frontend change.
 - [x] Make unchanged local training reruns reuse the latest matching `model_runs` result instead of recomputing the same walk-forward benchmark.
 

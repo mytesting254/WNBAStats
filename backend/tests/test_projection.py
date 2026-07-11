@@ -1049,6 +1049,7 @@ def test_targeted_matchup_snapshot_publish_preserves_untouched_matchups(tmp_path
     monkeypatch.setattr(main_module, "_prediction_state_by_game", lambda conn: {})
     monkeypatch.setattr(main_module, "_covers_records_by_game", lambda conn: {})
     monkeypatch.setattr(main_module, "_covers_market_odds_by_game", lambda: {})
+    monkeypatch.setattr(main_module, "_GamePredictionCache", lambda *args: object())
     monkeypatch.setattr(main_module, "import_rotowire_lineups", lambda conn, force_refresh=False: {"source": "cache", "captured_at": None, "from_cache": True})
 
     existing_snapshot = main_module._matchup_snapshot_payload(
@@ -1658,9 +1659,9 @@ def test_walk_forward_training_saves_model_run() -> None:
             INSERT INTO prop_predictions (
                 id, prop_line_id, model_version, prediction_time, projection, recommended_side,
                 model_probability, implied_probability, edge, expected_value, confidence, reason
-            ) VALUES (8802, 8801, 'adaptive-context-v1', ?, 21.7, 'over', 0.58, 0.52, 0.06, 0.03, 'medium', 'validation-test')
+            ) VALUES (8802, 8801, ?, ?, 21.7, 'over', 0.58, 0.52, 0.06, 0.03, 'medium', 'validation-test')
             """,
-            (datetime.now(timezone.utc).isoformat(),),
+            (MODEL_VERSION, datetime.now(timezone.utc).isoformat()),
         )
         captured_at = datetime.now(timezone.utc).isoformat()
         for prediction_id in range(8900, 8916):
@@ -1689,7 +1690,7 @@ def test_walk_forward_training_saves_model_run() -> None:
     assert result["status"] == "completed"
     assert result["training_rows"] > 0
     assert len(rows) == 2
-    assert {row["model_version"] for row in rows} == {"adaptive-context-v1", "component-pregame-v2"}
+    assert {row["model_version"] for row in rows} == {MODEL_VERSION, "component-pregame-v2"}
     assert result["metrics"]["points"]["settled_rows"] >= 1
     assert "side_accuracy" in result["metrics"]["points"]
     assert "residual_rows" in result["metrics"]["points"]
@@ -1807,7 +1808,11 @@ def test_training_sample_weights_bias_fit_toward_recent_results() -> None:
             )
         )
 
-    weighted_model = player_prop_model_module._fit_model_from_samples("points", samples)
+    weighted_model = player_prop_model_module._fit_model_from_samples(
+        "points",
+        samples,
+        config=player_prop_model_module.ModelTuningConfig(recency_weight_scale=1.0),
+    )
     unweighted_model = player_prop_model_module._fit_model_from_rows(
         "points",
         [(sample.features, sample.target) for sample in samples],
@@ -1817,6 +1822,25 @@ def test_training_sample_weights_bias_fit_toward_recent_results() -> None:
     assert unweighted_model is not None
     assert weighted_model.intercept > unweighted_model.intercept
     assert weighted_model.intercept > 20.0
+
+
+def test_training_samples_mark_recent_verified_team_changes() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        initial_rows = player_prop_model_module._player_training_rows(conn, 1001)
+        conn.execute(
+            "INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (1001, 3, int(initial_rows[0]["game_id"]), "transfer-test", 1.0, captured_at),
+        )
+        conn.execute(
+            "INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (1001, 10, int(initial_rows[6]["game_id"]), "transfer-test", 1.0, captured_at),
+        )
+        player_prop_model_module.clear_model_cache()
+        rows = player_prop_model_module._player_training_rows(conn, 1001)
+
+    assert player_prop_model_module._is_recent_transfer_training_row(rows, 7) is True
 
 
 def test_walk_forward_training_reuses_cached_run_when_data_unchanged(monkeypatch) -> None:
@@ -1847,6 +1871,7 @@ def test_run_parameter_tuning_returns_ranked_candidates() -> None:
             market_weight_scales=[1.0],
             player_weight_scales=[1.0],
             stabilization_scales=[0.9],
+            recency_weight_scales=[1.0],
         )
 
     assert result["run_type"] == "parameter_tuning"
@@ -2138,6 +2163,31 @@ def test_historical_training_features_use_live_context_factors(monkeypatch) -> N
     assert features[FEATURE_INDEX["blowout_minutes_delta"]] == 2.5
 
 
+def test_historical_training_features_include_team_transition_context() -> None:
+    load_test_history()
+    with connect() as conn:
+        rows = player_prop_model_module._player_training_rows(conn, 1001)
+        row_index = 7
+        row = rows[row_index]
+        history_rows = rows[max(0, row_index - 7):row_index]
+        features = _historical_training_features(
+            conn,
+            row,
+            history=[float(item["points"]) for item in history_rows],
+            minutes=[float(item["minutes"]) for item in history_rows],
+            market="points",
+            previous_game_date=str(rows[row_index - 1]["game_date"]),
+            recent_rows=history_rows,
+            player_rows=rows,
+            row_index=row_index,
+        )
+
+    assert len(features) == len(FEATURE_NAMES)
+    assert features[FEATURE_INDEX["games_since_joining_team"]] == 7.0
+    assert -1.0 <= features[FEATURE_INDEX["teammate_minutes_redistribution"]] <= 1.0
+    assert 0.0 <= features[FEATURE_INDEX["rotation_stability"]] <= 1.0
+
+
 def test_calibrated_probability_uses_settled_history_support(monkeypatch) -> None:
     load_test_history()
     monkeypatch.setattr(projections_module, "CALIBRATION_MIN_SAMPLES", 4)
@@ -2291,7 +2341,7 @@ def test_predict_player_prop_blends_market_residual_model(monkeypatch) -> None:
 
     assert projection == pytest.approx(21.94, abs=0.01)
     assert "residual blend 30%" in reason
-    assert model_version == "adaptive-context-v1"
+    assert model_version == MODEL_VERSION
 
 
 def test_predict_player_prop_uses_local_combo_estimator_for_pra(monkeypatch) -> None:
@@ -6361,6 +6411,7 @@ def test_gems_keep_one_direction_per_player_market_game(monkeypatch) -> None:
             lambda _conn: [
                 {
                     "id": 1,
+                    "prop_line_id": 1,
                     "game_id": 401856946,
                     "player_id": 2566106,
                     "player": "Dearica Hamby",
@@ -6373,6 +6424,7 @@ def test_gems_keep_one_direction_per_player_market_game(monkeypatch) -> None:
                 },
                 {
                     "id": 2,
+                    "prop_line_id": 2,
                     "game_id": 401856946,
                     "player_id": 2566106,
                     "player": "Dearica Hamby",
@@ -6385,6 +6437,7 @@ def test_gems_keep_one_direction_per_player_market_game(monkeypatch) -> None:
                 },
                 {
                     "id": 3,
+                    "prop_line_id": 3,
                     "game_id": 401856946,
                     "player_id": 2566106,
                     "player": "Dearica Hamby",

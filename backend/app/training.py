@@ -101,6 +101,7 @@ def run_parameter_tuning(
     market_weight_scales: list[float] | None = None,
     player_weight_scales: list[float] | None = None,
     stabilization_scales: list[float] | None = None,
+    recency_weight_scales: list[float] | None = None,
 ) -> dict:
     started_at = datetime.now(timezone.utc).isoformat()
     candidates = _tuning_candidates(
@@ -108,6 +109,7 @@ def run_parameter_tuning(
         market_weight_scales=market_weight_scales,
         player_weight_scales=player_weight_scales,
         stabilization_scales=stabilization_scales,
+        recency_weight_scales=recency_weight_scales,
     )
     results = []
     for config in candidates:
@@ -208,6 +210,23 @@ def _run_component_benchmark(conn: sqlite3.Connection) -> dict:
     }
 
 
+def run_component_blend_tuning(conn: sqlite3.Connection) -> dict:
+    """Evaluate conservative component-formula alternatives before promotion."""
+    candidates = {
+        "current": (0.40, 0.25, 0.20, 0.15),
+        "rate_minutes": (0.32, 0.20, 0.34, 0.14),
+        "recent_form": (0.48, 0.28, 0.14, 0.10),
+        "longer_history": (0.30, 0.20, 0.20, 0.30),
+    }
+    results = []
+    for name, weights in candidates.items():
+        metrics = _evaluate_all_component_markets(conn, weights=weights)
+        _ensure_overall_metrics(metrics)
+        results.append({"name": name, "weights": weights, "metrics": metrics, "mae": metrics.get("overall", {}).get("mae")})
+    results.sort(key=lambda item: float(item["mae"]) if item["mae"] is not None else math.inf)
+    return {"run_type": "component_blend_tuning", "candidates": results, "best_candidate": results[0] if results else None}
+
+
 def _save_model_run(conn: sqlite3.Connection, run: dict) -> None:
     conn.execute(
         """
@@ -231,7 +250,10 @@ def _save_model_run(conn: sqlite3.Connection, run: dict) -> None:
 
 
 def _training_data_signature(conn: sqlite3.Connection) -> str:
-    payload = {"training_start_date": _training_start_date()}
+    payload = {
+        "training_start_date": _training_start_date(),
+        "model_tuning_config": DEFAULT_TUNING_CONFIG.to_dict(),
+    }
     for table in (
         "games",
         "player_game_stats",
@@ -389,22 +411,26 @@ def _tuning_candidates(
     market_weight_scales: list[float] | None = None,
     player_weight_scales: list[float] | None = None,
     stabilization_scales: list[float] | None = None,
+    recency_weight_scales: list[float] | None = None,
 ) -> list[ModelTuningConfig]:
     penalties = ridge_penalties or [0.75, 1.25, 2.0]
     market_scales = market_weight_scales or [0.85, 1.0, 1.15]
     player_scales = player_weight_scales or [0.9, 1.0, 1.1]
     guard_scales = stabilization_scales or [0.9, 1.0, 1.1]
+    recency_scales = recency_weight_scales or [0.0, 0.5, 1.0, 1.5]
     return [
         ModelTuningConfig(
             ridge_penalty=penalty,
             market_weight_scale=market_scale,
             player_weight_scale=player_scale,
             stabilization_scale=guard_scale,
+            recency_weight_scale=recency_scale,
         )
         for penalty in penalties
         for market_scale in market_scales
         for player_scale in player_scales
         for guard_scale in guard_scales
+        for recency_scale in recency_scales
     ]
 
 
@@ -757,7 +783,7 @@ def _empty_component_accumulator() -> dict[str, float]:
     }
 
 
-def _evaluate_all_component_markets(conn: sqlite3.Connection) -> dict[str, dict]:
+def _evaluate_all_component_markets(conn: sqlite3.Connection, weights: tuple[float, float, float, float] | None = None) -> dict[str, dict]:
     players = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
     accumulators = {market: _empty_component_accumulator() for market in TRAINING_MARKETS}
 
@@ -787,7 +813,7 @@ def _evaluate_all_component_markets(conn: sqlite3.Connection) -> dict[str, dict]
                 history = values[max(0, idx - 10):idx]
                 minute_history = minutes[max(0, idx - 10):idx]
                 actual = values[idx]
-                projection = _project_from_history(history, minute_history)
+                projection = _project_from_history(history, minute_history, weights=weights)
                 error = projection - actual
                 baseline = sum(history) / len(history)
 
@@ -821,7 +847,7 @@ def _evaluate_all_component_markets(conn: sqlite3.Connection) -> dict[str, dict]
     return metrics
 
 
-def _project_from_history(values: list[float], minutes: list[float]) -> float:
+def _project_from_history(values: list[float], minutes: list[float], weights: tuple[float, float, float, float] | None = None) -> float:
     weighted_recent = _weighted_average(values)
     last_5 = values[-5:]
     last_5_avg = sum(last_5) / len(last_5)
@@ -829,12 +855,8 @@ def _project_from_history(values: list[float], minutes: list[float]) -> float:
     rates = [value / max(minute, 1.0) for value, minute in zip(values, minutes)]
     avg_minutes = sum(minutes[-5:]) / min(len(minutes), 5)
     rate_projection = _weighted_average(rates) * avg_minutes
-    return (
-        (0.40 * weighted_recent)
-        + (0.25 * last_5_avg)
-        + (0.20 * rate_projection)
-        + (0.15 * last_10_avg)
-    )
+    recent_weight, last_5_weight, rate_weight, history_weight = weights or (0.30, 0.20, 0.20, 0.30)
+    return (recent_weight * weighted_recent) + (last_5_weight * last_5_avg) + (rate_weight * rate_projection) + (history_weight * last_10_avg)
 
 
 def _weighted_average(values: list[float]) -> float:

@@ -5,3 +5,4 @@ python-dotenv>=1.0.1
 requests>=2.32.0
 pytest>=8.3.4
 numpy>=2.1.0
+scikit-learn>=1.6.0

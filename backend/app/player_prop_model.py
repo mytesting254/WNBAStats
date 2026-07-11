@@ -19,7 +19,7 @@ from .odds import american_to_implied_probability
 from .timezone_utils import APP_TIMEZONE
 
 
-MODEL_VERSION = "adaptive-context-v2-residual-guard"
+MODEL_VERSION = "adaptive-context-v3-team-transition"
 MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
     "points",
@@ -59,6 +59,10 @@ FEATURE_NAMES = [
     "arch_assist_guard",
     "arch_bench_gunner",
     "arch_stocks_specialist",
+    "games_since_joining_team",
+    "new_team_minutes_trend",
+    "teammate_minutes_redistribution",
+    "rotation_stability",
 ]
 FEATURE_INDEX = {name: idx for idx, name in enumerate(FEATURE_NAMES)}
 MINUTES_FEATURE_NAMES = [
@@ -102,6 +106,7 @@ class ModelTuningConfig:
     market_weight_scale: float = 1.0
     player_weight_scale: float = 1.0
     stabilization_scale: float = 1.0
+    recency_weight_scale: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
         return asdict(self)
@@ -150,6 +155,7 @@ class TrainingSample:
     season: str
     segment: str
     baseline: float
+    is_recent_transfer: bool = False
 
 
 @dataclass(frozen=True)
@@ -538,6 +544,7 @@ def feature_snapshot(
     adjustment_note = str(shared["adjustment_note"])
     usage_multiplier *= injury["usage_multiplier"]
     archetype = shared["archetype"]
+    team_transition = shared["team_transition"]
 
     component_projection = (
         component_base
@@ -573,6 +580,7 @@ def feature_snapshot(
         spread_abs,
         game_total,
         *archetype.feature_values(),
+        *team_transition,
     ]
     archetype_note = ", ".join(archetype.labels()) or "balanced"
     reason = (
@@ -587,6 +595,8 @@ def feature_snapshot(
         f"injury {injury['status']} (avail {injury['availability_factor']:.2f}, "
         f"team usage {injury['usage_multiplier']:.2f}, min {injury['minutes_delta']:+.1f}); {adjustment_note}."
         f" Archetype: {archetype_note}."
+        f" Team transition: {int(team_transition[0])} games with team, minutes trend {team_transition[1]:+.1f}, "
+        f"teammate minutes shift {team_transition[2]:+.2f}, rotation stability {team_transition[3]:.2f}."
         f" Minutes projection: {minutes_note}."
     )
     return FeatureSnapshot(
@@ -696,6 +706,12 @@ def _shared_projection_context(
         allow_training=allow_training and use_live_minutes_context,
     )
     usage_multiplier, adjustment_note = _manual_adjustment(conn, player_id)
+    team_transition = _team_transition_features(
+        conn,
+        player_id=player_id,
+        team_id=int(context["team_id"]),
+        history_rows=history_rows,
+    )
     shared = {
         "context": context,
         "reference_game_date": reference_game_date,
@@ -710,6 +726,7 @@ def _shared_projection_context(
         "usage_multiplier": usage_multiplier,
         "adjustment_note": adjustment_note,
         "archetype": _player_archetype_profile_from_rows(history_rows, fallback_rotation_role=rotation_role),
+        "team_transition": team_transition,
     }
     if cache is not None:
         cache[cache_key] = shared
@@ -844,6 +861,12 @@ def evaluate_market_model(
         }
     metrics = _evaluate_walk_forward_samples(market, samples, config=tuning)
     metrics["training_sample_diagnostics"] = diagnostics.to_dict()
+    transfer_samples = [sample for sample in samples if sample.is_recent_transfer]
+    metrics["recent_transfer_evaluation"] = (
+        _evaluate_walk_forward_samples(market, transfer_samples, config=tuning)
+        if len(transfer_samples) >= 20
+        else {"rows": len(transfer_samples), "mae": None, "status": "insufficient_transfer_samples"}
+    )
     return metrics
 
 
@@ -914,19 +937,24 @@ def _fit_model_from_samples(
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
     rows = [(sample.features, sample.target) for sample in samples]
-    return _fit_model_from_rows(market, rows, config=config, weights=_training_sample_weights(samples))
+    return _fit_model_from_rows(market, rows, config=config, weights=_training_sample_weights(samples, config=config))
 
 
-def _training_sample_weights(samples: list[TrainingSample]) -> list[float]:
+def _training_sample_weights(
+    samples: list[TrainingSample],
+    *,
+    config: ModelTuningConfig | None = None,
+) -> list[float]:
     if not samples:
         return []
+    tuning = config or DEFAULT_TUNING_CONFIG
     ordinals = [_training_sample_ordinal(sample) for sample in samples]
     min_ordinal = min(ordinals)
     span = max(max(ordinals) - min_ordinal, 1)
     weights = []
     for ordinal in ordinals:
         recency = (ordinal - min_ordinal) / span
-        weights.append(1.0 + (recency * 1.5))
+        weights.append(1.0 + (recency * 1.5 * max(tuning.recency_weight_scale, 0.0)))
     return weights
 
 
@@ -1042,6 +1070,7 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[Train
                     season=game_date[:4],
                     segment=game_date[:7],
                     baseline=float(features[FEATURE_NAMES.index("last_10_avg")]),
+                    is_recent_transfer=_is_recent_transfer_training_row(rows, idx),
                 )
             )
     diagnostics = TrainingSampleDiagnostics(
@@ -1054,6 +1083,21 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[Train
     )
     cache[cache_key] = (samples, diagnostics)
     return samples, diagnostics
+
+
+def _is_recent_transfer_training_row(rows: list[sqlite3.Row], row_index: int) -> bool:
+    if row_index <= 0:
+        return False
+    current_team_id = _historical_row_team_id(rows[row_index])
+    games_with_current_team = 0
+    prior_team_ids: set[int] = set()
+    for row in reversed(rows[:row_index]):
+        team_id = _historical_row_team_id(row)
+        if team_id == current_team_id and not prior_team_ids:
+            games_with_current_team += 1
+            continue
+        prior_team_ids.add(team_id)
+    return 0 < games_with_current_team <= 12 and any(team_id != current_team_id for team_id in prior_team_ids)
 
 
 def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
@@ -1541,6 +1585,13 @@ def _historical_training_features(
             exclude_game_id=int(row["game_id"]),
             fallback_rotation_role=str(row["rotation_role"] or "starter"),
         )
+    team_transition = _team_transition_features_from_player_rows(
+        conn,
+        player_id=int(row["player_id"]),
+        team_id=int(context["team_id"]),
+        player_rows=player_rows or [],
+        row_index=row_index,
+    )
     return [
         component_projection,
         weighted_recent,
@@ -1562,6 +1613,7 @@ def _historical_training_features(
         abs(team_spread) if team_spread is not None else 0.0,
         game_total,
         *archetype.feature_values(),
+        *team_transition,
     ]
 
 
@@ -2634,6 +2686,101 @@ def _player_recent_feature_rows(
         """,
         params,
     ).fetchall()
+
+
+def _team_transition_features(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    team_id: int,
+    history_rows: list[sqlite3.Row],
+) -> list[float]:
+    """Describe the player's current-team tenure using only completed games."""
+    current_team_rows: list[sqlite3.Row] = []
+    for row in history_rows:
+        if _historical_row_team_id(row) != team_id:
+            break
+        current_team_rows.append(row)
+    return _team_transition_features_from_games(conn, player_id, current_team_rows)
+
+
+def _team_transition_features_from_player_rows(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    team_id: int,
+    player_rows: list[sqlite3.Row],
+    row_index: int | None,
+) -> list[float]:
+    if row_index is None:
+        return [0.0, 0.0, 0.0, 0.5]
+    current_team_rows: list[sqlite3.Row] = []
+    for row in reversed(player_rows[:row_index]):
+        if _historical_row_team_id(row) != team_id:
+            break
+        current_team_rows.append(row)
+    return _team_transition_features_from_games(conn, player_id, current_team_rows)
+
+
+def _team_transition_features_from_games(
+    conn: sqlite3.Connection,
+    player_id: int,
+    current_team_rows: list[sqlite3.Row],
+) -> list[float]:
+    if not current_team_rows:
+        return [0.0, 0.0, 0.0, 0.5]
+
+    recent_rows = current_team_rows[:8]
+    minutes = [float(row["minutes"]) for row in recent_rows]
+    new_team_minutes_trend = _recent_trend(minutes)
+    game_ids = tuple(int(row["game_id"]) for row in recent_rows)
+    cache = _connection_training_cache_bucket(conn, "team_transition_features")
+    cache_key = (int(player_id), game_ids)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        teammate_shift, rotation_stability = cached  # type: ignore[misc]
+    else:
+        placeholders = ",".join("?" for _ in game_ids)
+        roster_rows = conn.execute(
+            f"""
+            SELECT DISTINCT h.game_id, h.player_id, s.minutes
+            FROM player_team_history h
+            JOIN player_game_stats s
+              ON s.player_id = h.player_id AND s.game_id = h.game_id
+            WHERE h.game_id IN ({placeholders})
+            """,
+            game_ids,
+        ).fetchall()
+        teammate_minutes: dict[int, float] = {game_id: 0.0 for game_id in game_ids}
+        rosters: dict[int, set[int]] = {game_id: set() for game_id in game_ids}
+        for row in roster_rows:
+            game_id = int(row["game_id"])
+            teammate_id = int(row["player_id"])
+            if teammate_id == player_id:
+                continue
+            teammate_minutes[game_id] += float(row["minutes"])
+            rosters[game_id].add(teammate_id)
+        minute_totals = [teammate_minutes[game_id] for game_id in game_ids]
+        recent_avg = sum(minute_totals[:3]) / min(len(minute_totals), 3)
+        prior_values = minute_totals[3:6]
+        prior_avg = sum(prior_values) / len(prior_values) if prior_values else recent_avg
+        teammate_shift = _clamp((prior_avg - recent_avg) / 30.0, -1.0, 1.0)
+        stability_scores = []
+        for current_game_id, previous_game_id in zip(game_ids, game_ids[1:]):
+            current_roster = rosters[current_game_id]
+            previous_roster = rosters[previous_game_id]
+            union = current_roster | previous_roster
+            if union:
+                stability_scores.append(len(current_roster & previous_roster) / len(union))
+        rotation_stability = sum(stability_scores) / len(stability_scores) if stability_scores else 0.5
+        cache[cache_key] = (teammate_shift, rotation_stability)
+
+    return [
+        float(min(len(current_team_rows), 20)),
+        float(new_team_minutes_trend),
+        float(teammate_shift),
+        float(rotation_stability),
+    ]
 
 
 def _market_value(row: sqlite3.Row, market: str) -> float:
