@@ -3925,7 +3925,20 @@ function SpecialStocksView({
     return Array.from(grouped.values()).map((card) => ({
       ...card,
       players: card.players.slice().sort((left, right) => right.projected_stocks - left.projected_stocks),
-    }));
+    })).sort((left, right) => {
+      const leftTime = Date.parse(left.startTime || left.gameDate);
+      const rightTime = Date.parse(right.startTime || right.gameDate);
+      if (Number.isNaN(leftTime) && Number.isNaN(rightTime)) {
+        return left.gameId - right.gameId;
+      }
+      if (Number.isNaN(leftTime)) {
+        return 1;
+      }
+      if (Number.isNaN(rightTime)) {
+        return -1;
+      }
+      return leftTime - rightTime;
+    });
   }, [snapshots]);
   const selectedCard = cards.find((card) => card.gameId === selectedGameId) ?? cards[0] ?? null;
 
