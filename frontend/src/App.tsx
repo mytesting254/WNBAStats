@@ -984,7 +984,7 @@ export function App() {
         return;
       }
       try {
-        const refreshedRoster = await fetchRoster();
+        const refreshedRoster = Array.isArray(result.roster) ? result.roster : await fetchRoster();
         setRosterPullSummary(buildRosterPullSummary(roster, refreshedRoster, result.captured_at ?? null));
         setRoster(refreshedRoster);
       } catch (err) {

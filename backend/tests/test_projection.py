@@ -1200,6 +1200,7 @@ def test_targeted_matchup_snapshot_publish_preserves_untouched_matchups(tmp_path
 def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_roster(monkeypatch) -> None:
     connect_calls = 0
     deleted: list[str] = []
+    roster_payload = [{"team": "ATL", "player_name": "Angel Reese", "status": "OUT"}]
 
     class DummyConn:
         def __enter__(self):
@@ -1239,6 +1240,7 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_ro
             main_module.ROSTER_CACHE_NAME: 12,
         },
     )
+    monkeypatch.setattr(main_module, "_roster_payload", lambda conn, refresh_lineups=False: roster_payload)
     monkeypatch.setattr(
         main_module,
         "_queue_current_slate_repair_job",
@@ -1255,11 +1257,13 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_ro
     assert result["published_payloads"] == {
         main_module.ROSTER_CACHE_NAME: 12,
     }
+    assert result["roster"] == roster_payload
     assert result["repair"] == {"status": "queued", "scope": "injury_update", "target_game_ids": [991, 992]}
 
 
 def test_rotowire_refresh_route_skips_repair_when_roster_snapshot_is_unchanged(monkeypatch) -> None:
     connect_calls = 0
+    roster_payload = [{"team": "ATL", "player_name": "Angel Reese", "status": "OUT"}]
 
     class DummyConn:
         def __enter__(self):
@@ -1290,6 +1294,7 @@ def test_rotowire_refresh_route_skips_repair_when_roster_snapshot_is_unchanged(m
             main_module.ROSTER_CACHE_NAME: 12,
         },
     )
+    monkeypatch.setattr(main_module, "_roster_payload", lambda conn, refresh_lineups=False: roster_payload)
 
     repair_called = False
 
@@ -1305,6 +1310,7 @@ def test_rotowire_refresh_route_skips_repair_when_roster_snapshot_is_unchanged(m
     assert connect_calls == 1
     assert repair_called is False
     assert result["affected_game_ids"] == [991, 992]
+    assert result["roster"] == roster_payload
     assert result["repair"] == {"status": "not_needed", "scope": "injury_update", "target_game_ids": []}
 
 
