@@ -19,7 +19,7 @@ from .odds import american_to_implied_probability
 from .timezone_utils import APP_TIMEZONE
 
 
-MODEL_VERSION = "adaptive-context-v1"
+MODEL_VERSION = "adaptive-context-v2-residual-guard"
 MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
     "points",
