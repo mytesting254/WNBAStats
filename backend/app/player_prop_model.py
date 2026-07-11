@@ -2327,16 +2327,14 @@ def _residual_market_weight(
     avg_minutes: float,
     config: ModelTuningConfig | None = None,
 ) -> float:
+    # Three-season walk-forward evaluation found negative residual MAE deltas
+    # for every live market except points+assists. Keep that one as a bounded
+    # experiment only after it has meaningful line-relative support.
+    if market != "points_assists" or rows < 200:
+        return 0.0
     tuning = config or DEFAULT_TUNING_CONFIG
-    base = 0.12
-    if rows >= 60:
-        base = 0.17
-    if rows >= 120:
-        base = 0.22
-    if rows >= 220:
-        base = 0.28
     player_floor = 0.06 if sample_count < 8 or avg_minutes < 20.0 else 0.09 if sample_count < 15 else 0.12
-    return _scaled_market_weight(max(base, player_floor) * _market_depth_scale(market), tuning.market_weight_scale)
+    return _scaled_market_weight(max(0.17, player_floor) * _market_depth_scale(market), tuning.market_weight_scale)
 
 
 def _scaled_market_weight(weight: float, scale: float) -> float:

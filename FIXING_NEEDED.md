@@ -64,9 +64,15 @@
 
 ## Current Model Quality Follow-Up
 
-- [ ] Prioritize settled prop history expansion before further model complexity work; current residual markets are still thin (`points 354`, `rebounds 299`, `threes 204`, `assists 67`, `PRA 71`, `PR 37`, `PA 34`, `RA 26`).
+- [ ] Keep the component baseline as the live default until a revised learned layer beats it out-of-sample by market and season; the current three-season learned MAE is `2.800` versus baseline `2.638`.
+- [ ] Replace the universal residual blend with market-specific eligibility: local implementation disables it for markets with negative/sparse three-season residual deltas and retains a bounded `points_assists` experiment only at 200+ support rows; deploy and re-run the benchmark before closing.
+- [ ] Add explicit post-transfer/team-change features: games since joining team, new-team minutes trend, teammate usage redistribution, and rotation stability; evaluate them separately for transferred players.
+- [ ] Add recency-weighted training/backtests so 2024 improves coverage without dominating current-season player roles, teams, and rotations.
+- [ ] Compare direct line-relative training (`actual_result - line`) against the current secondary residual blend per market; promote only configurations that improve walk-forward MAE, calibration, and recommendation accuracy.
+- [ ] Refit market-specific probability calibration and recommendation thresholds on the expanded `2024`–`2026` settled history, with minimum-support gates for sparse markets.
+- [x] Prioritize settled prop history expansion before further model complexity work; historical Odds API event-player-prop imports now provide settled coverage across `2024` (381), `2025` (600), and `2026` (5,986) seasons.
 - [x] Add a repeatable settled-history gap audit/backfill workflow so missing settled prop dates can be expanded without manual date-by-date repair.
-- [ ] Make training-row quality explicit in `model_runs` / Model Lab: track per-market candidate rows, included rows, and exclusion reasons before changing model complexity further.
+- [x] Make training-row quality explicit in `model_runs` / Model Lab: track per-market candidate rows, included rows, and exclusion reasons before changing model complexity further.
 - [x] Import at least one additional full WNBA season of player/game history to improve early-season stability, rookie handling, and matchup/context coverage.
 - [x] Upgrade evaluation from simple chronological 80/20 holdout to season-aware walk-forward backtests segmented by market and season/month window.
 - [x] Add explicit baseline comparisons in Model Lab / reporting against `last_10_avg` and the component model so learned-model gains are measurable.
@@ -77,7 +83,7 @@
 - [ ] Re-run before/after projection comparison after the archetype restore to quantify how many rows moved.
 - [ ] Measure how often the residual model changes recommended side versus the raw stat model.
 - [ ] Decide whether the residual blend weight should vary more aggressively by market.
-- [ ] Re-run full settled-prop holdout after role-aware minutes rollout (early minutes-only holdout delta: MAE `-0.074`, RMSE `-0.106`, bias `-0.034`).
+- [x] Re-run full settled-prop holdout after role-aware minutes rollout: the refreshed `2024`–`2026` walk-forward run completed with `24,156` training rows; the current learned player layer remains behind the component baseline overall (MAE `2.800` vs `2.638`), so future tuning must beat this benchmark market by market.
 - [x] Surface residual-model metrics in `model_runs` output so raw-stat and market-relative quality can be compared directly.
 - [x] Surface game residual baseline-vs-blended deltas in Model Lab.
 - [ ] Decide whether to train player props directly on line-relative targets end-to-end instead of using a secondary residual blend.
@@ -133,4 +139,6 @@
   - latest saved segmented walk-forward learned-model run used `123,750` evaluation rows total
   - latest saved local walk-forward run (`2026-06-26T17:03:18Z`) finished in about `1m 41s`
   - unchanged repeat training call on the same DB state returned the cached run in about `0.65s`
-- Nyara Sabally rebounds projection exists in the live DB and was being hidden by value-board gating, not missing from the model pipeline.
+  - Nyara Sabally rebounds projection exists in the live DB and was being hidden by value-board gating, not missing from the model pipeline.
+  - Active mounted-volume validation on `2026-07-11`: historical player props are settled across three seasons (`2024`: 381, `2025`: 600, `2026`: 5,986; `6,967` total).
+  - Three-season walk-forward benchmark on `2026-07-11`: `24,156` training rows. Residual blending was negative for most markets; only `points_assists` showed a material residual MAE gain, pending confirmation with more settled rows.

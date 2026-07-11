@@ -1888,10 +1888,9 @@ def test_market_blend_weights_stay_moderate_for_learned_projection() -> None:
     assert _player_market_weight(8, 24.0) == pytest.approx(0.26)
     assert _player_market_weight(12, 24.0) == pytest.approx(0.18)
 
-    assert _residual_market_weight("points", 40, 5, 18.0) == pytest.approx(0.12)
-    assert _residual_market_weight("points", 80, 12, 24.0) == pytest.approx(0.17)
-    assert _residual_market_weight("points", 150, 16, 24.0) == pytest.approx(0.22)
-    assert _residual_market_weight("points", 260, 20, 28.0) == pytest.approx(0.28)
+    assert _residual_market_weight("points", 260, 20, 28.0) == 0.0
+    assert _residual_market_weight("points_assists", 199, 20, 28.0) == 0.0
+    assert _residual_market_weight("points_assists", 260, 20, 28.0) > 0.0
 
 
 def test_sparse_combo_markets_use_more_conservative_blend_weights() -> None:
@@ -1905,7 +1904,7 @@ def test_sparse_combo_markets_use_more_conservative_blend_weights() -> None:
 
     assert pra_weight < points_weight
     assert blocks_steals_weight < points_weight
-    assert _residual_market_weight("points_rebounds_assists", 260, 20, 28.0) < _residual_market_weight("points", 260, 20, 28.0)
+    assert _residual_market_weight("points_rebounds_assists", 260, 20, 28.0) == 0.0
 
 
 def test_train_market_model_uses_active_non_sqlite_connection(monkeypatch) -> None:
