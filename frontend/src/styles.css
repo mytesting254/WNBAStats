@@ -20,7 +20,22 @@ body.arena-background {
   background:
     linear-gradient(90deg, rgba(11, 18, 32, 0.88), rgba(11, 18, 32, 0.64) 46%, rgba(11, 18, 32, 0.78)),
     linear-gradient(180deg, rgba(11, 18, 32, 0.42), rgba(11, 18, 32, 0.88)),
-    url("./assets/basketball-arena-bg.png") center / cover fixed;
+    image-set(
+      url("./assets/basketball-arena-bg-1672.avif") type("image/avif") 1x,
+      url("./assets/basketball-arena-bg-1672.webp") type("image/webp") 1x
+    ) center / cover fixed;
+}
+
+@media (max-width: 960px) {
+  body.arena-background {
+    background-image:
+      linear-gradient(90deg, rgba(11, 18, 32, 0.88), rgba(11, 18, 32, 0.64) 46%, rgba(11, 18, 32, 0.78)),
+      linear-gradient(180deg, rgba(11, 18, 32, 0.42), rgba(11, 18, 32, 0.88)),
+      image-set(
+        url("./assets/basketball-arena-bg-960.avif") type("image/avif") 1x,
+        url("./assets/basketball-arena-bg-960.webp") type("image/webp") 1x
+      );
+  }
 }
 
 button,

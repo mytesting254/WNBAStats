@@ -2,6 +2,8 @@
 import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import {
   fetchAuthState,
+  fetchUnsettledPropAudit,
+  voidDnpProps,
   fetchCacheStatus,
   fetchMissingEspnScores,
   fetchOpsHealth,
@@ -48,7 +50,8 @@ import {
   type TeamLast10,
   type ValueProp,
   type WatchlistPerformance,
-  type WatchlistProp
+  type WatchlistProp,
+  type UnsettledPropAuditItem
 } from "./api";
 
 const markets = [
@@ -228,6 +231,8 @@ export function App() {
   const [operationStatus, setOperationStatus] = useState<string | null>(null);
   const [stalePayloadAudit, setStalePayloadAudit] = useState<StalePayloadAudit | null>(null);
   const [dbLockAudit, setDbLockAudit] = useState<DbLockAudit | null>(null);
+  const [unsettledPropAudit, setUnsettledPropAudit] = useState<{ count: number; items: UnsettledPropAuditItem[] } | null>(null);
+  const [auditingUnsettledProps, setAuditingUnsettledProps] = useState(false);
   const [stalePayloadAck, setStalePayloadAck] = useState("");
   const [availabilityToast, setAvailabilityToast] = useState<string | null>(null);
   const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
@@ -1203,6 +1208,8 @@ export function App() {
             missingEspnGames={missingEspnGames}
             stalePayloadAudit={stalePayloadAudit}
             dbLockAudit={dbLockAudit}
+            unsettledPropAudit={unsettledPropAudit}
+            auditingUnsettledProps={auditingUnsettledProps}
             stalePayloadAck={stalePayloadAck}
             onImportOdds={handleImportOdds}
             onImportCoversOdds={handleImportCoversOdds}
@@ -1220,6 +1227,15 @@ export function App() {
             onDeleteStalePayloads={handleDeleteStalePayloads}
             onAuditDbLock={handleAuditDbLock}
             onRecoverDbLock={handleRecoverDbLock}
+            onAuditUnsettledProps={async () => {
+              setAuditingUnsettledProps(true);
+              setError(null);
+              try { setUnsettledPropAudit(await fetchUnsettledPropAudit()); } catch (err) { setError(err instanceof Error ? err.message : "Unable to audit unsettled props"); } finally { setAuditingUnsettledProps(false); }
+            }}
+            onVoidDnp={async (gameId, playerId) => {
+              setAuditingUnsettledProps(true);
+              try { const result = await voidDnpProps(gameId, playerId); setUnsettledPropAudit(await fetchUnsettledPropAudit()); setOperationStatus(`Voided ${result.voided_prop_lines} DNP prop lines.`); } catch (err) { setError(err instanceof Error ? err.message : "Unable to void DNP props"); } finally { setAuditingUnsettledProps(false); }
+            }}
             onStalePayloadAckChange={setStalePayloadAck}
             onReload={handleReload}
           />
@@ -1278,6 +1294,8 @@ function DataView({
   missingEspnGames,
   stalePayloadAudit,
   dbLockAudit,
+  unsettledPropAudit,
+  auditingUnsettledProps,
   stalePayloadAck,
   onImportOdds,
   onImportCoversOdds,
@@ -1295,6 +1313,8 @@ function DataView({
   onDeleteStalePayloads,
   onAuditDbLock,
   onRecoverDbLock,
+  onAuditUnsettledProps,
+  onVoidDnp,
   onStalePayloadAckChange,
   onReload
 }: {
@@ -1333,6 +1353,8 @@ function DataView({
   missingEspnGames: MissingEspnGame[];
   stalePayloadAudit: StalePayloadAudit | null;
   dbLockAudit: DbLockAudit | null;
+  unsettledPropAudit: { count: number; items: UnsettledPropAuditItem[] } | null;
+  auditingUnsettledProps: boolean;
   stalePayloadAck: string;
   onImportOdds: (forceRefresh: boolean) => void;
   onImportCoversOdds: (forceRefresh: boolean) => void;
@@ -1356,6 +1378,8 @@ function DataView({
   onDeleteStalePayloads: () => void;
   onAuditDbLock: () => void;
   onRecoverDbLock: () => void;
+  onAuditUnsettledProps: () => void;
+  onVoidDnp: (gameId: number, playerId: number) => void;
   onStalePayloadAckChange: (value: string) => void;
   onReload: () => void;
 }) {
@@ -1632,6 +1656,36 @@ function DataView({
               </button>
               <button className="secondary-button" onClick={onImportMissingScores} disabled={busy || missingEspnDates.length === 0}>
                 Import Missing
+              </button>
+            </div>
+          </article>
+          <article className="operation-card">
+            <div>
+              <p className="eyebrow">settlement review</p>
+              <h3>Unsettled Props</h3>
+              <p>Review final-game props that could not settle. Missing box scores require DNP confirmation before a prop can be voided.</p>
+              {unsettledPropAudit ? (
+                unsettledPropAudit.items.length ? (
+                  <div className="reason">
+                    {unsettledPropAudit.items.map((item) => (
+                      <div key={`${item.game_id}-${item.player_id}`}>
+                        {item.game_date} · {item.player_name} · {item.prop_count} props · {item.review_status.replace(/_/g, " ")}
+                        {item.availability_reason ? ` (${item.availability_reason})` : ""}
+                        {item.review_status === "missing_boxscore" ? (
+                          <button className="secondary-button" onClick={() => { if (window.confirm(`Confirm ${item.player_name} was a DNP and void ${item.prop_count} props?`)) onVoidDnp(item.game_id, item.player_id); }} disabled={busy || auditingUnsettledProps}>
+                            Void confirmed DNP
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : <p className="reason">No unsettled final props.</p>
+              ) : null}
+            </div>
+            <div className="operation-actions">
+              <button className="icon-button text-button dark-button" onClick={onAuditUnsettledProps} disabled={busy || auditingUnsettledProps}>
+                <ListChecks size={18} />
+                {auditingUnsettledProps ? "Auditing" : "Audit Unsettled Props"}
               </button>
             </div>
           </article>

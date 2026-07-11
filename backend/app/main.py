@@ -3235,6 +3235,108 @@ def settle_props(
     }
 
 
+@app.get("/api/admin/unsettled-props", dependencies=[Depends(_protect_mutation)])
+def unsettled_props_audit() -> dict[str, Any]:
+    """List final prop lines that cannot yet be settled, grouped for DNP review."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                g.id AS game_id,
+                g.game_date,
+                home.abbreviation AS home_team,
+                away.abbreviation AS away_team,
+                p.id AS player_id,
+                p.full_name AS player_name,
+                COUNT(DISTINCT pl.id) AS prop_count,
+                GROUP_CONCAT(DISTINCT pl.market) AS markets,
+                CASE WHEN EXISTS (
+                    SELECT 1 FROM player_game_stats pgs
+                    WHERE pgs.game_id = pl.game_id AND pgs.player_id = pl.player_id
+                ) THEN 1 ELSE 0 END AS has_boxscore,
+                COALESCE((
+                    SELECT MAX(pga.did_not_play)
+                    FROM player_game_availability pga
+                    WHERE pga.game_id = pl.game_id AND pga.player_id = pl.player_id
+                ), 0) AS explicit_dnp,
+                (
+                    SELECT pga.status_reason
+                    FROM player_game_availability pga
+                    WHERE pga.game_id = pl.game_id AND pga.player_id = pl.player_id
+                      AND trim(COALESCE(pga.status_reason, '')) <> ''
+                    ORDER BY pga.did_not_play DESC, pga.observed_at DESC
+                    LIMIT 1
+                ) AS availability_reason
+            FROM prop_lines pl
+            JOIN games g ON g.id = pl.game_id
+            JOIN players p ON p.id = pl.player_id
+            JOIN teams home ON home.id = g.home_team_id
+            JOIN teams away ON away.id = g.away_team_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE g.status = 'final' AND sp.id IS NULL
+            GROUP BY pl.game_id, pl.player_id
+            ORDER BY g.game_date DESC, p.full_name
+            """
+        ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        item["markets"] = sorted(filter(None, str(item.get("markets") or "").split(",")))
+        item["review_status"] = (
+            "confirmed_dnp" if item["explicit_dnp"] else "missing_boxscore" if not item["has_boxscore"] else "settlement_context_missing"
+        )
+        items.append(item)
+    return {"count": len(items), "items": items}
+
+
+@app.post("/api/admin/unsettled-props/void-dnp", dependencies=[Depends(_protect_mutation)])
+def void_dnp_props(game_id: int, player_id: int, confirmation: str) -> dict[str, Any]:
+    if confirmation.strip() != "VOID DNP":
+        raise HTTPException(status_code=400, detail="Confirmation must be VOID DNP.")
+    with connect() as conn:
+        game = conn.execute(
+            "SELECT id FROM games WHERE id = ? AND status = 'final'", (int(game_id),)
+        ).fetchone()
+        player = conn.execute("SELECT team_id FROM players WHERE id = ?", (int(player_id),)).fetchone()
+        if game is None or player is None:
+            raise HTTPException(status_code=404, detail="Final game or player not found.")
+        team = conn.execute(
+            "SELECT team_id FROM player_team_history WHERE game_id = ? AND player_id = ? ORDER BY id DESC LIMIT 1",
+            (int(game_id), int(player_id)),
+        ).fetchone()
+        team_id = int(team["team_id"]) if team else int(player["team_id"])
+        conn.execute(
+            """
+            INSERT INTO player_game_availability (
+                player_id, game_id, team_id, source, is_active, did_not_play, status_reason, minutes_text, observed_at
+            ) VALUES (?, ?, ?, 'manual_review', 0, 1, 'Admin-confirmed DNP', NULL, ?)
+            ON CONFLICT(player_id, game_id, source) DO UPDATE SET
+                team_id = excluded.team_id, is_active = 0, did_not_play = 1,
+                status_reason = excluded.status_reason, observed_at = excluded.observed_at
+            """,
+            (int(player_id), int(game_id), team_id, datetime.now(timezone.utc).isoformat()),
+        )
+        prop_rows = conn.execute(
+            """
+            SELECT pl.id FROM prop_lines pl
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE pl.game_id = ? AND pl.player_id = ? AND sp.id IS NULL
+            """,
+            (int(game_id), int(player_id)),
+        ).fetchall()
+        prop_ids = [int(row["id"]) for row in prop_rows]
+        if prop_ids:
+            placeholders = ",".join("?" for _ in prop_ids)
+            params = tuple(prop_ids)
+            conn.execute(f"DELETE FROM watchlist_snapshot_items WHERE prop_line_id IN ({placeholders})", params)
+            conn.execute(f"DELETE FROM gem_snapshot_items WHERE prop_line_id IN ({placeholders})", params)
+            conn.execute(f"DELETE FROM prop_predictions WHERE prop_line_id IN ({placeholders})", params)
+            conn.execute(f"DELETE FROM prop_lines WHERE id IN ({placeholders})", params)
+        conn.commit()
+    _invalidate_read_caches()
+    return {"game_id": game_id, "player_id": player_id, "voided_prop_lines": len(prop_ids), "status": "voided_dnp"}
+
+
 @app.get("/api/value-board", dependencies=[Depends(_protect_force_refresh)])
 def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
     if force_refresh:

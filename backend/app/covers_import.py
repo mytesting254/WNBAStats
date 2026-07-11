@@ -301,7 +301,16 @@ def _replace_covers_rows(
     rows = [_row_to_tuple(row) for row in row_payload if isinstance(row, dict)]
     if update_game_markets:
         _update_covers_game_markets(conn, game_payload or [])
-    conn.execute("DELETE FROM sportsbook_prop_lines WHERE provider = ?", (PROVIDER,))
+    # Covers can be backfilled one historical date at a time.  Replacing the
+    # complete provider inventory here would discard all previously imported
+    # dates (and today's offers) whenever one date is refreshed.
+    replacement_dates = sorted({str(row[3]) for row in rows if row[3]})
+    if replacement_dates:
+        placeholders = ",".join("?" for _ in replacement_dates)
+        conn.execute(
+            f"DELETE FROM sportsbook_prop_lines WHERE provider = ? AND game_date IN ({placeholders})",
+            (PROVIDER, *replacement_dates),
+        )
     conn.executemany(
         """
         INSERT INTO sportsbook_prop_lines (

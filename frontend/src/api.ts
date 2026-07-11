@@ -1018,6 +1018,37 @@ export async function settleProps(
   return response.json();
 }
 
+export type UnsettledPropAuditItem = {
+  game_id: number;
+  game_date: string;
+  home_team: string;
+  away_team: string;
+  player_id: number;
+  player_name: string;
+  prop_count: number;
+  markets: string[];
+  has_boxscore: number;
+  explicit_dnp: number;
+  availability_reason?: string | null;
+  review_status: "confirmed_dnp" | "missing_boxscore" | "settlement_context_missing";
+};
+
+export async function fetchUnsettledPropAudit(): Promise<{ count: number; items: UnsettledPropAuditItem[] }> {
+  const response = await apiFetch("/api/admin/unsettled-props");
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new Error(detail || "Failed to audit unsettled props");
+  }
+  return response.json();
+}
+
+export async function voidDnpProps(gameId: number, playerId: number): Promise<{ voided_prop_lines: number }> {
+  const params = new URLSearchParams({ game_id: String(gameId), player_id: String(playerId), confirmation: "VOID DNP" });
+  const response = await apiFetch(`/api/admin/unsettled-props/void-dnp?${params}`, { method: "POST" });
+  if (!response.ok) throw new Error((await readErrorDetail(response)) || "Failed to void DNP props");
+  return response.json();
+}
+
 export async function fetchModelRuns(): Promise<{ latest: ModelRun | null; runs: ModelRun[] }> {
   const response = await fetch("/api/models/runs");
   if (!response.ok) {

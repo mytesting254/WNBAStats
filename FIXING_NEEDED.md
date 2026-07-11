@@ -30,6 +30,8 @@
 - [x] Make `current_*` read caches and `app_response_cache_*.json` expire on local date rollover, not only TTL, so previous-day payloads cannot survive past midnight ET.
 - [x] Remove the misleading unused `ODDSPAPI_KEY` deployment wiring so live Odds API imports only depend on `ODDS_API_KEY`.
 - [x] Expose current live provider-env status (`ODDS_API_KEY` configured / missing) through the admin-only `/api/admin/provider-status` endpoint.
+- [x] Make the nightly settlement workflow refresh a rolling seven-day ESPN results/box-score window before settlement, so completed games cannot remain scheduled after a missed overnight import.
+- [x] Add an admin-only unsettled-prop audit and confirmed-DNP void action; DNP prop lines and dependent predictions/snapshots are deleted instead of being graded as zero.
 
 ## Initial App-Load Performance
 
@@ -47,7 +49,7 @@
 - [x] Report an unambiguous cache outcome (`HIT`, `STALE`, `MISS`, `REBUILDING`) and compute duration in response headers; current `X-App-Cache: STORE` is written for every successful response and cannot distinguish cache hits.
 - [x] Profile the cold Matchups query and remove repeated per-game injury-impact queries by sharing one slate-level game-prediction cache; direct profiling found `11.2s` of a `13.8s` build in repeated game prediction/injury work.
 - [x] Profile the cold Roster query; direct profiling found team injury-impact enrichment dominates the `7.9s` cold build, while the deployed cache-hit response is `43ms`.
-- [ ] Compress the 1.9 MB arena background image (WebP/AVIF and responsive variants); its network request is now deferred until after the Props view renders.
+- [x] Compress the 1.9 MB arena background image (WebP/AVIF and responsive variants); its network request is now deferred until after the Props view renders.
 
 ## Current Repair-Path Optimization Work
 
@@ -56,7 +58,7 @@
 - [x] Keep unchanged scheduled `prop_lines` in place during reingest instead of deleting and recreating every touched game row.
 - [x] Apply Covers precedence before model-line sync so overlapping Odds API rows do not create duplicate live model rows for the same player market.
 - [x] Scope roster-triggered background repairs to scheduled games involving affected teams; cached views remain available while the targeted repair runs.
-- [ ] Investigate duplicate player identities that may create unnecessary joins and duplicate prop rows.
+- [x] Investigate duplicate player identities that may create unnecessary joins and duplicate prop rows (the only normalized-name collision is distinct Golden State/Japan Kokoro Tanaka records; no duplicate live prop-line keys found).
 - [x] Keep Odds API cache rehydration scoped to active upcoming events instead of blindly reloading stale cached provider rows.
 - [x] Tighten merged provider dedupe rules so overlapping Covers and Odds API rows keep distinct lines without over-inflating effectively identical offers.
 

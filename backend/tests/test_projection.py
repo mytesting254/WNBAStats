@@ -5015,6 +5015,33 @@ def test_covers_parser_extracts_player_prop_rows() -> None:
     assert rows[1][14] == -130
 
 
+def test_covers_historical_replace_preserves_other_dates() -> None:
+    def row_for(game_date: str, event_id: str) -> dict:
+        return dict(
+            zip(
+                covers_import_module.ROW_COLUMNS,
+                (
+                    "covers", event_id, None, game_date, f"{game_date}T19:00:00+00:00",
+                    "New York Liberty", "Connecticut Sun", "draftkings", "DraftKings",
+                    "player_points", "points", "Breanna Stewart", "over", 20.5, -110,
+                    f"{game_date}T12:00:00+00:00",
+                ),
+            )
+        )
+
+    with connect() as conn:
+        covers_import_module._replace_covers_rows(conn, [row_for("2025-05-17", "historic")])
+        covers_import_module._replace_covers_rows(conn, [row_for("2026-05-08", "current")])
+        stored_dates = [
+            row[0]
+            for row in conn.execute(
+                "SELECT game_date FROM sportsbook_prop_lines WHERE provider = 'covers' ORDER BY game_date"
+            ).fetchall()
+        ]
+
+    assert stored_dates == ["2025-05-17", "2026-05-08"]
+
+
 def test_covers_matchup_links_accepts_sport_and_sports_paths(monkeypatch) -> None:
     html = """
     <a href="/sport/basketball/wnba/matchup/373849/odds">A</a>

@@ -9,7 +9,7 @@ USE_LIVE_CONTAINER="${WNBA_USE_LIVE_CONTAINER:-false}"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/live_daily_props.sh settle|train-model|settle-and-train|odds-if-matchups
+Usage: scripts/live_daily_props.sh refresh-results|settle|train-model|settle-and-train|odds-if-matchups
 
 Environment:
   WNBA_API_BASE  Backend base URL. Default: http://127.0.0.1:8010
@@ -119,6 +119,18 @@ run_settle() {
   echo
 }
 
+run_refresh_completed_results() {
+  require_api_key_for_prod_hint
+  # ESPN occasionally publishes a final score or box score later than the next
+  # morning.  Keep a short repair window so a missed overnight import cannot
+  # leave completed props permanently attached to scheduled games.
+  local selected_dates
+  selected_dates="$(python3 -c 'from datetime import datetime, timedelta; from zoneinfo import ZoneInfo; today = datetime.now(ZoneInfo("America/New_York")).date(); print(",".join((today - timedelta(days=offset)).isoformat() for offset in range(7)))')"
+  echo "[$(timestamp)] refreshing ESPN completed results for ${selected_dates}"
+  api_post "/api/history/import/espn?force_refresh=true&include_player_stats=true&missing_only=true&selected_dates=${selected_dates}"
+  echo
+}
+
 run_train_model() {
   require_api_key_for_prod_hint
   echo "[$(timestamp)] queueing model training"
@@ -140,6 +152,7 @@ run_train_model() {
 }
 
 run_settle_and_train() {
+  run_refresh_completed_results
   run_settle
   run_train_model
 }
@@ -168,6 +181,9 @@ main() {
   fi
 
   case "${1:-}" in
+    refresh-results)
+      run_refresh_completed_results
+      ;;
     settle)
       run_settle
       ;;
