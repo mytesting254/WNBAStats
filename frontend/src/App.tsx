@@ -3971,7 +3971,7 @@ function SpecialStocksView({
                 </div>
               </div>
               <div className="table-wrap special-props-table-wrap">
-                <table className="props-table roster-table special-props-table">
+                <table className="props-table special-props-table">
                   <thead>
                     <tr>
                       <th>Player</th>
@@ -3983,7 +3983,6 @@ function SpecialStocksView({
                       <th>1+ BLK</th>
                       <th>2+ BLK</th>
                       <th>2+ Stocks</th>
-                      <th>Last 5</th>
                       <th>Settled</th>
                       <th>Captured</th>
                     </tr>
@@ -3995,6 +3994,7 @@ function SpecialStocksView({
                           <div className="roster-player-cell special-player-cell">
                             <strong>{snapshot.player_name}</strong>
                             <span>{snapshot.data_quality === "model_only" ? "Model only" : snapshot.data_quality}</span>
+                            {renderRecentOutcomesWithMinutes(snapshot, `special-${snapshot.id}`)}
                           </div>
                         </td>
                         <td>{formatNumber(snapshot.projected_steals)}</td>
@@ -4005,7 +4005,6 @@ function SpecialStocksView({
                         <td>{formatPercent(snapshot.block_prob_1_plus)}</td>
                         <td>{formatPercent(snapshot.block_prob_2_plus)}</td>
                         <td>{formatPercent(snapshot.stocks_prob_2_plus)}</td>
-                        <td>{renderRecentOutcomesWithMinutes(snapshot, `special-${snapshot.id}`)}</td>
                         <td>
                           {snapshot.actual_stocks == null
                             ? "Pending"
@@ -4016,7 +4015,7 @@ function SpecialStocksView({
                     ))}
                     {!selectedCard.players.length && (
                       <tr>
-                        <td colSpan={12}>No special props generated for this game yet.</td>
+                        <td colSpan={11}>No special props generated for this game yet.</td>
                       </tr>
                     )}
                   </tbody>

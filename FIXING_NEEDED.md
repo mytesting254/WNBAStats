@@ -137,7 +137,7 @@
   - parallel per-market training evaluation in `run_walk_forward_training()`
   - signature-based reuse of unchanged `model_runs` so repeat local training returns instantly when the data has not changed
   - end-to-end `Special` tab support for model-only steals/blocks props, including backend list/generate endpoints, rebuild-time snapshot generation, settlement from ESPN box scores, and frontend review/generate UI
-  - `Special` tab refinement: props now render in a rows-and-columns table and expose the last five `stocks` outcomes plus minutes using the same inline recent-form strip style as the regular props/parlay surfaces
+  - `Special` tab refinement: props now render in a rows-and-columns table with real matchup labels/tipoff times, and the last-five `stocks` outcomes plus minutes sit under the player name using the same inline recent-form strip style and color language as the regular props/parlay surfaces
 - Current data state checked on `2026-06-26`:
   - local `data/wnba.sqlite` now mirrors the deploy snapshot and includes imported `2024` ESPN history
   - active local history spans `2024-05-03` through `2026-09-24`

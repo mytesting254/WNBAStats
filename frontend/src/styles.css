@@ -1087,14 +1087,29 @@ tbody tr.selected {
 .special-props-table-wrap {
   margin: 0 18px 18px;
   overflow-x: auto;
-  border: 1px solid rgba(8, 47, 73, 0.1);
-  border-radius: 18px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+  border: 1px solid #eaecf0;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
 }
 
 .special-props-table {
   min-width: 1180px;
+  background: #ffffff;
+}
+
+.special-props-table thead th {
+  background: #f8fafc;
+  border-bottom-color: #eaecf0;
+  color: #667085;
+}
+
+.special-props-table tbody tr {
+  transition: background 160ms ease;
+}
+
+.special-props-table tbody tr:hover {
+  background: #f8fbff;
 }
 
 .special-props-table td:nth-child(n + 2):nth-child(-n + 9) {
@@ -1113,6 +1128,19 @@ tbody tr.selected {
 
 .special-props-table td:nth-child(10) {
   min-width: 220px;
+}
+
+.special-player-cell > span {
+  margin-top: 0;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.special-player-cell .prop-l5-strip {
+  margin-top: 8px;
+  flex-wrap: wrap;
 }
 
 .roster-player-cell .player-label {
