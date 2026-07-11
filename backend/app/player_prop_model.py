@@ -2596,7 +2596,12 @@ def _player_recent_feature_rows(
     if before_game_date is not None:
         return conn.execute(
             f"""
-            SELECT s.*, g.game_date, p.rotation_role, p.position
+            SELECT s.*, g.game_date, p.rotation_role, p.position,
+                COALESCE((
+                    SELECT h.team_id FROM player_team_history h
+                    WHERE h.player_id = s.player_id AND h.game_id = s.game_id
+                    ORDER BY h.id DESC LIMIT 1
+                ), p.team_id) AS resolved_team_id
             FROM player_game_stats s
             JOIN games g ON g.id = s.game_id
             JOIN players p ON p.id = s.player_id
@@ -2614,7 +2619,12 @@ def _player_recent_feature_rows(
         ).fetchall()
     return conn.execute(
         f"""
-        SELECT s.*, g.game_date, p.rotation_role, p.position
+        SELECT s.*, g.game_date, p.rotation_role, p.position,
+            COALESCE((
+                SELECT h.team_id FROM player_team_history h
+                WHERE h.player_id = s.player_id AND h.game_id = s.game_id
+                ORDER BY h.id DESC LIMIT 1
+            ), p.team_id) AS resolved_team_id
         FROM player_game_stats s
         JOIN games g ON g.id = s.game_id
         JOIN players p ON p.id = s.player_id

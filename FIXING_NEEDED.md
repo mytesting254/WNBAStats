@@ -65,8 +65,8 @@
 ## Current Model Quality Follow-Up
 
 - [ ] Keep the component baseline as the live default until a revised learned layer beats it out-of-sample by market and season; the current three-season learned MAE is `2.800` versus baseline `2.638`.
-- [ ] Replace the universal residual blend with market-specific eligibility: local implementation disables it for markets with negative/sparse three-season residual deltas and retains a bounded `points_assists` experiment only at 200+ support rows; deploy and re-run the benchmark before closing.
-- [ ] Add explicit post-transfer/team-change features: games since joining team, new-team minutes trend, teammate usage redistribution, and rotation stability; evaluate them separately for transferred players.
+- [x] Replace the universal residual blend with market-specific eligibility: verified in deployed `adaptive-context-v2-residual-guard`; it improved overall walk-forward MAE from `2.800` to `2.797`, keeps only the 200+ support `points_assists` experiment, and disables negative/sparse residual markets.
+- [ ] Add explicit post-transfer/team-change features: game-specific resolved team history is now available in recent feature rows; next add games since joining, new-team minutes trend, teammate usage redistribution, and rotation stability, then evaluate them separately for transferred players.
 - [ ] Add recency-weighted training/backtests so 2024 improves coverage without dominating current-season player roles, teams, and rotations.
 - [ ] Compare direct line-relative training (`actual_result - line`) against the current secondary residual blend per market; promote only configurations that improve walk-forward MAE, calibration, and recommendation accuracy.
 - [ ] Refit market-specific probability calibration and recommendation thresholds on the expanded `2024`–`2026` settled history, with minimum-support gates for sparse markets.
