@@ -119,6 +119,36 @@ def test_training_start_date_ignores_invalid_override(monkeypatch) -> None:
     assert player_prop_model_module._training_start_date(date(2026, 7, 5)) == "2025-01-01"
 
 
+def test_session_cookie_secure_follows_request_scheme(monkeypatch) -> None:
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.setenv("ENV", "prod")
+
+    http_request = Request({"type": "http", "scheme": "http", "headers": [], "server": ("example.com", 80), "path": "/"})
+    https_request = Request({"type": "http", "scheme": "https", "headers": [], "server": ("example.com", 443), "path": "/"})
+
+    assert main_module._session_cookie_secure(http_request) is False
+    assert main_module._session_cookie_secure(https_request) is True
+
+
+def test_session_cookie_secure_prefers_forwarded_proto_and_override(monkeypatch) -> None:
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    monkeypatch.setenv("ENV", "prod")
+
+    proxied_https = Request(
+        {
+            "type": "http",
+            "scheme": "http",
+            "headers": [(b"x-forwarded-proto", b"https")],
+            "server": ("example.com", 80),
+            "path": "/",
+        }
+    )
+    assert main_module._session_cookie_secure(proxied_https) is True
+
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
+    assert main_module._session_cookie_secure(proxied_https) is False
+
+
 def test_before_training_start_compares_iso_dates() -> None:
     assert player_prop_model_module._before_training_start("2024-12-31", "2025-01-01") is True
     assert player_prop_model_module._before_training_start("2025-01-01", "2025-01-01") is False
@@ -1187,6 +1217,7 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_ro
         lambda conn, force_refresh=False: {
             "source": "rotowire",
             "status": "imported",
+            "roster_changed": True,
             "affected_team_ids": [3, 7],
         },
     )
@@ -1225,6 +1256,56 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_ro
         main_module.ROSTER_CACHE_NAME: 12,
     }
     assert result["repair"] == {"status": "queued", "scope": "injury_update", "target_game_ids": [991, 992]}
+
+
+def test_rotowire_refresh_route_skips_repair_when_roster_snapshot_is_unchanged(monkeypatch) -> None:
+    connect_calls = 0
+
+    class DummyConn:
+        def __enter__(self):
+            nonlocal connect_calls
+            connect_calls += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(
+        main_module,
+        "import_rotowire_lineups",
+        lambda conn, force_refresh=False: {
+            "source": "rotowire",
+            "status": "imported",
+            "roster_changed": False,
+            "affected_team_ids": [3, 7],
+        },
+    )
+    monkeypatch.setattr(main_module, "_scheduled_game_ids_for_teams", lambda conn, team_ids: [991, 992])
+    monkeypatch.setattr(main_module, "delete_json_cache", lambda name: True)
+    monkeypatch.setattr(
+        main_module,
+        "_refresh_roster_read_payloads",
+        lambda conn: {
+            main_module.ROSTER_CACHE_NAME: 12,
+        },
+    )
+
+    repair_called = False
+
+    def fail_queue(*args, **kwargs):
+        nonlocal repair_called
+        repair_called = True
+        raise AssertionError("_queue_current_slate_repair_job should not be called")
+
+    monkeypatch.setattr(main_module, "_queue_current_slate_repair_job", fail_queue)
+
+    result = main_module.import_rotowire_injuries(force_refresh=True)
+
+    assert connect_calls == 1
+    assert repair_called is False
+    assert result["affected_game_ids"] == [991, 992]
+    assert result["repair"] == {"status": "not_needed", "scope": "injury_update", "target_game_ids": []}
 
 
 def test_espn_history_accepts_batch_dates(monkeypatch) -> None:

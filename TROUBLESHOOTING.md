@@ -87,6 +87,32 @@ If login still works but POSTs fail, inspect the backend log line and response b
   - `X-API-Key: <API_KEY>`
   - or `Authorization: Bearer <API_KEY>`
 
+## Admin Login Is Lost On Refresh Or Redeploy
+
+### Symptom
+
+- `POST /api/auth/login` succeeds
+- a page refresh shows the admin as signed out
+- a new container deploy appears to log the admin out immediately
+
+### Likely Cause
+
+- the browser never persisted the session cookie
+- the app is being served over plain `http`, but cookie security was forced for `https`
+- proxy headers make the backend believe the public scheme is different from the browser-visible scheme
+
+### What To Check
+
+- inspect the login response cookie attributes in the browser devtools
+- if the public app is HTTPS, ensure the proxy sends `X-Forwarded-Proto: https`
+- if the public app is intentionally HTTP, do not force `SESSION_COOKIE_SECURE=true`
+- `GET /api/auth/me` immediately after login should stay authenticated across reloads
+
+### Notes
+
+- The app now sets the admin session cookie `Secure` flag from the effective request scheme by default.
+- Use `SESSION_COOKIE_SECURE=true|false` only when you need to override that behavior for a specific deployment.
+
 ## Model Lab Missing Or Train Fails
 
 ### Symptom

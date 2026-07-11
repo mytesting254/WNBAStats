@@ -34,6 +34,10 @@ The app is built around a provider-backed pregame workflow:
 - Admin credentials come from:
   - `ADMIN_USERNAME`
   - `ADMIN_PASSWORD`
+- Admin session cookies now follow the effective request scheme:
+  - HTTPS requests get a `Secure` cookie
+  - HTTP requests get a non-`Secure` cookie so browser sessions persist across refreshes
+  - `SESSION_COOKIE_SECURE=true|false` can override this when a deployment needs explicit control
 - Login endpoints:
   - `GET /api/auth/me`
   - `POST /api/auth/login`
@@ -376,6 +380,7 @@ Before treating a deployment as production-ready, verify all of the following:
 2. `https://<domain>/api/matchups` returns JSON through nginx, not directly from uvicorn.
 3. SQLite data survives container restarts and redeploys.
 4. Admin login works from the `Data` tab.
+   - If login appears to work but refresh immediately signs the admin out, verify whether the public app is really HTTPS and whether `SESSION_COOKIE_SECURE` is forcing the wrong cookie mode.
 5. `https://<domain>/index.html` and `https://<domain>/runtime-config.js` return `Cache-Control: no-store`.
 6. The frontend container/image, not a manual file sync, is the source of `/usr/share/nginx/html`.
 7. A hard refresh loads the latest UI and the `Recalculate` action calls `POST /api/props/repair-current-slate`.

@@ -48,6 +48,8 @@ Important:
 
 - `ADMIN_USERNAME` and `ADMIN_PASSWORD` bootstrap the admin account used by the Data tab login.
 - Session-authenticated admin POST routes also require a CSRF token header, which the frontend now manages automatically.
+- Admin session cookies follow the effective request scheme by default. If your public endpoint is HTTPS through Coolify/Traefik, leave that behavior alone. If you intentionally expose plain HTTP, the app will avoid setting a `Secure` cookie so login survives page refreshes.
+- `SESSION_COOKIE_SECURE=true|false` is available if you need to override cookie behavior explicitly for a specific proxy/deploy shape.
 - Leave `VITE_API_KEY` unset for public deployments so the browser does not receive a shared mutation secret.
 - `API_KEY` remains available as a fallback for server-to-server or manual admin requests that send `X-API-Key`.
 - `runtime-config.js` must never fall back to `API_KEY`; only `VITE_API_KEY` may be emitted to the browser.

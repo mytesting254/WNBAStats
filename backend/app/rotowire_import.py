@@ -65,7 +65,7 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
             else:
                 raise
 
-    _update_roster_snapshot_cache(rows, captured_at, source)
+    snapshot_metadata = _update_roster_snapshot_cache(rows, captured_at, source)
 
     inserted = 0
     unresolved = 0
@@ -138,6 +138,8 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
         "status": status,
         "message": message,
         "captured_at": captured_at,
+        "roster_changed": bool(snapshot_metadata.get("changed")),
+        "roster_changed_at": snapshot_metadata.get("changed_at"),
         "parsed_rows": len(rows),
         "inserted": inserted,
         "unresolved": unresolved,
@@ -223,7 +225,7 @@ def _is_db_locked(exc: sqlite3.OperationalError) -> bool:
     return "database is locked" in str(exc).lower()
 
 
-def _update_roster_snapshot_cache(rows: list[dict[str, str]], captured_at: str, source: str) -> None:
+def _update_roster_snapshot_cache(rows: list[dict[str, str]], captured_at: str, source: str) -> dict[str, str | bool | list[dict[str, str]]]:
     normalized_rows = []
     for row in rows:
         if not isinstance(row, dict):
@@ -247,21 +249,20 @@ def _update_roster_snapshot_cache(rows: list[dict[str, str]], captured_at: str, 
     changed = normalized_rows != previous_rows
     changed_at = captured_at if changed else (previous_changed_at or captured_at)
 
+    snapshot_payload = {
+        "provider": "rotowire",
+        "source": source,
+        "captured_at": captured_at,
+        "changed_at": changed_at,
+        "changed": changed,
+        "rows": normalized_rows,
+    }
     try:
-        write_json_cache(
-            ROSTER_SNAPSHOT_CACHE_NAME,
-            {
-                "provider": "rotowire",
-                "source": source,
-                "captured_at": captured_at,
-                "changed_at": changed_at,
-                "changed": changed,
-                "rows": normalized_rows,
-            },
-        )
+        write_json_cache(ROSTER_SNAPSHOT_CACHE_NAME, snapshot_payload)
     except OSError:
         # Snapshot cache is a best-effort optimization and should not break lineup imports.
-        return
+        pass
+    return snapshot_payload
 
 
 def _parse_lineup_injuries(page: str) -> list[dict[str, str]]:

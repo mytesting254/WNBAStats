@@ -1134,7 +1134,17 @@ def _enforce_api_key(x_api_key: str | None, authorization: str | None) -> None:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
-def _session_cookie_secure() -> bool:
+def _session_cookie_secure(request: Request | None = None) -> bool:
+    override = os.getenv("SESSION_COOKIE_SECURE", "").strip().lower()
+    if override in {"1", "true", "yes", "on"}:
+        return True
+    if override in {"0", "false", "no", "off"}:
+        return False
+    if request is not None:
+        forwarded_proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+        if forwarded_proto:
+            return forwarded_proto == "https"
+        return request.url.scheme.lower() == "https"
     return not _is_dev_env()
 
 
@@ -1654,7 +1664,7 @@ def recover_db_lock() -> dict[str, Any]:
 
 
 @app.post("/api/auth/login")
-def auth_login(payload: LoginRequest, response: Response) -> dict[str, Any]:
+def auth_login(request: Request, payload: LoginRequest, response: Response) -> dict[str, Any]:
     username = payload.username.strip()
     password = payload.password
     if not username or not password:
@@ -1670,7 +1680,7 @@ def auth_login(payload: LoginRequest, response: Response) -> dict[str, Any]:
         value=session_token,
         max_age=session_cookie_max_age(),
         httponly=True,
-        secure=_session_cookie_secure(),
+        secure=_session_cookie_secure(request),
         samesite="lax",
         path="/",
     )
@@ -1685,7 +1695,7 @@ def auth_logout(request: Request, response: Response) -> dict[str, Any]:
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         httponly=True,
-        secure=_session_cookie_secure(),
+        secure=_session_cookie_secure(request),
         samesite="lax",
         path="/",
     )
@@ -4373,10 +4383,15 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
         delete_json_cache(MATCHUPS_CACHE_NAME)
         result["published_payloads"] = _refresh_roster_read_payloads(conn)
     affected_game_ids = list(result.get("affected_game_ids") or [])
+    roster_changed = bool(result.get("roster_changed"))
     result["repair"] = (
         _queue_current_slate_repair_job(affected_game_ids)
-        if affected_game_ids
-        else {"status": "not_needed", "scope": "injury_update", "target_game_ids": []}
+        if roster_changed and affected_game_ids
+        else {
+            "status": "not_needed",
+            "scope": "injury_update",
+            "target_game_ids": affected_game_ids if roster_changed else [],
+        }
     )
     result["predictions"] = 0
     return result
