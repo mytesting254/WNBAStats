@@ -817,6 +817,96 @@ tbody tr.selected {
   border-radius: 14px;
 }
 
+.roster-change-card {
+  margin: 0 18px 18px;
+  padding: 16px 18px;
+  border: 1px solid #d7e0ea;
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(247, 250, 252, 0.98), rgba(255, 255, 255, 0.98));
+}
+
+.roster-change-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.roster-change-card-header h3 {
+  margin: 0;
+  color: #12263a;
+  font-size: 16px;
+}
+
+.roster-change-card-header p {
+  margin: 6px 0 0;
+  color: #526071;
+  font-size: 13px;
+}
+
+.roster-change-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 92px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #e6f0ff;
+  color: #1d4f91;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.roster-change-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.roster-change-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid #e1e8f0;
+  border-radius: 12px;
+  background: #ffffff;
+}
+
+.roster-change-item strong,
+.roster-change-item span,
+.roster-change-item p {
+  display: block;
+}
+
+.roster-change-item strong {
+  color: #12263a;
+  font-size: 14px;
+}
+
+.roster-change-item span {
+  margin-top: 3px;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.roster-change-item p {
+  margin: 0;
+  color: #1d4f91;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.roster-change-empty {
+  margin: 14px 0 0;
+  color: #344054;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
 .matchup-game-tabs button.winner-home {
   border-color: #8dd3b3;
   background: #effcf6;
@@ -1726,7 +1816,8 @@ tbody tr.selected {
   .prediction-strip,
   .covers-records-panel,
   .candidate-strip,
-  .discrepancy-grid {
+  .discrepancy-grid,
+  .roster-change-list {
     grid-template-columns: 1fr;
   }
 
@@ -1761,6 +1852,15 @@ tbody tr.selected {
   .summary-grid,
   .detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .roster-change-card-header,
+  .roster-change-item {
+    flex-direction: column;
+  }
+
+  .roster-change-item p {
+    text-align: left;
   }
 
   h1 {

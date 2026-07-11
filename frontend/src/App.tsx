@@ -97,6 +97,17 @@ type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
 type TabLoadingState = Record<DashboardTab, boolean>;
 type CacheUpdateEvent = { id: number; created_at: string; views: string[] };
+type RosterStatusChange = {
+  team: string;
+  player_name: string;
+  from_status: string;
+  to_status: string;
+};
+type RosterPullSummary = {
+  captured_at: string | null;
+  changes: RosterStatusChange[];
+  remaining_gtd: RosterPlayer[];
+};
 
 const INITIAL_LOAD_TIMEOUT_MS = 45000;
 const AUTH_LOAD_TIMEOUT_MS = 15000;
@@ -142,6 +153,54 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): 
       }
     );
   });
+}
+
+function rosterPlayerKey(player: Pick<RosterPlayer, "team" | "player_name">) {
+  return `${player.team}::${player.player_name}`.toUpperCase();
+}
+
+function buildRosterPullSummary(previous: RosterPlayer[], next: RosterPlayer[], capturedAt: string | null): RosterPullSummary {
+  const previousMap = new Map(previous.map((player) => [rosterPlayerKey(player), player]));
+  const nextMap = new Map(next.map((player) => [rosterPlayerKey(player), player]));
+  const keys = Array.from(new Set([...previousMap.keys(), ...nextMap.keys()])).sort();
+  const changes: RosterStatusChange[] = [];
+
+  for (const key of keys) {
+    const before = previousMap.get(key);
+    const after = nextMap.get(key);
+    if (before && after && before.status === after.status) {
+      continue;
+    }
+    if (!before && !after) {
+      continue;
+    }
+    const player = after ?? before;
+    if (!player) {
+      continue;
+    }
+    changes.push({
+      team: player.team,
+      player_name: player.player_name,
+      from_status: before?.status ?? "AVAILABLE",
+      to_status: after?.status ?? "AVAILABLE",
+    });
+  }
+
+  const remainingGtd = [...next]
+    .filter((player) => player.status.trim().toUpperCase() === "GTD")
+    .sort((left, right) => {
+      const teamDelta = left.team.localeCompare(right.team);
+      if (teamDelta !== 0) {
+        return teamDelta;
+      }
+      return left.player_name.localeCompare(right.player_name);
+    });
+
+  return {
+    captured_at: capturedAt,
+    changes,
+    remaining_gtd: remainingGtd,
+  };
 }
 
 type NormalizedCoversRecords = {
@@ -210,6 +269,7 @@ export function App() {
   const [specialStocks, setSpecialStocks] = useState<SpecialStocksSnapshot[]>([]);
   const [discrepancies, setDiscrepancies] = useState<LineDiscrepancy[]>([]);
   const [roster, setRoster] = useState<RosterPlayer[]>([]);
+  const [rosterPullSummary, setRosterPullSummary] = useState<RosterPullSummary | null>(null);
   const [performance, setPerformance] = useState<ModelPerformance | null>(null);
   const [gemPerformance, setGemPerformance] = useState<GemPerformance | null>(null);
   const [watchlistPerformance, setWatchlistPerformance] = useState<WatchlistPerformance | null>(null);
@@ -925,6 +985,7 @@ export function App() {
       }
       try {
         const refreshedRoster = await fetchRoster();
+        setRosterPullSummary(buildRosterPullSummary(roster, refreshedRoster, result.captured_at ?? null));
         setRoster(refreshedRoster);
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Unable to reload roster after Rotowire refresh";
@@ -1287,6 +1348,7 @@ export function App() {
         ) : activeTab === "roster" ? (
           <RosterView
             roster={roster}
+            pullSummary={rosterPullSummary}
             matchups={matchups}
             loading={tabLoading.roster}
             error={error}
@@ -1829,6 +1891,7 @@ function DataView({
 
 function RosterView({
   roster,
+  pullSummary,
   matchups,
   loading,
   error,
@@ -1838,6 +1901,7 @@ function RosterView({
   canRefresh = true
 }: {
   roster: RosterPlayer[];
+  pullSummary: RosterPullSummary | null;
   matchups: Matchup[];
   loading: boolean;
   error: string | null;
@@ -1939,6 +2003,50 @@ function RosterView({
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
         {rosterFreshnessWarning && <div className="warning">{rosterFreshnessWarning}</div>}
+        <section className="roster-change-card" aria-live="polite">
+          <div className="roster-change-card-header">
+            <div>
+              <h3>Latest Pull Changes</h3>
+              <p>
+                {pullSummary?.captured_at
+                  ? `Compared against the prior roster snapshot at ${formatDateTime(pullSummary.captured_at)}.`
+                  : "Run Refresh Roster to compare the latest pull against the prior snapshot."}
+              </p>
+            </div>
+            {pullSummary ? (
+              <span className="roster-change-count">
+                {pullSummary.changes.length} change{pullSummary.changes.length === 1 ? "" : "s"}
+              </span>
+            ) : null}
+          </div>
+          {pullSummary ? (
+            pullSummary.changes.length ? (
+              <div className="roster-change-list">
+                {pullSummary.changes.map((change) => (
+                  <article
+                    key={`${change.team}-${change.player_name}-${change.from_status}-${change.to_status}`}
+                    className="roster-change-item"
+                  >
+                    <div>
+                      <strong>{change.player_name}</strong>
+                      <span>{change.team}</span>
+                    </div>
+                    <p>{change.from_status} to {change.to_status}</p>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="roster-change-empty">
+                No changes yet.
+                {pullSummary.remaining_gtd.length
+                  ? ` ${pullSummary.remaining_gtd.length} player${pullSummary.remaining_gtd.length === 1 ? "" : "s"} still GTD: ${pullSummary.remaining_gtd.map((player) => `${player.player_name} (${player.team})`).join(", ")}.`
+                  : " No players are still GTD."}
+              </p>
+            )
+          ) : (
+            <p className="roster-change-empty">No roster pull has been compared yet.</p>
+          )}
+        </section>
         <div className="game-tabs roster-tabs" aria-label="Roster team tabs">
           {teams.map((team) => (
             <button key={team} className={selectedTeam === team ? "active" : ""} onClick={() => setSelectedTeam(team)}>

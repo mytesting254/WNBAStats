@@ -2766,6 +2766,54 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
     assert result["rebuilt_game_predictions"] == 1
 
 
+def test_repair_current_slate_props_injury_update_rebuilds_full_games_in_batches(monkeypatch) -> None:
+    rebuild_calls: list[tuple[list[int] | None, list[int] | None, int]] = []
+
+    def fake_sync(conn, **kwargs):
+        assert kwargs["game_ids"] == [9910]
+        assert kwargs["include_change_details"] is True
+        return SyncPropLinesResult(
+            synced_props=3,
+            changed_props=3,
+            changed_prop_line_ids=[501, 502, 503],
+            touched_game_ids=[9910],
+        )
+
+    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None):
+        rebuild_calls.append(
+            (
+                list(game_ids) if game_ids is not None else None,
+                list(prop_line_ids) if prop_line_ids is not None else None,
+                int(chunk_size),
+            )
+        )
+        return projections_module.LiveRebuildResult(
+            projections=[],
+            attempted=20,
+            written=20,
+            skipped=0,
+            errors=[],
+        )
+
+    monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fake_sync)
+    monkeypatch.setattr(main_module, "rebuild_predictions_live", fake_rebuild)
+    monkeypatch.setattr(
+        main_module,
+        "rebuild_game_predictions_live",
+        lambda conn, game_ids=None, progress_callback=None: {"attempted": 1, "written": 1},
+    )
+    monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: {"tracked": 0})
+
+    with connect() as conn:
+        result = main_module._repair_current_slate_props(conn, target_game_ids=[9910])
+
+    assert rebuild_calls == [([9910], None, 20)]
+    assert result["scope"] == "injury_update"
+    assert result["changed_prop_line_ids"] == [501, 502, 503]
+    assert result["attempted_predictions"] == 20
+    assert result["rebuilt_predictions"] == 20
+
+
 def test_rebuild_predictions_skips_model_prewarm_when_refresh_disabled(monkeypatch) -> None:
     load_test_history()
     prewarm_calls = 0

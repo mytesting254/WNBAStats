@@ -2967,6 +2967,7 @@ def _repair_current_slate_props(
     target_game_ids: list[int] | None = None,
     progress_callback: Callable[[str, int, int, str | None], None] | None = None,
 ) -> dict[str, Any]:
+    rebuild_chunk_size = 20
     if target_game_ids is None:
         scope, target_game_ids = _repair_current_slate_target(conn)
     else:
@@ -3002,11 +3003,25 @@ def _repair_current_slate_props(
         scanned = int(sync_result)
         synced = int(sync_result)
         changed_prop_line_ids = []
-    if changed_prop_line_ids:
+    if scope == "injury_update":
+        # Availability changes alter teammate context across the whole slate, so
+        # targeted roster repairs must rebuild by game and keep the standard
+        # 20-prop batching instead of narrowing to changed prop line ids.
+        rebuild_result = rebuild_predictions_live(
+            conn,
+            game_ids=target_game_ids,
+            prop_line_ids=None,
+            chunk_size=rebuild_chunk_size,
+            progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
+            if progress_callback is not None
+            else None,
+        )
+    elif changed_prop_line_ids:
         rebuild_result = rebuild_predictions_live(
             conn,
             game_ids=None,
             prop_line_ids=changed_prop_line_ids,
+            chunk_size=rebuild_chunk_size,
             progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
             if progress_callback is not None
             else None,
@@ -3018,6 +3033,7 @@ def _repair_current_slate_props(
             conn,
             game_ids=target_game_ids,
             prop_line_ids=None,
+            chunk_size=rebuild_chunk_size,
             progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
             if progress_callback is not None
             else None,
