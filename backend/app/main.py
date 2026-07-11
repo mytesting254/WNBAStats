@@ -48,7 +48,7 @@ from .odds_import import (
     sync_prop_lines_from_sportsbook,
 )
 from .player_identity import player_is_skeletal, repair_shadow_player_identities, resolve_player_identity
-from .projections import rebuild_predictions, rebuild_predictions_live
+from .projections import LiveRebuildResult, rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
 from .player_prop_model import prewarm_model_cache
@@ -219,7 +219,7 @@ def _read_app_response_cache(cache_name: str, *, allow_stale: bool = False) -> d
         or not isinstance(status_code, int)
     ):
         return None
-    if not allow_stale and cache_date != _local_today_iso():
+    if cache_date != _local_today_iso():
         return None
     try:
         cached_at = datetime.fromisoformat(cached_at_raw.replace("Z", "+00:00"))
@@ -1484,6 +1484,11 @@ def auth_logout(request: Request, response: Response) -> dict[str, Any]:
     return _auth_payload(None)
 
 
+@app.get("/api/admin/provider-status", dependencies=[Depends(_protect_mutation)])
+def admin_provider_status() -> dict[str, Any]:
+    return {"odds_api": {"configured": bool(os.getenv("ODDS_API_KEY", "").strip())}}
+
+
 @app.get("/api/admin/team-conflicts", dependencies=[Depends(_protect_mutation)])
 def team_conflicts(limit: int = Query(default=100, ge=1, le=500)) -> list[dict]:
     with connect() as conn:
@@ -1605,7 +1610,7 @@ def _read_cached_payload(cache_name: str, *, allow_stale: bool = False) -> Any |
         return None
     if not allow_stale and isinstance(cached.get("invalidated_at"), str):
         return None
-    if not allow_stale and cache_date != _local_today_iso():
+    if cache_date != _local_today_iso():
         return None
     try:
         cached_at = datetime.fromisoformat(cached_at_raw.replace("Z", "+00:00"))
@@ -2709,9 +2714,14 @@ def _settle_recent_completed_games(conn) -> dict[str, Any]:
 def _repair_current_slate_props(
     conn,
     *,
+    target_game_ids: list[int] | None = None,
     progress_callback: Callable[[str, int, int, str | None], None] | None = None,
 ) -> dict[str, Any]:
-    scope, target_game_ids = _repair_current_slate_target(conn)
+    if target_game_ids is None:
+        scope, target_game_ids = _repair_current_slate_target(conn)
+    else:
+        target_game_ids = sorted({int(game_id) for game_id in target_game_ids if int(game_id) > 0})
+        scope = "injury_update"
     if not target_game_ids:
         if progress_callback is not None:
             progress_callback("syncing_props", 0, 0, "No scheduled games were available for repair.")
@@ -2742,14 +2752,26 @@ def _repair_current_slate_props(
         scanned = int(sync_result)
         synced = int(sync_result)
         changed_prop_line_ids = []
-    rebuild_result = rebuild_predictions_live(
-        conn,
-        game_ids=None,
-        prop_line_ids=changed_prop_line_ids or None,
-        progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
-        if progress_callback is not None
-        else None,
-    )
+    if changed_prop_line_ids:
+        rebuild_result = rebuild_predictions_live(
+            conn,
+            game_ids=None,
+            prop_line_ids=changed_prop_line_ids,
+            progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
+            if progress_callback is not None
+            else None,
+        )
+    else:
+        # Injury/availability changes affect every player projection in the
+        # slate even when sportsbook lines themselves are unchanged.
+        rebuild_result = rebuild_predictions_live(
+            conn,
+            game_ids=target_game_ids,
+            prop_line_ids=None,
+            progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
+            if progress_callback is not None
+            else None,
+        )
     game_rebuild_result = rebuild_game_predictions_live(
         conn,
         game_ids=target_game_ids,
@@ -2930,11 +2952,12 @@ def props_sync_status() -> dict:
         return dict(_PROP_SYNC_STATE)
 
 
-def _run_current_slate_repair_job() -> dict[str, Any]:
+def _run_current_slate_repair_job(target_game_ids: list[int] | None = None) -> dict[str, Any]:
     total_stages = 5
     with connect() as conn:
         result = _repair_current_slate_props(
             conn,
+            target_game_ids=target_game_ids,
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
                 conn=conn,
                 stage=stage,
@@ -2977,7 +3000,7 @@ def _run_current_slate_repair_job() -> dict[str, Any]:
     return result
 
 
-def _queue_current_slate_repair_job() -> dict[str, Any]:
+def _queue_current_slate_repair_job(target_game_ids: list[int] | None = None) -> dict[str, Any]:
     with _PROP_SYNC_LOCK:
         if _PROP_SYNC_STATE["running"]:
             return {
@@ -2986,11 +3009,16 @@ def _queue_current_slate_repair_job() -> dict[str, Any]:
                 "scope": _PROP_SYNC_STATE.get("scope"),
                 "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
             }
-    started_at = _begin_prop_sync_job("current_slate")
+    normalized_target_game_ids = sorted({int(game_id) for game_id in (target_game_ids or []) if int(game_id) > 0})
+    started_at = _begin_prop_sync_job("injury_update" if normalized_target_game_ids else "current_slate")
 
     def _run() -> None:
         try:
-            result = _run_current_slate_repair_job()
+            result = (
+                _run_current_slate_repair_job(normalized_target_game_ids)
+                if normalized_target_game_ids
+                else _run_current_slate_repair_job()
+            )
             _mutate_prop_sync_state(
                 running=False,
                 finished_at=datetime.now(timezone.utc).isoformat(),
@@ -3014,8 +3042,8 @@ def _queue_current_slate_repair_job() -> dict[str, Any]:
     return {
         "status": "queued",
         "started_at": started_at,
-        "scope": "current_slate",
-        "target_game_ids": [],
+        "scope": "injury_update" if normalized_target_game_ids else "current_slate",
+        "target_game_ids": normalized_target_game_ids,
     }
 
 
@@ -3998,6 +4026,12 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
         delete_json_cache(ROSTER_CACHE_NAME)
         delete_json_cache(MATCHUPS_CACHE_NAME)
         result["published_payloads"] = _refresh_roster_read_payloads(conn)
+    affected_game_ids = list(result.get("affected_game_ids") or [])
+    result["repair"] = (
+        _queue_current_slate_repair_job(affected_game_ids)
+        if affected_game_ids
+        else {"status": "not_needed", "scope": "injury_update", "target_game_ids": []}
+    )
     result["predictions"] = 0
     return result
 
@@ -4877,20 +4911,32 @@ def _start_prop_sync_if_needed(source: str) -> bool:
                     scope=source,
                     target_game_ids=touched_game_ids,
                 )
-                rebuild_result = rebuild_predictions_live(
-                    conn,
-                    game_ids=None,
-                    prop_line_ids=sync_result.changed_prop_line_ids or None,
-                    progress_callback=lambda current, total, message: _set_prop_sync_progress(
+                if sync_result.changed_prop_line_ids:
+                    rebuild_result = rebuild_predictions_live(
+                        conn,
+                        game_ids=None,
+                        prop_line_ids=sync_result.changed_prop_line_ids,
+                        progress_callback=lambda current, total, message: _set_prop_sync_progress(
+                            conn=conn,
+                            stage="rebuilding_predictions",
+                            stage_index=2,
+                            stage_total=3,
+                            current=current,
+                            total=total,
+                            message=message,
+                        ),
+                    )
+                else:
+                    rebuild_result = LiveRebuildResult(projections=[], attempted=0, written=0, skipped=0, errors=[])
+                    _set_prop_sync_progress(
                         conn=conn,
                         stage="rebuilding_predictions",
                         stage_index=2,
                         stage_total=3,
-                        current=current,
-                        total=total,
-                        message=message,
-                    ),
-                )
+                        current=0,
+                        total=0,
+                        message="No prop-line changes; skipped prediction rebuild.",
+                    )
             _invalidate_read_caches()
             with connect() as conn:
                 _set_prop_sync_progress(

@@ -365,6 +365,22 @@ def test_read_through_cache_with_meta_returns_stale_payload_while_rebuild_is_sch
     assert scheduled == ["test-read-cache.json"]
 
 
+def test_stale_read_cache_never_crosses_local_date_rollover(monkeypatch) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "read_json_cache",
+        lambda name: {
+            "cache_key_version": main_module.READ_CACHE_VERSION,
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+            "cache_date": "2000-01-01",
+            "ttl_seconds": 3600,
+            "payload": ["previous-day"],
+        },
+    )
+
+    assert main_module._read_cached_payload("test-read-cache.json", allow_stale=True) is None
+
+
 def test_publish_current_read_payloads_continues_after_single_failure(monkeypatch) -> None:
     published: list[str] = []
 
@@ -1096,6 +1112,11 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_ro
             main_module.ROSTER_CACHE_NAME: 12,
         },
     )
+    monkeypatch.setattr(
+        main_module,
+        "_queue_current_slate_repair_job",
+        lambda game_ids=None: {"status": "queued", "scope": "injury_update", "target_game_ids": list(game_ids or [])},
+    )
 
     result = main_module.import_rotowire_injuries(force_refresh=True)
 
@@ -1107,6 +1128,7 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_ro
     assert result["published_payloads"] == {
         main_module.ROSTER_CACHE_NAME: 12,
     }
+    assert result["repair"] == {"status": "queued", "scope": "injury_update", "target_game_ids": [991, 992]}
 
 
 def test_espn_history_accepts_batch_dates(monkeypatch) -> None:

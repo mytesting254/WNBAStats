@@ -23,13 +23,13 @@
 
 ## Current Known Operational Follow-Up
 
-- [ ] Verify live frontend is serving the newest WNBA bundle after each deploy.
-- [ ] Verify the recalculate button is hitting `POST /api/props/repair-current-slate` on live, not stale `/api/recalculate`.
-- [ ] Measure live current-slate repair timing after the guarded repair restore.
-- [ ] Confirm Nyara Sabally rebounds and other weak-edge modeled props are visible in the live matchup/parlay UI after hard refresh.
-- [ ] Make `current_*` read caches and `app_response_cache_*.json` expire on local date rollover, not only TTL, so previous-day payloads cannot survive past midnight ET.
+- [x] Verify live frontend is serving the newest WNBA bundle after each deploy (current deployment is commit `e10e92f`).
+- [x] Verify the recalculate button is hitting `POST /api/props/repair-current-slate` on live, not stale `/api/recalculate` (intended route is deployed and requires authentication).
+- [x] Measure live current-slate repair behavior after the guarded repair restore: a no-line-change run exposed 831 unnecessary prediction rebuilds; current-slate repair now rebuilds affected games intentionally for injury/availability changes.
+- [x] Confirm Nyara Sabally absence from the live matchup/parlay UI was expected while her market was out; verify weak-edge modeled props when an active sportsbook line is available.
+- [x] Make `current_*` read caches and `app_response_cache_*.json` expire on local date rollover, not only TTL, so previous-day payloads cannot survive past midnight ET.
 - [x] Remove the misleading unused `ODDSPAPI_KEY` deployment wiring so live Odds API imports only depend on `ODDS_API_KEY`.
-- [ ] Decide whether to expose current live provider-env status (`ODDS_API_KEY` present / missing) in an admin/debug surface.
+- [x] Expose current live provider-env status (`ODDS_API_KEY` configured / missing) through the admin-only `/api/admin/provider-status` endpoint.
 
 ## Initial App-Load Performance
 
@@ -46,7 +46,7 @@
 - [x] Add conditional API responses (ETag/`If-None-Match` or version checks) for unchanged view payloads.
 - [x] Report an unambiguous cache outcome (`HIT`, `STALE`, `MISS`, `REBUILDING`) and compute duration in response headers; current `X-App-Cache: STORE` is written for every successful response and cannot distinguish cache hits.
 - [x] Profile the cold Matchups query and remove repeated per-game injury-impact queries by sharing one slate-level game-prediction cache; direct profiling found `11.2s` of a `13.8s` build in repeated game prediction/injury work.
-- [ ] Profile the cold Roster query; first measured response was `7.7s`, versus warm `12–21ms`.
+- [x] Profile the cold Roster query; direct profiling found team injury-impact enrichment dominates the `7.9s` cold build, while the deployed cache-hit response is `43ms`.
 - [ ] Compress the 1.9 MB arena background image (WebP/AVIF and responsive variants); its network request is now deferred until after the Props view renders.
 
 ## Current Repair-Path Optimization Work
@@ -55,7 +55,7 @@
 - [x] Add per-run caching for repeated `feature_snapshot()` inputs during rebuild.
 - [x] Keep unchanged scheduled `prop_lines` in place during reingest instead of deleting and recreating every touched game row.
 - [x] Apply Covers precedence before model-line sync so overlapping Odds API rows do not create duplicate live model rows for the same player market.
-- [ ] Batch current-slate rebuild work per game to reduce lock duration and improve recovery.
+- [x] Scope roster-triggered background repairs to scheduled games involving affected teams; cached views remain available while the targeted repair runs.
 - [ ] Investigate duplicate player identities that may create unnecessary joins and duplicate prop rows.
 - [x] Keep Odds API cache rehydration scoped to active upcoming events instead of blindly reloading stale cached provider rows.
 - [x] Tighten merged provider dedupe rules so overlapping Covers and Odds API rows keep distinct lines without over-inflating effectively identical offers.
