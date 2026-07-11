@@ -1036,6 +1036,13 @@ def special_stocks() -> list[dict[str, Any]]:
                             ORDER BY h.id DESC
                             LIMIT 1
                         ),
+                        (
+                            SELECT h.team_id
+                            FROM player_team_history h
+                            WHERE h.player_id = p.id
+                            ORDER BY h.id DESC
+                            LIMIT 1
+                        ),
                         p.team_id
                     )
                 )
