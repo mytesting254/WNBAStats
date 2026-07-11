@@ -179,6 +179,7 @@ def _should_cache_app_response(request: Request) -> bool:
         "/api/cache/status",
         "/api/cache/events",
         "/api/props/sync-status",
+        "/api/special/stocks",
     }:
         return False
     return True
