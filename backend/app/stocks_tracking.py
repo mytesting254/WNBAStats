@@ -3,12 +3,18 @@ from __future__ import annotations
 import math
 import os
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .db import connect
 from .paths import get_db_path
 from .player_prop_model import MODEL_VERSION, predict_player_prop
+
+
+_SNAPSHOT_JOB_LOCK = threading.Lock()
+_SNAPSHOT_JOB_RUNNING = False
 
 
 def get_tracking_db_path() -> Path:
@@ -167,6 +173,30 @@ def snapshot_stocks(
         return written
     finally:
         tracking.close()
+
+
+def queue_snapshot_stocks(game_ids: list[int] | None = None) -> bool:
+    global _SNAPSHOT_JOB_RUNNING
+    normalized_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+    with _SNAPSHOT_JOB_LOCK:
+        if _SNAPSHOT_JOB_RUNNING:
+            return False
+        _SNAPSHOT_JOB_RUNNING = True
+
+    def _run() -> None:
+        global _SNAPSHOT_JOB_RUNNING
+        try:
+            with connect() as conn:
+                snapshot_stocks(conn, game_ids=normalized_game_ids or None, runtime_cache=None)
+        except Exception:
+            # Model-only tracking is best-effort and must never block sportsbook rebuilds.
+            pass
+        finally:
+            with _SNAPSHOT_JOB_LOCK:
+                _SNAPSHOT_JOB_RUNNING = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
 
 
 def list_special_stocks(*, include_history: bool = False) -> list[dict[str, Any]]:

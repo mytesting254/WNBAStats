@@ -4,6 +4,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 import json
+from pathlib import Path
 import runpy
 from types import SimpleNamespace
 
@@ -1699,6 +1700,14 @@ def test_walk_forward_training_saves_model_run() -> None:
     assert result["metrics"]["game_ats"]["rows"] >= 1
     assert result["metrics"]["game_total"]["rows"] >= 1
     assert "baseline_mae" in result["metrics"]["game_ats"]
+    artifact_bundle = result.get("artifact_bundle")
+    assert artifact_bundle is not None
+    manifest_path = Path(str(artifact_bundle["manifest_path"]))
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["model_version"] == MODEL_VERSION
+    assert manifest["data_snapshot_hash"]
+    assert Path(str(manifest["feature_schema_path"])).exists()
 
 
 def test_market_evaluation_reports_training_sample_diagnostics() -> None:

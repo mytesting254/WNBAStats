@@ -518,8 +518,8 @@ def rebuild_predictions_live(
             progress_callback(processed, total_props, f"Built {len(projections)} of {total_props} projections.")
 
     try:
-        from .stocks_tracking import snapshot_stocks
-        snapshot_stocks(conn, game_ids=game_ids, runtime_cache=runtime_cache)
+        from .stocks_tracking import queue_snapshot_stocks
+        queue_snapshot_stocks(game_ids=game_ids)
     except Exception as exc:
         # Model-only tracking must never interrupt sportsbook predictions.
         errors.append(f"stocks tracking: {exc}")

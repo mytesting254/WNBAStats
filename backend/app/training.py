@@ -9,15 +9,23 @@ import sqlite3
 from concurrent.futures import ProcessPoolExecutor
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 from .game_predictions import evaluate_game_residual_models
-from .player_prop_model import DEFAULT_TUNING_CONFIG, MODEL_VERSION as LEARNED_MODEL_VERSION
+from .paths import get_cache_dir
+from .player_prop_model import (
+    DEFAULT_TUNING_CONFIG,
+    FEATURE_NAMES,
+    MINUTES_FEATURE_NAMES,
+    MODEL_VERSION as LEARNED_MODEL_VERSION,
+)
 from .player_prop_model import ModelTuningConfig, TRAINING_MARKETS, _training_start_date, evaluate_market_model, evaluate_market_residual_model
 
 TRAINING_MODEL_VERSION = LEARNED_MODEL_VERSION
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
 DATA_SIGNATURE_LABEL = "data_signature="
 GAME_EVAL_SIGNATURE_LABEL = "game_eval_signature="
+ARTIFACT_BUNDLE_LABEL = "artifact_bundle="
 GAME_EVAL_SIGNATURE = "v6"
 DEFAULT_TRAINING_MAX_WORKERS = 2
 
@@ -228,7 +236,7 @@ def run_component_blend_tuning(conn: sqlite3.Connection) -> dict:
 
 
 def _save_model_run(conn: sqlite3.Connection, run: dict) -> None:
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT INTO model_runs (
             model_version, run_type, status, started_at, finished_at,
@@ -247,6 +255,13 @@ def _save_model_run(conn: sqlite3.Connection, run: dict) -> None:
             run.get("notes"),
         ),
     )
+    run["id"] = int(cursor.lastrowid)
+    artifact_bundle = _write_model_artifact_bundle(run)
+    if artifact_bundle:
+        run["artifact_bundle"] = artifact_bundle
+        notes = _append_artifact_bundle(run.get("notes"), artifact_bundle["manifest_path"])
+        run["notes"] = notes
+        conn.execute("UPDATE model_runs SET notes = ? WHERE id = ?", (notes, run["id"]))
 
 
 def _training_data_signature(conn: sqlite3.Connection) -> str:
@@ -320,6 +335,16 @@ def _append_game_eval_signature(notes: str | None, game_eval_signature: str) -> 
     return f"{base} {suffix}"
 
 
+def _append_artifact_bundle(notes: str | None, manifest_path: str) -> str:
+    base = (notes or "").strip()
+    suffix = f"{ARTIFACT_BUNDLE_LABEL}{manifest_path}"
+    if not base:
+        return suffix
+    if suffix in base:
+        return base
+    return f"{base} {suffix}"
+
+
 def _extract_data_signature(notes: str | None) -> str | None:
     if not notes:
         return None
@@ -332,6 +357,161 @@ def _extract_game_eval_signature(notes: str | None) -> str | None:
         return None
     match = re.search(rf"{re.escape(GAME_EVAL_SIGNATURE_LABEL)}([A-Za-z0-9._-]+)", str(notes))
     return match.group(1) if match else None
+
+
+def _extract_artifact_bundle_path(notes: str | None) -> str | None:
+    if not notes:
+        return None
+    match = re.search(rf"{re.escape(ARTIFACT_BUNDLE_LABEL)}(\S+)", str(notes))
+    return match.group(1) if match else None
+
+
+def _artifact_root() -> Path:
+    path = get_cache_dir() / "model_artifacts"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _safe_artifact_stem(run: dict) -> str:
+    started_at = str(run.get("started_at") or datetime.now(timezone.utc).isoformat())
+    safe_started = re.sub(r"[^0-9A-Za-z]+", "", started_at)
+    return f"{run['model_version']}__{run['run_type']}__{safe_started}"
+
+
+def _git_sha() -> str | None:
+    override = os.getenv("WNBA_GIT_SHA", "").strip()
+    if override:
+        return override
+    git_dir = Path(__file__).resolve().parents[2] / ".git"
+    head_path = git_dir / "HEAD"
+    try:
+        head = head_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not head.startswith("ref: "):
+        return head[:40] if head else None
+    ref_path = git_dir / head[5:]
+    try:
+        return ref_path.read_text(encoding="utf-8").strip()[:40] or None
+    except OSError:
+        return None
+
+
+def _feature_schema_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "feature_names": list(FEATURE_NAMES),
+        "minutes_feature_names": list(MINUTES_FEATURE_NAMES),
+        "default_tuning_config": DEFAULT_TUNING_CONFIG.to_dict(),
+    }
+
+
+def _overall_calibration_summary(metrics: dict[str, dict]) -> dict[str, object]:
+    per_market = {
+        market: metric.get("calibration_gap")
+        for market, metric in metrics.items()
+        if isinstance(metric, dict) and market not in {"overall", "game_overall"}
+    }
+    populated = [float(value) for value in per_market.values() if value is not None]
+    return {
+        "average_gap": round(sum(populated) / len(populated), 4) if populated else None,
+        "markets_reported": len(populated),
+        "per_market_gap": per_market,
+    }
+
+
+def _write_json_file(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+
+
+def _write_model_artifact_bundle(run: dict) -> dict[str, object] | None:
+    if not run.get("metrics") or not run.get("model_version") or not run.get("run_type"):
+        return None
+    stem = _safe_artifact_stem(run)
+    bundle_dir = _artifact_root() / stem
+    metrics = run["metrics"]
+    summary_path = bundle_dir / "manifest.json"
+    feature_schema_path = bundle_dir / "feature_schema.json"
+    evaluation_dir = bundle_dir / "evaluation"
+    calibration_dir = bundle_dir / "calibration"
+    threshold_dir = bundle_dir / "thresholds"
+    regressor_dir = bundle_dir / "regressors"
+    git_sha = _git_sha()
+    data_signature = _extract_data_signature(run.get("notes"))
+    manifest = {
+        "artifact_schema_version": 1,
+        "run_id": run.get("id"),
+        "model_version": run["model_version"],
+        "run_type": run["run_type"],
+        "status": run["status"],
+        "started_at": run["started_at"],
+        "finished_at": run.get("finished_at"),
+        "training_rows": run["training_rows"],
+        "markets": list(run.get("markets") or []),
+        "git_sha": git_sha,
+        "data_snapshot_hash": data_signature,
+        "feature_schema_path": str(feature_schema_path),
+        "evaluation_dir": str(evaluation_dir),
+        "calibration_dir": str(calibration_dir),
+        "thresholds_dir": str(threshold_dir),
+        "regressors_dir": str(regressor_dir),
+        "calibration_summary": _overall_calibration_summary(metrics),
+    }
+    try:
+        _write_json_file(feature_schema_path, _feature_schema_payload())
+        for market, metric in metrics.items():
+            if not isinstance(metric, dict):
+                continue
+            _write_json_file(
+                evaluation_dir / f"{market}.json",
+                {
+                    "market": market,
+                    "model_version": run["model_version"],
+                    "run_type": run["run_type"],
+                    "started_at": run["started_at"],
+                    "finished_at": run.get("finished_at"),
+                    "training_rows": run["training_rows"],
+                    "git_sha": git_sha,
+                    "data_snapshot_hash": data_signature,
+                    "metrics": metric,
+                },
+            )
+            _write_json_file(
+                calibration_dir / f"{market}.json",
+                {
+                    "market": market,
+                    "model_version": run["model_version"],
+                    "calibration_gap": metric.get("calibration_gap"),
+                    "settled_rows": metric.get("settled_rows"),
+                },
+            )
+            _write_json_file(
+                threshold_dir / f"{market}.json",
+                {
+                    "market": market,
+                    "model_version": run["model_version"],
+                    "status": "pending_policy",
+                    "notes": "Threshold sidecars reserved for future promotion-gate and recommendation policy output.",
+                },
+            )
+            _write_json_file(
+                regressor_dir / f"{market}.json",
+                {
+                    "market": market,
+                    "model_version": run["model_version"],
+                    "status": "summary_only",
+                    "notes": "Regressor sidecars reserved for explicit serialized market artifacts.",
+                },
+            )
+        _write_json_file(summary_path, manifest)
+    except OSError:
+        return None
+    return {
+        "bundle_dir": str(bundle_dir),
+        "manifest_path": str(summary_path),
+        "feature_schema_path": str(feature_schema_path),
+    }
 
 
 def _parallel_market_metrics(
@@ -882,6 +1062,12 @@ def _serialize_run(conn: sqlite3.Connection, row: sqlite3.Row) -> dict:
     payload = dict(row)
     payload["markets"] = json.loads(payload["markets"])
     payload["metrics"] = json.loads(payload.pop("metrics_json"))
+    artifact_bundle_path = _extract_artifact_bundle_path(payload.get("notes"))
+    if artifact_bundle_path:
+        payload["artifact_bundle"] = {
+            "manifest_path": artifact_bundle_path,
+            "bundle_dir": str(Path(artifact_bundle_path).parent),
+        }
     _ensure_overall_metrics(payload["metrics"])
     validation = _settled_validation_metrics(conn, str(payload.get("model_version") or ""))
     if validation:

@@ -83,6 +83,11 @@
 - [ ] Re-run before/after projection comparison after the archetype restore to quantify how many rows moved.
 - [ ] Measure how often the residual model changes recommended side versus the raw stat model.
 - [ ] Decide whether the residual blend weight should vary more aggressively by market.
+- [ ] Split learned-model artifacts by responsibility: separate per-market regressor artifacts from calibration, recommendation-threshold, feature-schema, and evaluation sidecars so live promotion/debugging can isolate the failing layer quickly.
+- [ ] Make every promoted model artifact carry explicit metadata: training window, validation window, training rows, market, MAE/RMSE, directional accuracy, baseline deltas, calibration summary, git SHA, and a data snapshot hash.
+- [ ] Version the live feature schema inside each artifact bundle, including ordered feature names, default-fill behavior, and categorical handling, so inference can reject mismatched artifacts instead of silently projecting with drifted inputs.
+- [ ] Add promotion gates for learned artifacts: minimum-support checks, per-market baseline wins, calibration sanity, and recent-window stability must pass before a new artifact can replace the current live component-backed default.
+- [ ] Save artifact-level diagnostic slices by market/month/role/line bucket/minutes bucket/injury-adjusted slate so underperformance can be localized without rerunning full training analysis each time.
 - [x] Re-run full settled-prop holdout after role-aware minutes rollout: the refreshed `2024`–`2026` walk-forward run completed with `24,156` training rows; the current learned player layer remains behind the component baseline overall (MAE `2.800` vs `2.638`), so future tuning must beat this benchmark market by market.
 - [x] Surface residual-model metrics in `model_runs` output so raw-stat and market-relative quality can be compared directly.
 - [x] Surface game residual baseline-vs-blended deltas in Model Lab.
