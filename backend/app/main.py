@@ -1006,17 +1006,17 @@ def special_stocks() -> list[dict[str, Any]]:
     rows = list_special_stocks()
     if not rows:
         return []
+    visible_rows: list[dict[str, Any]] = []
     with connect() as conn:
         for item in rows:
             game_id = item.get("game_id")
             player_id = item.get("player_id")
             if game_id is None or player_id is None:
-                item["recent_values"] = []
-                item["recent_minutes"] = []
                 continue
             game_row = conn.execute(
                 """
                 SELECT
+                    g.status,
                     g.start_time,
                     home.abbreviation AS home_team,
                     away.abbreviation AS away_team,
@@ -1051,13 +1051,14 @@ def special_stocks() -> list[dict[str, Any]]:
                 """,
                 (int(player_id), int(game_id)),
             ).fetchone()
-            if game_row is not None:
-                item["start_time"] = game_row["start_time"]
-                item["home_team"] = game_row["home_team"]
-                item["away_team"] = game_row["away_team"]
-                item["position"] = game_row["position"]
-                item["team"] = game_row["team"]
-                item["team_logo_url"] = game_row["team_logo_url"]
+            if game_row is None or str(game_row["status"] or "").lower() != "scheduled":
+                continue
+            item["start_time"] = game_row["start_time"]
+            item["home_team"] = game_row["home_team"]
+            item["away_team"] = game_row["away_team"]
+            item["position"] = game_row["position"]
+            item["team"] = game_row["team"]
+            item["team_logo_url"] = game_row["team_logo_url"]
             item["recent_values"] = _recent_market_values(
                 conn,
                 player_id=int(player_id),
@@ -1071,7 +1072,8 @@ def special_stocks() -> list[dict[str, Any]]:
                 game_id=int(game_id),
                 limit=5,
             )
-    return rows
+            visible_rows.append(item)
+    return visible_rows
 
 
 @app.get("/api/ops/health")

@@ -84,6 +84,7 @@ def snapshot_stocks(
 ) -> int:
     tracking = _open_tracking_connection()
     try:
+        shared_runtime_cache: dict[str, dict[tuple, object]] = runtime_cache if runtime_cache is not None else {}
         filter_sql = ""
         params: tuple[int, ...] = ()
         if game_ids:
@@ -110,14 +111,14 @@ def snapshot_stocks(
             params,
         ).fetchall()
         now = datetime.now(timezone.utc).isoformat()
-        written = 0
+        rows_to_insert: list[tuple[object, ...]] = []
         for game_id, game_date, player_id, player_name in rows:
             steals, _, _ = predict_player_prop(
                 conn,
                 int(player_id),
                 "steals",
                 int(game_id),
-                runtime_cache=runtime_cache,
+                runtime_cache=shared_runtime_cache,
                 allow_training=False,
             )
             blocks, _, _ = predict_player_prop(
@@ -125,11 +126,31 @@ def snapshot_stocks(
                 int(player_id),
                 "blocks",
                 int(game_id),
-                runtime_cache=runtime_cache,
+                runtime_cache=shared_runtime_cache,
                 allow_training=False,
             )
             projected_stocks = float(steals + blocks)
-            cursor = tracking.execute(
+            rows_to_insert.append(
+                (
+                    int(game_id),
+                    int(player_id),
+                    str(player_name),
+                    str(game_date),
+                    now,
+                    MODEL_VERSION,
+                    float(steals),
+                    float(blocks),
+                    projected_stocks,
+                    _poisson_at_least(float(steals), 1),
+                    _poisson_at_least(float(steals), 2),
+                    _poisson_at_least(float(blocks), 1),
+                    _poisson_at_least(float(blocks), 2),
+                    _poisson_at_least(projected_stocks, 2),
+                    "model_only",
+                )
+            )
+        if rows_to_insert:
+            tracking.executemany(
                 """
                 INSERT OR IGNORE INTO projection_snapshots (
                     game_id,
@@ -149,26 +170,11 @@ def snapshot_stocks(
                     data_quality
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (
-                    int(game_id),
-                    int(player_id),
-                    str(player_name),
-                    str(game_date),
-                    now,
-                    MODEL_VERSION,
-                    float(steals),
-                    float(blocks),
-                    projected_stocks,
-                    _poisson_at_least(float(steals), 1),
-                    _poisson_at_least(float(steals), 2),
-                    _poisson_at_least(float(blocks), 1),
-                    _poisson_at_least(float(blocks), 2),
-                    _poisson_at_least(projected_stocks, 2),
-                    "model_only",
-                ),
+                rows_to_insert,
             )
-            if cursor.rowcount > 0:
-                written += 1
+            written = tracking.total_changes
+        else:
+            written = 0
         tracking.commit()
         return written
     finally:

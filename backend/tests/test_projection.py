@@ -21,6 +21,7 @@ from backend.app import paths as paths_module
 from backend.app import player_prop_model as player_prop_model_module
 from backend.app import projections as projections_module
 from backend.app import rotowire_import as rotowire_import_module
+from backend.app import stocks_tracking as stocks_tracking_module
 from backend.app import training as training_module
 from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
@@ -2774,6 +2775,195 @@ def test_rebuild_predictions_live_keeps_existing_predictions_when_a_rebuild_fail
         (101, "stale", 9.0, "stale"),
         (102, "component", 12.0, "rebuilt"),
     ]
+
+
+def test_rebuild_predictions_live_does_not_auto_generate_special_snapshots(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    def fake_build(conn, prop_line_id, *, runtime_cache=None, allow_training=True):
+        return projections_module.PropProjection(
+            prop_line_id=int(prop_line_id),
+            model_version="component",
+            prediction_time="2026-06-25T00:00:00+00:00",
+            projection=10.0,
+            recommended_side="over",
+            model_probability=0.55,
+            implied_probability=0.50,
+            edge=0.05,
+            expected_value=0.02,
+            confidence="medium",
+            reason="test",
+        )
+
+    monkeypatch.setattr(projections_module, "build_prop_projection", fake_build)
+
+    with connect() as conn:
+        scheduled_game = conn.execute(
+            """
+            SELECT g.id
+            FROM games g
+            JOIN prop_lines pl ON pl.game_id = g.id
+            WHERE g.status = 'scheduled'
+            ORDER BY g.id
+            LIMIT 1
+            """
+        ).fetchone()
+        assert scheduled_game is not None
+        projections_module.rebuild_predictions_live(conn, game_ids=[int(scheduled_game["id"])], chunk_size=2)
+
+    assert tracking_path.exists() is False
+
+
+def test_special_stocks_only_returns_scheduled_games(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        scheduled_row = conn.execute(
+            """
+            SELECT g.id AS game_id, p.id AS player_id, p.full_name AS player_name, g.game_date
+            FROM games g
+            JOIN prop_lines pl ON pl.game_id = g.id
+            JOIN players p ON p.id = pl.player_id
+            WHERE g.status = 'scheduled'
+            ORDER BY g.id, p.id
+            LIMIT 1
+            """
+        ).fetchone()
+        assert scheduled_row is not None
+        player_row = conn.execute(
+            """
+            SELECT p.id AS player_id, p.full_name AS player_name, p.team_id
+            FROM players p
+            WHERE p.id = ?
+            """,
+            (int(scheduled_row["player_id"]),),
+        ).fetchone()
+        assert player_row is not None
+        home_team_id = int(player_row["team_id"])
+        away_team_id = int(
+            conn.execute(
+                "SELECT id FROM teams WHERE id <> ? ORDER BY id LIMIT 1",
+                (home_team_id,),
+            ).fetchone()[0]
+        )
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)
+            """,
+            (909001, "2026-05-29", "2026-05-29T23:00:00+00:00", home_team_id, away_team_id, -3.5, 164.5),
+        )
+        conn.commit()
+        final_row = {
+            "game_id": 909001,
+            "player_id": int(player_row["player_id"]),
+            "player_name": str(player_row["player_name"]),
+            "game_date": "2026-05-29",
+        }
+
+    stocks_tracking_module.ensure_tracking_schema()
+    with sqlite3.connect(tracking_path) as tracking:
+        tracking.executemany(
+            """
+            INSERT INTO projection_snapshots (
+                game_id,
+                player_id,
+                player_name,
+                game_date,
+                captured_at,
+                model_version,
+                projected_steals,
+                projected_blocks,
+                projected_stocks,
+                steal_prob_1_plus,
+                steal_prob_2_plus,
+                block_prob_1_plus,
+                block_prob_2_plus,
+                stocks_prob_2_plus,
+                data_quality
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    int(scheduled_row["game_id"]),
+                    int(scheduled_row["player_id"]),
+                    str(scheduled_row["player_name"]),
+                    str(scheduled_row["game_date"]),
+                    "2026-07-11T10:00:00+00:00",
+                    MODEL_VERSION,
+                    1.2,
+                    0.8,
+                    2.0,
+                    0.7,
+                    0.3,
+                    0.5,
+                    0.2,
+                    0.6,
+                    "model_only",
+                ),
+                (
+                    int(final_row["game_id"]),
+                    int(final_row["player_id"]),
+                    str(final_row["player_name"]),
+                    str(final_row["game_date"]),
+                    "2026-05-29T10:00:00+00:00",
+                    MODEL_VERSION,
+                    1.0,
+                    0.5,
+                    1.5,
+                    0.6,
+                    0.2,
+                    0.4,
+                    0.1,
+                    0.4,
+                    "model_only",
+                ),
+            ],
+        )
+        tracking.commit()
+
+    rows = main_module.special_stocks()
+
+    assert len(rows) == 1
+    assert int(rows[0]["game_id"]) == int(scheduled_row["game_id"])
+
+
+def test_snapshot_stocks_uses_shared_runtime_cache_by_default(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+    runtime_cache_ids: list[int] = []
+
+    def fake_predict_player_prop(
+        conn,
+        player_id,
+        market,
+        game_id,
+        line=None,
+        over_odds=None,
+        under_odds=None,
+        config=None,
+        runtime_cache=None,
+        allow_training=True,
+    ):
+        assert runtime_cache is not None
+        runtime_cache_ids.append(id(runtime_cache))
+        return (1.0 if market == "steals" else 0.5, "ok", "component")
+
+    monkeypatch.setattr(stocks_tracking_module, "predict_player_prop", fake_predict_player_prop)
+
+    with connect() as conn:
+        written = stocks_tracking_module.snapshot_stocks(conn)
+
+    assert written > 0
+    assert runtime_cache_ids
+    assert len(set(runtime_cache_ids)) == 1
 
 
 def test_feature_snapshot_reuses_shared_player_context_with_runtime_cache(monkeypatch) -> None:
