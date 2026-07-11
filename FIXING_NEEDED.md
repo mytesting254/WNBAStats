@@ -102,7 +102,7 @@
 ## Infrastructure / Test Follow-Up
 
 - [x] Repair stale `backend/tests/test_projection.py` expectations so the full file is clean again (`186 passed` on `2026-07-11`).
-- [ ] Finish the model-only `Special` steals/blocks tracker: isolated `stocks_tracking.sqlite` schema and post-rebuild hook exist, but its scheduled-player source must use live roster availability rather than stale `players.team_id` before snapshots can populate; keep it separate from sportsbook EV and recommendations.
+- [x] Finish the model-only `Special` steals/blocks tracker: snapshots now write to isolated `stocks_tracking.sqlite`, rebuild from scheduled players who already have live regular prop lines, settle from ESPN box-score steals/blocks, and stay separate from sportsbook EV/recommendation logic.
 - [ ] Keep frontend asset deployment reliable so manual volume syncs are not needed after every WNBA frontend change.
 - [x] Make unchanged local training reruns reuse the latest matching `model_runs` result instead of recomputing the same walk-forward benchmark.
 
@@ -131,6 +131,7 @@
   - diff-based prop-line reingest so unchanged rows and predictions are preserved across current-slate repairs
   - parallel per-market training evaluation in `run_walk_forward_training()`
   - signature-based reuse of unchanged `model_runs` so repeat local training returns instantly when the data has not changed
+  - end-to-end `Special` tab support for model-only steals/blocks props, including backend list/generate endpoints, rebuild-time snapshot generation, settlement from ESPN box scores, and frontend review/generate UI
 - Current data state checked on `2026-06-26`:
   - local `data/wnba.sqlite` now mirrors the deploy snapshot and includes imported `2024` ESPN history
   - active local history spans `2024-05-03` through `2026-09-24`
@@ -143,3 +144,4 @@
   - Nyara Sabally rebounds projection exists in the live DB and was being hidden by value-board gating, not missing from the model pipeline.
   - Active mounted-volume validation on `2026-07-11`: historical player props are settled across three seasons (`2024`: 381, `2025`: 600, `2026`: 5,986; `6,967` total).
   - Three-season walk-forward benchmark on `2026-07-11`: `24,156` training rows. Residual blending was negative for most markets; only `points_assists` showed a material residual MAE gain, pending confirmation with more settled rows.
+  - Special-props validation on `2026-07-11`: local end-to-end implementation passed `188` backend tests and the frontend production build; mounted `stocks_tracking.sqlite` contained `8` projection snapshots with latest capture `2026-07-11T14:16:12.464186+00:00`.

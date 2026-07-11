@@ -13,10 +13,12 @@ import {
   fetchModelRuns,
   fetchPerformance,
   fetchRoster,
+  fetchSpecialStocks,
   auditStalePayloads,
   auditDbLock,
   deleteStalePayloads,
   fetchValueBoard,
+  generateSpecialStocks,
   fetchWatchlistPerformance,
   fetchWatchlist,
   importCoversOdds,
@@ -46,12 +48,13 @@ import {
   type ModelRun,
   type OpsHealth,
   type RosterPlayer,
+  type SpecialStocksSnapshot,
   type StalePayloadAudit,
   type TeamLast10,
   type ValueProp,
   type WatchlistPerformance,
   type WatchlistProp,
-  type UnsettledPropAuditItem
+  type UnsettledPropAuditItem,
 } from "./api";
 
 const markets = [
@@ -88,7 +91,7 @@ const WNBA_TEAM_LOGOS: Record<string, string> = {
   PDX: "/team-logos/por.png"
 };
 
-type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "discrepancies" | "roster" | "models" | "data";
+type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "special" | "discrepancies" | "roster" | "models" | "data";
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
@@ -103,6 +106,7 @@ const INITIAL_TAB_LOADING: TabLoadingState = {
   watchlist: false,
   matchups: false,
   parlays: false,
+  special: false,
   discrepancies: false,
   roster: false,
   models: false,
@@ -114,6 +118,7 @@ const CACHE_NAMES_BY_TAB: Record<DashboardTab, string[]> = {
   watchlist: ["current_watchlist.json", "watchlist_performance.json"],
   matchups: ["current_matchups.json"],
   parlays: ["current_value_board.json", "current_matchups.json"],
+  special: [],
   discrepancies: ["line_discrepancies.json"],
   roster: ["roster.json", "current_matchups.json"],
   models: ["model_runs.json", "model_performance.json"],
@@ -202,6 +207,7 @@ export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
+  const [specialStocks, setSpecialStocks] = useState<SpecialStocksSnapshot[]>([]);
   const [discrepancies, setDiscrepancies] = useState<LineDiscrepancy[]>([]);
   const [roster, setRoster] = useState<RosterPlayer[]>([]);
   const [performance, setPerformance] = useState<ModelPerformance | null>(null);
@@ -218,6 +224,7 @@ export function App() {
   const [recalculating, setRecalculating] = useState(false);
   const [settlingProps, setSettlingProps] = useState(false);
   const [snapshottingGems, setSnapshottingGems] = useState(false);
+  const [generatingSpecial, setGeneratingSpecial] = useState(false);
   const [auditingStalePayloads, setAuditingStalePayloads] = useState(false);
   const [deletingStalePayloads, setDeletingStalePayloads] = useState(false);
   const [auditingDbLock, setAuditingDbLock] = useState(false);
@@ -245,6 +252,7 @@ export function App() {
     watchlist: false,
     matchups: false,
     parlays: false,
+    special: false,
     discrepancies: false,
     roster: false,
     models: false,
@@ -283,6 +291,7 @@ export function App() {
     recalculating ||
     settlingProps ||
     snapshottingGems ||
+    generatingSpecial ||
     auditingStalePayloads ||
     deletingStalePayloads ||
     auditingDbLock ||
@@ -369,6 +378,8 @@ export function App() {
         setWatchlistPerformance(nextPerformance);
       } else if (tab === "matchups" || tab === "parlays") {
         setMatchups(await withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups"));
+      } else if (tab === "special") {
+        setSpecialStocks(await withTimeout(fetchSpecialStocks(), INITIAL_LOAD_TIMEOUT_MS, "special props"));
       } else if (tab === "discrepancies") {
         setDiscrepancies(await withTimeout(fetchLineDiscrepancies(), INITIAL_LOAD_TIMEOUT_MS, "line discrepancies"));
       } else if (tab === "roster") {
@@ -626,7 +637,7 @@ export function App() {
           : [];
       const scope = usedDates.length ? ` for ${usedDates.join(", ")}` : "";
       setOperationStatus(
-        `Settled ${result.props?.settled ?? 0} props and ${result.games?.settled ?? 0} game predictions${scope}.`
+        `Settled ${result.props?.settled ?? 0} props, ${result.special?.settled ?? 0} special props, and ${result.games?.settled ?? 0} game predictions${scope}.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to settle props");
@@ -649,6 +660,27 @@ export function App() {
       setError(err instanceof Error ? err.message : "Unable to snapshot gems");
     } finally {
       setSnapshottingGems(false);
+    }
+  }
+
+  async function handleGenerateSpecialStocks() {
+    if (!isAdmin) {
+      setError("Unauthorized. Sign in on the Data tab and try Generate again.");
+      return;
+    }
+    setGeneratingSpecial(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await generateSpecialStocks();
+      const snapshots = await fetchSpecialStocks();
+      setSpecialStocks(snapshots);
+      setLoadedTabs((current) => ({ ...current, special: true }));
+      setOperationStatus(`Generated ${result.generated} model-only special props.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to generate special props");
+    } finally {
+      setGeneratingSpecial(false);
     }
   }
 
@@ -1102,6 +1134,10 @@ export function App() {
           <ListChecks size={18} />
           Parlays
         </button>
+        <button className={activeTab === "special" ? "active" : ""} onClick={() => setActiveTab("special")}>
+          <ShieldCheck size={18} />
+          Special
+        </button>
         <button className={activeTab === "discrepancies" ? "active" : ""} onClick={() => setActiveTab("discrepancies")}>
           <SlidersHorizontal size={18} />
           Discrepancies
@@ -1124,12 +1160,12 @@ export function App() {
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups, props).toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "special" ? "Special props" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups, props).toString() : activeTab === "special" ? specialStocks.length.toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
         />
         <Metric
-          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups, props).toString() : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "special" ? "Top stocks" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups, props).toString() : activeTab === "special" ? formatNumber(specialStocks[0]?.projected_stocks ?? null) : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={(performance?.total_settled ?? performance?.settled ?? 0).toString()} />
         <Metric
@@ -1175,6 +1211,15 @@ export function App() {
             error={error}
             propsCacheStatus={cacheStatus?.views.parlays.props ?? null}
             matchupsCacheStatus={cacheStatus?.views.parlays.matchups ?? null}
+          />
+        ) : activeTab === "special" ? (
+          <SpecialStocksView
+            snapshots={specialStocks}
+            loading={tabLoading.special}
+            error={error}
+            canGenerate={isAdmin}
+            generating={generatingSpecial}
+            onGenerate={handleGenerateSpecialStocks}
           />
         ) : activeTab === "discrepancies" ? (
           <DiscrepanciesView discrepancies={discrepancies} loading={tabLoading.discrepancies} error={error} />
@@ -3801,6 +3846,125 @@ function ParlayCandidatesView({
   );
 }
 
+function SpecialStocksView({
+  snapshots,
+  loading,
+  error,
+  canGenerate,
+  generating,
+  onGenerate,
+}: {
+  snapshots: SpecialStocksSnapshot[];
+  loading: boolean;
+  error: string | null;
+  canGenerate: boolean;
+  generating: boolean;
+  onGenerate: () => void;
+}) {
+  const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
+  const cards = useMemo(() => {
+    const grouped = new Map<number, { gameId: number; gameDate: string; players: SpecialStocksSnapshot[] }>();
+    for (const snapshot of snapshots) {
+      const current = grouped.get(snapshot.game_id);
+      if (current) {
+        current.players.push(snapshot);
+      } else {
+        grouped.set(snapshot.game_id, {
+          gameId: snapshot.game_id,
+          gameDate: snapshot.game_date,
+          players: [snapshot],
+        });
+      }
+    }
+    return Array.from(grouped.values()).map((card) => ({
+      ...card,
+      players: card.players.slice().sort((left, right) => right.projected_stocks - left.projected_stocks),
+    }));
+  }, [snapshots]);
+  const selectedCard = cards.find((card) => card.gameId === selectedGameId) ?? cards[0] ?? null;
+
+  return (
+    <section className="matchup-list">
+      <div className="board-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Special Props</h2>
+            <p>{loading ? "Loading model-only stocks props" : "In-house steals and blocks projections for players already on the slate"}</p>
+          </div>
+          {canGenerate ? (
+            <button className="icon-button text-button dark-button" onClick={onGenerate} disabled={generating}>
+              <RefreshCw size={18} />
+              {generating ? "Generating" : "Generate"}
+            </button>
+          ) : (
+            <ShieldCheck size={20} />
+          )}
+        </div>
+        {error && <div className="error">{error}</div>}
+        <div className="game-tabs" aria-label="Special props matchup tabs">
+          {cards.map((card) => (
+            <button
+              key={card.gameId}
+              className={selectedCard?.gameId === card.gameId ? "active" : ""}
+              onClick={() => setSelectedGameId(card.gameId)}
+            >
+              <span>{formatDate(card.gameDate)}</span>
+              <strong>Game {card.gameId}</strong>
+              <em>{`${card.players.length} model-only props`}</em>
+            </button>
+          ))}
+        </div>
+        <div className="parlay-tab-content">
+          {selectedCard ? (
+            <div className="matchup-props">
+              <div className="panel-header compact">
+                <div>
+                  <h3>Model-only Stocks Board</h3>
+                  <p>{`${selectedCard.players.length} slate players with regular lines ranked by projected steals plus blocks`}</p>
+                  <p>No sportsbook line is attached. These rows are for internal tracking and UI review.</p>
+                </div>
+              </div>
+              <div className="candidate-grid">
+                {selectedCard.players.map((snapshot) => (
+                  <article key={snapshot.id} className="candidate-card">
+                    <div className="candidate-card-header">
+                      <div>
+                        <h4>{snapshot.player_name}</h4>
+                        <p>{`Captured ${formatDateTime(snapshot.captured_at)}`}</p>
+                      </div>
+                      <span className="confidence-badge high">Model only</span>
+                    </div>
+                    <div className="candidate-stats">
+                      <MiniStat label="STL" value={formatNumber(snapshot.projected_steals)} />
+                      <MiniStat label="BLK" value={formatNumber(snapshot.projected_blocks)} />
+                      <MiniStat label="STL+BLK" value={formatNumber(snapshot.projected_stocks)} />
+                      <MiniStat label="1+ STL" value={formatPercent(snapshot.steal_prob_1_plus)} />
+                      <MiniStat label="2+ STL" value={formatPercent(snapshot.steal_prob_2_plus)} />
+                      <MiniStat label="1+ BLK" value={formatPercent(snapshot.block_prob_1_plus)} />
+                      <MiniStat label="2+ BLK" value={formatPercent(snapshot.block_prob_2_plus)} />
+                      <MiniStat label="2+ STOCKS" value={formatPercent(snapshot.stocks_prob_2_plus)} />
+                      <MiniStat
+                        label="Settled"
+                        value={
+                          snapshot.actual_stocks == null
+                            ? "Pending"
+                            : `${formatNumber(snapshot.actual_steals ?? null)} STL | ${formatNumber(snapshot.actual_blocks ?? null)} BLK`
+                        }
+                      />
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <p className="empty">No special props generated yet.</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function MatchupProps({
   matchup,
   props,
@@ -4493,6 +4657,7 @@ function tabTitle(tab: DashboardTab) {
     watchlist: "Prop Watchlist",
     matchups: "Pregame Matchups",
     parlays: "Parlay Candidates",
+    special: "Special Props",
     discrepancies: "Line Discrepancies",
     roster: "Roster Status",
     models: "Model Lab",

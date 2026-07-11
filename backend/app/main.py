@@ -51,6 +51,7 @@ from .player_identity import player_is_skeletal, repair_shadow_player_identities
 from .projections import LiveRebuildResult, rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
+from .stocks_tracking import get_tracking_db_path, list_special_stocks, settle_stocks, snapshot_stocks
 from .player_prop_model import prewarm_model_cache
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
 from .timezone_utils import APP_TIMEZONE, local_today_iso
@@ -996,6 +997,14 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/special/stocks")
+def special_stocks() -> list[dict[str, Any]]:
+    path = get_tracking_db_path()
+    if not path.exists():
+        return []
+    return list_special_stocks()
+
+
 @app.get("/api/ops/health")
 @app.get("/api/operations/health")
 def ops_health() -> dict[str, Any]:
@@ -1335,6 +1344,12 @@ def _protect_force_refresh(
         return
     _consume_rate_limit(_client_key(request), "refresh", RATE_LIMIT_REFRESH_CAPACITY, RATE_LIMIT_REFRESH_REFILL_PER_SEC)
     _require_admin_session_or_api_key(request, x_api_key, authorization, x_csrf_token)
+
+
+@app.post("/api/special/stocks/generate", dependencies=[Depends(_protect_mutation)])
+def generate_special_stocks() -> dict[str, int]:
+    with connect() as conn:
+        return {"generated": snapshot_stocks(conn)}
 
 
 @app.get("/api/auth/me")
@@ -2703,11 +2718,13 @@ def _settle_recent_completed_games(conn) -> dict[str, Any]:
             "selected_dates": [],
             "prop_settlements": {"settled": 0, "repaired": 0, "skipped": 0},
             "game_settlements": {"settled": 0},
+            "special_settlements": {"settled": 0},
         }
     return {
         "selected_dates": target_dates,
         "prop_settlements": settle_completed_props(conn, selected_dates=target_dates),
         "game_settlements": settle_completed_game_predictions(conn, selected_dates=target_dates),
+        "special_settlements": settle_stocks(conn, selected_dates=target_dates),
     }
 
 
@@ -2861,6 +2878,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
             message="Settling completed player props.",
         )
         settlements = settle_completed_props(conn)
+        special_settlements = settle_stocks(conn)
         _set_prop_sync_progress(
             current=1,
             total=1,
@@ -2902,6 +2920,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
     return {
         "predictions": int(rebuild_result["rebuilt_predictions"]),
         "settled": settlements["settled"],
+        "special_settled": special_settlements["settled"],
         "game_settled": game_settlements["settled"],
     }
 
@@ -3213,6 +3232,7 @@ def settle_props(
     with connect() as conn:
         props = settle_completed_props(conn, selected_date=selected_date, selected_dates=selected_dates)
         games = settle_completed_game_predictions(conn, selected_date=selected_date, selected_dates=selected_dates)
+        special = settle_stocks(conn, selected_date=selected_date, selected_dates=selected_dates)
         gems = _sync_gem_snapshot_settlements(conn)
         watchlist = _sync_watchlist_snapshot_settlements(conn)
         scheduled_repair = _maybe_repair_current_slate_after_settlement(conn)
@@ -3226,6 +3246,7 @@ def settle_props(
     return {
         "props": props,
         "games": games,
+        "special": special,
         "gems": gems,
         "watchlist": watchlist,
         "scheduled_repair": scheduled_repair,
@@ -4241,6 +4262,7 @@ def import_espn_history(
             ats_backfill = _recompute_team_results_from_game_lines(conn)
             settlements = settle_completed_props(conn, selected_dates=daily_dates)
             game_settlements = settle_completed_game_predictions(conn, selected_dates=daily_dates)
+            special_settlements = settle_stocks(conn, selected_dates=daily_dates)
             gem_settlements = _sync_gem_snapshot_settlements(conn)
             watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
             _clear_scheduled_prop_state(conn, clear_source_rows=True)
@@ -4285,6 +4307,7 @@ def import_espn_history(
         "synced_props": synced_props,
         "settlements": settlements,
         "game_settlements": game_settlements,
+        "special_settlements": special_settlements,
         "gem_settlements": gem_settlements,
         "watchlist_settlements": watchlist_settlements,
         "watchlist_snapshot": watchlist_snapshot,
@@ -4366,6 +4389,7 @@ def backfill_espn_history_gaps(
         ats_backfill = _recompute_team_results_from_game_lines(conn)
         settlements = settle_completed_props(conn, selected_dates=before["missing_dates"])
         game_settlements = settle_completed_game_predictions(conn, selected_dates=before["missing_dates"])
+        special_settlements = settle_stocks(conn, selected_dates=before["missing_dates"])
         gem_settlements = _sync_gem_snapshot_settlements(conn)
         watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
         _clear_scheduled_prop_state(conn, clear_source_rows=True)
@@ -4385,6 +4409,7 @@ def backfill_espn_history_gaps(
         "ats_backfill": ats_backfill,
         "settlements": settlements,
         "game_settlements": game_settlements,
+        "special_settlements": special_settlements,
         "gem_settlements": gem_settlements,
         "watchlist_settlements": watchlist_settlements,
         "watchlist_snapshot": watchlist_snapshot,

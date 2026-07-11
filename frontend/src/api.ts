@@ -39,6 +39,29 @@ export type WatchlistProp = ValueProp & {
   home_team?: string;
 };
 
+export type SpecialStocksSnapshot = {
+  id: number;
+  game_id: number;
+  player_id: number;
+  player_name: string;
+  game_date: string;
+  captured_at: string;
+  model_version: string;
+  projected_steals: number;
+  projected_blocks: number;
+  projected_stocks: number;
+  steal_prob_1_plus: number;
+  steal_prob_2_plus: number;
+  block_prob_1_plus: number;
+  block_prob_2_plus: number;
+  stocks_prob_2_plus: number;
+  data_quality: string;
+  actual_steals?: number | null;
+  actual_blocks?: number | null;
+  actual_stocks?: number | null;
+  settled_at?: string | null;
+};
+
 export type SportsbookProp = {
   id: number;
   game_id: number | null;
@@ -713,6 +736,24 @@ export async function fetchWatchlist(): Promise<WatchlistProp[]> {
   return response.json();
 }
 
+export async function fetchSpecialStocks(): Promise<SpecialStocksSnapshot[]> {
+  const response = await apiFetch("/api/special/stocks");
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new Error(detail || "Failed to load special props");
+  }
+  return response.json();
+}
+
+export async function generateSpecialStocks(): Promise<{ generated: number }> {
+  const response = await apiFetch("/api/special/stocks/generate", { method: "POST" });
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new Error(detail || "Failed to generate special props");
+  }
+  return response.json();
+}
+
 export async function fetchPerformance(): Promise<ModelPerformance> {
   const response = await apiFetch("/api/model-performance");
   if (!response.ok) {
@@ -991,6 +1032,7 @@ export async function settleProps(
 ): Promise<{
   props: { settled: number; selected_date?: string | null; selected_dates?: string[] };
   games: { settled: number; selected_date?: string | null; selected_dates?: string[] };
+  special?: { settled: number; selected_date?: string | null; selected_dates?: string[] };
   selected_date?: string | null;
   selected_dates?: string[];
 }> {
