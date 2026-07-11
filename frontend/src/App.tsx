@@ -89,9 +89,33 @@ type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "d
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SortDirection = "desc" | "asc";
+type TabLoadingState = Record<DashboardTab, boolean>;
+type CacheUpdateEvent = { id: number; created_at: string; views: string[] };
 
 const INITIAL_LOAD_TIMEOUT_MS = 45000;
 const AUTH_LOAD_TIMEOUT_MS = 15000;
+const INITIAL_TAB_LOADING: TabLoadingState = {
+  props: false,
+  gems: false,
+  watchlist: false,
+  matchups: false,
+  parlays: false,
+  discrepancies: false,
+  roster: false,
+  models: false,
+  data: false
+};
+const CACHE_NAMES_BY_TAB: Record<DashboardTab, string[]> = {
+  props: ["current_value_board.json"],
+  gems: ["current_value_board.json", "current_matchups.json", "line_discrepancies.json", "gem_performance.json"],
+  watchlist: ["current_watchlist.json", "watchlist_performance.json"],
+  matchups: ["current_matchups.json"],
+  parlays: ["current_value_board.json", "current_matchups.json"],
+  discrepancies: ["line_discrepancies.json"],
+  roster: ["roster.json", "current_matchups.json"],
+  models: ["model_runs.json", "model_performance.json"],
+  data: []
+};
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -209,6 +233,18 @@ export function App() {
   const [missingEspnDates, setMissingEspnDates] = useState<string[]>([]);
   const [missingEspnGames, setMissingEspnGames] = useState<MissingEspnGame[]>([]);
   const [loading, setLoading] = useState(true);
+  const [tabLoading, setTabLoading] = useState<TabLoadingState>(INITIAL_TAB_LOADING);
+  const [loadedTabs, setLoadedTabs] = useState<Record<DashboardTab, boolean>>({
+    props: false,
+    gems: false,
+    watchlist: false,
+    matchups: false,
+    parlays: false,
+    discrepancies: false,
+    roster: false,
+    models: false,
+    data: false
+  });
   const [authState, setAuthState] = useState<AuthState>({ authenticated: false, user: null, csrf_token: null });
   const [authLoading, setAuthLoading] = useState(true);
   const [authSubmitting, setAuthSubmitting] = useState(false);
@@ -226,6 +262,8 @@ export function App() {
   const operationsBusyRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
   const lastCompletedPropSyncRef = useRef<string | null>(null);
+  const idlePrefetchScheduledRef = useRef(false);
+  const activeTabRef = useRef<DashboardTab>(activeTab);
   const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
@@ -251,6 +289,18 @@ export function App() {
     }
   }, [activeTab, isAdmin]);
 
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+    const timer = window.setTimeout(() => document.body.classList.add("arena-background"), 0);
+    return () => window.clearTimeout(timer);
+  }, [loading]);
+
   async function load(options?: { silent?: boolean }) {
     const requestId = ++loadRequestIdRef.current;
     if (!options?.silent) {
@@ -258,119 +308,29 @@ export function App() {
     }
     setError(null);
     try {
-      const [
-        boardResult,
-        performanceResult,
-        gemPerformanceResult,
-        watchlistPerformanceResult,
-        watchlistResult,
-        matchupsResult,
-        discrepanciesResult,
-        modelRunsResult,
-        rosterResult,
-        opsHealthResult,
-        cacheStatusResult
-      ] = await Promise.allSettled([
-        withTimeout(fetchValueBoard(), INITIAL_LOAD_TIMEOUT_MS, "value board"),
-        withTimeout(fetchPerformance(), INITIAL_LOAD_TIMEOUT_MS, "model performance"),
-        withTimeout(fetchGemPerformance(), INITIAL_LOAD_TIMEOUT_MS, "gem performance"),
-        withTimeout(fetchWatchlistPerformance(), INITIAL_LOAD_TIMEOUT_MS, "watchlist performance"),
-        withTimeout(fetchWatchlist(), INITIAL_LOAD_TIMEOUT_MS, "watchlist"),
-        withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups"),
-        withTimeout(fetchLineDiscrepancies(), INITIAL_LOAD_TIMEOUT_MS, "line discrepancies"),
-        withTimeout(fetchModelRuns(), INITIAL_LOAD_TIMEOUT_MS, "model runs"),
-        withTimeout(fetchRoster(), INITIAL_LOAD_TIMEOUT_MS, "roster"),
-        withTimeout(fetchOpsHealth(), INITIAL_LOAD_TIMEOUT_MS, "operations health"),
-        withTimeout(fetchCacheStatus(), INITIAL_LOAD_TIMEOUT_MS, "cache status")
-      ]);
-
-      const failures: string[] = [];
+      const board = await withTimeout(fetchValueBoard(), INITIAL_LOAD_TIMEOUT_MS, "value board");
 
       if (requestId !== loadRequestIdRef.current) {
         return;
       }
 
-      if (boardResult.status === "fulfilled") {
-        setProps(boardResult.value);
-        setSelected((current) => {
-          if (boardResult.value.length === 0) {
-            return null;
+      setProps(board);
+      setSelected((current) => {
+        if (board.length === 0) {
+          return null;
+        }
+        if (current) {
+          const matchingProp = board.find((item) => item.id === current.id);
+          if (matchingProp) {
+            return matchingProp;
           }
-          if (current) {
-            const matchingProp = boardResult.value.find((item) => item.id === current.id);
-            if (matchingProp) {
-              return matchingProp;
-            }
-          }
-          return boardResult.value[0] ?? null;
-        });
-      } else {
-        failures.push("value board");
-      }
-
-      if (performanceResult.status === "fulfilled") {
-        setPerformance(performanceResult.value);
-      } else {
-        failures.push("model performance");
-      }
-
-      if (gemPerformanceResult.status === "fulfilled") {
-        setGemPerformance(gemPerformanceResult.value);
-      } else {
-        failures.push("gem performance");
-      }
-
-      if (watchlistPerformanceResult.status === "fulfilled") {
-        setWatchlistPerformance(watchlistPerformanceResult.value);
-      } else {
-        failures.push("watchlist performance");
-      }
-
-      if (watchlistResult.status === "fulfilled") {
-        setWatchlist(watchlistResult.value);
-      } else {
-        failures.push("watchlist");
-      }
-
-      if (matchupsResult.status === "fulfilled") {
-        setMatchups(matchupsResult.value);
-      } else {
-        failures.push("matchups");
-      }
-
-      if (discrepanciesResult.status === "fulfilled") {
-        setDiscrepancies(discrepanciesResult.value);
-      } else {
-        failures.push("line discrepancies");
-      }
-
-      if (modelRunsResult.status === "fulfilled") {
-        setModelRuns(modelRunsResult.value.runs);
-        setLatestModelRun(modelRunsResult.value.latest);
-      } else {
-        failures.push("model runs");
-      }
-
-      if (rosterResult.status === "fulfilled") {
-        setRoster(rosterResult.value);
-      } else {
-        failures.push("roster");
-      }
-
-      if (opsHealthResult.status === "fulfilled") {
-        setOpsHealth(opsHealthResult.value);
-      } else {
-        failures.push("operations health");
-      }
-
-      if (cacheStatusResult.status === "fulfilled") {
-        setCacheStatus(cacheStatusResult.value);
-      } else {
-        failures.push("cache status");
-      }
-
-      if (failures.length > 0) {
-        setError(`Some dashboard data failed to load: ${failures.join(", ")}. Showing the last successful data.`);
+        }
+        return board[0] ?? null;
+      });
+      setLoadedTabs((current) => ({ ...current, props: true }));
+    } catch (err) {
+      if (requestId === loadRequestIdRef.current) {
+        setError(err instanceof Error ? err.message : "Unable to load value board");
       }
     } finally {
       if (!options?.silent && requestId === loadRequestIdRef.current) {
@@ -379,8 +339,132 @@ export function App() {
     }
   }
 
+  async function loadTab(tab: Exclude<DashboardTab, "props">, options?: { force?: boolean }) {
+    if (!options?.force && loadedTabs[tab]) {
+      return;
+    }
+    setTabLoading((current) => ({ ...current, [tab]: true }));
+    setError(null);
+    try {
+      if (tab === "gems") {
+        const [nextMatchups, nextDiscrepancies, nextPerformance] = await Promise.all([
+          withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups"),
+          withTimeout(fetchLineDiscrepancies(), INITIAL_LOAD_TIMEOUT_MS, "line discrepancies"),
+          withTimeout(fetchGemPerformance(), INITIAL_LOAD_TIMEOUT_MS, "gem performance")
+        ]);
+        setMatchups(nextMatchups);
+        setDiscrepancies(nextDiscrepancies);
+        setGemPerformance(nextPerformance);
+      } else if (tab === "watchlist") {
+        const [nextWatchlist, nextPerformance] = await Promise.all([
+          withTimeout(fetchWatchlist(), INITIAL_LOAD_TIMEOUT_MS, "watchlist"),
+          withTimeout(fetchWatchlistPerformance(), INITIAL_LOAD_TIMEOUT_MS, "watchlist performance")
+        ]);
+        setWatchlist(nextWatchlist);
+        setWatchlistPerformance(nextPerformance);
+      } else if (tab === "matchups" || tab === "parlays") {
+        setMatchups(await withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups"));
+      } else if (tab === "discrepancies") {
+        setDiscrepancies(await withTimeout(fetchLineDiscrepancies(), INITIAL_LOAD_TIMEOUT_MS, "line discrepancies"));
+      } else if (tab === "roster") {
+        const [nextRoster, nextMatchups] = await Promise.all([
+          withTimeout(fetchRoster(), INITIAL_LOAD_TIMEOUT_MS, "roster"),
+          withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups")
+        ]);
+        setRoster(nextRoster);
+        setMatchups(nextMatchups);
+      } else if (tab === "models") {
+        const [nextRuns, nextPerformance] = await Promise.all([
+          withTimeout(fetchModelRuns(), INITIAL_LOAD_TIMEOUT_MS, "model runs"),
+          withTimeout(fetchPerformance(), INITIAL_LOAD_TIMEOUT_MS, "model performance")
+        ]);
+        setModelRuns(nextRuns.runs);
+        setLatestModelRun(nextRuns.latest);
+        setPerformance(nextPerformance);
+      } else if (tab === "data") {
+        const [nextHealth, nextCacheStatus] = await Promise.all([
+          withTimeout(fetchOpsHealth(), INITIAL_LOAD_TIMEOUT_MS, "operations health"),
+          withTimeout(fetchCacheStatus(), INITIAL_LOAD_TIMEOUT_MS, "cache status")
+        ]);
+        setOpsHealth(nextHealth);
+        setCacheStatus(nextCacheStatus);
+      }
+      setLoadedTabs((current) => ({ ...current, [tab]: true }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Unable to load ${tab}`);
+    } finally {
+      setTabLoading((current) => ({ ...current, [tab]: false }));
+    }
+  }
+
   useEffect(() => {
     load();
+  }, []);
+
+  useEffect(() => {
+    if (activeTab !== "props") {
+      void loadTab(activeTab);
+    }
+  }, [activeTab]);
+
+  useEffect(() => {
+    if (loading || !loadedTabs.props || idlePrefetchScheduledRef.current) {
+      return;
+    }
+    idlePrefetchScheduledRef.current = true;
+    let didPrefetch = false;
+    const prefetch = () => {
+      didPrefetch = true;
+      if (document.hidden) {
+        return;
+      }
+      void loadTab("matchups");
+      void loadTab("roster");
+    };
+    const idleWindow = window as Window & {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    if (idleWindow.requestIdleCallback) {
+      const handle = idleWindow.requestIdleCallback(prefetch, { timeout: 3000 });
+      return () => {
+        idleWindow.cancelIdleCallback?.(handle);
+        if (!didPrefetch) idlePrefetchScheduledRef.current = false;
+      };
+    }
+    const handle = window.setTimeout(prefetch, 1500);
+    return () => {
+      window.clearTimeout(handle);
+      if (!didPrefetch) idlePrefetchScheduledRef.current = false;
+    };
+  }, [loading, loadedTabs.props]);
+
+  useEffect(() => {
+    if (!("EventSource" in window)) {
+      return;
+    }
+    const events = new EventSource("/api/cache/events");
+    const refreshActiveView = (message: MessageEvent<string>) => {
+      try {
+        const event = JSON.parse(message.data) as CacheUpdateEvent;
+        const tab = activeTabRef.current;
+        if (!event.views.some((name) => CACHE_NAMES_BY_TAB[tab].includes(name))) {
+          return;
+        }
+        if (tab === "props") {
+          void load({ silent: true });
+        } else if (tab !== "data") {
+          void loadTab(tab, { force: true });
+        }
+      } catch {
+        // Ignore malformed server-sent events and keep the current view usable.
+      }
+    };
+    events.addEventListener("cache-update", refreshActiveView as EventListener);
+    return () => {
+      events.removeEventListener("cache-update", refreshActiveView as EventListener);
+      events.close();
+    };
   }, []);
 
   async function loadAuth() {
@@ -472,7 +556,11 @@ export function App() {
   }, [activePipeline, opsHealth?.prop_sync]);
 
   function handleReload() {
-    void load();
+    if (activeTab === "props") {
+      void load();
+      return;
+    }
+    void loadTab(activeTab, { force: true });
   }
 
   const filtered = useMemo(() => {
@@ -489,6 +577,7 @@ export function App() {
       );
   }, [props, market, confidence, modelProbabilityOrder]);
   const gems = useMemo(() => buildGems(props, discrepancies), [props, discrepancies]);
+  const activeTabLoading = activeTab === "props" ? loading : tabLoading[activeTab];
 
   async function handleRecalculate() {
     setRecalculating(true);
@@ -980,9 +1069,9 @@ export function App() {
           <h1>{tabTitle(activeTab)}</h1>
         </div>
         <div className="topbar-actions">
-          <button className="icon-button text-button" onClick={handleReload} disabled={loading} title="Reload dashboard data">
+          <button className="icon-button text-button" onClick={handleReload} disabled={activeTabLoading} title="Reload dashboard data">
             <RefreshCw size={18} />
-            {loading ? "Loading" : "Reload"}
+            {activeTabLoading ? "Loading" : "Reload"}
           </button>
         </div>
       </header>
@@ -1068,25 +1157,25 @@ export function App() {
             setSelected={setSelected}
           />
         ) : activeTab === "gems" ? (
-          <GemsView gems={gems} matchups={matchups} loading={loading} error={error} />
+          <GemsView gems={gems} matchups={matchups} loading={tabLoading.gems} error={error} />
         ) : activeTab === "watchlist" ? (
-          <WatchlistView watchlist={watchlist} loading={loading} error={error} cacheStatus={cacheStatus?.views.watchlist ?? null} />
+          <WatchlistView watchlist={watchlist} loading={tabLoading.watchlist} error={error} cacheStatus={cacheStatus?.views.watchlist ?? null} />
         ) : activeTab === "matchups" ? (
-          <MatchupsView matchups={matchups} loading={loading} error={error} cacheStatus={cacheStatus?.views.matchups ?? null} />
+          <MatchupsView matchups={matchups} loading={tabLoading.matchups} error={error} cacheStatus={cacheStatus?.views.matchups ?? null} />
         ) : activeTab === "parlays" ? (
           <ParlayCandidatesView
             matchups={matchups}
             props={props}
-            loading={loading}
+            loading={tabLoading.parlays}
             error={error}
             propsCacheStatus={cacheStatus?.views.parlays.props ?? null}
             matchupsCacheStatus={cacheStatus?.views.parlays.matchups ?? null}
           />
         ) : activeTab === "discrepancies" ? (
-          <DiscrepanciesView discrepancies={discrepancies} loading={loading} error={error} />
+          <DiscrepanciesView discrepancies={discrepancies} loading={tabLoading.discrepancies} error={error} />
         ) : activeTab === "data" ? (
           <DataView
-            loading={loading}
+            loading={tabLoading.data}
             authLoading={authLoading}
             authSubmitting={authSubmitting}
             authState={authState}
@@ -1138,7 +1227,7 @@ export function App() {
           <RosterView
             roster={roster}
             matchups={matchups}
-            loading={loading}
+            loading={tabLoading.roster}
             error={error}
             status={operationStatus}
             refreshing={refreshingRoster}
@@ -1149,7 +1238,7 @@ export function App() {
           <ModelsView
             runs={modelRuns}
             latest={latestModelRun}
-            loading={loading || training}
+            loading={tabLoading.models || training}
             error={error}
             onTrain={handleTrainModel}
             canTrain={isAdmin}

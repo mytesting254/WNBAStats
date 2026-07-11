@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 import hashlib
 import json
@@ -15,7 +16,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from .ball_dont_lie import fetch_team_history
@@ -35,7 +36,7 @@ from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, 
 from .db import connect, init_db, sqlite_write_lock, using_turso
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
-from .game_predictions import _team_injury_impact, project_game
+from .game_predictions import _GamePredictionCache, _team_injury_impact, project_game
 from .odds_import import (
     import_historical_odds_api_game_markets,
     RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME,
@@ -102,6 +103,8 @@ _PROP_SYNC_LOCK = threading.Lock()
 _MODEL_TRAIN_LOCK = threading.Lock()
 _DB_MAINTENANCE_LOCK = threading.Lock()
 _ESPN_HISTORY_IMPORT_LOCK = threading.Lock()
+_READ_CACHE_REBUILD_LOCKS: dict[str, threading.Lock] = {}
+_READ_CACHE_REBUILD_LOCKS_LOCK = threading.Lock()
 PROP_SYNC_STALE_SECONDS = int(os.getenv("PROP_SYNC_STALE_SECONDS", "1800"))
 RECENT_FINALS_SETTLEMENT_LOOKBACK_DAYS = int(os.getenv("RECENT_FINALS_SETTLEMENT_LOOKBACK_DAYS", "3"))
 _PROP_SYNC_STATE: dict[str, Any] = {
@@ -141,6 +144,8 @@ READ_CACHE_FILES = {
     WATCHLIST_CACHE_NAME,
     LINE_DISCREPANCIES_CACHE_NAME,
     MODEL_PERFORMANCE_CACHE_NAME,
+    GEM_PERFORMANCE_CACHE_NAME,
+    WATCHLIST_PERFORMANCE_CACHE_NAME,
     MODEL_RUNS_CACHE_NAME,
     ROSTER_CACHE_NAME,
 }
@@ -165,6 +170,15 @@ def _should_cache_app_response(request: Request) -> bool:
     if not request.url.path.startswith("/api/"):
         return False
     if request.url.path.startswith("/api/auth/"):
+        return False
+    if request.url.path in {
+        "/api/health",
+        "/api/ops/health",
+        "/api/operations/health",
+        "/api/cache/status",
+        "/api/cache/events",
+        "/api/props/sync-status",
+    }:
         return False
     return True
 
@@ -224,7 +238,26 @@ def _read_app_response_cache(cache_name: str, *, allow_stale: bool = False) -> d
 def _cached_app_response(entry: dict[str, Any], cache_status: str) -> JSONResponse:
     response = JSONResponse(content=entry.get("payload"), status_code=int(entry.get("status_code") or 200))
     response.headers["X-App-Cache"] = cache_status
+    response.headers["X-Cache"] = f"APP_{cache_status}"
+    response.headers["X-Compute-Ms"] = "0.00"
     return response
+
+
+def _with_conditional_etag(request: Request, response: Response, body: bytes) -> Response:
+    etag = f'"{hashlib.sha256(body).hexdigest()}"'
+    response.headers["ETag"] = etag
+    if request.headers.get("if-none-match") != etag:
+        return response
+    return Response(
+        status_code=304,
+        headers={
+            "ETag": etag,
+            "Cache-Control": response.headers.get("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0"),
+            "X-App-Cache": response.headers.get("X-App-Cache", "BYPASS"),
+            "X-Cache": response.headers.get("X-Cache", "BYPASS"),
+            "X-Compute-Ms": response.headers.get("X-Compute-Ms", "0.00"),
+        },
+    )
 
 
 def _local_today_iso() -> str:
@@ -916,6 +949,11 @@ def _start_read_payload_prewarm() -> None:
 @app.middleware("http")
 async def cache_api_get_responses(request: Request, call_next):
     cache_name = _app_response_cache_name(request) if _should_cache_app_response(request) else None
+    if cache_name is not None:
+        cached = _read_app_response_cache(cache_name)
+        if cached is not None:
+            response = _cached_app_response(cached, "HIT")
+            return _with_conditional_etag(request, response, response.body)
     try:
         response = await call_next(request)
     except sqlite3.OperationalError as exc:
@@ -950,7 +988,7 @@ async def cache_api_get_responses(request: Request, call_next):
         return rebuilt
     write_json_cache(cache_name, _app_response_cache_envelope(response.status_code, payload))
     rebuilt.headers["X-App-Cache"] = "STORE"
-    return rebuilt
+    return _with_conditional_etag(request, rebuilt, body)
 
 
 @app.get("/api/health")
@@ -1325,6 +1363,70 @@ def cache_status() -> dict[str, Any]:
     }
 
 
+def _cache_events_since(after_id: int) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, created_at, views_json
+            FROM cache_events
+            WHERE id > ?
+            ORDER BY id ASC
+            LIMIT 100
+            """,
+            (max(0, int(after_id)),),
+        ).fetchall()
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            views = json.loads(str(row["views_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            views = []
+        if not isinstance(views, list):
+            views = []
+        events.append({
+            "id": int(row["id"]),
+            "created_at": str(row["created_at"]),
+            "views": [str(view) for view in views],
+        })
+    return events
+
+
+def _latest_cache_event_id() -> int:
+    with connect() as conn:
+        row = conn.execute("SELECT COALESCE(MAX(id), 0) AS id FROM cache_events").fetchone()
+    return int(row["id"] or 0) if row else 0
+
+
+@app.get("/api/cache/events")
+async def cache_events(
+    request: Request,
+    after_id: int | None = Query(None, ge=0),
+    last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+) -> StreamingResponse:
+    if after_id is not None:
+        initial_event_id = after_id
+    else:
+        try:
+            initial_event_id = max(0, int(last_event_id or ""))
+        except ValueError:
+            initial_event_id = _latest_cache_event_id()
+
+    async def stream():
+        last_id = initial_event_id
+        while not await request.is_disconnected():
+            for event in _cache_events_since(last_id):
+                last_id = int(event["id"])
+                yield f"id: {last_id}\nevent: cache-update\ndata: {_json_text(event)}\n\n"
+            yield ": keepalive\n\n"
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.post("/api/cache/stale-payloads/delete", dependencies=[Depends(_protect_mutation)])
 def delete_stale_payloads(payload: DeleteStalePayloadRequest) -> dict[str, Any]:
     if payload.acknowledgement.strip() != DELETE_STALE_PAYLOAD_ACK:
@@ -1501,6 +1603,8 @@ def _read_cached_payload(cache_name: str, *, allow_stale: bool = False) -> Any |
     ttl_seconds = cached.get("ttl_seconds")
     if not isinstance(cached_at_raw, str) or not isinstance(cache_date, str) or not isinstance(ttl_seconds, int):
         return None
+    if not allow_stale and isinstance(cached.get("invalidated_at"), str):
+        return None
     if not allow_stale and cache_date != _local_today_iso():
         return None
     try:
@@ -1543,6 +1647,7 @@ def _cache_status_payload(cache_name: str) -> dict[str, Any]:
         and cache_date == _local_today_iso()
         and isinstance(ttl_seconds, int)
         and age_seconds <= ttl_seconds
+        and not isinstance(cached.get("invalidated_at"), str)
     )
     status["cached_at"] = cached_at.isoformat()
     status["age_seconds"] = round(age_seconds, 2)
@@ -1559,24 +1664,66 @@ def _read_through_cache(cache_name: str, ttl_seconds: int, compute: Callable[[],
     return payload
 
 
+def _read_cache_rebuild_lock(cache_name: str) -> threading.Lock:
+    with _READ_CACHE_REBUILD_LOCKS_LOCK:
+        lock = _READ_CACHE_REBUILD_LOCKS.get(cache_name)
+        if lock is None:
+            lock = threading.Lock()
+            _READ_CACHE_REBUILD_LOCKS[cache_name] = lock
+        return lock
+
+
+def _start_read_cache_rebuild(cache_name: str, ttl_seconds: int, compute: Callable[[], Any]) -> bool:
+    """Start one refresh worker for a stale cache entry, if one is not already running."""
+    lock = _read_cache_rebuild_lock(cache_name)
+    if not lock.acquire(blocking=False):
+        return False
+
+    def _worker() -> None:
+        started = datetime.now(timezone.utc)
+        try:
+            payload = compute()
+            write_json_cache(cache_name, _cache_envelope(payload, ttl_seconds))
+            elapsed_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+            print(f"[cache] {cache_name} background rebuild completed in {elapsed_ms:.2f}ms")
+        except Exception as exc:
+            print(f"[cache] {cache_name} background rebuild failed: {exc}")
+        finally:
+            lock.release()
+
+    threading.Thread(target=_worker, name=f"read-cache-{cache_name}", daemon=True).start()
+    return True
+
+
 def _read_through_cache_with_meta(cache_name: str, ttl_seconds: int, compute: Callable[[], Any]) -> tuple[Any, str, float]:
     cached_payload = _read_cached_payload(cache_name)
     if cached_payload is not None:
         return cached_payload, "HIT", 0.0
-    started = datetime.now(timezone.utc)
-    try:
-        payload = compute()
-    except sqlite3.OperationalError as exc:
-        if _is_sqlite_locked_error(exc):
-            stale_payload = _read_cached_payload(cache_name, allow_stale=True)
-            if stale_payload is not None:
-                compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
-                print(f"[cache] {cache_name} serving stale payload after sqlite lock: {exc}")
-                return stale_payload, "STALE", round(compute_ms, 2)
-        raise
-    compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
-    write_json_cache(cache_name, _cache_envelope(payload, ttl_seconds))
-    return payload, "MISS", round(compute_ms, 2)
+
+    stale_payload = _read_cached_payload(cache_name, allow_stale=True)
+    if stale_payload is not None:
+        rebuilding = _start_read_cache_rebuild(cache_name, ttl_seconds, compute)
+        return stale_payload, "STALE" if rebuilding else "REBUILDING", 0.0
+
+    rebuild_lock = _read_cache_rebuild_lock(cache_name)
+    with rebuild_lock:
+        cached_payload = _read_cached_payload(cache_name)
+        if cached_payload is not None:
+            return cached_payload, "HIT", 0.0
+        started = datetime.now(timezone.utc)
+        try:
+            payload = compute()
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_locked_error(exc):
+                stale_payload = _read_cached_payload(cache_name, allow_stale=True)
+                if stale_payload is not None:
+                    compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+                    print(f"[cache] {cache_name} serving stale payload after sqlite lock: {exc}")
+                    return stale_payload, "STALE", round(compute_ms, 2)
+            raise
+        compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+        write_json_cache(cache_name, _cache_envelope(payload, ttl_seconds))
+        return payload, "MISS", round(compute_ms, 2)
 
 
 def _prediction_side_conflicts_with_projection(item: Mapping[str, Any]) -> bool:
@@ -1604,16 +1751,17 @@ def _repair_prediction_item_if_needed(conn, item: dict[str, Any]) -> dict[str, A
 
 
 def _invalidate_read_caches() -> None:
-    for name in (
-        VALUE_BOARD_CACHE_NAME,
-        WATCHLIST_CACHE_NAME,
-        LINE_DISCREPANCIES_CACHE_NAME,
-        MATCHUPS_CACHE_NAME,
-        MODEL_PERFORMANCE_CACHE_NAME,
-        MODEL_RUNS_CACHE_NAME,
-        ROSTER_CACHE_NAME,
-    ):
-        delete_json_cache(name)
+    invalidated_at = datetime.now(timezone.utc).isoformat()
+    cache_names = set(READ_CACHE_FILES)
+    cache_dir = get_cache_dir()
+    if cache_dir.exists():
+        cache_names.update(path.name for path in cache_dir.glob(f"{MATCHUP_SNAPSHOT_CACHE_PREFIX}*.json"))
+    for name in cache_names:
+        cached = read_json_cache(name)
+        if not isinstance(cached, dict) or cached.get("cache_key_version") != READ_CACHE_VERSION:
+            continue
+        cached["invalidated_at"] = invalidated_at
+        write_json_cache(name, cached)
     _delete_app_response_caches()
 
 
@@ -1913,6 +2061,7 @@ def _build_matchup_payload_item(
     covers_records: dict[int, dict],
     covers_market_odds: dict[int, dict],
     prediction_state_by_game: dict[int, dict[str, Any]],
+    game_prediction_cache: _GamePredictionCache,
 ) -> dict[str, Any]:
     home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
     away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
@@ -1953,7 +2102,7 @@ def _build_matchup_payload_item(
         )
     game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
     game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
-    prediction = project_game(conn, game_context)
+    prediction = project_game(conn, game_context, runtime_cache=game_prediction_cache)
     game_prediction_id = _latest_game_prediction_id(conn, game_id)
     market_payload = _matchup_game_markets(game_context)
     prediction_state = next(
@@ -2019,6 +2168,10 @@ def _matchups_payload(conn, game_ids: list[int] | None = None) -> list[dict]:
     covers_records = _covers_records_by_game(conn)
     covers_market_odds = _covers_market_odds_by_game()
     prediction_state_by_game = _prediction_state_by_game(conn)
+    game_prediction_cache = _GamePredictionCache(
+        conn,
+        tuple(team_id for game, _ in game_groups for team_id in (int(game["home_team_id"]), int(game["away_team_id"]))),
+    )
     payload = []
     for game, game_ids in game_groups:
         payload.append(
@@ -2030,6 +2183,7 @@ def _matchups_payload(conn, game_ids: list[int] | None = None) -> list[dict]:
                 covers_records=covers_records,
                 covers_market_odds=covers_market_odds,
                 prediction_state_by_game=prediction_state_by_game,
+                game_prediction_cache=game_prediction_cache,
             )
         )
     return payload
@@ -2149,7 +2303,12 @@ def _publish_matchup_snapshot_payloads(conn, game_ids: list[int] | None = None) 
     covers_records = _covers_records_by_game(conn)
     covers_market_odds = _covers_market_odds_by_game()
     prediction_state_by_game = _prediction_state_by_game(conn)
-    for game, grouped_game_ids in _scheduled_matchup_game_groups(conn, game_ids=game_ids):
+    game_groups = _scheduled_matchup_game_groups(conn, game_ids=game_ids)
+    game_prediction_cache = _GamePredictionCache(
+        conn,
+        tuple(team_id for game, _ in game_groups for team_id in (int(game["home_team_id"]), int(game["away_team_id"]))),
+    )
+    for game, grouped_game_ids in game_groups:
         matchup = _build_matchup_payload_item(
             conn,
             game,
@@ -2158,6 +2317,7 @@ def _publish_matchup_snapshot_payloads(conn, game_ids: list[int] | None = None) 
             covers_records=covers_records,
             covers_market_odds=covers_market_odds,
             prediction_state_by_game=prediction_state_by_game,
+            game_prediction_cache=game_prediction_cache,
         )
         snapshot_key = _matchup_snapshot_key(game)
         snapshot_payload = _matchup_snapshot_payload(
@@ -2266,7 +2426,37 @@ def _publish_current_read_payloads(
         except Exception as exc:
             print(f"[startup] matchup snapshot publish skipped: {exc}")
 
+    _record_cache_event(conn, published)
     return published
+
+
+def _record_cache_event(conn, published: dict[str, int]) -> None:
+    views = sorted(name for name in published if name in READ_CACHE_FILES)
+    if not views:
+        return
+    try:
+        conn.execute(
+            """
+            INSERT INTO cache_events (created_at, views_json)
+            VALUES (?, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(), _json_text(views)),
+        )
+    except Exception as exc:
+        print(f"[cache] cache event publish skipped: {exc}")
+        return
+    try:
+        conn.execute(
+            """
+            DELETE FROM cache_events
+            WHERE id NOT IN (
+                SELECT id FROM cache_events ORDER BY id DESC LIMIT 100
+            )
+            """
+        )
+    except Exception:
+        # Retention cleanup must never make a successfully rebuilt cache unavailable.
+        pass
 
 
 def _publish_post_mutation_read_payloads(
@@ -2362,11 +2552,11 @@ def _set_observability_headers(response: Response, cache_name: str, cache_status
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
+    response.headers["X-Cache"] = cache_status
+    response.headers["X-Compute-Ms"] = f"{compute_ms:.2f}"
     if os.getenv("EXPOSE_DEBUG_HEADERS", "").strip().lower() not in {"1", "true", "yes"}:
         return
-    response.headers["X-Cache"] = cache_status
     response.headers["X-Cache-Key"] = f"{cache_name}:v{READ_CACHE_VERSION}"
-    response.headers["X-Compute-Ms"] = f"{compute_ms:.2f}"
     print(f"[cache] {cache_name} status={cache_status} compute_ms={compute_ms:.2f}")
 
 
@@ -4623,33 +4813,39 @@ def ball_dont_lie_history(
 
 @app.get("/api/matchups", dependencies=[Depends(_protect_force_refresh)])
 def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
-    if not force_refresh:
-        cached = _read_cached_payload(MATCHUPS_CACHE_NAME)
-        if cached is not None:
-            _set_observability_headers(response, MATCHUPS_CACHE_NAME, "HIT", 0.0)
-            return cached
-    started = datetime.now(timezone.utc)
-    try:
+    def compute() -> list[dict]:
         with connect() as conn:
             aggregates = _aggregate_matchup_snapshot_payloads(conn)
-            if aggregates is None or force_refresh:
+            if aggregates is None:
                 _publish_matchup_snapshot_aggregates(conn)
-                payload = _read_cached_payload(MATCHUPS_CACHE_NAME) or []
-            else:
-                payload = aggregates[1]
-                write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(payload, MATCHUPS_TTL_SECONDS))
+                return _read_cached_payload(MATCHUPS_CACHE_NAME) or []
+            return aggregates[1]
+
+    if force_refresh:
+        started = datetime.now(timezone.utc)
+        try:
+            payload = compute()
+            write_json_cache(MATCHUPS_CACHE_NAME, _cache_envelope(payload, MATCHUPS_TTL_SECONDS))
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_locked_error(exc):
+                cached = _read_cached_payload(MATCHUPS_CACHE_NAME, allow_stale=True)
+                if cached is not None:
+                    compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+                    print(f"[cache] {MATCHUPS_CACHE_NAME} serving stale payload after sqlite lock: {exc}")
+                    _set_observability_headers(response, MATCHUPS_CACHE_NAME, "STALE", round(compute_ms, 2))
+                    return cached
+            raise
         compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
-        _set_observability_headers(response, MATCHUPS_CACHE_NAME, "BYPASS" if force_refresh else "MISS", round(compute_ms, 2))
+        _set_observability_headers(response, MATCHUPS_CACHE_NAME, "BYPASS", round(compute_ms, 2))
         return payload
-    except sqlite3.OperationalError as exc:
-        if _is_sqlite_locked_error(exc):
-            cached = _read_cached_payload(MATCHUPS_CACHE_NAME, allow_stale=True)
-            if cached is not None:
-                compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
-                print(f"[cache] {MATCHUPS_CACHE_NAME} serving stale payload after sqlite lock: {exc}")
-                _set_observability_headers(response, MATCHUPS_CACHE_NAME, "STALE", round(compute_ms, 2))
-                return cached
-        raise
+
+    payload, status, compute_ms = _read_through_cache_with_meta(
+        MATCHUPS_CACHE_NAME,
+        MATCHUPS_TTL_SECONDS,
+        compute,
+    )
+    _set_observability_headers(response, MATCHUPS_CACHE_NAME, status, compute_ms)
+    return payload
 
 
 def _start_prop_sync_if_needed(source: str) -> bool:

@@ -31,6 +31,24 @@
 - [x] Remove the misleading unused `ODDSPAPI_KEY` deployment wiring so live Odds API imports only depend on `ODDS_API_KEY`.
 - [ ] Decide whether to expose current live provider-env status (`ODDS_API_KEY` present / missing) in an admin/debug surface.
 
+## Initial App-Load Performance
+
+- [x] Stop blocking the first render on every dashboard payload: load the value board and auth state first, then render the Props tab as soon as the board is available.
+- [x] Lazy-load tab-specific data (Gems, Watchlist, Matchups, Parlays, Discrepancies, Roster, and Models) only when the user opens that tab.
+- [x] Split the single global dashboard `loading` state into per-view loading states so one slow optional endpoint cannot hold the visible Props view hostage.
+- [x] Treat cached read payloads as stale-while-revalidate: return the latest valid payload immediately and rebuild it asynchronously after source data changes instead of forcing a synchronous recompute after the five-minute TTL.
+- [x] Replace the fixed 300-second read-cache refresh policy with mutation-driven invalidation/rebuilds for affected views; add a single-flight guard so concurrent visitors cannot stampede a cold cache.
+- [x] Prewarm Value Board, Matchups, and Roster after odds imports, injury refreshes, current-slate repairs, and model training complete; do not make the next visitor rebuild those payloads.
+- [x] Prefetch Matchups and Roster during browser idle time after the Value Board has rendered, without delaying the initial Props view.
+- [x] Make the app-response cache a real read-through cache on normal GET requests, rather than writing each response and reading it only as a SQLite-lock fallback.
+- [x] Add a lightweight cache-version/event channel (SQLite event/version table initially; Redis pub/sub if scaled out) so imports, repairs, and model runs trigger targeted cache rebuilds and browsers refresh only affected views.
+- [x] Use SSE or WebSocket notifications to tell open browsers that a specific view changed; remove broad dashboard-data polling and refresh only the affected visible view.
+- [x] Add conditional API responses (ETag/`If-None-Match` or version checks) for unchanged view payloads.
+- [x] Report an unambiguous cache outcome (`HIT`, `STALE`, `MISS`, `REBUILDING`) and compute duration in response headers; current `X-App-Cache: STORE` is written for every successful response and cannot distinguish cache hits.
+- [x] Profile the cold Matchups query and remove repeated per-game injury-impact queries by sharing one slate-level game-prediction cache; direct profiling found `11.2s` of a `13.8s` build in repeated game prediction/injury work.
+- [ ] Profile the cold Roster query; first measured response was `7.7s`, versus warm `12–21ms`.
+- [ ] Compress the 1.9 MB arena background image (WebP/AVIF and responsive variants); its network request is now deferred until after the Props view renders.
+
 ## Current Repair-Path Optimization Work
 
 - [x] Rebuild only changed `prop_lines` during current-slate repair instead of rebuilding every scheduled prop in the touched games.

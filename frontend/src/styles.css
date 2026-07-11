@@ -13,6 +13,12 @@ body {
   min-height: 100vh;
   background:
     linear-gradient(90deg, rgba(11, 18, 32, 0.88), rgba(11, 18, 32, 0.64) 46%, rgba(11, 18, 32, 0.78)),
+    linear-gradient(180deg, rgba(11, 18, 32, 0.42), rgba(11, 18, 32, 0.88));
+}
+
+body.arena-background {
+  background:
+    linear-gradient(90deg, rgba(11, 18, 32, 0.88), rgba(11, 18, 32, 0.64) 46%, rgba(11, 18, 32, 0.78)),
     linear-gradient(180deg, rgba(11, 18, 32, 0.42), rgba(11, 18, 32, 0.88)),
     url("./assets/basketball-arena-bg.png") center / cover fixed;
 }

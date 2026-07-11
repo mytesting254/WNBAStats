@@ -332,6 +332,39 @@ def test_read_through_cache_with_meta_serves_stale_payload_when_db_is_locked(mon
     assert compute_ms >= 0
 
 
+def test_read_through_cache_with_meta_returns_stale_payload_while_rebuild_is_scheduled(monkeypatch) -> None:
+    stale_payload = [{"player_name": "Cached Player"}]
+    stale_cached_at = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    monkeypatch.setattr(
+        main_module,
+        "read_json_cache",
+        lambda name: {
+            "cache_key_version": main_module.READ_CACHE_VERSION,
+            "cached_at": stale_cached_at,
+            "cache_date": datetime.now(main_module.LOCAL_TZ).date().isoformat(),
+            "ttl_seconds": 60,
+            "payload": stale_payload,
+        },
+    )
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        main_module,
+        "_start_read_cache_rebuild",
+        lambda name, ttl_seconds, compute: scheduled.append(name) or True,
+    )
+
+    payload, status, compute_ms = main_module._read_through_cache_with_meta(
+        "test-read-cache.json",
+        60,
+        lambda: (_ for _ in ()).throw(AssertionError("stale reads must not compute inline")),
+    )
+
+    assert payload == stale_payload
+    assert status == "STALE"
+    assert compute_ms == 0.0
+    assert scheduled == ["test-read-cache.json"]
+
+
 def test_publish_current_read_payloads_continues_after_single_failure(monkeypatch) -> None:
     published: list[str] = []
 
@@ -438,7 +471,7 @@ def test_watchlist_performance_uses_read_cache(monkeypatch) -> None:
 
 
 @pytest.mark.anyio
-async def test_app_response_cache_serves_stale_payload_when_db_is_locked(tmp_path, monkeypatch) -> None:
+async def test_app_response_cache_serves_fresh_payload_before_calling_backend(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(cache_module, "get_cache_dir", lambda: tmp_path)
 
     async def _receive():
@@ -472,7 +505,7 @@ async def test_app_response_cache_serves_stale_payload_when_db_is_locked(tmp_pat
 
     second = await main_module.cache_api_get_responses(request, locked_call)
     assert second.status_code == 200
-    assert second.headers.get("x-app-cache") == "STALE"
+    assert second.headers.get("x-app-cache") == "HIT"
     assert json.loads(second.body.decode("utf-8")) == [{"id": 1, "player_name": "Cached"}]
 
 
@@ -914,15 +947,27 @@ def test_recalculate_endpoint_skips_model_refresh_and_marks_legacy(monkeypatch) 
     assert response.headers["X-Legacy-Endpoint"] == "/api/recalculate"
 
 
-def test_read_cache_invalidation_clears_new_cache_keys(monkeypatch) -> None:
-    deleted: list[str] = []
-    monkeypatch.setattr(main_module, "delete_json_cache", lambda name: deleted.append(name) or True)
+def test_read_cache_invalidation_marks_new_cache_keys_stale(monkeypatch, tmp_path) -> None:
+    cache_store = {
+        name: main_module._cache_envelope([], 300)
+        for name in main_module.READ_CACHE_FILES
+    }
+    written: dict[str, object] = {}
+    monkeypatch.setattr(main_module, "get_cache_dir", lambda: tmp_path)
+    monkeypatch.setattr(main_module, "read_json_cache", lambda name: cache_store.get(name))
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: written.__setitem__(name, payload))
+    monkeypatch.setattr(main_module, "_delete_app_response_caches", lambda: None)
 
     main_module._invalidate_read_caches()
 
-    assert main_module.MODEL_PERFORMANCE_CACHE_NAME in deleted
-    assert main_module.MODEL_RUNS_CACHE_NAME in deleted
-    assert main_module.ROSTER_CACHE_NAME in deleted
+    for name in (
+        main_module.MODEL_PERFORMANCE_CACHE_NAME,
+        main_module.MODEL_RUNS_CACHE_NAME,
+        main_module.ROSTER_CACHE_NAME,
+    ):
+        assert name in written
+        assert isinstance(written[name], dict)
+        assert isinstance(written[name].get("invalidated_at"), str)
 
 
 def test_read_cache_invalidation_clears_app_response_cache_files(tmp_path, monkeypatch) -> None:
@@ -939,7 +984,7 @@ def test_read_cache_invalidation_clears_app_response_cache_files(tmp_path, monke
 
     assert not stale_app_cache.exists()
     assert retained_cache.exists()
-    assert main_module.VALUE_BOARD_CACHE_NAME in deleted
+    assert main_module.VALUE_BOARD_CACHE_NAME not in deleted
 
 
 def test_targeted_matchup_snapshot_publish_preserves_untouched_matchups(tmp_path, monkeypatch) -> None:
@@ -3086,7 +3131,7 @@ def test_matchups_payload_survives_rotowire_failure(monkeypatch) -> None:
     monkeypatch.setattr(
         main_module,
         "project_game",
-        lambda conn, game: {
+        lambda conn, game, **kwargs: {
             "home_projected_points": 80.0,
             "away_projected_points": 75.0,
             "projected_margin": 5.0,
@@ -3125,7 +3170,7 @@ def test_matchups_payload_does_not_write_game_predictions(monkeypatch) -> None:
     monkeypatch.setattr(
         main_module,
         "project_game",
-        lambda conn, game: {
+        lambda conn, game, **kwargs: {
             "home_projected_points": 80.0,
             "away_projected_points": 75.0,
             "projected_margin": 5.0,
@@ -3183,7 +3228,7 @@ def test_matchups_payload_prefers_game_markets_over_covers_override(monkeypatch)
     monkeypatch.setattr(
         main_module,
         "project_game",
-        lambda conn, game: {
+        lambda conn, game, **kwargs: {
             "home_projected_points": 80.0,
             "away_projected_points": 75.0,
             "projected_margin": 5.0,
@@ -3257,7 +3302,7 @@ def test_matchups_payload_uses_local_calendar_for_rest_days(monkeypatch) -> None
         monkeypatch.setattr(
             main_module,
             "project_game",
-            lambda conn, game: {
+            lambda conn, game, **kwargs: {
                 "home_projected_points": 81.0,
                 "away_projected_points": 74.0,
                 "projected_margin": 7.0,

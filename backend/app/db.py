@@ -704,6 +704,21 @@ def init_db() -> None:
             ON prop_sync_jobs(started_at DESC, id DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cache_events (
+                id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                views_json TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_cache_events_created_at
+            ON cache_events(created_at DESC, id DESC)
+            """
+        )
 
 
 SCHEMA = """

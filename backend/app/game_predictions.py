@@ -186,10 +186,15 @@ class _GamePredictionCache:
 _DIRECT_MODEL_CACHE: dict[tuple[str, str, int, int], _DirectGameModel] = {}
 
 
-def project_game(conn: sqlite3.Connection, game: Mapping[str, Any]) -> dict:
+def project_game(
+    conn: sqlite3.Connection,
+    game: Mapping[str, Any],
+    *,
+    runtime_cache: _GamePredictionCache | None = None,
+) -> dict:
     home_team_id = int(game["home_team_id"])
     away_team_id = int(game["away_team_id"])
-    cache = _GamePredictionCache(conn, (home_team_id, away_team_id))
+    cache = runtime_cache or _GamePredictionCache(conn, (home_team_id, away_team_id))
     home_history_count = cache.team_count(home_team_id)
     away_history_count = cache.team_count(away_team_id)
 
