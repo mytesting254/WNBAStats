@@ -59,6 +59,9 @@ export type SpecialStocksSnapshot = {
   start_time?: string | null;
   home_team?: string | null;
   away_team?: string | null;
+  position?: string | null;
+  team?: string | null;
+  team_logo_url?: string | null;
   recent_values?: number[];
   recent_minutes?: number[];
   actual_steals?: number | null;

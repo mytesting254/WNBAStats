@@ -3992,8 +3992,22 @@ function SpecialStocksView({
                       <tr key={snapshot.id}>
                         <td>
                           <div className="roster-player-cell special-player-cell">
-                            <strong>{snapshot.player_name}</strong>
-                            <span>{snapshot.data_quality === "model_only" ? "Model only" : snapshot.data_quality}</span>
+                            <div className="player-cell">
+                              <TeamLogo
+                                src={
+                                  snapshot.team_logo_url
+                                  ?? (() => {
+                                    const normalized = snapshot.team ? normalizeTeamCode(snapshot.team) : null;
+                                    return normalized ? (WNBA_TEAM_LOGOS[normalized] ?? null) : null;
+                                  })()
+                                }
+                                alt={`${snapshot.team ?? "Team"} logo`}
+                              />
+                              <div>
+                                <PlayerLabel name={snapshot.player_name} position={snapshot.position} />
+                                <span>{`${snapshot.team ?? "—"} | ${snapshot.data_quality === "model_only" ? "Model only" : snapshot.data_quality}`}</span>
+                              </div>
+                            </div>
                             {renderRecentOutcomesWithMinutes(snapshot, `special-${snapshot.id}`)}
                           </div>
                         </td>

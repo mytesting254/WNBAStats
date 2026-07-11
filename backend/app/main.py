@@ -1018,18 +1018,38 @@ def special_stocks() -> list[dict[str, Any]]:
                 SELECT
                     g.start_time,
                     home.abbreviation AS home_team,
-                    away.abbreviation AS away_team
+                    away.abbreviation AS away_team,
+                    p.position,
+                    rt.abbreviation AS team,
+                    rt.logo_url AS team_logo_url
                 FROM games g
+                JOIN players p ON p.id = ?
                 JOIN teams home ON home.id = g.home_team_id
                 JOIN teams away ON away.id = g.away_team_id
+                JOIN teams rt ON rt.id = (
+                    SELECT COALESCE(
+                        (
+                            SELECT h.team_id
+                            FROM player_team_history h
+                            WHERE h.player_id = p.id
+                              AND h.game_id = g.id
+                            ORDER BY h.id DESC
+                            LIMIT 1
+                        ),
+                        p.team_id
+                    )
+                )
                 WHERE g.id = ?
                 """,
-                (int(game_id),),
+                (int(player_id), int(game_id)),
             ).fetchone()
             if game_row is not None:
                 item["start_time"] = game_row["start_time"]
                 item["home_team"] = game_row["home_team"]
                 item["away_team"] = game_row["away_team"]
+                item["position"] = game_row["position"]
+                item["team"] = game_row["team"]
+                item["team_logo_url"] = game_row["team_logo_url"]
             item["recent_values"] = _recent_market_values(
                 conn,
                 player_id=int(player_id),
