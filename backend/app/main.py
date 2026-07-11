@@ -1002,7 +1002,31 @@ def special_stocks() -> list[dict[str, Any]]:
     path = get_tracking_db_path()
     if not path.exists():
         return []
-    return list_special_stocks()
+    rows = list_special_stocks()
+    if not rows:
+        return []
+    with connect() as conn:
+        for item in rows:
+            game_id = item.get("game_id")
+            player_id = item.get("player_id")
+            if game_id is None or player_id is None:
+                item["recent_values"] = []
+                item["recent_minutes"] = []
+                continue
+            item["recent_values"] = _recent_market_values(
+                conn,
+                player_id=int(player_id),
+                market="blocks_steals",
+                game_id=int(game_id),
+                limit=5,
+            )
+            item["recent_minutes"] = _recent_minutes_played(
+                conn,
+                player_id=int(player_id),
+                game_id=int(game_id),
+                limit=5,
+            )
+    return rows
 
 
 @app.get("/api/ops/health")

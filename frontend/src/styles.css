@@ -575,6 +575,12 @@ td span {
   border-color: #b7ebcf;
 }
 
+.prop-l5-strip span.neutral {
+  color: #0c4a6e;
+  background: #e0f2fe;
+  border-color: #bae6fd;
+}
+
 .prop-l5-strip span.miss {
   color: #b42318;
   background: #fff1f0;
@@ -1072,6 +1078,24 @@ tbody tr.selected {
 .roster-player-cell {
   display: grid;
   gap: 4px;
+}
+
+.special-props-table td {
+  vertical-align: middle;
+}
+
+.special-props-table td:nth-child(n + 2):nth-child(-n + 9) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.special-props-table th:nth-child(n + 2):nth-child(-n + 9) {
+  text-align: right;
+}
+
+.special-player-cell strong {
+  font-size: 14px;
+  color: #101828;
 }
 
 .roster-player-cell .player-label {

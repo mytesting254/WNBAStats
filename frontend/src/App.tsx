@@ -2608,6 +2608,42 @@ function renderRecentFormWithMinutes(
   );
 }
 
+function renderRecentOutcomesWithMinutes(
+  snapshot: Pick<SpecialStocksSnapshot, "recent_values" | "recent_minutes">,
+  keyPrefix: string
+) {
+  if (!Array.isArray(snapshot.recent_values) || snapshot.recent_values.length === 0) {
+    return <span className="empty-inline">No history</span>;
+  }
+  return (
+    <div className="prop-l5-strip" aria-label="Last 5 outcomes and minutes">
+      {snapshot.recent_values.slice(0, 5).map((value, idx) => (
+        <span
+          key={`${keyPrefix}-${idx}`}
+          className="neutral"
+          title={`Stocks result: ${value.toFixed(1)}`}
+        >
+          {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+        </span>
+      ))}
+      {Array.isArray(snapshot.recent_minutes) && snapshot.recent_minutes.length > 0 && (
+        <>
+          <span className="l5-separator" title="Minutes distribution">|</span>
+          {snapshot.recent_minutes.slice(0, 5).map((minutes, idx) => (
+            <span
+              key={`${keyPrefix}-min-${idx}`}
+              className="min-chip"
+              title={`Minutes played: ${minutes.toFixed(1)}`}
+            >
+              {minutes.toFixed(1)}
+            </span>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 type GemPreset = "conservative" | "balanced" | "aggressive";
 type GemProp = ValueProp & {
   gem_score: number;
@@ -3924,36 +3960,57 @@ function SpecialStocksView({
                   <p>No sportsbook line is attached. These rows are for internal tracking and UI review.</p>
                 </div>
               </div>
-              <div className="candidate-grid">
-                {selectedCard.players.map((snapshot) => (
-                  <article key={snapshot.id} className="candidate-card">
-                    <div className="candidate-card-header">
-                      <div>
-                        <h4>{snapshot.player_name}</h4>
-                        <p>{`Captured ${formatDateTime(snapshot.captured_at)}`}</p>
-                      </div>
-                      <span className="confidence-badge high">Model only</span>
-                    </div>
-                    <div className="candidate-stats">
-                      <MiniStat label="STL" value={formatNumber(snapshot.projected_steals)} />
-                      <MiniStat label="BLK" value={formatNumber(snapshot.projected_blocks)} />
-                      <MiniStat label="STL+BLK" value={formatNumber(snapshot.projected_stocks)} />
-                      <MiniStat label="1+ STL" value={formatPercent(snapshot.steal_prob_1_plus)} />
-                      <MiniStat label="2+ STL" value={formatPercent(snapshot.steal_prob_2_plus)} />
-                      <MiniStat label="1+ BLK" value={formatPercent(snapshot.block_prob_1_plus)} />
-                      <MiniStat label="2+ BLK" value={formatPercent(snapshot.block_prob_2_plus)} />
-                      <MiniStat label="2+ STOCKS" value={formatPercent(snapshot.stocks_prob_2_plus)} />
-                      <MiniStat
-                        label="Settled"
-                        value={
-                          snapshot.actual_stocks == null
+              <div className="props-table-wrapper roster-table-wrapper">
+                <table className="props-table roster-table special-props-table">
+                  <thead>
+                    <tr>
+                      <th>Player</th>
+                      <th>STL</th>
+                      <th>BLK</th>
+                      <th>STL+BLK</th>
+                      <th>1+ STL</th>
+                      <th>2+ STL</th>
+                      <th>1+ BLK</th>
+                      <th>2+ BLK</th>
+                      <th>2+ Stocks</th>
+                      <th>Last 5</th>
+                      <th>Settled</th>
+                      <th>Captured</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedCard.players.map((snapshot) => (
+                      <tr key={snapshot.id}>
+                        <td>
+                          <div className="roster-player-cell special-player-cell">
+                            <strong>{snapshot.player_name}</strong>
+                            <span>{snapshot.data_quality === "model_only" ? "Model only" : snapshot.data_quality}</span>
+                          </div>
+                        </td>
+                        <td>{formatNumber(snapshot.projected_steals)}</td>
+                        <td>{formatNumber(snapshot.projected_blocks)}</td>
+                        <td>{formatNumber(snapshot.projected_stocks)}</td>
+                        <td>{formatPercent(snapshot.steal_prob_1_plus)}</td>
+                        <td>{formatPercent(snapshot.steal_prob_2_plus)}</td>
+                        <td>{formatPercent(snapshot.block_prob_1_plus)}</td>
+                        <td>{formatPercent(snapshot.block_prob_2_plus)}</td>
+                        <td>{formatPercent(snapshot.stocks_prob_2_plus)}</td>
+                        <td>{renderRecentOutcomesWithMinutes(snapshot, `special-${snapshot.id}`)}</td>
+                        <td>
+                          {snapshot.actual_stocks == null
                             ? "Pending"
-                            : `${formatNumber(snapshot.actual_steals ?? null)} STL | ${formatNumber(snapshot.actual_blocks ?? null)} BLK`
-                        }
-                      />
-                    </div>
-                  </article>
-                ))}
+                            : `${formatNumber(snapshot.actual_steals ?? null)} STL | ${formatNumber(snapshot.actual_blocks ?? null)} BLK`}
+                        </td>
+                        <td>{formatDateTime(snapshot.captured_at)}</td>
+                      </tr>
+                    ))}
+                    {!selectedCard.players.length && (
+                      <tr>
+                        <td colSpan={12}>No special props generated for this game yet.</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
               </div>
             </div>
           ) : (

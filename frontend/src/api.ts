@@ -56,6 +56,8 @@ export type SpecialStocksSnapshot = {
   block_prob_2_plus: number;
   stocks_prob_2_plus: number;
   data_quality: string;
+  recent_values?: number[];
+  recent_minutes?: number[];
   actual_steals?: number | null;
   actual_blocks?: number | null;
   actual_stocks?: number | null;
