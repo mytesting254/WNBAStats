@@ -434,12 +434,57 @@ def test_publish_current_read_payloads_can_skip_matchups(monkeypatch) -> None:
     assert main_module.WATCHLIST_CACHE_NAME in published
 
 
+def test_publish_current_read_payloads_uses_cached_rotowire_state(monkeypatch) -> None:
+    published: list[str] = []
+    roster_refresh_flags: list[bool] = []
+
+    monkeypatch.setattr(main_module, "_watchlist_payload", lambda conn: [3])
+    monkeypatch.setattr(main_module, "line_discrepancies", lambda conn, game_id=None: [4])
+    monkeypatch.setattr(
+        main_module,
+        "_roster_payload",
+        lambda conn, refresh_lineups=True: roster_refresh_flags.append(bool(refresh_lineups)) or [5],
+    )
+    monkeypatch.setattr(main_module, "_model_runs_payload", lambda conn: {"latest": {}, "runs": [1]})
+    monkeypatch.setattr(main_module, "_model_performance_payload", lambda conn: {"model": 1})
+    monkeypatch.setattr(main_module, "_gem_performance_payload", lambda conn: {"gem": 1})
+    monkeypatch.setattr(main_module, "_watchlist_performance_payload", lambda conn: {"watchlist": 1})
+    monkeypatch.setattr(
+        main_module,
+        "_cached_rotowire_refresh_metadata",
+        lambda: {"source": "cache", "captured_at": "2026-07-11T10:00:00+00:00", "from_cache": True},
+    )
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: published.append(name))
+
+    captured_matchup_args: dict[str, object] = {}
+
+    def fake_publish_matchups(conn, game_ids=None, full_refresh=True, injury_refresh=None):
+        del conn
+        captured_matchup_args["game_ids"] = game_ids
+        captured_matchup_args["full_refresh"] = full_refresh
+        captured_matchup_args["injury_refresh"] = injury_refresh
+        return {main_module.MATCHUPS_CACHE_NAME: 1, main_module.VALUE_BOARD_CACHE_NAME: 2}
+
+    monkeypatch.setattr(main_module, "_publish_matchup_snapshot_aggregates", fake_publish_matchups)
+
+    result = main_module._publish_current_read_payloads(SimpleNamespace())
+
+    assert roster_refresh_flags == [False]
+    assert captured_matchup_args["injury_refresh"] == {
+        "source": "cache",
+        "captured_at": "2026-07-11T10:00:00+00:00",
+        "from_cache": True,
+    }
+    assert result[main_module.MATCHUPS_CACHE_NAME] == 1
+    assert main_module.ROSTER_CACHE_NAME in published
+
+
 def test_publish_post_mutation_read_payloads_includes_matchups(monkeypatch) -> None:
     published: list[str] = []
 
     monkeypatch.setattr(main_module, "_watchlist_payload", lambda conn: [3])
     monkeypatch.setattr(main_module, "line_discrepancies", lambda conn, game_id=None: [4])
-    monkeypatch.setattr(main_module, "_roster_payload", lambda conn: [5])
+    monkeypatch.setattr(main_module, "_roster_payload", lambda conn, refresh_lineups=True: [5])
     monkeypatch.setattr(main_module, "_model_runs_payload", lambda conn: {"latest": {}, "runs": [1]})
     monkeypatch.setattr(main_module, "_model_performance_payload", lambda conn: {"model": 1})
     monkeypatch.setattr(main_module, "_gem_performance_payload", lambda conn: {"gem": 1})
@@ -448,11 +493,59 @@ def test_publish_post_mutation_read_payloads_includes_matchups(monkeypatch) -> N
     monkeypatch.setattr(
         main_module,
         "_publish_matchup_snapshot_aggregates",
-        lambda conn, game_ids=None, full_refresh=True: {main_module.MATCHUPS_CACHE_NAME: 1, main_module.VALUE_BOARD_CACHE_NAME: 2},
+        lambda conn, game_ids=None, full_refresh=True, injury_refresh=None: {main_module.MATCHUPS_CACHE_NAME: 1, main_module.VALUE_BOARD_CACHE_NAME: 2},
     )
 
     result = main_module._publish_post_mutation_read_payloads(SimpleNamespace())
 
+    assert result[main_module.MATCHUPS_CACHE_NAME] == 1
+
+
+def test_publish_matchup_snapshot_aggregates_uses_supplied_injury_refresh(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("WNBA_CACHE_DIR", str(tmp_path))
+
+    game = {
+        "id": 9910,
+        "start_time": "2026-07-04T17:00:00+00:00",
+        "home_team_id": 10,
+        "away_team_id": 3,
+    }
+
+    def fake_groups(conn, game_ids=None):
+        del conn, game_ids
+        return [(game, [9910])]
+
+    captured_injury_refresh: list[dict[str, object]] = []
+
+    def fake_matchup(conn, game, game_ids, **kwargs):
+        del conn, game, game_ids
+        captured_injury_refresh.append(dict(kwargs["injury_refresh"]))
+        return {
+            "id": 9910,
+            "start_time": "2026-07-04T17:00:00+00:00",
+            "home_team_id": 10,
+            "away_team_id": 3,
+            "game_ids": [9910],
+            "props": [],
+        }
+
+    monkeypatch.setattr(main_module, "_scheduled_matchup_game_groups", fake_groups)
+    monkeypatch.setattr(main_module, "_build_matchup_payload_item", fake_matchup)
+    monkeypatch.setattr(main_module, "_value_board_payload_for_games", lambda conn, game_ids, include_filtered_only=True: [])
+    monkeypatch.setattr(main_module, "_prediction_state_by_game", lambda conn: {})
+    monkeypatch.setattr(main_module, "_covers_records_by_game", lambda conn: {})
+    monkeypatch.setattr(main_module, "_covers_market_odds_by_game", lambda: {})
+    monkeypatch.setattr(main_module, "_GamePredictionCache", lambda *args: object())
+    monkeypatch.setattr(
+        main_module,
+        "import_rotowire_lineups",
+        lambda conn, force_refresh=False: (_ for _ in ()).throw(AssertionError("publish should use supplied injury refresh")),
+    )
+
+    supplied = {"source": "cache", "captured_at": "2026-07-11T10:00:00+00:00", "from_cache": True}
+    result = main_module._publish_matchup_snapshot_aggregates(object(), injury_refresh=supplied)
+
+    assert captured_injury_refresh == [supplied]
     assert result[main_module.MATCHUPS_CACHE_NAME] == 1
 
 

@@ -1978,12 +1978,33 @@ def _invalidate_read_caches() -> None:
     _delete_app_response_caches()
 
 
-def _roster_payload(conn) -> list[dict]:
-    try:
-        import_rotowire_lineups(conn, force_refresh=False)
-    except Exception:
-        # Keep roster payload non-fatal so cache publication can proceed even if live fetch fails.
-        pass
+def _cached_rotowire_refresh_metadata() -> dict[str, Any]:
+    payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
+    if not isinstance(payload, dict):
+        return {
+            "source": "unavailable",
+            "captured_at": None,
+            "from_cache": False,
+            "status": "missing",
+            "message": "Rotowire raw cache unavailable.",
+        }
+    source = str(payload.get("source") or "cache")
+    return {
+        "source": source,
+        "captured_at": payload.get("captured_at"),
+        "from_cache": source != "rotowire",
+        "status": "cached",
+        "message": None,
+    }
+
+
+def _roster_payload(conn, *, refresh_lineups: bool = True) -> list[dict]:
+    if refresh_lineups:
+        try:
+            import_rotowire_lineups(conn, force_refresh=False)
+        except Exception:
+            # Keep roster payload non-fatal so cache publication can proceed even if live fetch fails.
+            pass
     if hasattr(conn, "execute"):
         repair_shadow_player_identities(conn)
     payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
@@ -2501,18 +2522,24 @@ def _latest_game_prediction_id(conn, game_id: int) -> int | None:
     return int(row["id"])
 
 
-def _publish_matchup_snapshot_payloads(conn, game_ids: list[int] | None = None) -> dict[str, int]:
+def _publish_matchup_snapshot_payloads(
+    conn,
+    game_ids: list[int] | None = None,
+    *,
+    injury_refresh: dict[str, Any] | None = None,
+) -> dict[str, int]:
     published: dict[str, int] = {}
-    try:
-        injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
-    except Exception as exc:
-        injury_refresh = {
-            "source": "unavailable",
-            "captured_at": None,
-            "from_cache": False,
-            "status": "failed",
-            "message": str(exc),
-        }
+    if injury_refresh is None:
+        try:
+            injury_refresh = import_rotowire_lineups(conn, force_refresh=False)
+        except Exception as exc:
+            injury_refresh = {
+                "source": "unavailable",
+                "captured_at": None,
+                "from_cache": False,
+                "status": "failed",
+                "message": str(exc),
+            }
     covers_records = _covers_records_by_game(conn)
     covers_market_odds = _covers_market_odds_by_game()
     prediction_state_by_game = _prediction_state_by_game(conn)
@@ -2573,15 +2600,16 @@ def _publish_matchup_snapshot_aggregates(
     *,
     game_ids: list[int] | None = None,
     full_refresh: bool = True,
+    injury_refresh: dict[str, Any] | None = None,
 ) -> dict[str, int]:
     published: dict[str, int] = {}
     if full_refresh:
-        published.update(_publish_matchup_snapshot_payloads(conn))
+        published.update(_publish_matchup_snapshot_payloads(conn, injury_refresh=injury_refresh))
     elif game_ids is not None:
-        published.update(_publish_matchup_snapshot_payloads(conn, game_ids=game_ids))
+        published.update(_publish_matchup_snapshot_payloads(conn, game_ids=game_ids, injury_refresh=injury_refresh))
     aggregates = _aggregate_matchup_snapshot_payloads(conn)
     if aggregates is None:
-        published.update(_publish_matchup_snapshot_payloads(conn))
+        published.update(_publish_matchup_snapshot_payloads(conn, injury_refresh=injury_refresh))
         aggregates = _aggregate_matchup_snapshot_payloads(conn)
     if aggregates is None:
         raise RuntimeError("Unable to assemble matchup snapshot aggregates.")
@@ -2601,6 +2629,7 @@ def _publish_current_read_payloads(
     full_matchup_refresh: bool = True,
 ) -> dict[str, int]:
     published: dict[str, int] = {}
+    cached_injury_refresh = _cached_rotowire_refresh_metadata()
 
     def publish(name: str, ttl_seconds: int, payload: Any, count: int) -> None:
         write_json_cache(name, _cache_envelope(payload, ttl_seconds))
@@ -2609,7 +2638,7 @@ def _publish_current_read_payloads(
     payload_builders = [
         (WATCHLIST_CACHE_NAME, WATCHLIST_TTL_SECONDS, lambda: _watchlist_payload(conn)),
         (LINE_DISCREPANCIES_CACHE_NAME, LINE_DISCREPANCIES_TTL_SECONDS, lambda: line_discrepancies(conn, None)),
-        (ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn)),
+        (ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn, refresh_lineups=False)),
         (MODEL_RUNS_CACHE_NAME, MODEL_RUNS_TTL_SECONDS, lambda: _model_runs_payload(conn)),
         (MODEL_PERFORMANCE_CACHE_NAME, MODEL_PERFORMANCE_TTL_SECONDS, lambda: _model_performance_payload(conn)),
         (GEM_PERFORMANCE_CACHE_NAME, GEM_PERFORMANCE_TTL_SECONDS, lambda: _gem_performance_payload(conn)),
@@ -2634,6 +2663,7 @@ def _publish_current_read_payloads(
                     conn,
                     game_ids=matchup_game_ids,
                     full_refresh=full_matchup_refresh,
+                    injury_refresh=cached_injury_refresh,
                 )
             )
         except Exception as exc:
