@@ -1231,10 +1231,6 @@ tbody tr.selected {
 .special-player-cell .prop-l5-strip {
   margin-top: 8px;
   flex-wrap: nowrap;
-  max-width: 100%;
-  overflow-x: auto;
-  white-space: nowrap;
-  scrollbar-width: thin;
 }
 
 .special-calibration-table-wrap {
