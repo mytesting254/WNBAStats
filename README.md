@@ -564,14 +564,14 @@ Rolling diagnostics from settled props:
 
 ```text
 GET /api/model-diagnostics
-GET /api/model-diagnostics?model_version=adaptive-context-v1&windows=7,14,30
+GET /api/model-diagnostics?model_version=adaptive-context-v3-team-transition&windows=7,14,30
 ```
 
 Loss concentration breakdowns from settled props:
 
 ```text
 GET /api/model-loss-breakdown
-GET /api/model-loss-breakdown?model_version=adaptive-context-v1&top_n_players=20
+GET /api/model-loss-breakdown?model_version=adaptive-context-v3-team-transition&top_n_players=20
 ```
 
 ## Turso Clean-Slate Tracking
@@ -923,7 +923,7 @@ The app should write raw API responses into `data/cache/` or `data/raw/`, then n
 
 ## Model Notes
 
-Player prop projections use the `adaptive-context-v1` model. It starts with a transparent component projection, then uses an in-process ridge regression model trained from actual player game logs in the active runtime database. In normal app runs that database is Turso; local SQLite training is only used by tests or explicit commands that set `WNBA_DB_PATH`.
+Player prop projections still default live to the transparent `component-pregame-v2` baseline. The main learned candidate is `adaptive-context-v3-team-transition`, which starts from the same component projection and then applies an in-process ridge regression model trained from actual player game logs in the active runtime database. In normal app runs that database is Turso; local SQLite training is only used by tests or explicit commands that set `WNBA_DB_PATH`.
 
 The live player-prop path now uses three historical layers when a sportsbook line is available:
 
@@ -962,6 +962,13 @@ Probability conversion and uncertainty controls:
 
 Projection and value are intentionally separate. The model first estimates the stat outcome, then converts sportsbook odds into implied probability, edge, and expected value. More advanced ML models should be compared against this component model before replacing it.
 
+Current live status checked on `2026-07-12`:
+
+- the active runtime volume retained `574` cached historical Odds API event payloads under `/var/lib/docker/volumes/pqsez6mkr14y0bnlhmcdmikg_wnba-data/_data/cache`
+- a safety copy of those payloads now also exists at `/root/WNBA_HISTORICAL_PLAYER_PROPS_CACHE`
+- the recovered historical payloads cover the regular `8` player markets: `points`, `rebounds`, `assists`, `threes`, `points_rebounds`, `points_assists`, `rebounds_assists`, and `points_rebounds_assists`
+- those payloads do not include sportsbook historical `steals`, `blocks`, or `blocks_steals`; the `Special` tab remains in-house projection only
+
 ## Model Training
 
 The admin-only Model Lab tab trains against the active Turso database and records two benchmarks:
@@ -970,8 +977,8 @@ The admin-only Model Lab tab trains against the active Turso database and record
 component-pregame-v2
   walk-forward component benchmark using only prior games
 
-adaptive-context-v1
-  chronological 80/20 holdout for the learned history/context model
+adaptive-context-v3-team-transition
+  month-segmented walk-forward benchmark for the learned history/context model
 ```
 
 Each training action saves both runs to Turso in `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. Learned-run payloads now also include game residual evaluation rows (`game_ats`, `game_total`, and `game_overall`) with both baseline and blended metrics so saved game predictions can be compared before and after the residual layer. The Model Lab now shows those game residual deltas directly alongside the existing player-market training tables. The comparison table shows the latest run for each model version side by side. Prediction-time learned models also train from the active connection when the app is using Turso, instead of reopening a local SQLite file.
@@ -992,7 +999,18 @@ Runtime behavior:
 
 - normal live prop rebuilds now prewarm learned player/minutes/residual models before writing predictions
 - if uploaded cache files do not match the active live DB fingerprint, the backend retrains from the active runtime instead of silently downgrading prop predictions to `component`
-- `adaptive-context-v1` should therefore remain the default live prop model after deploy/restart, with uploaded cache files acting as a warm start rather than a hard dependency
+- `adaptive-context-v3-team-transition` remains the current learned candidate version after deploy/restart, with uploaded cache files acting as a warm start rather than a hard dependency
+
+Latest live server-side run checked on `2026-07-12`:
+
+- `model_version`: `adaptive-context-v3-team-transition`
+- `training_rows`: `24,156`
+- learned overall player-prop `MAE`: `2.771`
+- component baseline `MAE`: `2.638`
+- outcome: keep the component baseline live for regular player props
+- by-market result: the learned layer lost to baseline on every regular player-prop market in the latest saved run
+- residual exception: `points_assists` remains the only regular market with a clear residual-layer MAE gain (`4.458` vs residual baseline `5.081`)
+- game-side residuals remain the strongest learned result so far, especially `game_total` (`MAE 7.740` vs baseline `14.695`)
 
 Useful options:
 
@@ -1027,7 +1045,7 @@ The player model now also supports a separate market-relative residual fit by ma
 Run the CLI from the repo root:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\analyze_accuracy.py report --model adaptive-context-v1
+.\.venv\Scripts\python.exe scripts\analyze_accuracy.py report --model adaptive-context-v3-team-transition
 .\.venv\Scripts\python.exe scripts\analyze_accuracy.py best --limit 20 --min-edge 0.04
 .\.venv\Scripts\python.exe scripts\analyze_accuracy.py worst --limit 20
 ```
