@@ -288,24 +288,40 @@ def _delete_explicit_dnp_snapshots(
         placeholders = ",".join("?" for _ in target_dates)
         filter_sql = f" AND ps.game_date IN ({placeholders})"
         params.extend(target_dates)
-    rows = conn.execute(
+    rows = tracking.execute(
         """
-        SELECT DISTINCT ps.id
+        SELECT
+            ps.id,
+            ps.game_id,
+            ps.player_id
         FROM projection_snapshots ps
-        JOIN games g ON g.id = ps.game_id
-        JOIN player_game_availability pga
-          ON pga.game_id = ps.game_id
-         AND pga.player_id = ps.player_id
         LEFT JOIN settlements st ON st.snapshot_id = ps.id
-        WHERE g.status = 'final'
-          AND st.snapshot_id IS NULL
-          AND pga.did_not_play = 1
-          AND pga.source IN ('espn_boxscore', 'espn_summary_injury', 'manual_review')
+        WHERE st.snapshot_id IS NULL
         """
         + filter_sql,
         tuple(params),
     ).fetchall()
-    snapshot_ids = [int(row["id"]) for row in rows]
+    snapshot_ids: list[int] = []
+    for row in rows:
+        game_id = int(row["game_id"])
+        player_id = int(row["player_id"])
+        game_row = conn.execute("SELECT status FROM games WHERE id = ?", (game_id,)).fetchone()
+        if game_row is None or str(game_row["status"] or "").lower() != "final":
+            continue
+        dnp_row = conn.execute(
+            """
+            SELECT 1
+            FROM player_game_availability
+            WHERE game_id = ?
+              AND player_id = ?
+              AND did_not_play = 1
+              AND source IN ('espn_boxscore', 'espn_summary_injury', 'manual_review')
+            LIMIT 1
+            """,
+            (game_id, player_id),
+        ).fetchone()
+        if dnp_row is not None:
+            snapshot_ids.append(int(row["id"]))
     if not snapshot_ids:
         return 0
     placeholders = ",".join("?" for _ in snapshot_ids)
