@@ -3129,30 +3129,42 @@ def _repair_current_slate_props(
             "synced_props": 0,
             "rebuilt_predictions": 0,
         }
-    if progress_callback is not None:
-        progress_callback("syncing_props", 0, 1, f"Syncing props for {len(target_game_ids)} games.")
-    sync_result = sync_prop_lines_from_sportsbook(
-        conn,
-        game_ids=target_game_ids,
-        fast_fail=True,
-        rebuild_predictions_after=False,
-        include_change_details=True,
-        progress_callback=lambda current, total, message: progress_callback("syncing_props", current, total, message)
-        if progress_callback is not None
-        else None,
-    )
-    if isinstance(sync_result, SyncPropLinesResult):
-        scanned = sync_result.synced_props
-        synced = sync_result.changed_props
-        changed_prop_line_ids = sync_result.changed_prop_line_ids
+    if scope == "injury_update":
+        scanned = 0
+        synced = 0
+        changed_prop_line_ids: list[int] = []
+        if progress_callback is not None:
+            progress_callback(
+                "syncing_props",
+                1,
+                1,
+                f"Skipped sportsbook sync for injury update; rebuilding all projections for {len(target_game_ids)} affected games.",
+            )
     else:
-        scanned = int(sync_result)
-        synced = int(sync_result)
-        changed_prop_line_ids = []
+        if progress_callback is not None:
+            progress_callback("syncing_props", 0, 1, f"Syncing props for {len(target_game_ids)} games.")
+        sync_result = sync_prop_lines_from_sportsbook(
+            conn,
+            game_ids=target_game_ids,
+            fast_fail=True,
+            rebuild_predictions_after=False,
+            include_change_details=True,
+            progress_callback=lambda current, total, message: progress_callback("syncing_props", current, total, message)
+            if progress_callback is not None
+            else None,
+        )
+        if isinstance(sync_result, SyncPropLinesResult):
+            scanned = sync_result.synced_props
+            synced = sync_result.changed_props
+            changed_prop_line_ids = sync_result.changed_prop_line_ids
+        else:
+            scanned = int(sync_result)
+            synced = int(sync_result)
+            changed_prop_line_ids = []
     if scope == "injury_update":
         # Availability changes alter teammate context across the whole slate, so
-        # targeted roster repairs must rebuild by game and keep the standard
-        # 20-prop batching instead of narrowing to changed prop line ids.
+        # targeted roster repairs skip sportsbook sync and rebuild by game so
+        # teammate context, usage, and game totals all update together.
         rebuild_result = rebuild_predictions_live(
             conn,
             game_ids=target_game_ids,

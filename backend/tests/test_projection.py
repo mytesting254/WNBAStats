@@ -3130,16 +3130,7 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
 
 def test_repair_current_slate_props_injury_update_rebuilds_full_games_in_batches(monkeypatch) -> None:
     rebuild_calls: list[tuple[list[int] | None, list[int] | None, int]] = []
-
-    def fake_sync(conn, **kwargs):
-        assert kwargs["game_ids"] == [9910]
-        assert kwargs["include_change_details"] is True
-        return SyncPropLinesResult(
-            synced_props=3,
-            changed_props=3,
-            changed_prop_line_ids=[501, 502, 503],
-            touched_game_ids=[9910],
-        )
+    game_rebuild_calls: list[list[int] | None] = []
 
     def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None):
         rebuild_calls.append(
@@ -3157,12 +3148,17 @@ def test_repair_current_slate_props_injury_update_rebuilds_full_games_in_batches
             errors=[],
         )
 
-    monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fake_sync)
+    def fail_sync(*_args, **_kwargs):
+        raise AssertionError("injury_update should not sync sportsbook prop lines")
+
+    monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fail_sync)
     monkeypatch.setattr(main_module, "rebuild_predictions_live", fake_rebuild)
     monkeypatch.setattr(
         main_module,
         "rebuild_game_predictions_live",
-        lambda conn, game_ids=None, progress_callback=None: {"attempted": 1, "written": 1},
+        lambda conn, game_ids=None, progress_callback=None: (
+            game_rebuild_calls.append(list(game_ids) if game_ids is not None else None) or {"attempted": 1, "written": 1}
+        ),
     )
     monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: {"tracked": 0})
 
@@ -3170,8 +3166,11 @@ def test_repair_current_slate_props_injury_update_rebuilds_full_games_in_batches
         result = main_module._repair_current_slate_props(conn, target_game_ids=[9910])
 
     assert rebuild_calls == [([9910], None, 20)]
+    assert game_rebuild_calls == [[9910]]
     assert result["scope"] == "injury_update"
-    assert result["changed_prop_line_ids"] == [501, 502, 503]
+    assert result["scanned_props"] == 0
+    assert result["synced_props"] == 0
+    assert result["changed_prop_line_ids"] == []
     assert result["attempted_predictions"] == 20
     assert result["rebuilt_predictions"] == 20
 
