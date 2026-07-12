@@ -35,7 +35,7 @@ from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
 from .db import connect, init_db, sqlite_write_lock, using_turso
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
-from .game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
+from .game_prediction_tracking import save_game_prediction, save_game_predictions, settle_completed_game_predictions
 from .game_predictions import _GamePredictionCache, _team_injury_impact, project_game
 from .odds_import import (
     import_historical_odds_api_game_markets,
@@ -2963,6 +2963,7 @@ def rebuild_game_predictions_live(
     conn,
     *,
     game_ids: list[int] | None = None,
+    chunk_size: int = 20,
     progress_callback: Callable[[int, int, str | None], None] | None = None,
 ) -> dict[str, int]:
     target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
@@ -3010,12 +3011,14 @@ def rebuild_game_predictions_live(
         return {"attempted": 0, "written": 0}
 
     written = 0
-    for index, game in enumerate(rows, start=1):
-        prediction = project_game(conn, game)
-        save_game_prediction(conn, game, prediction)
-        written += 1
+    safe_chunk_size = max(1, int(chunk_size))
+    for start in range(0, len(rows), safe_chunk_size):
+        batch_games = rows[start : start + safe_chunk_size]
+        batch_predictions = [project_game(conn, game) for game in batch_games]
+        written += save_game_predictions(conn, batch_games, batch_predictions)
         if progress_callback is not None:
-            progress_callback(index, total_games, f"Built {written} of {total_games} game predictions.")
+            processed = min(start + len(batch_games), total_games)
+            progress_callback(processed, total_games, f"Built {written} of {total_games} game predictions.")
     return {"attempted": total_games, "written": written}
 
 

@@ -3000,6 +3000,63 @@ def test_repair_current_slate_props_injury_update_rebuilds_full_games_in_batches
     assert result["rebuilt_predictions"] == 20
 
 
+def test_rebuild_game_predictions_live_batches_games(monkeypatch) -> None:
+    batch_sizes: list[int] = []
+    progress_updates: list[tuple[int, int, str | None]] = []
+
+    class DummyResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    class DummyConn:
+        def execute(self, sql, params=()):
+            if "FROM games g" in sql:
+                rows = [
+                    {
+                        "id": game_id,
+                        "game_date": "2026-07-12",
+                        "start_time": f"2026-07-12T{i:02d}:00:00Z",
+                        "home_team_id": 1,
+                        "away_team_id": 2,
+                        "home_team": "NY",
+                        "away_team": "CON",
+                        "rest_days_home": 2,
+                        "rest_days_away": 2,
+                        "spread_home": -5.5,
+                        "game_total": 158.0,
+                        "home_moneyline": None,
+                        "away_moneyline": None,
+                        "home_spread_price": None,
+                        "away_spread_price": None,
+                        "over_price": None,
+                        "under_price": None,
+                    }
+                    for i, game_id in enumerate(range(2000, 2045), start=1)
+                ]
+                return DummyResult(rows)
+            raise AssertionError(f"Unexpected SQL: {sql}")
+
+    monkeypatch.setattr(main_module, "project_game", lambda conn, game: {"game_id": int(game["id"])})
+    monkeypatch.setattr(
+        main_module,
+        "save_game_predictions",
+        lambda conn, games, predictions: batch_sizes.append(len(games)) or len(games),
+    )
+
+    result = main_module.rebuild_game_predictions_live(
+        DummyConn(),
+        chunk_size=20,
+        progress_callback=lambda current, total, message: progress_updates.append((current, total, message)),
+    )
+
+    assert batch_sizes == [20, 20, 5]
+    assert result == {"attempted": 45, "written": 45}
+    assert progress_updates[-1] == (45, 45, "Built 45 of 45 game predictions.")
+
+
 def test_rebuild_predictions_skips_model_prewarm_when_refresh_disabled(monkeypatch) -> None:
     load_test_history()
     prewarm_calls = 0
