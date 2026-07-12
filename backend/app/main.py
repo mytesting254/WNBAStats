@@ -1017,6 +1017,7 @@ def special_stocks() -> list[dict[str, Any]]:
     path = get_tracking_db_path()
     if not path.exists():
         return []
+    today_iso = _local_today_iso()
     visible_statuses = {"scheduled", "in_progress", "final"}
     visible_rows: list[dict[str, Any]] = []
     with connect() as conn:
@@ -1044,6 +1045,7 @@ def special_stocks() -> list[dict[str, Any]]:
                 """
                 SELECT
                     g.status,
+                    g.game_date,
                     g.start_time,
                     home.abbreviation AS home_team,
                     away.abbreviation AS away_team,
@@ -1079,6 +1081,9 @@ def special_stocks() -> list[dict[str, Any]]:
                 (int(player_id), int(game_id)),
             ).fetchone()
             if game_row is None:
+                continue
+            game_date = str(game_row["game_date"] or "").strip()[:10]
+            if game_date != today_iso:
                 continue
             game_status = str(game_row["status"] or "").lower()
             if game_status not in visible_statuses:
