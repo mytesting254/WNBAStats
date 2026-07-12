@@ -280,6 +280,17 @@ def _local_today_iso() -> str:
     return local_today_iso()
 
 
+def _app_local_game_date(game_date: Any, start_time: Any) -> str:
+    start_text = str(start_time or "").strip()
+    if start_text:
+        try:
+            parsed = datetime.fromisoformat(start_text.replace("Z", "+00:00"))
+            return parsed.astimezone(APP_TIMEZONE).date().isoformat()
+        except ValueError:
+            pass
+    return str(game_date or "").strip()[:10]
+
+
 def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
 
@@ -1089,7 +1100,7 @@ def special_stocks() -> list[dict[str, Any]]:
             ).fetchone()
             if game_row is None:
                 continue
-            game_date = str(game_row["game_date"] or "").strip()[:10]
+            game_date = _app_local_game_date(game_row["game_date"], game_row["start_time"])
             if game_date != today_iso:
                 continue
             game_status = str(game_row["status"] or "").lower()

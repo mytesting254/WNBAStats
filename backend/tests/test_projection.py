@@ -58,10 +58,12 @@ from backend.app.odds_import import (
     sync_prop_lines_from_sportsbook,
 )
 from backend.app.player_prop_model import (
+    COMPONENT_MODEL_VERSION,
     FEATURE_NAMES,
     FEATURE_INDEX,
     FeatureSnapshot,
     MINUTES_FEATURE_NAMES,
+    RESIDUAL_PROMOTION_MIN_ROWS,
     RidgeModel,
     _market_depth_scale,
     _market_line_weight,
@@ -74,6 +76,7 @@ from backend.app.player_prop_model import (
     _injury_adjustment_for_prop,
     _player_archetype_profile,
     _project_minutes,
+    _residual_model_passes_promotion_gate,
     _stabilize_learned_projection,
     clear_model_cache,
     feature_snapshot,
@@ -2688,6 +2691,10 @@ def test_predict_player_prop_blends_market_residual_model(monkeypatch) -> None:
     monkeypatch.setattr("backend.app.player_prop_model.train_market_model", lambda *_args, **_kwargs: learned_model)
     monkeypatch.setattr("backend.app.player_prop_model.train_market_residual_model", lambda *_args, **_kwargs: residual_model)
     monkeypatch.setattr(
+        "backend.app.player_prop_model._market_overlay_decision",
+        lambda *_args, **_kwargs: {"mode": "full_learned", "note": "walk-forward gate passed"},
+    )
+    monkeypatch.setattr(
         "backend.app.player_prop_model._predict",
         lambda model, _features: -1.0 if str(model.market).startswith("residual:") else 24.0,
     )
@@ -2712,6 +2719,175 @@ def test_predict_player_prop_blends_market_residual_model(monkeypatch) -> None:
     assert projection == pytest.approx(21.94, abs=0.01)
     assert "residual blend 30%" in reason
     assert model_version == MODEL_VERSION
+
+
+def test_predict_player_prop_uses_component_only_when_market_policy_rejects_learned(monkeypatch) -> None:
+    feature_values = [0.0 for _ in FEATURE_NAMES]
+    snapshot = FeatureSnapshot(values=feature_values, component_projection=18.0, reason="snapshot reason")
+    learned_model = RidgeModel("points", 200, 0.0, [], [0.0 for _ in FEATURE_NAMES], [1.0 for _ in FEATURE_NAMES])
+
+    monkeypatch.setattr("backend.app.player_prop_model.feature_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr("backend.app.player_prop_model._player_sample_quality", lambda *_args, **_kwargs: (20, 30.0))
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_model", lambda *_args, **_kwargs: learned_model)
+    monkeypatch.setattr(
+        "backend.app.player_prop_model._market_overlay_decision",
+        lambda *_args, **_kwargs: {"mode": "component_only", "note": "walk-forward gate failed"},
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 24.0)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_combo_market_projection", lambda learned, *_args, **_kwargs: learned)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_learned_projection", lambda learned, *_args, **_kwargs: (learned, "no stabilization"))
+
+    with connect() as conn:
+        projection, reason, model_version = predict_player_prop(
+            conn,
+            player_id=1001,
+            market="points",
+            game_id=100,
+            line=20.0,
+            over_odds=-110,
+            under_odds=-110,
+        )
+
+    assert projection == pytest.approx(18.0)
+    assert "walk-forward gate failed" in reason
+    assert model_version == COMPONENT_MODEL_VERSION
+
+
+def test_predict_player_prop_blends_component_and_learned_when_market_policy_passes(monkeypatch) -> None:
+    feature_values = [0.0 for _ in FEATURE_NAMES]
+    snapshot = FeatureSnapshot(values=feature_values, component_projection=18.0, reason="snapshot reason")
+    learned_model = RidgeModel("points", 200, 0.0, [], [0.0 for _ in FEATURE_NAMES], [1.0 for _ in FEATURE_NAMES])
+
+    monkeypatch.setattr("backend.app.player_prop_model.feature_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr("backend.app.player_prop_model._player_sample_quality", lambda *_args, **_kwargs: (20, 30.0))
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_model", lambda *_args, **_kwargs: learned_model)
+    monkeypatch.setattr(
+        "backend.app.player_prop_model._market_overlay_decision",
+        lambda *_args, **_kwargs: {"mode": "blend", "blend_weight": 0.25, "note": "walk-forward gate passed"},
+    )
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_residual_model", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 24.0)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_combo_market_projection", lambda learned, *_args, **_kwargs: learned)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_learned_projection", lambda learned, *_args, **_kwargs: (learned, "no stabilization"))
+
+    with connect() as conn:
+        projection, reason, model_version = predict_player_prop(
+            conn,
+            player_id=1001,
+            market="points",
+            game_id=100,
+            line=None,
+            over_odds=None,
+            under_odds=None,
+        )
+
+    assert projection == pytest.approx(19.5)
+    assert "learned/component blend 25%" in reason
+    assert model_version == MODEL_VERSION
+
+
+def test_predict_player_prop_uses_reduced_transfer_blend_when_transfer_slice_underperforms(monkeypatch) -> None:
+    feature_values = [0.0 for _ in FEATURE_NAMES]
+    snapshot = FeatureSnapshot(values=feature_values, component_projection=18.0, reason="snapshot reason")
+    learned_model = RidgeModel("points", 200, 0.0, [], [0.0 for _ in FEATURE_NAMES], [1.0 for _ in FEATURE_NAMES])
+
+    monkeypatch.setattr("backend.app.player_prop_model.feature_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr("backend.app.player_prop_model._player_sample_quality", lambda *_args, **_kwargs: (20, 30.0))
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_model", lambda *_args, **_kwargs: learned_model)
+    monkeypatch.setattr(
+        "backend.app.player_prop_model._market_overlay_decision",
+        lambda *_args, **_kwargs: {
+            "mode": "transfer_blend",
+            "blend_weight": 0.10,
+            "note": "recent-transfer MAE improvement below gate",
+        },
+    )
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_residual_model", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 24.0)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_combo_market_projection", lambda learned, *_args, **_kwargs: learned)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_learned_projection", lambda learned, *_args, **_kwargs: (learned, "no stabilization"))
+
+    with connect() as conn:
+        projection, reason, model_version = predict_player_prop(
+            conn,
+            player_id=1001,
+            market="points",
+            game_id=100,
+            line=None,
+            over_odds=None,
+            under_odds=None,
+        )
+
+    assert projection == pytest.approx(18.6)
+    assert "reduced learned/component blend 10%" in reason
+    assert model_version == MODEL_VERSION
+
+
+def test_residual_model_promotion_gate_requires_positive_walk_forward_improvement() -> None:
+    assert _residual_model_passes_promotion_gate(
+        {
+            "rows": RESIDUAL_PROMOTION_MIN_ROWS,
+            "mae_improvement": 0.12,
+            "rmse_improvement": 0.01,
+        }
+    )
+    assert not _residual_model_passes_promotion_gate(
+        {
+            "rows": RESIDUAL_PROMOTION_MIN_ROWS,
+            "mae_improvement": -0.05,
+            "rmse_improvement": 0.08,
+        }
+    )
+    assert not _residual_model_passes_promotion_gate(
+        {
+            "rows": RESIDUAL_PROMOTION_MIN_ROWS,
+            "mae_improvement": 0.08,
+            "rmse_improvement": -0.01,
+        }
+    )
+    assert not _residual_model_passes_promotion_gate(
+        {
+            "rows": RESIDUAL_PROMOTION_MIN_ROWS - 1,
+            "mae_improvement": 0.08,
+            "rmse_improvement": 0.02,
+        }
+    )
+
+
+def test_train_market_residual_model_skips_regressive_model(monkeypatch) -> None:
+    samples = [
+        player_prop_model_module.TrainingSample(
+            features=[0.0 for _ in FEATURE_NAMES],
+            target=1.0,
+            game_date="2026-06-01",
+            season="2026",
+            segment="2026-06",
+            baseline=1.0,
+        )
+        for _ in range(RESIDUAL_PROMOTION_MIN_ROWS)
+    ]
+    residual_model = RidgeModel("residual:points", len(samples), 0.0, [0.0 for _ in FEATURE_NAMES], [0.0 for _ in FEATURE_NAMES], [1.0 for _ in FEATURE_NAMES])
+
+    monkeypatch.setattr(
+        player_prop_model_module,
+        "_residual_training_samples",
+        lambda *_args, **_kwargs: (samples, player_prop_model_module.TrainingSampleDiagnostics()),
+    )
+    monkeypatch.setattr(player_prop_model_module, "_fit_model_from_samples", lambda *_args, **_kwargs: residual_model)
+    monkeypatch.setattr(
+        player_prop_model_module,
+        "_evaluate_walk_forward_samples",
+        lambda *_args, **_kwargs: {
+            "rows": len(samples),
+            "mae_improvement": -0.2,
+            "rmse_improvement": -0.1,
+        },
+    )
+
+    with connect() as conn:
+        trained = player_prop_model_module._train_market_residual_model_uncached(conn, "points")
+
+    assert trained is None
 
 
 def test_predict_player_prop_uses_local_combo_estimator_for_pra(monkeypatch) -> None:

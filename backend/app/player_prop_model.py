@@ -20,6 +20,7 @@ from .timezone_utils import APP_TIMEZONE
 
 
 MODEL_VERSION = "adaptive-context-v5-minutes-residual"
+COMPONENT_MODEL_VERSION = "component-pregame-v2"
 MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
     "points",
@@ -102,6 +103,129 @@ MARKET_VOLATILITY_FLOORS = {
     "blocks": 0.7,
     "blocks_steals": 1.1,
     "points_rebounds_assists": 5.0,
+}
+RESIDUAL_PROMOTION_MIN_ROWS = 100
+RESIDUAL_PROMOTION_MIN_MAE_IMPROVEMENT = 0.0
+RESIDUAL_PROMOTION_MIN_RMSE_IMPROVEMENT = 0.0
+DEFAULT_MARKET_OVERLAY_POLICY = {
+    "mode": "component_only",
+    "blend_weight": 0.0,
+    "min_rows": 1500,
+    "min_mae_improvement": 0.02,
+    "min_rmse_improvement": 0.0,
+    "max_abs_bias": 0.2,
+    "recent_transfer_min_rows": 100,
+    "recent_transfer_min_mae_improvement": 0.0,
+    "recent_transfer_blend_weight": 0.15,
+}
+MARKET_OVERLAY_POLICY = {
+    "points": {
+        "mode": "blend",
+        "blend_weight": 0.20,
+        "min_rows": 2000,
+        "min_mae_improvement": 0.10,
+        "min_rmse_improvement": 0.05,
+        "max_abs_bias": 0.15,
+        "recent_transfer_min_rows": 100,
+        "recent_transfer_min_mae_improvement": 0.0,
+        "recent_transfer_blend_weight": 0.10,
+    },
+    "rebounds": {
+        "mode": "blend",
+        "blend_weight": 0.20,
+        "min_rows": 2000,
+        "min_mae_improvement": 0.05,
+        "min_rmse_improvement": 0.02,
+        "max_abs_bias": 0.15,
+        "recent_transfer_blend_weight": 0.10,
+    },
+    "assists": {
+        "mode": "blend",
+        "blend_weight": 0.20,
+        "min_rows": 2000,
+        "min_mae_improvement": 0.05,
+        "min_rmse_improvement": 0.02,
+        "max_abs_bias": 0.15,
+        "recent_transfer_blend_weight": 0.10,
+    },
+    "points_rebounds": {
+        "mode": "blend",
+        "blend_weight": 0.15,
+        "min_rows": 1800,
+        "min_mae_improvement": 0.12,
+        "min_rmse_improvement": 0.06,
+        "max_abs_bias": 0.15,
+        "recent_transfer_min_rows": 100,
+        "recent_transfer_min_mae_improvement": 0.0,
+        "recent_transfer_blend_weight": 0.08,
+    },
+    "points_assists": {
+        "mode": "blend",
+        "blend_weight": 0.15,
+        "min_rows": 1800,
+        "min_mae_improvement": 0.12,
+        "min_rmse_improvement": 0.06,
+        "max_abs_bias": 0.15,
+        "recent_transfer_min_rows": 100,
+        "recent_transfer_min_mae_improvement": 0.0,
+        "recent_transfer_blend_weight": 0.08,
+    },
+    "rebounds_assists": {
+        "mode": "blend",
+        "blend_weight": 0.15,
+        "min_rows": 1800,
+        "min_mae_improvement": 0.08,
+        "min_rmse_improvement": 0.04,
+        "max_abs_bias": 0.15,
+        "recent_transfer_blend_weight": 0.08,
+    },
+    "points_rebounds_assists": {
+        "mode": "blend",
+        "blend_weight": 0.10,
+        "min_rows": 1800,
+        "min_mae_improvement": 0.15,
+        "min_rmse_improvement": 0.08,
+        "max_abs_bias": 0.15,
+        "recent_transfer_min_rows": 100,
+        "recent_transfer_min_mae_improvement": 0.0,
+        "recent_transfer_blend_weight": 0.05,
+    },
+    "threes": {
+        "mode": "blend",
+        "blend_weight": 0.15,
+        "min_rows": 1500,
+        "min_mae_improvement": 0.04,
+        "min_rmse_improvement": 0.0,
+        "max_abs_bias": 0.10,
+        "recent_transfer_blend_weight": 0.08,
+    },
+    "steals": {
+        "mode": "blend",
+        "blend_weight": 0.10,
+        "min_rows": 1500,
+        "min_mae_improvement": 0.02,
+        "min_rmse_improvement": 0.0,
+        "max_abs_bias": 0.08,
+        "recent_transfer_blend_weight": 0.05,
+    },
+    "blocks": {
+        "mode": "blend",
+        "blend_weight": 0.10,
+        "min_rows": 1500,
+        "min_mae_improvement": 0.03,
+        "min_rmse_improvement": 0.0,
+        "max_abs_bias": 0.08,
+        "recent_transfer_blend_weight": 0.05,
+    },
+    "blocks_steals": {
+        "mode": "blend",
+        "blend_weight": 0.10,
+        "min_rows": 1500,
+        "min_mae_improvement": 0.03,
+        "min_rmse_improvement": 0.0,
+        "max_abs_bias": 0.10,
+        "recent_transfer_blend_weight": 0.05,
+    },
 }
 
 @dataclass(frozen=True)
@@ -299,10 +423,27 @@ def predict_player_prop(
     learned = max(0.0, learned)
     learned = _stabilize_combo_market_projection(learned, snapshot, market)
     learned, stabilization_note = _stabilize_learned_projection(learned, snapshot, market, config=tuning)
-    projection = learned
-    market_note = "no sportsbook line blend"
+    overlay_policy = _market_overlay_decision(conn, market)
+    overlay_mode = str(overlay_policy.get("mode") or "component_only")
+    overlay_note = str(overlay_policy.get("note") or "market policy defaulted to component")
+    model_version = MODEL_VERSION
+    if overlay_mode == "component_only":
+        projection = snapshot.component_projection
+        market_note = f"{overlay_note}; learned projection suppressed"
+        model_version = COMPONENT_MODEL_VERSION
+    elif overlay_mode == "blend":
+        blend_weight = float(overlay_policy.get("blend_weight") or 0.0)
+        projection = ((blend_weight * learned) + ((1.0 - blend_weight) * snapshot.component_projection))
+        market_note = f"{overlay_note}; learned/component blend {blend_weight:.0%}"
+    elif overlay_mode == "transfer_blend":
+        blend_weight = float(overlay_policy.get("blend_weight") or 0.0)
+        projection = ((blend_weight * learned) + ((1.0 - blend_weight) * snapshot.component_projection))
+        market_note = f"{overlay_note}; reduced learned/component blend {blend_weight:.0%}"
+    else:
+        projection = learned
+        market_note = f"{overlay_note}; no sportsbook line blend"
 
-    if line is not None:
+    if line is not None and overlay_mode != "component_only":
         market_weight = _market_line_weight(
             market,
             model.rows,
@@ -340,11 +481,116 @@ def predict_player_prop(
         projection = 0.0
         market_note = f"{market_note}; player marked OUT"
 
-    reason = (
-        f"{snapshot.reason} Learned model {MODEL_VERSION} projected {learned:.1f} from "
-        f"{model.rows} historical rows; {market_note}; {stabilization_note}. Final projection {projection:.1f}."
-    )
-    return round(projection, 2), reason, MODEL_VERSION
+    if overlay_mode == "component_only":
+        reason = (
+            f"{snapshot.reason} Learned model {MODEL_VERSION} projected {learned:.1f} from "
+            f"{model.rows} historical rows, but live market policy held {market} on the "
+            f"{COMPONENT_MODEL_VERSION} baseline; {market_note}; {stabilization_note}. "
+            f"Final projection {projection:.1f}."
+        )
+    else:
+        reason = (
+            f"{snapshot.reason} Learned model {MODEL_VERSION} projected {learned:.1f} from "
+            f"{model.rows} historical rows; {market_note}; {stabilization_note}. Final projection {projection:.1f}."
+        )
+    return round(projection, 2), reason, model_version
+
+
+def _market_overlay_metrics(conn: sqlite3.Connection) -> dict[str, dict]:
+    cache = _connection_training_cache_bucket(conn, "market_overlay_metrics")
+    cache_key = ("latest", MODEL_VERSION, "walk_forward_segments")
+    if cache_key in cache:
+        return cache[cache_key]  # type: ignore[return-value]
+    row = conn.execute(
+        """
+        SELECT metrics_json
+        FROM model_runs
+        WHERE model_version = ?
+          AND run_type = 'walk_forward_segments'
+          AND status = 'completed'
+        ORDER BY started_at DESC, id DESC
+        LIMIT 1
+        """,
+        (MODEL_VERSION,),
+    ).fetchone()
+    if row is None:
+        cache[cache_key] = {}
+        return {}
+    metrics = json.loads(str(row["metrics_json"] if isinstance(row, sqlite3.Row) else row[0]))
+    cache[cache_key] = metrics
+    return metrics
+
+
+def _market_overlay_decision(conn: sqlite3.Connection, market: str) -> dict[str, object]:
+    policy = {**DEFAULT_MARKET_OVERLAY_POLICY, **MARKET_OVERLAY_POLICY.get(str(market), {})}
+    metrics = _market_overlay_metrics(conn).get(str(market))
+    if not isinstance(metrics, dict):
+        return {"mode": "component_only", "note": "no saved walk-forward metrics"}
+    rows = int(metrics.get("rows") or 0)
+    mae_improvement = metrics.get("mae_improvement")
+    rmse_improvement = metrics.get("rmse_improvement")
+    bias = metrics.get("bias")
+    if rows < int(policy["min_rows"]):
+        return {"mode": "component_only", "note": f"walk-forward support {rows} below {int(policy['min_rows'])}"}
+    if mae_improvement is None or float(mae_improvement) < float(policy["min_mae_improvement"]):
+        return {
+            "mode": "component_only",
+            "note": f"walk-forward MAE improvement {float(mae_improvement or 0.0):+.3f} below {float(policy['min_mae_improvement']):+.3f}",
+        }
+    if rmse_improvement is None or float(rmse_improvement) < float(policy["min_rmse_improvement"]):
+        return {
+            "mode": "component_only",
+            "note": f"walk-forward RMSE improvement {float(rmse_improvement or 0.0):+.3f} below {float(policy['min_rmse_improvement']):+.3f}",
+        }
+    if bias is not None and abs(float(bias)) > float(policy["max_abs_bias"]):
+        return {
+            "mode": "component_only",
+            "note": f"walk-forward bias {float(bias):+.3f} exceeded {float(policy['max_abs_bias']):.3f}",
+        }
+    transfer_metrics = metrics.get("recent_transfer_evaluation")
+    if isinstance(transfer_metrics, dict):
+        transfer_rows = int(transfer_metrics.get("rows") or 0)
+        transfer_mae_improvement = transfer_metrics.get("mae_improvement")
+        if (
+            transfer_rows >= int(policy["recent_transfer_min_rows"])
+            and (
+                transfer_mae_improvement is None
+                or float(transfer_mae_improvement) < float(policy["recent_transfer_min_mae_improvement"])
+            )
+        ):
+            if str(policy["mode"]) == "blend":
+                return {
+                    "mode": "transfer_blend",
+                    "blend_weight": float(policy.get("recent_transfer_blend_weight") or 0.0),
+                    "note": (
+                        f"recent-transfer MAE improvement {float(transfer_mae_improvement or 0.0):+.3f} "
+                        f"below {float(policy['recent_transfer_min_mae_improvement']):+.3f}"
+                    ),
+                }
+            return {
+                "mode": "component_only",
+                "note": (
+                    f"recent-transfer MAE improvement {float(transfer_mae_improvement or 0.0):+.3f} "
+                    f"below {float(policy['recent_transfer_min_mae_improvement']):+.3f}"
+                ),
+            }
+    mode = str(policy["mode"])
+    if mode == "blend":
+        return {
+            "mode": "blend",
+            "blend_weight": float(policy["blend_weight"]),
+            "note": (
+                f"walk-forward gate passed ({rows} rows, MAE {float(mae_improvement):+.3f}, "
+                f"RMSE {float(rmse_improvement):+.3f})"
+            ),
+        }
+    return {
+        "mode": "full_learned",
+        "note": (
+            f"walk-forward gate passed ({rows} rows, MAE {float(mae_improvement):+.3f}, "
+            f"RMSE {float(rmse_improvement):+.3f})"
+        ),
+    }
 
 
 def _predict_local_combo_market(
@@ -864,12 +1110,32 @@ def _train_market_residual_model_uncached(
     config: ModelTuningConfig | None = None,
 ) -> RidgeModel | None:
     samples, _diagnostics = _residual_training_samples(conn, market)
-    model = _fit_model_from_samples(f"residual:{market}", samples, config=config)
+    tuning = config or DEFAULT_TUNING_CONFIG
+    model = _fit_model_from_samples(f"residual:{market}", samples, config=tuning)
     if model is not None:
+        evaluation = _evaluate_walk_forward_samples(f"residual:{market}", samples, config=tuning)
+        if not _residual_model_passes_promotion_gate(evaluation):
+            return None
         db_path = conn.execute("PRAGMA database_list").fetchone()["file"]
-        cache_key = _model_cache_key(conn, db_path, f"residual:{market}", config or DEFAULT_TUNING_CONFIG, kind="residual")
-        _store_cached_model(cache_key, model, config or DEFAULT_TUNING_CONFIG)
+        cache_key = _model_cache_key(conn, db_path, f"residual:{market}", tuning, kind="residual")
+        _store_cached_model(cache_key, model, tuning)
     return model
+
+
+def _residual_model_passes_promotion_gate(metrics: dict[str, object] | None) -> bool:
+    if not metrics:
+        return False
+    rows = int(metrics.get("rows") or 0)
+    mae_improvement = metrics.get("mae_improvement")
+    rmse_improvement = metrics.get("rmse_improvement")
+    if rows < RESIDUAL_PROMOTION_MIN_ROWS:
+        return False
+    if mae_improvement is None or rmse_improvement is None:
+        return False
+    return (
+        float(mae_improvement) > RESIDUAL_PROMOTION_MIN_MAE_IMPROVEMENT
+        and float(rmse_improvement) >= RESIDUAL_PROMOTION_MIN_RMSE_IMPROVEMENT
+    )
 
 
 def evaluate_market_model(
