@@ -14,6 +14,7 @@ import {
   fetchPerformance,
   fetchRoster,
   fetchSpecialStocks,
+  fetchSpecialStocksPerformance,
   auditStalePayloads,
   auditDbLock,
   deleteStalePayloads,
@@ -49,6 +50,7 @@ import {
   type OpsHealth,
   type RosterPlayer,
   type SpecialStocksSnapshot,
+  type SpecialStocksPerformance,
   type StalePayloadAudit,
   type TeamLast10,
   type ValueProp,
@@ -267,6 +269,7 @@ export function App() {
   const [watchlist, setWatchlist] = useState<WatchlistProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
   const [specialStocks, setSpecialStocks] = useState<SpecialStocksSnapshot[]>([]);
+  const [specialPerformance, setSpecialPerformance] = useState<SpecialStocksPerformance | null>(null);
   const [discrepancies, setDiscrepancies] = useState<LineDiscrepancy[]>([]);
   const [roster, setRoster] = useState<RosterPlayer[]>([]);
   const [rosterPullSummary, setRosterPullSummary] = useState<RosterPullSummary | null>(null);
@@ -340,6 +343,10 @@ export function App() {
   const [adminUsername, setAdminUsername] = useState("");
   const [adminPassword, setAdminPassword] = useState("");
   const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
+  const topSpecialStocks =
+    specialStocks.length > 0
+      ? Math.max(...specialStocks.map((snapshot) => snapshot.projected_stocks))
+      : null;
   const operationsBusy =
     loading ||
     training ||
@@ -439,7 +446,12 @@ export function App() {
       } else if (tab === "matchups" || tab === "parlays") {
         setMatchups(await withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups"));
       } else if (tab === "special") {
-        setSpecialStocks(await withTimeout(fetchSpecialStocks(), INITIAL_LOAD_TIMEOUT_MS, "special props"));
+        const [nextSpecialStocks, nextSpecialPerformance] = await Promise.all([
+          withTimeout(fetchSpecialStocks(), INITIAL_LOAD_TIMEOUT_MS, "special props"),
+          withTimeout(fetchSpecialStocksPerformance(), INITIAL_LOAD_TIMEOUT_MS, "special stats")
+        ]);
+        setSpecialStocks(nextSpecialStocks);
+        setSpecialPerformance(nextSpecialPerformance);
       } else if (tab === "discrepancies") {
         setDiscrepancies(await withTimeout(fetchLineDiscrepancies(), INITIAL_LOAD_TIMEOUT_MS, "line discrepancies"));
       } else if (tab === "roster") {
@@ -733,8 +745,12 @@ export function App() {
     setOperationStatus(null);
     try {
       const result = await generateSpecialStocks();
-      const snapshots = await fetchSpecialStocks();
+      const [snapshots, performance] = await Promise.all([
+        fetchSpecialStocks(),
+        fetchSpecialStocksPerformance()
+      ]);
       setSpecialStocks(snapshots);
+      setSpecialPerformance(performance);
       setLoadedTabs((current) => ({ ...current, special: true }));
       setOperationStatus(`Generated ${result.generated} model-only special props.`);
     } catch (err) {
@@ -1226,7 +1242,7 @@ export function App() {
         />
         <Metric
           label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "special" ? "Top stocks" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups, props).toString() : activeTab === "special" ? formatNumber(specialStocks[0]?.projected_stocks ?? null) : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups, props).toString() : activeTab === "special" ? formatNumber(topSpecialStocks) : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={(performance?.total_settled ?? performance?.settled ?? 0).toString()} />
         <Metric
@@ -1276,6 +1292,7 @@ export function App() {
         ) : activeTab === "special" ? (
           <SpecialStocksView
             snapshots={specialStocks}
+            performance={specialPerformance}
             loading={tabLoading.special}
             error={error}
             canGenerate={isAdmin}
@@ -3992,6 +4009,7 @@ function ParlayCandidatesView({
 
 function SpecialStocksView({
   snapshots,
+  performance,
   loading,
   error,
   canGenerate,
@@ -3999,6 +4017,7 @@ function SpecialStocksView({
   onGenerate,
 }: {
   snapshots: SpecialStocksSnapshot[];
+  performance: SpecialStocksPerformance | null;
   loading: boolean;
   error: string | null;
   canGenerate: boolean;
@@ -4013,12 +4032,17 @@ function SpecialStocksView({
       startTime: string | null;
       homeTeam: string | null;
       awayTeam: string | null;
+      candidateCount50Plus: number;
+      avgProb2Plus: number;
       players: SpecialStocksSnapshot[];
     }>();
     for (const snapshot of snapshots) {
       const current = grouped.get(snapshot.game_id);
       if (current) {
         current.players.push(snapshot);
+        if ((snapshot.stocks_prob_2_plus ?? 0) >= 0.5) {
+          current.candidateCount50Plus += 1;
+        }
       } else {
         grouped.set(snapshot.game_id, {
           gameId: snapshot.game_id,
@@ -4026,13 +4050,25 @@ function SpecialStocksView({
           startTime: snapshot.start_time ?? null,
           homeTeam: snapshot.home_team ?? null,
           awayTeam: snapshot.away_team ?? null,
+          candidateCount50Plus: (snapshot.stocks_prob_2_plus ?? 0) >= 0.5 ? 1 : 0,
+          avgProb2Plus: 0,
           players: [snapshot],
         });
       }
     }
     return Array.from(grouped.values()).map((card) => ({
       ...card,
-      players: card.players.slice().sort((left, right) => right.projected_stocks - left.projected_stocks),
+      avgProb2Plus:
+        card.players.length > 0
+          ? card.players.reduce((sum, player) => sum + (player.stocks_prob_2_plus ?? 0), 0) / card.players.length
+          : 0,
+      players: card.players.slice().sort((left, right) => {
+        const probabilityDelta = (right.stocks_prob_2_plus ?? 0) - (left.stocks_prob_2_plus ?? 0);
+        if (Math.abs(probabilityDelta) > 0.0001) {
+          return probabilityDelta;
+        }
+        return right.projected_stocks - left.projected_stocks;
+      }),
     })).sort((left, right) => {
       const leftTime = Date.parse(left.startTime || left.gameDate);
       const rightTime = Date.parse(right.startTime || right.gameDate);
@@ -4077,7 +4113,7 @@ function SpecialStocksView({
             >
               <span>{formatDate(card.startTime || card.gameDate)}</span>
               <strong>{card.awayTeam && card.homeTeam ? `${card.awayTeam} at ${card.homeTeam}` : `Game ${card.gameId}`}</strong>
-              <em>{`${card.players.length} model-only props`}</em>
+              <em>{`${card.candidateCount50Plus} at 50%+ | ${card.players.length} props`}</em>
             </button>
           ))}
         </div>
@@ -4087,15 +4123,48 @@ function SpecialStocksView({
               <div className="panel-header compact">
                 <div>
                   <h3>Model-only Stocks Board</h3>
-                  <p>{`${selectedCard.players.length} slate players with regular lines ranked by projected steals plus blocks`}</p>
+                  <p>{`${selectedCard.players.length} slate players with regular lines ranked by 2+ stocks probability`}</p>
+                  <p>{`${selectedCard.candidateCount50Plus} players are at 50%+ for 2+ stocks. Board average: ${formatPercent(selectedCard.avgProb2Plus)}`}</p>
                   <p>No sportsbook line is attached. These rows are for internal tracking and UI review.</p>
                 </div>
+              </div>
+              <div className="stat-strip">
+                <MiniStat label="Settled" value={String(performance?.settled_count ?? 0)} />
+                <MiniStat label="Pending" value={String(performance?.pending_count ?? 0)} />
+                <MiniStat label="2+ Stocks Hit" value={formatPercent(performance?.hit_rate_2_plus ?? undefined)} />
+                <MiniStat label="50%+ Hit" value={formatPercent(performance?.candidate_hit_rate_2_plus ?? undefined)} />
+                <MiniStat label="Avg 2+ Prob" value={formatPercent(performance?.avg_prob_2_plus ?? undefined)} />
+              </div>
+              <div className="table-wrap special-calibration-table-wrap">
+                <table className="special-calibration-table">
+                  <thead>
+                    <tr>
+                      <th>2+ Stocks Prob</th>
+                      <th>Settled</th>
+                      <th>Hits</th>
+                      <th>Avg Prob</th>
+                      <th>Actual Hit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(performance?.calibration_buckets ?? []).map((bucket) => (
+                      <tr key={bucket.label}>
+                        <td>{bucket.label}</td>
+                        <td>{bucket.count}</td>
+                        <td>{bucket.hits}</td>
+                        <td>{formatPercent(bucket.avg_prob ?? undefined)}</td>
+                        <td>{formatPercent(bucket.hit_rate ?? undefined)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
               <div className="table-wrap special-props-table-wrap">
                 <table className="props-table special-props-table">
                   <thead>
                     <tr>
                       <th>Player</th>
+                      <th>Tier</th>
                       <th>STL</th>
                       <th>BLK</th>
                       <th>STL+BLK</th>
@@ -4132,6 +4201,7 @@ function SpecialStocksView({
                             {renderRecentOutcomesWithMinutes(snapshot, `special-${snapshot.id}`)}
                           </div>
                         </td>
+                        <td>{(snapshot.stocks_prob_2_plus ?? 0) >= 0.5 ? "50%+" : (snapshot.stocks_prob_2_plus ?? 0) >= 0.4 ? "40%+" : "Watch"}</td>
                         <td>{formatNumber(snapshot.projected_steals)}</td>
                         <td>{formatNumber(snapshot.projected_blocks)}</td>
                         <td>{formatNumber(snapshot.projected_stocks)}</td>
@@ -4150,7 +4220,7 @@ function SpecialStocksView({
                     ))}
                     {!selectedCard.players.length && (
                       <tr>
-                        <td colSpan={11}>No special props generated for this game yet.</td>
+                        <td colSpan={12}>No special props generated for this game yet.</td>
                       </tr>
                     )}
                   </tbody>

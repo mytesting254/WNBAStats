@@ -1600,6 +1600,60 @@ def test_minutes_projection_expands_upside_for_injury_replacement_spike() -> Non
     assert "starter_volatile" in note or "rotation" in note
 
 
+def test_minutes_projection_stabilizes_against_overly_low_learned_output(monkeypatch) -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="bench",
+        recent_minutes_avg=19.0,
+        last_10_minutes_avg=17.0,
+        ewma_minutes=18.0,
+        minutes_trend=1.0,
+        minute_volatility=4.0,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+    )
+    monkeypatch.setattr(
+        "backend.app.player_prop_model.train_minutes_model",
+        lambda *_args, **_kwargs: RidgeModel(
+            market="minutes:bench",
+            rows=500,
+            intercept=0.0,
+            coefficients=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_means=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_scales=[1.0] * len(MINUTES_FEATURE_NAMES),
+        ),
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: -10.0)
+    monkeypatch.setattr("backend.app.player_prop_model._venue_minutes_adjustment", lambda *_args, **_kwargs: 0.0)
+
+    projected, note = _project_minutes(
+        sqlite3.connect(":memory:"),
+        player_id=1005,
+        game_id=2050,
+        rotation_role="bench",
+        ewma_minutes=18.0,
+        minutes_trend=1.0,
+        recent_minutes_avg=19.0,
+        last_10_minutes_avg=17.0,
+        minute_volatility=4.0,
+        context={"is_home": False, "rest_days": 2, "team_spread": 4.5},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=None,
+        team_transition=[4.0, 1.0, 0.1, 0.6],
+        before_game_date=None,
+    )
+
+    assert role_state.bucket in {"bench", "rotation"}
+    assert projected >= 17.5
+    assert "learned blend" in note
+    assert "learned blend 10%/" in note
+    assert "delta -10.0" in note
+    assert "recency anchor" in note
+    assert "baseline " in note
+
+
 def test_minutes_feature_values_include_role_shift_signals() -> None:
     role_state = _classify_minutes_role(
         rotation_role="rotation",
@@ -1912,6 +1966,107 @@ def test_market_evaluation_reports_training_sample_diagnostics() -> None:
     assert "skipped_missing_snapshot" in residual_diagnostics
 
 
+def test_training_samples_use_component_projection_as_baseline(monkeypatch) -> None:
+    load_test_history()
+    clear_model_cache()
+
+    original = player_prop_model_module._historical_training_features
+
+    def wrapped_features(*args, **kwargs):
+        features = original(*args, **kwargs)
+        features[FEATURE_INDEX["component_projection"]] = 77.0
+        features[FEATURE_INDEX["last_10_avg"]] = 11.0
+        return features
+
+    monkeypatch.setattr(player_prop_model_module, "_historical_training_features", wrapped_features)
+
+    with connect() as conn:
+        samples, _diagnostics = player_prop_model_module._training_samples(conn, "points")
+
+    assert samples
+    assert samples[0].baseline == 77.0
+
+
+def test_market_evaluation_reports_final_projection_metrics(monkeypatch) -> None:
+    clear_model_cache()
+
+    def make_features(component_projection: float) -> list[float]:
+        values = [0.0 for _ in FEATURE_NAMES]
+        values[FEATURE_INDEX["component_projection"]] = component_projection
+        values[FEATURE_INDEX["weighted_recent"]] = component_projection
+        values[FEATURE_INDEX["ewma_value"]] = component_projection
+        values[FEATURE_INDEX["last_10_avg"]] = component_projection
+        values[FEATURE_INDEX["rate_projection"]] = component_projection
+        values[FEATURE_INDEX["ewma_minutes"]] = 30.0
+        values[FEATURE_INDEX["minutes_trend"]] = 0.0
+        return values
+
+    raw_samples = [
+        player_prop_model_module.TrainingSample(
+            features=make_features(10.0),
+            target=11.6,
+            game_date=f"2026-01-{day:02d}",
+            season="2026",
+            segment="2026-01",
+            baseline=10.0,
+        )
+        for day in range(1, 26)
+    ]
+    residual_samples = [
+        player_prop_model_module.TrainingSample(
+            features=make_features(10.0),
+            target=0.0,
+            game_date=f"2026-01-{day:02d}",
+            season="2026",
+            segment="2026-01",
+            baseline=0.0,
+        )
+        for day in range(1, 26)
+    ]
+    final_samples = [
+        player_prop_model_module.FinalProjectionSample(
+            features=make_features(10.0),
+            target=11.6,
+            game_date=f"2026-02-{day:02d}",
+            season="2026",
+            segment="2026-02",
+            component_projection=10.0,
+            line=12.0,
+            over_odds=-110,
+            under_odds=-110,
+            sample_count=20,
+            avg_minutes=30.0,
+        )
+        for day in range(1, 21)
+    ]
+
+    monkeypatch.setattr(player_prop_model_module, "_training_samples", lambda conn, market: (raw_samples, player_prop_model_module.TrainingSampleDiagnostics(included_rows=len(raw_samples), candidate_rows=len(raw_samples))))
+    monkeypatch.setattr(player_prop_model_module, "_residual_training_samples", lambda conn, market: (residual_samples, player_prop_model_module.TrainingSampleDiagnostics(included_rows=len(residual_samples), candidate_rows=len(residual_samples))))
+    monkeypatch.setattr(player_prop_model_module, "_final_projection_samples", lambda conn, market: (final_samples, player_prop_model_module.TrainingSampleDiagnostics(included_rows=len(final_samples), candidate_rows=len(final_samples))))
+
+    def fake_fit_model(market: str, samples: list[player_prop_model_module.TrainingSample], config=None):
+        intercept = 11.5 if not market.startswith("residual:") else 0.0
+        return RidgeModel(
+            market=market,
+            rows=len(samples),
+            intercept=intercept,
+            coefficients=[0.0 for _ in FEATURE_NAMES],
+            feature_means=[0.0 for _ in FEATURE_NAMES],
+            feature_scales=[1.0 for _ in FEATURE_NAMES],
+        )
+
+    monkeypatch.setattr(player_prop_model_module, "_fit_model_from_samples", fake_fit_model)
+
+    with connect() as conn:
+        metrics = player_prop_model_module.evaluate_market_model(conn, "points_assists")
+
+    assert metrics["final_rows"] == 20
+    assert metrics["final_mae"] is not None
+    assert metrics["final_baseline_mae"] is not None
+    assert metrics["final_mae_improvement"] is not None
+    assert float(metrics["final_mae_improvement"]) > 0
+
+
 def test_training_samples_skip_ambiguous_historical_team_identity() -> None:
     load_test_history()
     with connect() as conn:
@@ -2198,6 +2353,31 @@ def test_accuracy_analysis_uses_completed_player_stats() -> None:
     assert best[0].actual_result == 19.0
     assert best[0].correct_side is False
     assert worst[0].abs_error == 1.0
+
+
+def test_model_diagnostics_defaults_to_current_model_version(monkeypatch) -> None:
+    captured_versions: list[str] = []
+
+    class DummyReport:
+        total_predictions = 0
+        mae = None
+        rmse = None
+        bias = None
+        directional_accuracy = None
+        market_breakdown = {}
+
+    def fake_report(conn, model_version):
+        captured_versions.append(model_version)
+        return DummyReport()
+
+    monkeypatch.setattr(main_module, "build_accuracy_report", fake_report)
+    monkeypatch.setattr(main_module, "build_accuracy_report_for_days", lambda conn, days, model_version: fake_report(conn, model_version))
+
+    result = main_module.model_diagnostics()
+
+    assert result["model_version"] == MODEL_VERSION
+    assert captured_versions
+    assert all(version == MODEL_VERSION for version in captured_versions)
 
 
 def test_settle_completed_props_writes_actual_results() -> None:

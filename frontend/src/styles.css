@@ -1233,6 +1233,37 @@ tbody tr.selected {
   flex-wrap: wrap;
 }
 
+.special-calibration-table-wrap {
+  margin: 0 18px 18px;
+  overflow-x: auto;
+  border: 1px solid #eaecf0;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
+}
+
+.special-calibration-table {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+}
+
+.special-calibration-table th,
+.special-calibration-table td {
+  padding: 12px 14px;
+  border-bottom: 1px solid #eaecf0;
+}
+
+.special-calibration-table thead th {
+  background: #f8fafc;
+  color: #667085;
+  text-align: left;
+}
+
+.special-calibration-table td:nth-child(n + 2) {
+  font-variant-numeric: tabular-nums;
+}
+
 .roster-player-cell .player-label {
   font-size: 15px;
 }

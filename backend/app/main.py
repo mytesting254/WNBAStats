@@ -51,8 +51,22 @@ from .player_identity import player_is_skeletal, repair_shadow_player_identities
 from .projections import LiveRebuildResult, rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
-from .stocks_tracking import get_tracking_db_path, list_special_stocks, settle_stocks, snapshot_stocks
-from .player_prop_model import prewarm_model_cache
+from .stocks_tracking import get_tracking_db_path, list_special_stocks, prune_special_snapshots, settle_stocks, snapshot_stocks
+from .player_prop_model import (
+    MODEL_VERSION,
+    _blowout_adjustment,
+    _classify_minutes_role,
+    _days_between_game_dates,
+    _ewma_newest_first,
+    _historical_game_context,
+    _minute_volatility,
+    _player_training_rows,
+    _project_minutes,
+    _recent_trend,
+    _team_transition_features_from_player_rows,
+    _training_start_date,
+    prewarm_model_cache,
+)
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
 from .timezone_utils import APP_TIMEZONE, local_today_iso
 from .paths import get_cache_dir, get_db_path
@@ -1003,15 +1017,28 @@ def special_stocks() -> list[dict[str, Any]]:
     path = get_tracking_db_path()
     if not path.exists():
         return []
-    rows = list_special_stocks()
-    if not rows:
-        return []
+    visible_statuses = {"scheduled", "in_progress", "final"}
     visible_rows: list[dict[str, Any]] = []
     with connect() as conn:
+        prune_special_snapshots(conn)
+        rows = list_special_stocks()
+        if not rows:
+            return []
         for item in rows:
             game_id = item.get("game_id")
             player_id = item.get("player_id")
             if game_id is None or player_id is None:
+                continue
+            active_prop_row = conn.execute(
+                """
+                SELECT 1
+                FROM prop_lines
+                WHERE game_id = ? AND player_id = ?
+                LIMIT 1
+                """,
+                (int(game_id), int(player_id)),
+            ).fetchone()
+            if active_prop_row is None:
                 continue
             game_row = conn.execute(
                 """
@@ -1051,11 +1078,15 @@ def special_stocks() -> list[dict[str, Any]]:
                 """,
                 (int(player_id), int(game_id)),
             ).fetchone()
-            if game_row is None or str(game_row["status"] or "").lower() != "scheduled":
+            if game_row is None:
+                continue
+            game_status = str(game_row["status"] or "").lower()
+            if game_status not in visible_statuses:
                 continue
             item["start_time"] = game_row["start_time"]
             item["home_team"] = game_row["home_team"]
             item["away_team"] = game_row["away_team"]
+            item["game_status"] = game_status
             item["position"] = game_row["position"]
             item["team"] = game_row["team"]
             item["team_logo_url"] = game_row["team_logo_url"]
@@ -1074,6 +1105,83 @@ def special_stocks() -> list[dict[str, Any]]:
             )
             visible_rows.append(item)
     return visible_rows
+
+
+@app.get("/api/special/stats")
+def special_stocks_stats() -> dict[str, Any]:
+    empty_buckets = [
+        {"label": "0-40%", "min_prob": 0.0, "max_prob": 0.4, "count": 0, "hits": 0, "avg_prob": None, "hit_rate": None},
+        {"label": "40-50%", "min_prob": 0.4, "max_prob": 0.5, "count": 0, "hits": 0, "avg_prob": None, "hit_rate": None},
+        {"label": "50-60%", "min_prob": 0.5, "max_prob": 0.6, "count": 0, "hits": 0, "avg_prob": None, "hit_rate": None},
+        {"label": "60%+", "min_prob": 0.6, "max_prob": None, "count": 0, "hits": 0, "avg_prob": None, "hit_rate": None},
+    ]
+    path = get_tracking_db_path()
+    if not path.exists():
+        return {
+            "total_latest": 0,
+            "settled_count": 0,
+            "pending_count": 0,
+            "hits_2_plus": 0,
+            "hit_rate_2_plus": None,
+            "avg_prob_2_plus": None,
+            "candidate_count_50_plus": 0,
+            "candidate_hits_2_plus": 0,
+            "candidate_hit_rate_2_plus": None,
+            "calibration_buckets": empty_buckets,
+        }
+    with connect() as conn:
+        prune_special_snapshots(conn)
+        rows = list_special_stocks()
+    settled_rows = [row for row in rows if row.get("actual_stocks") is not None]
+    pending_count = sum(1 for row in rows if row.get("actual_stocks") is None)
+    hits_2_plus = sum(1 for row in settled_rows if float(row.get("actual_stocks") or 0.0) >= 2.0)
+    avg_prob_2_plus = (
+        sum(float(row.get("stocks_prob_2_plus") or 0.0) for row in settled_rows) / len(settled_rows)
+        if settled_rows
+        else None
+    )
+    candidate_rows = [row for row in settled_rows if float(row.get("stocks_prob_2_plus") or 0.0) >= 0.5]
+    candidate_hits_2_plus = sum(1 for row in candidate_rows if float(row.get("actual_stocks") or 0.0) >= 2.0)
+    bucket_defs = [
+        ("0-40%", 0.0, 0.4),
+        ("40-50%", 0.4, 0.5),
+        ("50-60%", 0.5, 0.6),
+        ("60%+", 0.6, None),
+    ]
+    calibration_buckets: list[dict[str, Any]] = []
+    for label, min_prob, max_prob in bucket_defs:
+        bucket_rows = [
+            row for row in settled_rows
+            if float(row.get("stocks_prob_2_plus") or 0.0) >= min_prob
+            and (max_prob is None or float(row.get("stocks_prob_2_plus") or 0.0) < max_prob)
+        ]
+        bucket_hits = sum(1 for row in bucket_rows if float(row.get("actual_stocks") or 0.0) >= 2.0)
+        avg_bucket_prob = (
+            sum(float(row.get("stocks_prob_2_plus") or 0.0) for row in bucket_rows) / len(bucket_rows)
+            if bucket_rows
+            else None
+        )
+        calibration_buckets.append({
+            "label": label,
+            "min_prob": min_prob,
+            "max_prob": max_prob,
+            "count": len(bucket_rows),
+            "hits": bucket_hits,
+            "avg_prob": round(avg_bucket_prob, 4) if avg_bucket_prob is not None else None,
+            "hit_rate": round(bucket_hits / len(bucket_rows), 4) if bucket_rows else None,
+        })
+    return {
+        "total_latest": len(rows),
+        "settled_count": len(settled_rows),
+        "pending_count": pending_count,
+        "hits_2_plus": hits_2_plus,
+        "hit_rate_2_plus": round(hits_2_plus / len(settled_rows), 4) if settled_rows else None,
+        "avg_prob_2_plus": round(avg_prob_2_plus, 4) if avg_prob_2_plus is not None else None,
+        "candidate_count_50_plus": len(candidate_rows),
+        "candidate_hits_2_plus": candidate_hits_2_plus,
+        "candidate_hit_rate_2_plus": round(candidate_hits_2_plus / len(candidate_rows), 4) if candidate_rows else None,
+        "calibration_buckets": calibration_buckets,
+    }
 
 
 @app.get("/api/ops/health")
@@ -4232,7 +4340,7 @@ def performance_timeline(limit: int = 30) -> list[dict]:
 
 
 @app.get("/api/model-diagnostics")
-def model_diagnostics(model_version: str = "adaptive-context-v1", windows: str = "7,14,30") -> dict:
+def model_diagnostics(model_version: str = MODEL_VERSION, windows: str = "7,14,30") -> dict:
     parsed_windows = []
     for item in windows.split(","):
         token = item.strip()
@@ -4277,8 +4385,148 @@ def model_diagnostics(model_version: str = "adaptive-context-v1", windows: str =
     }
 
 
+def _minutes_metric_summary(rows: list[dict[str, float | str | int | None]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "rows": 0,
+            "learned_mae": None,
+            "heuristic_mae": None,
+            "recent5_mae": None,
+            "recent10_mae": None,
+            "recent_blend_mae": None,
+            "learned_bias": None,
+            "heuristic_bias": None,
+        }
+    count = len(rows)
+    return {
+        "rows": count,
+        "learned_mae": round(sum(abs(float(row["learned_error"])) for row in rows) / count, 3),
+        "heuristic_mae": round(sum(abs(float(row["heuristic_error"])) for row in rows) / count, 3),
+        "recent5_mae": round(sum(abs(float(row["recent5_error"])) for row in rows) / count, 3),
+        "recent10_mae": round(sum(abs(float(row["recent10_error"])) for row in rows) / count, 3),
+        "recent_blend_mae": round(sum(abs(float(row["recent_blend_error"])) for row in rows) / count, 3),
+        "learned_bias": round(sum(float(row["learned_error"]) for row in rows) / count, 3),
+        "heuristic_bias": round(sum(float(row["heuristic_error"]) for row in rows) / count, 3),
+    }
+
+
+@app.get("/api/minutes-diagnostics")
+def minutes_diagnostics(start_date: str | None = None) -> dict[str, Any]:
+    evaluation_start = (start_date or "").strip()
+    if evaluation_start:
+        try:
+            datetime.fromisoformat(evaluation_start[:10])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid start_date: {evaluation_start}") from exc
+
+    with connect() as conn:
+        effective_start = evaluation_start or conn.execute("SELECT DATE(?) AS d", (_training_start_date(),)).fetchone()["d"]
+        player_rows_by_id: dict[int, list[Any]] = {}
+        rows = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
+        eval_rows: list[dict[str, float | str | int | None]] = []
+        for player in rows:
+            player_id = int(player["id"])
+            training_rows = _player_training_rows(conn, player_id)
+            player_rows_by_id[player_id] = training_rows
+            minutes_history = [float(row["minutes"] or 0.0) for row in training_rows]
+            for idx in range(5, len(training_rows)):
+                current = training_rows[idx]
+                game_date = str(current["game_date"] or "")
+                if game_date[:10] < str(effective_start):
+                    continue
+                newest_minutes = list(reversed(minutes_history[max(0, idx - 10):idx]))
+                if len(newest_minutes) < 5:
+                    continue
+                previous_game_date = str(training_rows[idx - 1]["game_date"]) if idx > 0 else None
+                context = _historical_game_context(current)
+                minute_volatility = _minute_volatility(newest_minutes)
+                ewma_minutes = _ewma_newest_first(newest_minutes, alpha=0.38)
+                minutes_trend = _recent_trend(newest_minutes)
+                recent_minutes_avg = sum(newest_minutes[:5]) / min(len(newest_minutes), 5)
+                last_10_minutes_avg = sum(newest_minutes) / len(newest_minutes)
+                recent_absence_days = _days_between_game_dates(previous_game_date, game_date)
+                blowout = _blowout_adjustment(conn, context, str(current["rotation_role"] or "starter"))
+                team_transition = _team_transition_features_from_player_rows(
+                    conn,
+                    player_id=player_id,
+                    team_id=int(current["team_id"]),
+                    player_rows=training_rows,
+                    row_index=idx,
+                )
+                learned_minutes, _ = _project_minutes(
+                    conn,
+                    player_id=player_id,
+                    game_id=int(current["game_id"]),
+                    rotation_role=str(current["rotation_role"] or "starter"),
+                    ewma_minutes=ewma_minutes,
+                    minutes_trend=minutes_trend,
+                    recent_minutes_avg=recent_minutes_avg,
+                    last_10_minutes_avg=last_10_minutes_avg,
+                    minute_volatility=minute_volatility,
+                    context=context,
+                    blowout_delta=float(blowout["minutes_delta"]),
+                    injury_delta=0.0,
+                    injury_status="available",
+                    recent_absence_days=recent_absence_days,
+                    team_transition=team_transition,
+                    before_game_date=game_date,
+                    allow_training=False,
+                )
+                role_state = _classify_minutes_role(
+                    rotation_role=str(current["rotation_role"] or "starter"),
+                    recent_minutes_avg=recent_minutes_avg,
+                    last_10_minutes_avg=last_10_minutes_avg,
+                    ewma_minutes=ewma_minutes,
+                    minutes_trend=minutes_trend,
+                    minute_volatility=minute_volatility,
+                    injury_status="available",
+                    injury_delta=0.0,
+                    recent_absence_days=recent_absence_days,
+                )
+                heuristic_minutes = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
+                recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
+                actual_minutes = float(current["minutes"] or 0.0)
+                eval_rows.append({
+                    "player_id": player_id,
+                    "game_id": int(current["game_id"]),
+                    "game_date": game_date,
+                    "season": game_date[:4],
+                    "role_bucket": role_state.bucket,
+                    "recent_transfer": 1 if float(team_transition[0]) > 0.0 and float(team_transition[0]) <= 10.0 else 0,
+                    "learned_error": learned_minutes - actual_minutes,
+                    "heuristic_error": heuristic_minutes - actual_minutes,
+                    "recent5_error": recent_minutes_avg - actual_minutes,
+                    "recent10_error": last_10_minutes_avg - actual_minutes,
+                    "recent_blend_error": recent_blend - actual_minutes,
+                })
+
+    by_role: dict[str, list[dict[str, float | str | int | None]]] = {}
+    by_season: dict[str, list[dict[str, float | str | int | None]]] = {}
+    recent_transfer_rows: list[dict[str, float | str | int | None]] = []
+    for row in eval_rows:
+        by_role.setdefault(str(row["role_bucket"]), []).append(row)
+        by_season.setdefault(str(row["season"]), []).append(row)
+        if int(row["recent_transfer"] or 0) == 1:
+            recent_transfer_rows.append(row)
+
+    return {
+        "model_version": MODEL_VERSION,
+        "evaluation_start": effective_start,
+        "overall": _minutes_metric_summary(eval_rows),
+        "recent_transfer": _minutes_metric_summary(recent_transfer_rows),
+        "by_role": {
+            role: _minutes_metric_summary(role_rows)
+            for role, role_rows in sorted(by_role.items())
+        },
+        "by_season": {
+            season: _minutes_metric_summary(season_rows)
+            for season, season_rows in sorted(by_season.items())
+        },
+    }
+
+
 @app.get("/api/model-loss-breakdown")
-def model_loss_breakdown(model_version: str = "adaptive-context-v1", top_n_players: int = 15) -> dict:
+def model_loss_breakdown(model_version: str = MODEL_VERSION, top_n_players: int = 15) -> dict:
     with connect() as conn:
         rows = conn.execute(
             """

@@ -70,6 +70,27 @@ export type SpecialStocksSnapshot = {
   settled_at?: string | null;
 };
 
+export type SpecialStocksPerformance = {
+  total_latest: number;
+  settled_count: number;
+  pending_count: number;
+  hits_2_plus: number;
+  hit_rate_2_plus: number | null;
+  avg_prob_2_plus: number | null;
+  candidate_count_50_plus: number;
+  candidate_hits_2_plus: number;
+  candidate_hit_rate_2_plus: number | null;
+  calibration_buckets: Array<{
+    label: string;
+    min_prob: number;
+    max_prob: number | null;
+    count: number;
+    hits: number;
+    avg_prob: number | null;
+    hit_rate: number | null;
+  }>;
+};
+
 export type SportsbookProp = {
   id: number;
   game_id: number | null;
@@ -749,6 +770,15 @@ export async function fetchSpecialStocks(): Promise<SpecialStocksSnapshot[]> {
   if (!response.ok) {
     const detail = await readErrorDetail(response);
     throw new Error(detail || "Failed to load special props");
+  }
+  return response.json();
+}
+
+export async function fetchSpecialStocksPerformance(): Promise<SpecialStocksPerformance> {
+  const response = await apiFetch("/api/special/stats");
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new Error(detail || "Failed to load special stats");
   }
   return response.json();
 }

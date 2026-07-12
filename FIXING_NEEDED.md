@@ -78,6 +78,7 @@
 - [x] Add explicit baseline comparisons in Model Lab / reporting against `last_10_avg` and the component model so learned-model gains are measurable.
 - [x] Separate model strategy by market depth: keep stronger learned/residual behavior for deeper markets and use more conservative shrinkage for sparse combo markets.
 - [x] Focus the next feature pass on minutes and role-change prediction quality before trying more complex regressors.
+- [ ] Finish the dedicated minutes-model improvement pass before more player-market complexity work. `2026-07-12` progress: the minutes layer is now materially safer for Specials and beats the old heuristic on the `2026` diagnostics window after team-transition features, guarded blend weights, explicit recency/baseline fallbacks, and a residual-on-`recent_blend` minutes architecture (`adaptive-context-v5-minutes-residual`). It is no longer blocking Specials work. Remaining gap: the final minutes path still trails the simple `recent_blend` baseline overall, so future minutes work should focus on better live-context features and direct evaluation of the exact production projection path rather than more baseline reshaping.
 - [x] Add stricter row-quality gates after diagnostics land: ambiguous player/team identity, incomplete context, and weak historical windows should be excluded intentionally instead of blended silently.
 - [ ] Review active-slate props after the residual-model rollout to see which markets still look too aggressive or too weak.
 - [ ] Re-run before/after projection comparison after the archetype restore to quantify how many rows moved.
@@ -138,6 +139,9 @@
   - signature-based reuse of unchanged `model_runs` so repeat local training returns instantly when the data has not changed
   - end-to-end `Special` tab support for model-only steals/blocks props, including backend list/generate endpoints, rebuild-time snapshot generation, settlement from ESPN box scores, and frontend review/generate UI
   - `Special` tab refinement: props now render in a rows-and-columns table with real matchup labels/tipoff times, and the last-five `stocks` outcomes plus minutes sit under the player name using the same inline recent-form strip style and color language as the regular props/parlay surfaces
+  - active `2026-07-12` minutes-model workstream: document and test the minutes layer holistically, wire team-transition features (`games_since_joining_team`, new-team minutes trend, teammate-minutes redistribution, rotation stability) into minutes training/inference, and treat minutes diagnostics as a gating requirement before broader learned-model promotion
+  - current minutes outcome on `2026-07-12`: live projection path is safer and no longer the obvious blocker for Specials, but `recent_blend` remains the strongest pure minutes baseline; the next minutes improvement should be richer live context, not another round of baseline math changes
+  - `Special` tab now ranks per-game boards by `2+ stocks` probability instead of raw `STL+BLK`, shows matchup-level `50%+` candidate counts, and aligns the table ordering with the hit-rate / calibration stats already exposed in the UI
 - Current data state checked on `2026-06-26`:
   - local `data/wnba.sqlite` now mirrors the deploy snapshot and includes imported `2024` ESPN history
   - active local history spans `2024-05-03` through `2026-09-24`

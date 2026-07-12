@@ -19,7 +19,7 @@ from .odds import american_to_implied_probability
 from .timezone_utils import APP_TIMEZONE
 
 
-MODEL_VERSION = "adaptive-context-v3-team-transition"
+MODEL_VERSION = "adaptive-context-v5-minutes-residual"
 MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
     "points",
@@ -84,6 +84,10 @@ MINUTES_FEATURE_NAMES = [
     "role_rotation",
     "role_bench",
     "role_fringe",
+    "games_since_joining_team",
+    "new_team_minutes_trend",
+    "teammate_minutes_redistribution",
+    "rotation_stability",
 ]
 
 MARKET_VOLATILITY_FLOORS = {
@@ -156,6 +160,21 @@ class TrainingSample:
     segment: str
     baseline: float
     is_recent_transfer: bool = False
+
+
+@dataclass(frozen=True)
+class FinalProjectionSample:
+    features: list[float]
+    target: float
+    game_date: str
+    season: str
+    segment: str
+    component_projection: float
+    line: float | None
+    over_odds: int | None
+    under_odds: int | None
+    sample_count: int
+    avg_minutes: float
 
 
 @dataclass(frozen=True)
@@ -702,6 +721,16 @@ def _shared_projection_context(
             [{"game_date": str(row["game_date"])} for row in history_rows],
             reference_game_date,
         ),
+        team_transition=(
+            _team_transition_features(
+                conn,
+                player_id=player_id,
+                team_id=int(context["team_id"]),
+                history_rows=history_rows,
+            )
+            if use_live_minutes_context
+            else None
+        ),
         before_game_date=before_game_date,
         allow_training=allow_training and use_live_minutes_context,
     )
@@ -861,6 +890,7 @@ def evaluate_market_model(
         }
     metrics = _evaluate_walk_forward_samples(market, samples, config=tuning)
     metrics["training_sample_diagnostics"] = diagnostics.to_dict()
+    metrics.update(_evaluate_final_projection_samples(conn, market, samples, config=tuning))
     transfer_samples = [sample for sample in samples if sample.is_recent_transfer]
     metrics["recent_transfer_evaluation"] = (
         _evaluate_walk_forward_samples(market, transfer_samples, config=tuning)
@@ -1069,7 +1099,10 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[Train
                     game_date=game_date,
                     season=game_date[:4],
                     segment=game_date[:7],
-                    baseline=float(features[FEATURE_NAMES.index("last_10_avg")]),
+                    # Compare learned walk-forward results to the same
+                    # component anchor that live inference builds on top of,
+                    # not to a simpler last-10 average proxy.
+                    baseline=float(features[FEATURE_NAMES.index("component_projection")]),
                     is_recent_transfer=_is_recent_transfer_training_row(rows, idx),
                 )
             )
@@ -1202,6 +1235,108 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[l
 def _residual_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
     samples, _diagnostics = _residual_training_samples(conn, market)
     return [(sample.features, sample.target) for sample in samples]
+
+
+def _final_projection_samples(conn: sqlite3.Connection, market: str) -> tuple[list[FinalProjectionSample], TrainingSampleDiagnostics]:
+    cache = _connection_training_cache_bucket(conn, "final_projection_samples")
+    cache_key = ("final", str(market))
+    if cache_key in cache:
+        return cache[cache_key]  # type: ignore[return-value]
+
+    samples: list[FinalProjectionSample] = []
+    candidate_rows = 0
+    skipped_before_training_start = 0
+    skipped_missing_history_window = 0
+    skipped_incomplete_context = 0
+    skipped_ambiguous_team_identity = 0
+    skipped_missing_snapshot = 0
+    training_start = _training_start_date()
+    rows = conn.execute(
+        """
+        SELECT
+            pl.player_id,
+            pl.game_id,
+            pl.market,
+            pl.line,
+            pl.over_odds,
+            pl.under_odds,
+            sp.actual_result,
+            g.game_date,
+            g.spread_home,
+            g.game_total
+        FROM settled_props sp
+        JOIN prop_lines pl ON pl.id = sp.prop_line_id
+        JOIN games g ON g.id = pl.game_id
+        WHERE pl.market = ?
+        ORDER BY g.game_date ASC, pl.id ASC
+        """,
+        (market,),
+    ).fetchall()
+
+    for row in rows:
+        candidate_rows += 1
+        game_date = str(row["game_date"])
+        if _before_training_start(game_date, training_start):
+            skipped_before_training_start += 1
+            continue
+        training_row = _player_training_row_for_game(conn, int(row["player_id"]), int(row["game_id"]))
+        if training_row is None or not _has_unambiguous_historical_team(training_row):
+            skipped_ambiguous_team_identity += 1
+            continue
+        if not _has_complete_training_context(row):
+            skipped_incomplete_context += 1
+            continue
+        recent_rows = _player_recent_feature_rows(
+            conn,
+            int(row["player_id"]),
+            game_date,
+            exclude_game_id=int(row["game_id"]),
+        )
+        recent_values = [_market_value(prior_row, market) for prior_row in recent_rows]
+        recent_minutes = [float(prior_row["minutes"]) for prior_row in recent_rows]
+        if not _has_strong_training_history_window(recent_values, recent_minutes):
+            skipped_missing_history_window += 1
+            continue
+        snapshot = feature_snapshot(
+            conn,
+            int(row["player_id"]),
+            market,
+            int(row["game_id"]),
+            before_game_date=game_date,
+            use_injury_context=False,
+            use_live_minutes_context=False,
+        )
+        if not snapshot.values:
+            skipped_missing_snapshot += 1
+            continue
+        sample_count, avg_minutes = _player_sample_quality(conn, int(row["player_id"]), int(row["game_id"]))
+        samples.append(
+            FinalProjectionSample(
+                features=snapshot.values,
+                target=float(row["actual_result"]),
+                game_date=game_date,
+                season=game_date[:4],
+                segment=game_date[:7],
+                component_projection=float(snapshot.component_projection),
+                line=float(row["line"]) if row["line"] is not None else None,
+                over_odds=int(row["over_odds"]) if row["over_odds"] is not None else None,
+                under_odds=int(row["under_odds"]) if row["under_odds"] is not None else None,
+                sample_count=int(sample_count),
+                avg_minutes=float(avg_minutes),
+            )
+        )
+
+    diagnostics = TrainingSampleDiagnostics(
+        candidate_rows=candidate_rows,
+        included_rows=len(samples),
+        skipped_before_training_start=skipped_before_training_start,
+        skipped_missing_history_window=skipped_missing_history_window,
+        skipped_incomplete_context=skipped_incomplete_context,
+        skipped_ambiguous_team_identity=skipped_ambiguous_team_identity,
+        skipped_missing_snapshot=skipped_missing_snapshot,
+    )
+    cache[cache_key] = (samples, diagnostics)
+    return samples, diagnostics
 
 
 def _has_complete_training_context(row: sqlite3.Row) -> bool:
@@ -1477,6 +1612,297 @@ def _evaluate_holdout_samples(
     }
 
 
+def _apply_market_context_projection(
+    base_projection: float,
+    *,
+    market: str,
+    line: float | None,
+    over_odds: int | None,
+    under_odds: int | None,
+    market_rows: int,
+    sample_count: int,
+    avg_minutes: float,
+    config: ModelTuningConfig | None = None,
+) -> float:
+    projection = float(base_projection)
+    if line is None:
+        return projection
+    market_weight = _market_line_weight(
+        market,
+        market_rows,
+        sample_count,
+        avg_minutes,
+        config=config,
+    )
+    projection = ((1 - market_weight) * projection) + (market_weight * float(line))
+    if over_odds is not None and under_odds is not None:
+        over_implied = american_to_implied_probability(int(over_odds))
+        under_implied = american_to_implied_probability(int(under_odds))
+        no_vig_mid = (over_implied / max(over_implied + under_implied, 0.01)) - 0.5
+        projection += no_vig_mid * _market_price_nudge(market)
+    return projection
+
+
+def _evaluate_final_projection_samples(
+    conn: sqlite3.Connection,
+    market: str,
+    training_samples: list[TrainingSample],
+    *,
+    config: ModelTuningConfig,
+) -> dict[str, object]:
+    final_samples, diagnostics = _final_projection_samples(conn, market)
+    if len(final_samples) < 20:
+        return {
+            "final_rows": 0,
+            "final_mae": None,
+            "final_rmse": None,
+            "final_bias": None,
+            "final_directional_accuracy": None,
+            "final_baseline_mae": None,
+            "final_baseline_rmse": None,
+            "final_baseline_bias": None,
+            "final_baseline_directional_accuracy": None,
+            "final_mae_improvement": None,
+            "final_rmse_improvement": None,
+            "final_directional_accuracy_improvement": None,
+            "final_segment_count": 0,
+            "final_skipped_segments": 0,
+            "final_segments": [],
+            "final_seasons": [],
+            "final_projection_sample_diagnostics": diagnostics.to_dict(),
+        }
+
+    residual_samples, _residual_diagnostics = _residual_training_samples(conn, market)
+    raw_by_segment: dict[str, list[TrainingSample]] = {}
+    for sample in training_samples:
+        raw_by_segment.setdefault(sample.segment, []).append(sample)
+    residual_by_segment: dict[str, list[TrainingSample]] = {}
+    for sample in residual_samples:
+        residual_by_segment.setdefault(sample.segment, []).append(sample)
+    final_by_segment: dict[str, list[FinalProjectionSample]] = {}
+    for sample in final_samples:
+        final_by_segment.setdefault(sample.segment, []).append(sample)
+
+    raw_segments = sorted(raw_by_segment)
+    residual_segments = sorted(residual_by_segment)
+    final_segments = sorted(final_by_segment)
+
+    raw_cursor = 0
+    residual_cursor = 0
+    raw_history: list[TrainingSample] = []
+    residual_history: list[TrainingSample] = []
+    evaluated_segments: list[dict[str, object]] = []
+    season_rollup: dict[str, dict[str, float | int]] = {}
+    errors: list[float] = []
+    squared_errors: list[float] = []
+    absolute_errors: list[float] = []
+    baseline_errors: list[float] = []
+    baseline_squared_errors: list[float] = []
+    baseline_absolute_errors: list[float] = []
+    direction_hits = 0
+    skipped_segments = 0
+
+    for segment in final_segments:
+        while raw_cursor < len(raw_segments) and raw_segments[raw_cursor] < segment:
+            raw_history.extend(raw_by_segment[raw_segments[raw_cursor]])
+            raw_cursor += 1
+        while residual_cursor < len(residual_segments) and residual_segments[residual_cursor] < segment:
+            residual_history.extend(residual_by_segment[residual_segments[residual_cursor]])
+            residual_cursor += 1
+
+        if len(raw_history) < 20:
+            skipped_segments += 1
+            continue
+        raw_model = _fit_model_from_samples(market, raw_history, config=config)
+        if raw_model is None:
+            skipped_segments += 1
+            continue
+        residual_model = (
+            _fit_model_from_samples(f"residual:{market}", residual_history, config=config)
+            if len(residual_history) >= 20
+            else None
+        )
+
+        segment_samples = final_by_segment[segment]
+        segment_errors: list[float] = []
+        segment_squared_errors: list[float] = []
+        segment_absolute_errors: list[float] = []
+        segment_baseline_errors: list[float] = []
+        segment_baseline_squared_errors: list[float] = []
+        segment_baseline_absolute_errors: list[float] = []
+        segment_direction_hits = 0
+        season = segment_samples[0].season
+
+        for sample in segment_samples:
+            learned = max(0.0, _predict(raw_model, sample.features))
+            snapshot = FeatureSnapshot(sample.features, sample.component_projection, "evaluation")
+            learned = _stabilize_combo_market_projection(learned, snapshot, market)
+            learned, _ = _stabilize_learned_projection(learned, snapshot, market, config=config)
+            prediction = _apply_market_context_projection(
+                learned,
+                market=market,
+                line=sample.line,
+                over_odds=sample.over_odds,
+                under_odds=sample.under_odds,
+                market_rows=raw_model.rows,
+                sample_count=sample.sample_count,
+                avg_minutes=sample.avg_minutes,
+                config=config,
+            )
+            if residual_model is not None and sample.line is not None:
+                residual_prediction = _predict(residual_model, sample.features)
+                residual_projection = float(sample.line) + residual_prediction
+                residual_weight = _residual_market_weight(
+                    market,
+                    residual_model.rows,
+                    sample.sample_count,
+                    sample.avg_minutes,
+                    config=config,
+                )
+                prediction = ((1 - residual_weight) * prediction) + (residual_weight * residual_projection)
+
+            baseline_projection = _apply_market_context_projection(
+                sample.component_projection,
+                market=market,
+                line=sample.line,
+                over_odds=sample.over_odds,
+                under_odds=sample.under_odds,
+                market_rows=raw_model.rows,
+                sample_count=sample.sample_count,
+                avg_minutes=sample.avg_minutes,
+                config=config,
+            )
+
+            error = prediction - sample.target
+            baseline_error = baseline_projection - sample.target
+            errors.append(error)
+            squared_errors.append(error * error)
+            absolute_errors.append(abs(error))
+            baseline_errors.append(baseline_error)
+            baseline_squared_errors.append(baseline_error * baseline_error)
+            baseline_absolute_errors.append(abs(baseline_error))
+            segment_errors.append(error)
+            segment_squared_errors.append(error * error)
+            segment_absolute_errors.append(abs(error))
+            segment_baseline_errors.append(baseline_error)
+            segment_baseline_squared_errors.append(baseline_error * baseline_error)
+            segment_baseline_absolute_errors.append(abs(baseline_error))
+            if (prediction >= baseline_projection and sample.target >= baseline_projection) or (
+                prediction < baseline_projection and sample.target < baseline_projection
+            ):
+                direction_hits += 1
+                segment_direction_hits += 1
+
+        row_count = len(segment_samples)
+        segment_metric = {
+            "segment": segment,
+            "season": season,
+            "rows": row_count,
+            "mae": round(sum(segment_absolute_errors) / row_count, 3),
+            "rmse": round(math.sqrt(sum(segment_squared_errors) / row_count), 3),
+            "bias": round(sum(segment_errors) / row_count, 3),
+            "directional_accuracy": round(segment_direction_hits / row_count, 3),
+            "baseline_mae": round(sum(segment_baseline_absolute_errors) / row_count, 3),
+            "baseline_rmse": round(math.sqrt(sum(segment_baseline_squared_errors) / row_count), 3),
+            "baseline_bias": round(sum(segment_baseline_errors) / row_count, 3),
+            "baseline_directional_accuracy": None,
+        }
+        segment_metric["mae_improvement"] = round(float(segment_metric["baseline_mae"]) - float(segment_metric["mae"]), 3)
+        segment_metric["rmse_improvement"] = round(float(segment_metric["baseline_rmse"]) - float(segment_metric["rmse"]), 3)
+        segment_metric["directional_accuracy_improvement"] = None
+        evaluated_segments.append(segment_metric)
+
+        season_bucket = season_rollup.setdefault(
+            season,
+            {
+                "rows": 0,
+                "mae_sum": 0.0,
+                "rmse_sum": 0.0,
+                "bias_sum": 0.0,
+                "direction_sum": 0.0,
+                "baseline_mae_sum": 0.0,
+                "baseline_rmse_sum": 0.0,
+                "baseline_bias_sum": 0.0,
+            },
+        )
+        season_bucket["rows"] = int(season_bucket["rows"]) + row_count
+        season_bucket["mae_sum"] = float(season_bucket["mae_sum"]) + float(segment_metric["mae"]) * row_count
+        season_bucket["rmse_sum"] = float(season_bucket["rmse_sum"]) + float(segment_metric["rmse"]) * row_count
+        season_bucket["bias_sum"] = float(season_bucket["bias_sum"]) + float(segment_metric["bias"]) * row_count
+        season_bucket["direction_sum"] = float(season_bucket["direction_sum"]) + float(segment_metric["directional_accuracy"]) * row_count
+        season_bucket["baseline_mae_sum"] = float(season_bucket["baseline_mae_sum"]) + float(segment_metric["baseline_mae"]) * row_count
+        season_bucket["baseline_rmse_sum"] = float(season_bucket["baseline_rmse_sum"]) + float(segment_metric["baseline_rmse"]) * row_count
+        season_bucket["baseline_bias_sum"] = float(season_bucket["baseline_bias_sum"]) + float(segment_metric["baseline_bias"]) * row_count
+
+    row_count = len(errors)
+    if row_count == 0:
+        return {
+            "final_rows": 0,
+            "final_mae": None,
+            "final_rmse": None,
+            "final_bias": None,
+            "final_directional_accuracy": None,
+            "final_baseline_mae": None,
+            "final_baseline_rmse": None,
+            "final_baseline_bias": None,
+            "final_baseline_directional_accuracy": None,
+            "final_mae_improvement": None,
+            "final_rmse_improvement": None,
+            "final_directional_accuracy_improvement": None,
+            "final_segment_count": len(evaluated_segments),
+            "final_skipped_segments": skipped_segments,
+            "final_segments": evaluated_segments,
+            "final_seasons": [],
+            "final_projection_sample_diagnostics": diagnostics.to_dict(),
+        }
+
+    seasons = []
+    for season, bucket in sorted(season_rollup.items()):
+        season_rows = int(bucket["rows"])
+        season_metric = {
+            "season": season,
+            "rows": season_rows,
+            "mae": round(float(bucket["mae_sum"]) / season_rows, 3),
+            "rmse": round(float(bucket["rmse_sum"]) / season_rows, 3),
+            "bias": round(float(bucket["bias_sum"]) / season_rows, 3),
+            "directional_accuracy": round(float(bucket["direction_sum"]) / season_rows, 3),
+            "baseline_mae": round(float(bucket["baseline_mae_sum"]) / season_rows, 3),
+            "baseline_rmse": round(float(bucket["baseline_rmse_sum"]) / season_rows, 3),
+            "baseline_bias": round(float(bucket["baseline_bias_sum"]) / season_rows, 3),
+            "baseline_directional_accuracy": None,
+        }
+        season_metric["mae_improvement"] = round(float(season_metric["baseline_mae"]) - float(season_metric["mae"]), 3)
+        season_metric["rmse_improvement"] = round(float(season_metric["baseline_rmse"]) - float(season_metric["rmse"]), 3)
+        season_metric["directional_accuracy_improvement"] = None
+        seasons.append(season_metric)
+
+    baseline_mae = sum(baseline_absolute_errors) / row_count
+    baseline_rmse = math.sqrt(sum(baseline_squared_errors) / row_count)
+    baseline_bias = sum(baseline_errors) / row_count
+    mae = sum(absolute_errors) / row_count
+    rmse = math.sqrt(sum(squared_errors) / row_count)
+    directional_accuracy = direction_hits / row_count
+    return {
+        "final_rows": row_count,
+        "final_mae": round(mae, 3),
+        "final_rmse": round(rmse, 3),
+        "final_bias": round(sum(errors) / row_count, 3),
+        "final_directional_accuracy": round(directional_accuracy, 3),
+        "final_baseline_mae": round(baseline_mae, 3),
+        "final_baseline_rmse": round(baseline_rmse, 3),
+        "final_baseline_bias": round(baseline_bias, 3),
+        "final_baseline_directional_accuracy": None,
+        "final_mae_improvement": round(baseline_mae - mae, 3),
+        "final_rmse_improvement": round(baseline_rmse - rmse, 3),
+        "final_directional_accuracy_improvement": None,
+        "final_segment_count": len(evaluated_segments),
+        "final_skipped_segments": skipped_segments,
+        "final_segments": evaluated_segments,
+        "final_seasons": seasons,
+        "final_projection_sample_diagnostics": diagnostics.to_dict(),
+    }
+
+
 def _historical_training_features(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -1740,6 +2166,13 @@ def _minutes_training_rows(
             )
             if bucket_filter is not None and role_state.bucket != bucket_filter:
                 continue
+            team_transition = _team_transition_features_from_player_rows(
+                conn,
+                player_id=int(player["id"]),
+                team_id=int(context["team_id"]),
+                player_rows=rows,
+                row_index=idx,
+            )
             features = _minutes_feature_values(
                 role_state=role_state,
                 ewma_minutes=ewma_minutes,
@@ -1752,8 +2185,13 @@ def _minutes_training_rows(
                 spread_abs=abs(float(context["team_spread"])) if context["team_spread"] is not None else 0.0,
                 injury_delta=float(injury["minutes_delta"]),
                 recent_absence_days=recent_absence_days,
+                team_transition=team_transition,
             )
-            samples.append((features, float(current["minutes"])))
+            recent_blend = _minutes_recent_blend(
+                recent_minutes_avg=recent_minutes_avg,
+                last_10_minutes_avg=last_10_minutes_avg,
+            )
+            samples.append((features, float(current["minutes"]) - recent_blend))
     return samples
 
 
@@ -1790,10 +2228,20 @@ def _project_minutes(
     injury_delta: float,
     injury_status: str,
     recent_absence_days: float | None,
+    team_transition: list[float] | None = None,
     before_game_date: str | None,
     allow_training: bool = True,
 ) -> tuple[float, str]:
     base_heuristic = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
+    recent_blend = _minutes_recent_blend(
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+    )
+    recency_anchor = _minutes_recency_anchor(
+        ewma_minutes=ewma_minutes,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+    )
     hard_statuses = {"out", "inactive", "suspended", "unavailable"}
     if str(injury_status or "").strip().lower() in hard_statuses:
         return 0.0, "hard rule out"
@@ -1839,16 +2287,73 @@ def _project_minutes(
                 spread_abs=abs(float(context.get("team_spread"))) if context.get("team_spread") is not None else 0.0,
                 injury_delta=injury_delta,
                 recent_absence_days=recent_absence_days,
+                team_transition=team_transition,
             )
-            learned_minutes = max(0.0, _predict(minutes_model, minutes_features))
-            blend_weight = _minutes_model_weight(
+            learned_delta = _predict(minutes_model, minutes_features)
+            learned_minutes = max(0.0, recent_blend + learned_delta)
+            base_blend_weight = _minutes_model_weight(
                 rows=minutes_model.rows,
                 role_bucket=role_state.bucket,
                 minute_volatility=minute_volatility,
                 recent_absence_days=recent_absence_days,
             )
+            blend_weight = _minutes_earned_blend_weight(
+                base_weight=base_blend_weight,
+                learned_minutes=learned_minutes,
+                recency_anchor=recency_anchor,
+                role_bucket=role_state.bucket,
+                minute_volatility=minute_volatility,
+                recent_absence_days=recent_absence_days,
+                recent_drop=role_state.recent_drop,
+                recent_spike=role_state.recent_spike,
+                injury_delta=injury_delta,
+            )
             projected = ((1.0 - blend_weight) * projected) + (blend_weight * learned_minutes)
-            blend_note = f"learned blend {blend_weight:.0%} ({model_scope})"
+            blend_note = f"learned blend {blend_weight:.0%}/{base_blend_weight:.0%} ({model_scope}, delta {learned_delta:+.1f})"
+    anchor_weight = _minutes_recency_anchor_weight(
+        role_bucket=role_state.bucket,
+        minute_volatility=minute_volatility,
+        recent_absence_days=recent_absence_days,
+        recent_drop=role_state.recent_drop,
+        recent_spike=role_state.recent_spike,
+        injury_delta=injury_delta,
+    )
+    projected = ((1.0 - anchor_weight) * projected) + (anchor_weight * recency_anchor)
+    reference_baseline = _minutes_reference_baseline(
+        role_state=role_state,
+        base_heuristic=base_heuristic,
+        recent_blend=recent_blend,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minutes_trend=minutes_trend,
+        injury_status=injury_status,
+        injury_delta=injury_delta,
+        recent_absence_days=recent_absence_days,
+    )
+    baseline_guard_weight = _minutes_baseline_guard_weight(
+        learned_minutes=learned_minutes,
+        recency_anchor=recency_anchor,
+        reference_baseline=reference_baseline,
+        role_bucket=role_state.bucket,
+        minute_volatility=minute_volatility,
+        recent_absence_days=recent_absence_days,
+        recent_drop=role_state.recent_drop,
+        recent_spike=role_state.recent_spike,
+        injury_delta=injury_delta,
+    )
+    projected = ((1.0 - baseline_guard_weight) * projected) + (baseline_guard_weight * reference_baseline)
+    projected = _apply_minutes_recency_floor(
+        projected=projected,
+        role_state=role_state,
+        recency_anchor=recency_anchor,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minutes_trend=minutes_trend,
+        injury_status=injury_status,
+        injury_delta=injury_delta,
+        recent_absence_days=recent_absence_days,
+        team_transition=team_transition,
+    )
     lower_bound, upper_bound = _role_aware_minutes_bounds(
         role_state,
         last_10_minutes_avg=last_10_minutes_avg,
@@ -1874,8 +2379,149 @@ def _project_minutes(
     else:
         venue_note = ""
     learned_note = f", learned {learned_minutes:.1f}" if learned_minutes is not None else ""
+    anchor_note = f", recency anchor {recency_anchor:.1f} @ {anchor_weight:.0%}"
+    baseline_note = f", baseline {reference_baseline:.1f} @ {baseline_guard_weight:.0%}"
     hard_rule_suffix = f", {'; '.join(hard_rule_notes)}" if hard_rule_notes else ""
-    return projected, f"{role_state.bucket} bounds {lower_bound:.1f}-{upper_bound:.1f}{venue_note}, {blend_note}{learned_note}{hard_rule_suffix}"
+    return projected, f"{role_state.bucket} bounds {lower_bound:.1f}-{upper_bound:.1f}{venue_note}, {blend_note}{learned_note}{anchor_note}{baseline_note}{hard_rule_suffix}"
+
+
+def _minutes_recency_anchor(
+    *,
+    ewma_minutes: float,
+    recent_minutes_avg: float,
+    last_10_minutes_avg: float,
+) -> float:
+    return (0.65 * recent_minutes_avg) + (0.25 * last_10_minutes_avg) + (0.10 * ewma_minutes)
+
+
+def _minutes_recent_blend(
+    *,
+    recent_minutes_avg: float,
+    last_10_minutes_avg: float,
+) -> float:
+    return (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
+
+
+def _minutes_recency_anchor_weight(
+    *,
+    role_bucket: str,
+    minute_volatility: float,
+    recent_absence_days: float | None,
+    recent_drop: bool,
+    recent_spike: bool,
+    injury_delta: float,
+) -> float:
+    if role_bucket == "core_starter":
+        weight = 0.16
+    elif role_bucket in {"starter_volatile", "rotation"}:
+        weight = 0.22
+    else:
+        weight = 0.30
+    if minute_volatility >= 8.0:
+        weight += 0.06
+    if recent_absence_days is not None and recent_absence_days >= 7:
+        weight += 0.04
+    if recent_drop:
+        weight -= 0.05
+    if recent_spike and injury_delta > 0:
+        weight -= 0.08
+    return max(0.10, min(0.42, weight))
+
+
+def _minutes_reference_baseline(
+    *,
+    role_state: MinutesRoleState,
+    base_heuristic: float,
+    recent_blend: float,
+    recent_minutes_avg: float,
+    last_10_minutes_avg: float,
+    minutes_trend: float,
+    injury_status: str,
+    injury_delta: float,
+    recent_absence_days: float | None,
+) -> float:
+    status = str(injury_status or "").strip().lower()
+    baseline = recent_blend
+    if role_state.recent_drop or minutes_trend <= -4.0:
+        baseline = (0.55 * recent_blend) + (0.45 * base_heuristic)
+    if recent_absence_days is not None and recent_absence_days >= 7:
+        baseline = (0.50 * baseline) + (0.50 * base_heuristic)
+    if status in {"questionable", "gtd", "doubtful"}:
+        baseline = min(baseline, max(base_heuristic, recent_minutes_avg * 0.9))
+    if role_state.recent_spike and injury_delta > 0:
+        baseline = max(baseline, recent_minutes_avg - 0.5)
+    if role_state.bucket == "core_starter":
+        baseline = max(baseline, last_10_minutes_avg - 1.5)
+    return baseline
+
+
+def _minutes_baseline_guard_weight(
+    *,
+    learned_minutes: float | None,
+    recency_anchor: float,
+    reference_baseline: float,
+    role_bucket: str,
+    minute_volatility: float,
+    recent_absence_days: float | None,
+    recent_drop: bool,
+    recent_spike: bool,
+    injury_delta: float,
+) -> float:
+    if role_bucket == "core_starter":
+        weight = 0.10
+    elif role_bucket in {"starter_volatile", "rotation"}:
+        weight = 0.16
+    else:
+        weight = 0.24
+    if minute_volatility >= 8.0:
+        weight += 0.04
+    if recent_absence_days is not None and recent_absence_days >= 7:
+        weight += 0.05
+    if recent_drop:
+        weight -= 0.04
+    if recent_spike and injury_delta > 0:
+        weight -= 0.08
+    if learned_minutes is not None:
+        deviation = abs(learned_minutes - recency_anchor)
+        baseline_gap = abs(learned_minutes - reference_baseline)
+        if baseline_gap >= 4.0:
+            weight += 0.10
+        elif baseline_gap >= 2.5:
+            weight += 0.05
+        if deviation >= 6.0:
+            weight += 0.05
+    return max(0.06, min(0.34, weight))
+
+
+def _apply_minutes_recency_floor(
+    *,
+    projected: float,
+    role_state: MinutesRoleState,
+    recency_anchor: float,
+    recent_minutes_avg: float,
+    last_10_minutes_avg: float,
+    minutes_trend: float,
+    injury_status: str,
+    injury_delta: float,
+    recent_absence_days: float | None,
+    team_transition: list[float] | None,
+) -> float:
+    status = str(injury_status or "").strip().lower()
+    if status in {"questionable", "gtd", "doubtful"}:
+        return projected
+    if recent_absence_days is not None and recent_absence_days >= 7:
+        return projected
+    floor = recency_anchor - (2.0 if role_state.bucket in {"bench", "fringe"} else 2.5)
+    if role_state.bucket == "core_starter":
+        floor = max(floor, last_10_minutes_avg - 3.0)
+    if role_state.recent_spike and injury_delta > 0:
+        floor = max(floor, recent_minutes_avg - 1.0)
+    games_since_joining_team = float((team_transition or [0.0])[0] if team_transition else 0.0)
+    if 0.0 < games_since_joining_team <= 10.0:
+        floor = max(floor, recent_minutes_avg - 1.5)
+    if role_state.recent_drop and minutes_trend <= -4.0:
+        floor -= 1.5
+    return max(projected, max(role_state.lower_bound, floor))
 
 
 def _venue_minutes_adjustment(
@@ -2146,6 +2792,7 @@ def _minutes_feature_values(
     spread_abs: float,
     injury_delta: float,
     recent_absence_days: float | None,
+    team_transition: list[float] | None = None,
 ) -> list[float]:
     role_flags = {
         "core_starter": 0.0,
@@ -2158,6 +2805,9 @@ def _minutes_feature_values(
     recent_change_ratio = recent_minutes_avg / max(last_10_minutes_avg, 1.0)
     recent_vs_ewma_gap = recent_minutes_avg - ewma_minutes
     absence_return_flag = 1.0 if recent_absence_days is not None and recent_absence_days >= 7 else 0.0
+    normalized_team_transition = list(team_transition or [0.0, 0.0, 0.0, 0.5])
+    if len(normalized_team_transition) < 4:
+        normalized_team_transition = (normalized_team_transition + [0.0, 0.0, 0.0, 0.5])[:4]
     return [
         ewma_minutes,
         recent_minutes_avg,
@@ -2177,6 +2827,10 @@ def _minutes_feature_values(
         role_flags["rotation"],
         role_flags["bench"],
         role_flags["fringe"],
+        float(normalized_team_transition[0]),
+        float(normalized_team_transition[1]),
+        float(normalized_team_transition[2]),
+        float(normalized_team_transition[3]),
     ]
 
 
@@ -2188,18 +2842,48 @@ def _minutes_model_weight(
     recent_absence_days: float | None,
 ) -> float:
     if rows >= 400:
-        weight = 0.42
+        weight = 0.36
     elif rows >= 150:
-        weight = 0.32
+        weight = 0.27
     else:
-        weight = 0.22
+        weight = 0.18
     if role_bucket in {"bench", "fringe"}:
-        weight -= 0.06
+        weight -= 0.08
     if minute_volatility >= 8.0:
-        weight -= 0.05
+        weight -= 0.06
     if recent_absence_days is not None and recent_absence_days >= 7:
         weight -= 0.08
-    return max(0.12, min(0.50, weight))
+    return max(0.08, min(0.42, weight))
+
+
+def _minutes_earned_blend_weight(
+    *,
+    base_weight: float,
+    learned_minutes: float,
+    recency_anchor: float,
+    role_bucket: str,
+    minute_volatility: float,
+    recent_absence_days: float | None,
+    recent_drop: bool,
+    recent_spike: bool,
+    injury_delta: float,
+) -> float:
+    tolerance = 2.2 if role_bucket == "core_starter" else 2.8 if role_bucket in {"starter_volatile", "rotation"} else 3.2
+    if minute_volatility >= 8.0:
+        tolerance += 0.5
+    if recent_absence_days is not None and recent_absence_days >= 7:
+        tolerance += 0.5
+    downside_gap = max(recency_anchor - learned_minutes, 0.0)
+    upside_gap = max(learned_minutes - recency_anchor, 0.0)
+    downside_penalty = min(0.72, downside_gap / max(tolerance, 0.5))
+    upside_penalty = min(0.45, upside_gap / max(tolerance * 1.5, 0.5))
+    penalty = max(downside_penalty, upside_penalty)
+    if recent_drop:
+        penalty *= 0.82
+    if recent_spike and injury_delta > 0:
+        penalty *= 0.78
+    earned_weight = base_weight * (1.0 - penalty)
+    return max(0.03, min(base_weight, earned_weight))
 
 
 def _training_rows_slow(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:

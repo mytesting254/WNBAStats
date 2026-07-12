@@ -77,6 +77,58 @@ def _poisson_at_least(mean: float, threshold: int) -> float:
     return 1 - sum(math.exp(-safe_mean) * safe_mean**k / math.factorial(k) for k in range(threshold))
 
 
+def _calibrated_stocks_two_plus_probability(
+    tracking: sqlite3.Connection,
+    *,
+    projected_stocks: float,
+    game_date: str,
+) -> float:
+    raw_probability = _poisson_at_least(projected_stocks, 2)
+    rows = tracking.execute(
+        """
+        WITH settled_latest AS (
+            SELECT
+                ps.projected_stocks,
+                st.actual_steals,
+                st.actual_blocks,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ps.game_id, ps.player_id
+                    ORDER BY ps.captured_at DESC, ps.id DESC
+                ) AS snapshot_rank
+            FROM projection_snapshots ps
+            JOIN settlements st ON st.snapshot_id = ps.id
+            WHERE ps.game_date < ?
+        )
+        SELECT
+            projected_stocks,
+            actual_steals,
+            actual_blocks
+        FROM settled_latest
+        WHERE snapshot_rank = 1
+        ORDER BY ABS(projected_stocks - ?) ASC
+        LIMIT 80
+        """,
+        (str(game_date), float(projected_stocks)),
+    ).fetchall()
+    if len(rows) < 20:
+        return raw_probability
+    hits = 0
+    weighted_hits = 0.0
+    total_weight = 0.0
+    for row in rows:
+        actual_stocks = float(row["actual_steals"] or 0.0) + float(row["actual_blocks"] or 0.0)
+        hit = 1.0 if actual_stocks >= 2.0 else 0.0
+        hits += int(hit)
+        distance = abs(float(row["projected_stocks"] or 0.0) - float(projected_stocks))
+        weight = 1.0 / (1.0 + distance)
+        weighted_hits += hit * weight
+        total_weight += weight
+    empirical_probability = weighted_hits / total_weight if total_weight > 0 else (hits / len(rows))
+    sample_weight = min(0.75, len(rows) / 80.0)
+    blended_probability = ((1.0 - sample_weight) * raw_probability) + (sample_weight * empirical_probability)
+    return max(0.0, min(1.0, blended_probability))
+
+
 def snapshot_stocks(
     conn: sqlite3.Connection,
     game_ids: list[int] | None = None,
@@ -103,6 +155,12 @@ def snapshot_stocks(
             JOIN games g ON g.id = pl.game_id
             JOIN players p ON p.id = pl.player_id
             WHERE g.status = 'scheduled'
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM injuries i
+                  WHERE i.player_id = p.id
+                    AND lower(trim(COALESCE(i.status, ''))) IN ('out', 'inactive', 'suspended', 'unavailable')
+              )
             """
             + filter_sql
             + """
@@ -129,7 +187,20 @@ def snapshot_stocks(
                 runtime_cache=shared_runtime_cache,
                 allow_training=False,
             )
-            projected_stocks = float(steals + blocks)
+            projected_stocks, _, _ = predict_player_prop(
+                conn,
+                int(player_id),
+                "blocks_steals",
+                int(game_id),
+                runtime_cache=shared_runtime_cache,
+                allow_training=False,
+            )
+            projected_stocks = float(projected_stocks)
+            stocks_prob_2_plus = _calibrated_stocks_two_plus_probability(
+                tracking,
+                projected_stocks=projected_stocks,
+                game_date=str(game_date),
+            )
             rows_to_insert.append(
                 (
                     int(game_id),
@@ -145,7 +216,7 @@ def snapshot_stocks(
                     _poisson_at_least(float(steals), 2),
                     _poisson_at_least(float(blocks), 1),
                     _poisson_at_least(float(blocks), 2),
-                    _poisson_at_least(projected_stocks, 2),
+                    stocks_prob_2_plus,
                     "model_only",
                 )
             )
@@ -203,6 +274,125 @@ def queue_snapshot_stocks(game_ids: list[int] | None = None) -> bool:
 
     threading.Thread(target=_run, daemon=True).start()
     return True
+
+
+def _delete_explicit_dnp_snapshots(
+    conn: sqlite3.Connection,
+    tracking: sqlite3.Connection,
+    *,
+    target_dates: list[str] | None = None,
+) -> int:
+    filter_sql = ""
+    params: list[object] = []
+    if target_dates:
+        placeholders = ",".join("?" for _ in target_dates)
+        filter_sql = f" AND ps.game_date IN ({placeholders})"
+        params.extend(target_dates)
+    rows = conn.execute(
+        """
+        SELECT DISTINCT ps.id
+        FROM projection_snapshots ps
+        JOIN games g ON g.id = ps.game_id
+        JOIN player_game_availability pga
+          ON pga.game_id = ps.game_id
+         AND pga.player_id = ps.player_id
+        LEFT JOIN settlements st ON st.snapshot_id = ps.id
+        WHERE g.status = 'final'
+          AND st.snapshot_id IS NULL
+          AND pga.did_not_play = 1
+          AND pga.source IN ('espn_boxscore', 'espn_summary_injury', 'manual_review')
+        """
+        + filter_sql,
+        tuple(params),
+    ).fetchall()
+    snapshot_ids = [int(row["id"]) for row in rows]
+    if not snapshot_ids:
+        return 0
+    placeholders = ",".join("?" for _ in snapshot_ids)
+    tracking.execute(f"DELETE FROM projection_snapshots WHERE id IN ({placeholders})", tuple(snapshot_ids))
+    tracking.commit()
+    return len(snapshot_ids)
+
+
+def _delete_stale_pending_snapshots(
+    conn: sqlite3.Connection,
+    tracking: sqlite3.Connection,
+    *,
+    target_dates: list[str] | None = None,
+) -> int:
+    filter_sql = ""
+    params: list[object] = []
+    if target_dates:
+        placeholders = ",".join("?" for _ in target_dates)
+        filter_sql = f" AND ps.game_date IN ({placeholders})"
+        params.extend(target_dates)
+    rows = tracking.execute(
+        """
+        SELECT
+            ps.id,
+            ps.game_id,
+            ps.player_id,
+            ps.game_date
+        FROM projection_snapshots ps
+        LEFT JOIN settlements st ON st.snapshot_id = ps.id
+        WHERE st.snapshot_id IS NULL
+        """
+        + filter_sql,
+        tuple(params),
+    ).fetchall()
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    snapshot_ids: list[int] = []
+    for row in rows:
+        game_date = str(row["game_date"] or "").strip()
+        if not game_date or game_date >= today_iso:
+            continue
+        game_id = int(row["game_id"])
+        player_id = int(row["player_id"])
+        game_row = conn.execute("SELECT status FROM games WHERE id = ?", (game_id,)).fetchone()
+        active_prop_row = conn.execute(
+            """
+            SELECT 1
+            FROM prop_lines
+            WHERE game_id = ? AND player_id = ?
+            LIMIT 1
+            """,
+            (game_id, player_id),
+        ).fetchone()
+        if active_prop_row is not None:
+            continue
+        if game_row is None or str(game_row["status"] or "").lower() == "scheduled":
+            snapshot_ids.append(int(row["id"]))
+    if not snapshot_ids:
+        return 0
+    placeholders = ",".join("?" for _ in snapshot_ids)
+    tracking.execute(f"DELETE FROM projection_snapshots WHERE id IN ({placeholders})", tuple(snapshot_ids))
+    tracking.commit()
+    return len(snapshot_ids)
+
+
+def prune_special_snapshots(
+    conn: sqlite3.Connection,
+    *,
+    selected_date: str | None = None,
+    selected_dates: list[str] | None = None,
+) -> dict[str, int]:
+    target_dates = sorted(
+        {
+            str(value).strip()
+            for value in ([selected_date] if selected_date else []) + list(selected_dates or [])
+            if str(value).strip()
+        }
+    )
+    tracking = _open_tracking_connection()
+    try:
+        deleted_dnp = _delete_explicit_dnp_snapshots(conn, tracking, target_dates=target_dates)
+        deleted_stale = _delete_stale_pending_snapshots(conn, tracking, target_dates=target_dates)
+        return {
+            "deleted_dnp": deleted_dnp,
+            "deleted_stale": deleted_stale,
+        }
+    finally:
+        tracking.close()
 
 
 def list_special_stocks(*, include_history: bool = False) -> list[dict[str, Any]]:
@@ -272,6 +462,8 @@ def settle_stocks(
     )
     tracking = _open_tracking_connection()
     try:
+        deleted_dnp = _delete_explicit_dnp_snapshots(conn, tracking, target_dates=target_dates)
+        deleted_stale = _delete_stale_pending_snapshots(conn, tracking, target_dates=target_dates)
         filter_sql = ""
         params: tuple[str, ...] = ()
         if target_dates:
@@ -328,6 +520,8 @@ def settle_stocks(
         return {
             "eligible": len(snapshot_rows),
             "settled": len(inserts),
+            "deleted_dnp": deleted_dnp,
+            "deleted_stale": deleted_stale,
             "settled_at": settled_at,
             "selected_date": target_dates[0] if len(target_dates) == 1 else None,
             "selected_dates": target_dates,

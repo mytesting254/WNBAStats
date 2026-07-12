@@ -695,6 +695,18 @@ def _ensure_overall_metrics(metrics: dict[str, dict]) -> None:
     residual_bias_sum = 0.0
     residual_directional_sum = 0.0
     residual_directional_rows = 0
+    final_rows_total = 0
+    final_mae_sum = 0.0
+    final_rmse_sum = 0.0
+    final_bias_sum = 0.0
+    final_directional_sum = 0.0
+    final_directional_rows = 0
+    final_baseline_rows = 0
+    final_baseline_mae_sum = 0.0
+    final_baseline_rmse_sum = 0.0
+    final_baseline_bias_sum = 0.0
+    final_segment_count = 0
+    final_skipped_segments = 0
     baseline_rows = 0
     baseline_mae_sum = 0.0
     baseline_rmse_sum = 0.0
@@ -737,6 +749,27 @@ def _ensure_overall_metrics(metrics: dict[str, dict]) -> None:
             if metric.get("residual_directional_accuracy") is not None:
                 residual_directional_sum += float(metric["residual_directional_accuracy"]) * residual_rows
                 residual_directional_rows += residual_rows
+        final_rows = int(metric.get("final_rows") or 0)
+        if final_rows > 0:
+            final_rows_total += final_rows
+            if metric.get("final_mae") is not None:
+                final_mae_sum += float(metric["final_mae"]) * final_rows
+            if metric.get("final_rmse") is not None:
+                final_rmse_sum += float(metric["final_rmse"]) * final_rows
+            if metric.get("final_bias") is not None:
+                final_bias_sum += float(metric["final_bias"]) * final_rows
+            if metric.get("final_directional_accuracy") is not None:
+                final_directional_sum += float(metric["final_directional_accuracy"]) * final_rows
+                final_directional_rows += final_rows
+            if metric.get("final_baseline_mae") is not None:
+                final_baseline_rows += final_rows
+                final_baseline_mae_sum += float(metric["final_baseline_mae"]) * final_rows
+            if metric.get("final_baseline_rmse") is not None:
+                final_baseline_rmse_sum += float(metric["final_baseline_rmse"]) * final_rows
+            if metric.get("final_baseline_bias") is not None:
+                final_baseline_bias_sum += float(metric["final_baseline_bias"]) * final_rows
+            final_segment_count += int(metric.get("final_segment_count") or 0)
+            final_skipped_segments += int(metric.get("final_skipped_segments") or 0)
 
     if total_rows <= 0:
         return
@@ -774,6 +807,42 @@ def _ensure_overall_metrics(metrics: dict[str, dict]) -> None:
         "residual_directional_accuracy",
         round(residual_directional_sum / residual_directional_rows, 3) if residual_directional_rows else None,
     )
+    overall.setdefault("final_rows", final_rows_total)
+    overall.setdefault("final_mae", round(final_mae_sum / final_rows_total, 3) if final_rows_total else None)
+    overall.setdefault("final_rmse", round(final_rmse_sum / final_rows_total, 3) if final_rows_total else None)
+    overall.setdefault("final_bias", round(final_bias_sum / final_rows_total, 3) if final_rows_total else None)
+    overall.setdefault(
+        "final_directional_accuracy",
+        round(final_directional_sum / final_directional_rows, 3) if final_directional_rows else None,
+    )
+    overall.setdefault(
+        "final_baseline_mae",
+        round(final_baseline_mae_sum / final_baseline_rows, 3) if final_baseline_rows else None,
+    )
+    overall.setdefault(
+        "final_baseline_rmse",
+        round(final_baseline_rmse_sum / final_baseline_rows, 3) if final_baseline_rows else None,
+    )
+    overall.setdefault(
+        "final_baseline_bias",
+        round(final_baseline_bias_sum / final_baseline_rows, 3) if final_baseline_rows else None,
+    )
+    overall.setdefault(
+        "final_mae_improvement",
+        round(float(overall["final_baseline_mae"]) - float(overall["final_mae"]), 3)
+        if overall.get("final_baseline_mae") is not None and overall.get("final_mae") is not None
+        else None,
+    )
+    overall.setdefault(
+        "final_rmse_improvement",
+        round(float(overall["final_baseline_rmse"]) - float(overall["final_rmse"]), 3)
+        if overall.get("final_baseline_rmse") is not None and overall.get("final_rmse") is not None
+        else None,
+    )
+    overall.setdefault("final_baseline_directional_accuracy", None)
+    overall.setdefault("final_directional_accuracy_improvement", None)
+    overall.setdefault("final_segment_count", final_segment_count)
+    overall.setdefault("final_skipped_segments", final_skipped_segments)
 
 
 def _settled_validation_metrics(conn: sqlite3.Connection, model_version: str) -> dict[str, dict]:
