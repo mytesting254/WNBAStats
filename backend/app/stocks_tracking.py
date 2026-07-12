@@ -72,6 +72,22 @@ def ensure_tracking_schema() -> Path:
                 except sqlite3.OperationalError as exc:
                     if "duplicate column name" not in str(exc).lower():
                         raise
+            stale_three_plus_rows = conn.execute(
+                """
+                SELECT id, projected_stocks
+                FROM projection_snapshots
+                WHERE stocks_prob_3_plus = 0
+                  AND projected_stocks > 0
+                """
+            ).fetchall()
+            if stale_three_plus_rows:
+                conn.executemany(
+                    "UPDATE projection_snapshots SET stocks_prob_3_plus = ? WHERE id = ?",
+                    [
+                        (_poisson_at_least(float(projected_stocks), 3), int(snapshot_id))
+                        for snapshot_id, projected_stocks in stale_three_plus_rows
+                    ],
+                )
     return path
 
 
@@ -473,7 +489,12 @@ def list_special_stocks(*, include_history: bool = False) -> list[dict[str, Any]
                 ORDER BY latest.game_date, latest.projected_stocks DESC, latest.player_name
                 """
             ).fetchall()
-        return [dict(row) for row in rows]
+        items = [dict(row) for row in rows]
+        for item in items:
+            projected_stocks = float(item.get("projected_stocks") or 0.0)
+            if projected_stocks > 0 and float(item.get("stocks_prob_3_plus") or 0.0) <= 0.0:
+                item["stocks_prob_3_plus"] = _poisson_at_least(projected_stocks, 3)
+        return items
     finally:
         tracking.close()
 

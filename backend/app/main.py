@@ -1070,8 +1070,15 @@ def special_stocks() -> list[dict[str, Any]]:
                             SELECT h.team_id
                             FROM player_team_history h
                             WHERE h.player_id = p.id
+                              AND h.team_id IN (g.home_team_id, g.away_team_id)
                             ORDER BY h.id DESC
                             LIMIT 1
+                        ),
+                        (
+                            CASE
+                                WHEN p.team_id IN (g.home_team_id, g.away_team_id) THEN p.team_id
+                                ELSE NULL
+                            END
                         ),
                         p.team_id
                     )
