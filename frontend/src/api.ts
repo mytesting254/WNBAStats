@@ -55,6 +55,7 @@ export type SpecialStocksSnapshot = {
   block_prob_1_plus: number;
   block_prob_2_plus: number;
   stocks_prob_2_plus: number;
+  stocks_prob_3_plus: number;
   data_quality: string;
   start_time?: string | null;
   home_team?: string | null;
@@ -77,6 +78,9 @@ export type SpecialStocksPerformance = {
   hits_2_plus: number;
   hit_rate_2_plus: number | null;
   avg_prob_2_plus: number | null;
+  hits_3_plus: number;
+  hit_rate_3_plus: number | null;
+  avg_prob_3_plus: number | null;
   candidate_count_50_plus: number;
   candidate_hits_2_plus: number;
   candidate_hit_rate_2_plus: number | null;

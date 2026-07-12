@@ -1129,6 +1129,9 @@ def special_stocks_stats() -> dict[str, Any]:
             "hits_2_plus": 0,
             "hit_rate_2_plus": None,
             "avg_prob_2_plus": None,
+            "hits_3_plus": 0,
+            "hit_rate_3_plus": None,
+            "avg_prob_3_plus": None,
             "candidate_count_50_plus": 0,
             "candidate_hits_2_plus": 0,
             "candidate_hit_rate_2_plus": None,
@@ -1142,6 +1145,12 @@ def special_stocks_stats() -> dict[str, Any]:
     hits_2_plus = sum(1 for row in settled_rows if float(row.get("actual_stocks") or 0.0) >= 2.0)
     avg_prob_2_plus = (
         sum(float(row.get("stocks_prob_2_plus") or 0.0) for row in settled_rows) / len(settled_rows)
+        if settled_rows
+        else None
+    )
+    hits_3_plus = sum(1 for row in settled_rows if float(row.get("actual_stocks") or 0.0) >= 3.0)
+    avg_prob_3_plus = (
+        sum(float(row.get("stocks_prob_3_plus") or 0.0) for row in settled_rows) / len(settled_rows)
         if settled_rows
         else None
     )
@@ -1182,6 +1191,9 @@ def special_stocks_stats() -> dict[str, Any]:
         "hits_2_plus": hits_2_plus,
         "hit_rate_2_plus": round(hits_2_plus / len(settled_rows), 4) if settled_rows else None,
         "avg_prob_2_plus": round(avg_prob_2_plus, 4) if avg_prob_2_plus is not None else None,
+        "hits_3_plus": hits_3_plus,
+        "hit_rate_3_plus": round(hits_3_plus / len(settled_rows), 4) if settled_rows else None,
+        "avg_prob_3_plus": round(avg_prob_3_plus, 4) if avg_prob_3_plus is not None else None,
         "candidate_count_50_plus": len(candidate_rows),
         "candidate_hits_2_plus": candidate_hits_2_plus,
         "candidate_hit_rate_2_plus": round(candidate_hits_2_plus / len(candidate_rows), 4) if candidate_rows else None,

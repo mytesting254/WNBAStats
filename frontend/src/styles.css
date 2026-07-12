@@ -1202,12 +1202,12 @@ tbody tr.selected {
   background: #f8fbff;
 }
 
-.special-props-table td:nth-child(n + 2):nth-child(-n + 9) {
+.special-props-table td:nth-child(n + 2):nth-child(-n + 10) {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-.special-props-table th:nth-child(n + 2):nth-child(-n + 9) {
+.special-props-table th:nth-child(n + 2):nth-child(-n + 10) {
   text-align: right;
 }
 
@@ -1216,7 +1216,7 @@ tbody tr.selected {
   color: #101828;
 }
 
-.special-props-table td:nth-child(10) {
+.special-props-table td:nth-child(11) {
   min-width: 220px;
 }
 

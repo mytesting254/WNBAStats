@@ -4132,8 +4132,10 @@ function SpecialStocksView({
                 <MiniStat label="Settled" value={String(performance?.settled_count ?? 0)} />
                 <MiniStat label="Pending" value={String(performance?.pending_count ?? 0)} />
                 <MiniStat label="2+ Stocks Hit" value={formatPercent(performance?.hit_rate_2_plus ?? undefined)} />
+                <MiniStat label="3+ Stocks Hit" value={formatPercent(performance?.hit_rate_3_plus ?? undefined)} />
                 <MiniStat label="50%+ Hit" value={formatPercent(performance?.candidate_hit_rate_2_plus ?? undefined)} />
                 <MiniStat label="Avg 2+ Prob" value={formatPercent(performance?.avg_prob_2_plus ?? undefined)} />
+                <MiniStat label="Avg 3+ Prob" value={formatPercent(performance?.avg_prob_3_plus ?? undefined)} />
               </div>
               <div className="table-wrap special-calibration-table-wrap">
                 <table className="special-calibration-table">
@@ -4173,6 +4175,7 @@ function SpecialStocksView({
                       <th>1+ BLK</th>
                       <th>2+ BLK</th>
                       <th>2+ Stocks</th>
+                      <th>3+ Stocks</th>
                       <th>Settled</th>
                       <th>Captured</th>
                     </tr>
@@ -4208,6 +4211,7 @@ function SpecialStocksView({
                         <td>{formatPercent(snapshot.block_prob_1_plus)}</td>
                         <td>{formatPercent(snapshot.block_prob_2_plus)}</td>
                         <td>{formatPercent(snapshot.stocks_prob_2_plus)}</td>
+                        <td>{formatPercent(snapshot.stocks_prob_3_plus)}</td>
                         <td>
                           {snapshot.actual_stocks == null
                             ? "Pending"
@@ -4218,7 +4222,7 @@ function SpecialStocksView({
                     ))}
                     {!selectedCard.players.length && (
                       <tr>
-                        <td colSpan={12}>No special props generated for this game yet.</td>
+                        <td colSpan={13}>No special props generated for this game yet.</td>
                       </tr>
                     )}
                   </tbody>

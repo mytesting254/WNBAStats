@@ -47,6 +47,7 @@ def ensure_tracking_schema() -> Path:
                 block_prob_1_plus REAL NOT NULL,
                 block_prob_2_plus REAL NOT NULL,
                 stocks_prob_2_plus REAL NOT NULL,
+                stocks_prob_3_plus REAL NOT NULL DEFAULT 0,
                 data_quality TEXT NOT NULL,
                 UNIQUE(game_id, player_id, model_version, captured_at)
             );
@@ -60,6 +61,9 @@ def ensure_tracking_schema() -> Path:
             CREATE INDEX IF NOT EXISTS idx_stocks_snapshots_game ON projection_snapshots(game_id, player_id);
             """
         )
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(projection_snapshots)").fetchall()}
+        if "stocks_prob_3_plus" not in columns:
+            conn.execute("ALTER TABLE projection_snapshots ADD COLUMN stocks_prob_3_plus REAL NOT NULL DEFAULT 0")
     return path
 
 
@@ -201,6 +205,7 @@ def snapshot_stocks(
                 projected_stocks=projected_stocks,
                 game_date=str(game_date),
             )
+            stocks_prob_3_plus = _poisson_at_least(projected_stocks, 3)
             rows_to_insert.append(
                 (
                     int(game_id),
@@ -217,6 +222,7 @@ def snapshot_stocks(
                     _poisson_at_least(float(blocks), 1),
                     _poisson_at_least(float(blocks), 2),
                     stocks_prob_2_plus,
+                    stocks_prob_3_plus,
                     "model_only",
                 )
             )
@@ -238,8 +244,9 @@ def snapshot_stocks(
                     block_prob_1_plus,
                     block_prob_2_plus,
                     stocks_prob_2_plus,
+                    stocks_prob_3_plus,
                     data_quality
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows_to_insert,
             )
