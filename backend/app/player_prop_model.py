@@ -962,6 +962,7 @@ def _shared_projection_context(
         return shared
 
     rotation_role = str(history_rows[0]["rotation_role"] or "starter")
+    history_rows = _prune_extreme_blowout_history_rows(history_rows, rotation_role)
     minutes = [float(row["minutes"]) for row in history_rows]
     ewma_minutes = _ewma_newest_first(minutes, alpha=0.38)
     minutes_trend = _recent_trend(minutes)
@@ -4318,14 +4319,35 @@ def _weighted_average(values: list[float]) -> float:
     return sum(value * weight for value, weight in zip(values, weights)) / sum(weights)
 
 
-def _historical_row_is_blowout(row: sqlite3.Row | dict[str, object]) -> bool:
+def _historical_row_margin(row: sqlite3.Row | dict[str, object]) -> float:
     if isinstance(row, sqlite3.Row):
         margin = row["team_margin"] if "team_margin" in row.keys() else None
     else:
         margin = row.get("team_margin")
         if margin is None:
             margin = 15.0 if row.get("is_blowout") else 0.0
-    return float(margin or 0.0) >= 15.0
+    return float(margin or 0.0)
+
+
+def _historical_row_is_blowout(row: sqlite3.Row | dict[str, object]) -> bool:
+    return _historical_row_margin(row) >= 15.0
+
+
+def _prune_extreme_blowout_history_rows(
+    rows: list[sqlite3.Row] | list[dict[str, object]],
+    rotation_role: str | None,
+    *,
+    extreme_margin: float = 20.0,
+    min_competitive_rows: int = 5,
+) -> list[sqlite3.Row] | list[dict[str, object]]:
+    role = str(rotation_role or "starter").strip().lower()
+    if role not in {"star", "starter"} or len(rows) <= min_competitive_rows:
+        return rows
+    competitive_rows = [row for row in rows if _historical_row_margin(row) < 15.0]
+    if len(competitive_rows) < min_competitive_rows:
+        return rows
+    filtered = [row for row in rows if _historical_row_margin(row) < extreme_margin]
+    return filtered or rows
 
 
 def _historical_blowout_weight(row: sqlite3.Row | dict[str, object], rotation_role: str | None) -> float:

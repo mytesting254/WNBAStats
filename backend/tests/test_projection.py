@@ -4294,6 +4294,56 @@ def test_blowout_history_weight_downweights_starter_rows() -> None:
     assert close_weight == 1.0
 
 
+def test_extreme_blowout_history_prune_keeps_competitive_starter_sample() -> None:
+    rows = [
+        {"team_margin": 8.0, "rotation_role": "starter"},
+        {"team_margin": 11.0, "rotation_role": "starter"},
+        {"team_margin": 7.0, "rotation_role": "starter"},
+        {"team_margin": 12.0, "rotation_role": "starter"},
+        {"team_margin": 9.0, "rotation_role": "starter"},
+        {"team_margin": 22.0, "rotation_role": "starter"},
+        {"team_margin": 26.0, "rotation_role": "starter"},
+    ]
+
+    filtered = player_prop_model_module._prune_extreme_blowout_history_rows(rows, "starter")
+    bench_filtered = player_prop_model_module._prune_extreme_blowout_history_rows(rows, "bench")
+
+    assert len(filtered) == 5
+    assert all(float(row["team_margin"]) < 20.0 for row in filtered)
+    assert len(bench_filtered) == len(rows)
+
+
+def test_stocks_feature_bundle_prunes_extreme_blowout_rows(monkeypatch) -> None:
+    monkeypatch.setattr(stocks_tracking_module, "_player_stocks_target_context", lambda *args, **kwargs: (1, 2))
+    monkeypatch.setattr(
+        stocks_tracking_module,
+        "_player_stocks_history_rows",
+        lambda *args, **kwargs: [
+            {"steals": 1.0, "blocks": 1.0, "is_home": 1, "rest_days": 2, "rotation_role": "starter", "team_margin": 8.0},
+            {"steals": 1.0, "blocks": 1.0, "is_home": 1, "rest_days": 2, "rotation_role": "starter", "team_margin": 9.0},
+            {"steals": 1.0, "blocks": 1.0, "is_home": 1, "rest_days": 2, "rotation_role": "starter", "team_margin": 11.0},
+            {"steals": 1.0, "blocks": 1.0, "is_home": 1, "rest_days": 2, "rotation_role": "starter", "team_margin": 12.0},
+            {"steals": 1.0, "blocks": 1.0, "is_home": 1, "rest_days": 2, "rotation_role": "starter", "team_margin": 7.0},
+            {"steals": 1.0, "blocks": 1.0, "is_home": 1, "rest_days": 2, "rotation_role": "starter", "team_margin": 10.0},
+            {"steals": 4.0, "blocks": 2.0, "is_home": 1, "rest_days": 2, "rotation_role": "starter", "team_margin": 23.0},
+            {"steals": 3.0, "blocks": 2.0, "is_home": 1, "rest_days": 2, "rotation_role": "starter", "team_margin": 25.0},
+        ],
+    )
+
+    bundle = stocks_tracking_module._build_player_stocks_feature_bundle(
+        sqlite3.connect(":memory:"),
+        player_id=1,
+        game_id=10,
+        game_date="2026-07-13",
+        market="blocks_steals",
+        base_projection=2.0,
+    )
+
+    assert bundle["same_venue_games"] == 6
+    assert float(bundle["recent_avg"]) == pytest.approx(2.0)
+    assert float(bundle["stability_avg"]) == pytest.approx(2.0)
+
+
 def test_special_probability_calibration_is_market_specific(monkeypatch, tmp_path) -> None:
     tracking_path = tmp_path / "stocks-tracking.sqlite"
     monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))

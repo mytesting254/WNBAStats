@@ -11,7 +11,14 @@ from typing import Any
 
 from .db import connect
 from .paths import get_db_path
-from .player_prop_model import COMPONENT_MODEL_VERSION, _rest_factor, _winsorize_history_values, feature_snapshot
+from .player_prop_model import (
+    COMPONENT_MODEL_VERSION,
+    _historical_blowout_weight,
+    _prune_extreme_blowout_history_rows,
+    _rest_factor,
+    _winsorize_history_values,
+    feature_snapshot,
+)
 from .timezone_utils import APP_TIMEZONE, local_today_iso
 
 
@@ -391,15 +398,7 @@ def _stocks_market_value(row: sqlite3.Row, market: str) -> float:
 
 
 def _stocks_history_weight(row: sqlite3.Row) -> float:
-    margin = float(row["team_margin"] or 0.0) if "team_margin" in row.keys() else 0.0
-    if margin < 15.0:
-        return 1.0
-    rotation_role = str(row["rotation_role"] or "starter").strip().lower()
-    if rotation_role in {"star", "starter"}:
-        return 0.72
-    if rotation_role == "rotation":
-        return 0.82
-    return 0.92
+    return _historical_blowout_weight(row, str(row["rotation_role"] or "starter"))
 
 
 def _stocks_market_column(market: str) -> str:
@@ -658,6 +657,8 @@ def _build_player_stocks_feature_bundle(
             "rest_days": target_rest_days,
             "is_home": target_is_home,
         }
+    rotation_role = str(rows[0]["rotation_role"] or "starter")
+    rows = _prune_extreme_blowout_history_rows(rows, rotation_role)
     values = _winsorize_history_values([_stocks_market_value(row, market) for row in rows], market)
     sample_weights = [_stocks_history_weight(row) for row in rows]
     recent_values = values[:_STOCKS_RECENT_WINDOW_GAMES]
