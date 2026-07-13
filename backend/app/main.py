@@ -45,6 +45,7 @@ from .odds_import import (
     line_discrepancies,
     list_sportsbook_props,
     odds_cache_summary,
+    _player_name_match_clause,
     sync_prop_lines_from_sportsbook,
 )
 from .player_identity import player_is_skeletal, repair_shadow_player_identities, resolve_player_identity
