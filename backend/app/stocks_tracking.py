@@ -650,6 +650,96 @@ def _calibrated_stocks_two_plus_probability(
     return max(0.0, min(1.0, blended_probability))
 
 
+def _player_recent_stocks_hit_rate(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    game_id: int,
+    game_date: str,
+) -> float | None:
+    target_row = conn.execute(
+        """
+        SELECT
+            CASE
+                WHEN p.team_id = g.home_team_id THEN 1
+                WHEN p.team_id = g.away_team_id THEN 0
+                ELSE NULL
+            END AS is_home
+        FROM games g
+        JOIN players p ON p.id = ?
+        WHERE g.id = ?
+        LIMIT 1
+        """,
+        (int(player_id), int(game_id)),
+    ).fetchone()
+    target_is_home = None if target_row is None else target_row["is_home"]
+    rows = conn.execute(
+        f"""
+        SELECT
+            COALESCE(s.steals, 0) + COALESCE(s.blocks, 0) AS actual_stocks,
+            CASE
+                WHEN COALESCE((
+                    SELECT h.team_id
+                    FROM player_team_history h
+                    WHERE h.player_id = s.player_id
+                      AND h.game_id = s.game_id
+                    ORDER BY h.id DESC
+                    LIMIT 1
+                ), p.team_id) = g.home_team_id THEN 1
+                WHEN COALESCE((
+                    SELECT h.team_id
+                    FROM player_team_history h
+                    WHERE h.player_id = s.player_id
+                      AND h.game_id = s.game_id
+                    ORDER BY h.id DESC
+                    LIMIT 1
+                ), p.team_id) = g.away_team_id THEN 0
+                ELSE NULL
+            END AS is_home
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        JOIN players p ON p.id = s.player_id
+        WHERE s.player_id = ?
+          AND g.game_date < ?
+          AND s.game_id <> ?
+        ORDER BY
+            CASE
+                WHEN substr(g.game_date, 1, 4) = substr(?, 1, 4) THEN 0
+                ELSE 1
+            END,
+            g.game_date DESC,
+            s.game_id DESC
+        LIMIT {_STOCKS_STABILITY_WINDOW_GAMES}
+        """,
+        (int(player_id), str(game_date), int(game_id), str(game_date)),
+    ).fetchall()
+    if not rows:
+        return None
+    overall_hits = [1.0 if float(row["actual_stocks"] or 0.0) >= 2.0 else 0.0 for row in rows]
+    recent_hits = overall_hits[:_STOCKS_RECENT_WINDOW_GAMES]
+    overall_rate = (
+        (0.65 * (sum(recent_hits) / len(recent_hits)))
+        + (0.35 * (sum(overall_hits) / len(overall_hits)))
+    )
+    if target_is_home is None:
+        return overall_rate
+    same_venue_hits = [
+        1.0 if float(row["actual_stocks"] or 0.0) >= 2.0 else 0.0
+        for row in rows
+        if row["is_home"] is not None and int(row["is_home"]) == int(target_is_home)
+    ]
+    if len(same_venue_hits) >= 3:
+        venue_recent_hits = same_venue_hits[:_STOCKS_RECENT_WINDOW_GAMES]
+        venue_rate = (
+            (0.70 * (sum(venue_recent_hits) / len(venue_recent_hits)))
+            + (0.30 * (sum(same_venue_hits) / len(same_venue_hits)))
+        )
+        return (0.70 * overall_rate) + (0.30 * venue_rate)
+    if same_venue_hits:
+        return (0.85 * overall_rate) + (0.15 * (sum(same_venue_hits) / len(same_venue_hits)))
+    return overall_rate
+
+
 def snapshot_stocks(
     conn: sqlite3.Connection,
     game_ids: list[int] | None = None,
@@ -700,6 +790,18 @@ def snapshot_stocks(
                 projected_stocks=projected_stocks,
                 game_date=str(game_date),
             )
+            recent_hit_rate = _player_recent_stocks_hit_rate(
+                conn,
+                player_id=player_id,
+                game_id=game_id,
+                game_date=str(game_date),
+            )
+            if recent_hit_rate is not None:
+                history_weight = 0.18 if projected_stocks < 1.5 else 0.28 if projected_stocks < 2.5 else 0.22
+                stocks_prob_2_plus = ((1.0 - history_weight) * stocks_prob_2_plus) + (
+                    history_weight * float(recent_hit_rate)
+                )
+                stocks_prob_2_plus = max(0.0, min(1.0, stocks_prob_2_plus))
             stocks_prob_3_plus = _poisson_at_least(projected_stocks, 3)
             rows_to_insert.append(
                 (
