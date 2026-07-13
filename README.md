@@ -818,6 +818,27 @@ For automated production backups, prefer a host scheduler instead of an app-proc
 - `deploy/wnba-live-snapshot.service`
 - `deploy/wnba-live-snapshot.timer`
 
+For `Special` stocks prep, use the host-cron wrapper instead of app-local
+timers so prep runs against the same live mounted runtime as the backend:
+
+```cron
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 23 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_stocks_prep.sh tomorrow >> /var/log/wnba-stocks-prep.log 2>&1
+```
+
+That prepares tomorrow's slate at `11pm America/New_York`. A copy/paste
+template is available at `deploy/wnba-stocks-prep.cron`, and the wrapper also
+supports `today`, `today-and-tomorrow`, and explicit `dates` modes for manual
+or follow-up refreshes.
+
+The current Specials prep path reads scheduled games from canonical
+`wnba.sqlite`, copies the selected slate into `stocks_tracking.sqlite`, and
+then runs a fast component-based stocks estimator over the copied slate. The
+current live prep estimator uses a last-`10`-game recent window, up to `20`
+games for stabilization, and blends same-home/away plus scheduled-game
+`rest_days` context. Mounted-runtime validation on `2026-07-13` completed an
+ET-today run in about `1m 1s` for `3` prepared games, `79` candidates, and
+`79` fresh snapshots.
+
 Network access notes:
 
 - `dev.sh` defaults to `127.0.0.1` outside Codespaces and `0.0.0.0` inside Codespaces. Override with `BACKEND_HOST` or `FRONTEND_HOST` if needed.

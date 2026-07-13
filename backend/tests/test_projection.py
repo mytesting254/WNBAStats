@@ -65,8 +65,10 @@ from backend.app.player_prop_model import (
     MINUTES_FEATURE_NAMES,
     RESIDUAL_PROMOTION_MIN_ROWS,
     RidgeModel,
+    _component_market_line_weight,
     _market_depth_scale,
     _market_line_weight,
+    _market_specific_component_projection,
     _market_weight,
     _minutes_feature_values,
     _player_market_weight,
@@ -1805,7 +1807,7 @@ def test_injury_adjustment_ignores_teammate_games_after_as_of_date() -> None:
 
     assert injury["status"] == "available"
     assert injury["minutes_delta"] == 0.8
-    assert injury["usage_multiplier"] == pytest.approx(1.1125)
+    assert injury["usage_multiplier"] == pytest.approx(1.1385714286)
 
 
 def test_injury_adjustment_reuses_cached_teammate_snapshot_for_same_team_and_date() -> None:
@@ -2280,6 +2282,28 @@ def test_sparse_combo_markets_use_more_conservative_blend_weights() -> None:
     assert _residual_market_weight("points_rebounds_assists", 260, 20, 28.0) == 0.0
 
 
+def test_component_market_line_weight_stays_conservative_relative_to_learned_weight() -> None:
+    learned_weight = _market_line_weight("points", 220, 12, 28.0)
+    component_weight = _component_market_line_weight("points", 12, 28.0)
+    pra_component_weight = _component_market_line_weight("points_rebounds_assists", 12, 28.0)
+
+    assert component_weight < learned_weight
+    assert pra_component_weight < component_weight
+
+
+def test_market_specific_component_projection_regresses_volatile_combo_markets() -> None:
+    adjusted = _market_specific_component_projection(
+        market="points_rebounds_assists",
+        component_base=24.0,
+        rate_projection=26.0,
+        last_10_avg=20.0,
+        consistency_score=0.25,
+        value_volatility=11.0,
+    )
+
+    assert adjusted < 24.0
+
+
 def test_train_market_model_uses_active_non_sqlite_connection(monkeypatch) -> None:
     class FakeRemoteConnection:
         pass
@@ -2733,6 +2757,7 @@ def test_predict_player_prop_uses_component_only_when_market_policy_rejects_lear
         "backend.app.player_prop_model._market_overlay_decision",
         lambda *_args, **_kwargs: {"mode": "component_only", "note": "walk-forward gate failed"},
     )
+    monkeypatch.setattr("backend.app.player_prop_model._component_market_line_weight", lambda *_args, **_kwargs: 0.20)
     monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 24.0)
     monkeypatch.setattr("backend.app.player_prop_model._stabilize_combo_market_projection", lambda learned, *_args, **_kwargs: learned)
     monkeypatch.setattr("backend.app.player_prop_model._stabilize_learned_projection", lambda learned, *_args, **_kwargs: (learned, "no stabilization"))
@@ -2748,8 +2773,9 @@ def test_predict_player_prop_uses_component_only_when_market_policy_rejects_lear
             under_odds=-110,
         )
 
-    assert projection == pytest.approx(18.0)
+    assert projection == pytest.approx(18.4)
     assert "walk-forward gate failed" in reason
+    assert "component line anchor 20% at 20.0" in reason
     assert model_version == COMPONENT_MODEL_VERSION
 
 
@@ -3500,6 +3526,7 @@ def test_special_stocks_only_returns_scheduled_games(monkeypatch, tmp_path) -> N
             (909001, "2026-05-29", "2026-05-29T23:00:00+00:00", home_team_id, away_team_id, -3.5, 164.5),
         )
         conn.commit()
+        scheduled_game_date = str(scheduled_row["game_date"])
         final_row = {
             "game_id": 909001,
             "player_id": int(player_row["player_id"]),
@@ -3568,10 +3595,199 @@ def test_special_stocks_only_returns_scheduled_games(monkeypatch, tmp_path) -> N
         )
         tracking.commit()
 
+    monkeypatch.setattr(main_module, "_local_today_iso", lambda: scheduled_game_date)
     rows = main_module.special_stocks()
 
     assert len(rows) == 1
     assert int(rows[0]["game_id"]) == int(scheduled_row["game_id"])
+
+
+def test_rebuild_candidate_players_populates_tracking_pool(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        built = stocks_tracking_module.rebuild_candidate_players(conn)
+
+    assert built > 0
+    with sqlite3.connect(tracking_path) as tracking:
+        tracking.row_factory = sqlite3.Row
+        row = tracking.execute(
+            """
+            SELECT game_id, player_id, recent_minutes_avg, recent_stocks_avg, candidate_reason
+            FROM candidate_players
+            ORDER BY recent_stocks_avg DESC, recent_minutes_avg DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert int(row["game_id"]) > 0
+    assert int(row["player_id"]) > 0
+    assert float(row["recent_minutes_avg"]) >= 10.0
+    assert str(row["candidate_reason"])
+
+
+def test_rebuild_prepared_games_copies_scheduled_slate(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        copied = stocks_tracking_module.rebuild_prepared_games(conn)
+        expected = int(
+            conn.execute("SELECT COUNT(*) FROM games WHERE status = 'scheduled'").fetchone()[0]
+        )
+
+    assert copied == expected
+    with sqlite3.connect(tracking_path) as tracking:
+        row = tracking.execute("SELECT COUNT(*) FROM prepared_games").fetchone()
+    assert row is not None
+    assert int(row[0]) == expected
+
+
+def test_snapshot_stocks_can_use_candidate_pool_without_prop_lines(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+    runtime_cache_ids: list[int] = []
+
+    with connect() as conn:
+        candidate = conn.execute(
+            """
+            SELECT
+                g.id AS game_id,
+                g.game_date,
+                p.id AS player_id,
+                p.full_name
+            FROM games g
+            JOIN players p ON p.team_id IN (g.home_team_id, g.away_team_id)
+            WHERE g.status = 'scheduled'
+            ORDER BY g.id, p.id
+            LIMIT 1
+            """
+        ).fetchone()
+        assert candidate is not None
+        conn.execute(
+            "DELETE FROM prop_predictions WHERE prop_line_id IN (SELECT id FROM prop_lines WHERE game_id = ? AND player_id = ?)",
+            (int(candidate["game_id"]), int(candidate["player_id"])),
+        )
+        conn.execute(
+            "DELETE FROM prop_lines WHERE game_id = ? AND player_id = ?",
+            (int(candidate["game_id"]), int(candidate["player_id"])),
+        )
+        conn.commit()
+
+    stocks_tracking_module.ensure_tracking_schema()
+    with sqlite3.connect(tracking_path) as tracking:
+        tracking.execute(
+            """
+            INSERT INTO candidate_players (
+                game_id,
+                player_id,
+                player_name,
+                game_date,
+                team_id,
+                team_abbr,
+                rotation_role,
+                recent_minutes_avg,
+                recent_stocks_avg,
+                recent_games,
+                candidate_reason,
+                built_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(candidate["game_id"]),
+                int(candidate["player_id"]),
+                str(candidate["full_name"]),
+                str(candidate["game_date"]),
+                10,
+                "NY",
+                "starter",
+                28.0,
+                1.7,
+                8,
+                "test candidate",
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        tracking.commit()
+
+    class _FakeSnapshot:
+        def __init__(self, projection: float) -> None:
+            self.component_projection = projection
+
+    def fake_feature_snapshot(
+        conn,
+        player_id,
+        market,
+        game_id,
+        before_game_date=None,
+        allow_training=True,
+        use_injury_context=True,
+        use_live_minutes_context=True,
+        runtime_cache=None,
+    ):
+        assert runtime_cache is not None
+        runtime_cache_ids.append(id(runtime_cache))
+        assert int(player_id) == int(candidate["player_id"])
+        assert int(game_id) == int(candidate["game_id"])
+        assert use_live_minutes_context is False
+        return _FakeSnapshot(1.0 if market == "steals" else 0.5)
+
+    monkeypatch.setattr(stocks_tracking_module, "feature_snapshot", fake_feature_snapshot)
+
+    with connect() as conn:
+        written = stocks_tracking_module.snapshot_stocks(conn, game_ids=[int(candidate["game_id"])])
+
+    assert written > 0
+    assert runtime_cache_ids
+    assert len(set(runtime_cache_ids)) == 1
+
+
+def test_prepare_stocks_data_targets_selected_dates(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        scheduled_dates = [
+            str(row["game_date"])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT game_date
+                FROM games
+                WHERE status = 'scheduled'
+                ORDER BY game_date
+                LIMIT 2
+                """
+            ).fetchall()
+        ]
+        assert scheduled_dates
+        result = stocks_tracking_module.prepare_stocks_data(conn, target_dates=[scheduled_dates[0]])
+
+    assert result["selected_dates"] == [scheduled_dates[0]]
+    assert result["prepared_games"] > 0
+    assert result["candidate_players"] > 0
+    assert result["snapshots_written"] > 0
+    with sqlite3.connect(tracking_path) as tracking:
+        prepared_dates = [
+            str(row[0])
+            for row in tracking.execute(
+                "SELECT DISTINCT game_date FROM prepared_games ORDER BY game_date"
+            ).fetchall()
+        ]
+        tracked_dates = [
+            str(row[0])
+            for row in tracking.execute(
+                "SELECT DISTINCT game_date FROM candidate_players ORDER BY game_date"
+            ).fetchall()
+        ]
+
+    assert prepared_dates == [scheduled_dates[0]]
+    assert tracked_dates == [scheduled_dates[0]]
 
 
 def test_snapshot_stocks_uses_shared_runtime_cache_by_default(monkeypatch, tmp_path) -> None:
@@ -3580,23 +3796,27 @@ def test_snapshot_stocks_uses_shared_runtime_cache_by_default(monkeypatch, tmp_p
     monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
     runtime_cache_ids: list[int] = []
 
-    def fake_predict_player_prop(
+    class _FakeSnapshot:
+        def __init__(self, projection: float) -> None:
+            self.component_projection = projection
+
+    def fake_feature_snapshot(
         conn,
         player_id,
         market,
         game_id,
-        line=None,
-        over_odds=None,
-        under_odds=None,
-        config=None,
-        runtime_cache=None,
+        before_game_date=None,
         allow_training=True,
+        use_injury_context=True,
+        use_live_minutes_context=True,
+        runtime_cache=None,
     ):
         assert runtime_cache is not None
         runtime_cache_ids.append(id(runtime_cache))
-        return (1.0 if market == "steals" else 0.5, "ok", "component")
+        assert use_live_minutes_context is False
+        return _FakeSnapshot(1.0 if market == "steals" else 0.5)
 
-    monkeypatch.setattr(stocks_tracking_module, "predict_player_prop", fake_predict_player_prop)
+    monkeypatch.setattr(stocks_tracking_module, "feature_snapshot", fake_feature_snapshot)
 
     with connect() as conn:
         written = stocks_tracking_module.snapshot_stocks(conn)

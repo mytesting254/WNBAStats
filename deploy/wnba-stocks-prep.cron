@@ -1,0 +1,11 @@
+# Install with:
+#   crontab deploy/wnba-stocks-prep.cron
+#
+# Adjust the checkout path if needed. Debian/Ubuntu cron does not support
+# CRON_TZ for scheduling, so this hourly entry guards on Eastern time with
+# date(1). Percent signs must stay escaped in crontab commands.
+#
+# This runs inside the detected backend container so the active mounted runtime
+# DB and cache paths are used.
+
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 23 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_stocks_prep.sh tomorrow >> /var/log/wnba-stocks-prep.log 2>&1

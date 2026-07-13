@@ -169,6 +169,40 @@ or 3am. Keep the percent signs escaped when editing the crontab.
 
 A copy/paste template is also available at `deploy/wnba-daily-props.cron`.
 
+### Specials Stocks Prep
+
+Use host cron for the night-before `Special` stocks prep workflow. The initial
+production schedule prepares tomorrow's slate at `11pm America/New_York`, so
+Monday data is built on Sunday night in the live runtime before the slate day.
+
+Install with `crontab -e` on the Docker/Coolify host:
+
+```cron
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 23 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_stocks_prep.sh tomorrow >> /var/log/wnba-stocks-prep.log 2>&1
+```
+
+`WNBA_USE_LIVE_CONTAINER=true` runs the prep command inside the detected
+backend container, so the active mounted runtime DB and cache paths are used
+instead of repo-local files. Debian/Ubuntu cron does not support `CRON_TZ` for
+scheduling, so this follows the same hourly `date` guard pattern as the daily
+prop jobs. Keep the percent signs escaped when editing the crontab.
+
+Current prep behavior:
+
+- canonical schedule source: persisted `games` in `wnba.sqlite`
+- derived slate copy: `stocks_tracking.sqlite.prepared_games`
+- candidate window: last `10` games
+- estimator: fast component path with `10`-game recent form, `20`-game stabilizer, home/away context, and `rest_days`
+- live validation: mounted-volume ET-today run completed in about `1m 1s` for `3` prepared games / `79` candidates / `79` fresh snapshots
+
+Useful manual variants:
+
+- `scripts/live_stocks_prep.sh today`
+- `scripts/live_stocks_prep.sh today-and-tomorrow`
+- `scripts/live_stocks_prep.sh dates 2026-07-14,2026-07-15`
+
+A copy/paste template is also available at `deploy/wnba-stocks-prep.cron`.
+
 Live learned-model note:
 
 - uploaded learned-model cache files are a startup optimization, not the source of truth

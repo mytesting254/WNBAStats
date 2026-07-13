@@ -443,36 +443,46 @@ def predict_player_prop(
         projection = learned
         market_note = f"{overlay_note}; no sportsbook line blend"
 
-    if line is not None and overlay_mode != "component_only":
-        market_weight = _market_line_weight(
-            market,
-            model.rows,
-            sample_count,
-            avg_minutes,
-            config=tuning,
-        )
-        projection = ((1 - market_weight) * learned) + (market_weight * float(line))
-        residual_model = train_market_residual_model(conn, market, config=tuning, allow_training=allow_training)
-        if residual_model is not None:
-            residual_prediction = _predict(residual_model, snapshot.values)
-            residual_projection = float(line) + residual_prediction
-            residual_weight = _residual_market_weight(
+    if line is not None:
+        if overlay_mode == "component_only":
+            market_weight = _component_market_line_weight(
                 market,
-                residual_model.rows,
+                sample_count,
+                avg_minutes,
+            )
+            projection = ((1 - market_weight) * projection) + (market_weight * float(line))
+            market_note = f"{market_note}; component line anchor {market_weight:.0%} at {float(line):.1f}"
+        else:
+            market_weight = _market_line_weight(
+                market,
+                model.rows,
                 sample_count,
                 avg_minutes,
                 config=tuning,
             )
-            projection = ((1 - residual_weight) * projection) + (residual_weight * residual_projection)
-            market_note = (
-                f"line blend {market_weight:.0%} at {float(line):.1f}; "
-                f"residual blend {residual_weight:.0%} ({residual_model.rows} settled rows)"
-            )
+            projection = ((1 - market_weight) * learned) + (market_weight * float(line))
+            residual_model = train_market_residual_model(conn, market, config=tuning, allow_training=allow_training)
+            if residual_model is not None:
+                residual_prediction = _predict(residual_model, snapshot.values)
+                residual_projection = float(line) + residual_prediction
+                residual_weight = _residual_market_weight(
+                    market,
+                    residual_model.rows,
+                    sample_count,
+                    avg_minutes,
+                    config=tuning,
+                )
+                projection = ((1 - residual_weight) * projection) + (residual_weight * residual_projection)
+                market_note = (
+                    f"line blend {market_weight:.0%} at {float(line):.1f}; "
+                    f"residual blend {residual_weight:.0%} ({residual_model.rows} settled rows)"
+                )
         if over_odds is not None and under_odds is not None:
             over_implied = american_to_implied_probability(int(over_odds))
             under_implied = american_to_implied_probability(int(under_odds))
             no_vig_mid = (over_implied / max(over_implied + under_implied, 0.01)) - 0.5
-            projection += no_vig_mid * _market_price_nudge(market)
+            price_nudge_scale = 0.55 if overlay_mode == "component_only" else 1.0
+            projection += no_vig_mid * _market_price_nudge(market) * price_nudge_scale
         market_note = (
             f"{market_note} (player sample {sample_count} games, {avg_minutes:.1f} avg minutes)"
         )
@@ -783,6 +793,14 @@ def feature_snapshot(
         last_10_avg=last_10_avg,
         rate_projection=rate_projection,
         consistency_score=consistency_score,
+    )
+    component_base = _market_specific_component_projection(
+        market=market,
+        component_base=component_base,
+        rate_projection=rate_projection,
+        last_10_avg=last_10_avg,
+        consistency_score=consistency_score,
+        value_volatility=value_volatility,
     )
 
     pace_factor = _cached_pace_factor(conn, context["team_id"], context["opponent_id"]) if context else 1.0
@@ -2260,6 +2278,14 @@ def _historical_training_features(
         rate_projection=rate_projection,
         consistency_score=consistency_score,
     )
+    component_projection = _market_specific_component_projection(
+        market=market,
+        component_base=component_projection,
+        rate_projection=rate_projection,
+        last_10_avg=last_10_avg,
+        consistency_score=consistency_score,
+        value_volatility=value_volatility,
+    )
     is_home = bool(context["is_home"])
     rest_days = int(context["rest_days"])
     team_spread = context["team_spread"]
@@ -3322,6 +3348,30 @@ def _market_line_weight(
     return max(market_weight, player_weight)
 
 
+def _component_market_line_weight(
+    market: str,
+    sample_count: int,
+    avg_minutes: float,
+) -> float:
+    depth_scale = _market_depth_scale(market)
+    player_weight = _player_market_weight(sample_count, avg_minutes) * depth_scale
+    cap_by_market = {
+        "points": 0.18,
+        "rebounds": 0.16,
+        "assists": 0.16,
+        "points_rebounds": 0.14,
+        "points_assists": 0.14,
+        "rebounds_assists": 0.14,
+        "points_rebounds_assists": 0.12,
+        "threes": 0.12,
+        "steals": 0.10,
+        "blocks": 0.10,
+        "blocks_steals": 0.09,
+    }
+    cap = cap_by_market.get(market, 0.15)
+    return max(0.05, min(cap, player_weight * 0.42))
+
+
 def _residual_market_weight(
     market: str,
     rows: int,
@@ -3483,6 +3533,31 @@ def _adaptive_component_projection(
         + (rate_projection * weights["rate_projection"])
         + (last_10_avg * weights["last_10_avg"])
     ) / total
+
+
+def _market_specific_component_projection(
+    *,
+    market: str,
+    component_base: float,
+    rate_projection: float,
+    last_10_avg: float,
+    consistency_score: float,
+    value_volatility: float,
+) -> float:
+    stable_anchor = (0.55 * rate_projection) + (0.45 * last_10_avg)
+    low_consistency = consistency_score < 0.45
+    high_volatility = value_volatility > max(2.5, abs(component_base) * 0.38)
+    if market == "points":
+        if low_consistency or high_volatility:
+            return (0.90 * component_base) + (0.10 * stable_anchor)
+        return component_base
+    if market in {"points_rebounds", "points_assists", "points_rebounds_assists"}:
+        if low_consistency or high_volatility:
+            return (0.86 * component_base) + (0.14 * stable_anchor)
+        return component_base
+    if market in {"steals", "blocks", "blocks_steals"}:
+        return (0.92 * component_base) + (0.08 * stable_anchor)
+    return component_base
 
 
 def _ewma_newest_first(values: list[float], alpha: float) -> float:
@@ -4318,10 +4393,17 @@ def _injury_adjustment_for_prop(
             "hard_cap_zero": True,
         }
 
-    usage_boost = _clamp(teammate_penalty / 120.0, 0.0, 0.12)
-    base_minutes_by_role = {"star": 1.0, "starter": 0.8, "rotation": 0.5, "bench": 0.25}
-    role_minutes = base_minutes_by_role.get((rotation_role or "starter").lower(), 0.6)
-    minutes_delta = min(missing_key * role_minutes, 3.0)
+    role_key = (rotation_role or "starter").lower()
+    usage_cap_by_role = {"star": 0.18, "starter": 0.15, "rotation": 0.10, "bench": 0.06}
+    usage_boost = _clamp(
+        (teammate_penalty / 105.0) + (missing_key * 0.01),
+        0.0,
+        usage_cap_by_role.get(role_key, 0.10),
+    )
+    base_minutes_by_role = {"star": 1.25, "starter": 1.0, "rotation": 0.65, "bench": 0.35}
+    role_minutes = base_minutes_by_role.get(role_key, 0.75)
+    minutes_cap_by_role = {"star": 4.0, "starter": 3.2, "rotation": 2.2, "bench": 1.2}
+    minutes_delta = min(((teammate_penalty / 30.0) * role_minutes) + (missing_key * 0.35), minutes_cap_by_role.get(role_key, 2.5))
     return {
         "status": status,
         "availability_factor": availability_factor,
