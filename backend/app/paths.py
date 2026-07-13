@@ -37,3 +37,14 @@ def get_snapshot_dir() -> Path:
     if db_override:
         return Path(db_override).resolve().parent / "snapshots"
     return get_data_dir() / "snapshots"
+
+
+def get_training_db_path() -> Path:
+    override = os.getenv("WNBA_TRAINING_DB_PATH")
+    if override:
+        return Path(override)
+    db_override = os.getenv("WNBA_DB_PATH")
+    if db_override:
+        base_dir = Path(db_override).resolve().parent
+        return base_dir / "wnba-training.sqlite"
+    return get_data_dir() / "wnba-training.sqlite"

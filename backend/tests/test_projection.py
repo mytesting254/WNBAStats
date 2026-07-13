@@ -45,6 +45,7 @@ from backend.app.game_predictions import evaluate_game_residual_models, project_
 from backend.app.history_import import determine_ats_result
 from backend.app.main import app, import_espn_history as import_espn_history_endpoint, model_performance
 from backend.app import main as main_module
+from backend.app.minutes_training_db import ensure_minutes_training_db, load_minutes_training_examples
 
 INIT_DB_SCRIPT = str(paths_module.ROOT_DIR / "scripts" / "init_db.py")
 from backend.app.odds import american_to_implied_probability, expected_value
@@ -1809,6 +1810,36 @@ def test_train_minutes_model_returns_model_with_history() -> None:
         model = train_minutes_model(conn)
 
     assert model is not None
+    assert model.rows > 0
+
+
+def test_minutes_training_db_materializes_curated_examples() -> None:
+    load_test_history()
+    clear_model_cache()
+
+    with connect() as conn:
+        info = ensure_minutes_training_db(conn, force=True)
+        samples, loaded = load_minutes_training_examples(conn, role_bucket=None, force_rebuild=False)
+
+    assert Path(str(info["path"])).exists()
+    assert info["rebuilt"] is True
+    assert int(info["included_rows"]) > 0
+    assert int(info["candidate_rows"]) >= int(info["included_rows"])
+    assert loaded["source_signature"] == info["source_signature"]
+    assert samples
+    assert len(samples[0][0]) == len(MINUTES_FEATURE_NAMES)
+
+
+def test_train_minutes_model_uses_materialized_training_db() -> None:
+    load_test_history()
+    clear_model_cache()
+
+    with connect() as conn:
+        ensure_minutes_training_db(conn, force=True)
+        model = train_minutes_model(conn)
+
+    assert model is not None
+    assert model.market.startswith("minutes:")
     assert model.rows > 0
 
 

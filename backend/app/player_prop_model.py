@@ -2402,6 +2402,7 @@ def _train_minutes_model_cached(
     config: ModelTuningConfig,
     role_bucket: str | None = None,
     training_start: str = "",
+    data_signature: str = "",
 ) -> RidgeModel | None:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -2435,7 +2436,15 @@ def train_minutes_model(
         return cached_model
     if not allow_training:
         return None
-    return _train_minutes_model_cached(db_path, tuning, bucket, training_start)
+    from .minutes_training_db import minutes_training_db_signature
+
+    return _train_minutes_model_cached(
+        db_path,
+        tuning,
+        bucket,
+        training_start,
+        minutes_training_db_signature(conn),
+    )
 
 
 def prewarm_model_cache(conn: sqlite3.Connection, config: ModelTuningConfig | None = None) -> dict[str, int]:
@@ -2474,6 +2483,12 @@ def _minutes_training_rows(
     conn: sqlite3.Connection,
     role_bucket: str | None = None,
 ) -> list[tuple[list[float], float]]:
+    from .minutes_training_db import load_minutes_training_examples
+
+    samples, _info = load_minutes_training_examples(conn, role_bucket=role_bucket, force_rebuild=False)
+    if samples:
+        return samples
+
     samples = []
     training_start = _training_start_date()
     bucket_filter = role_bucket if role_bucket in set(MINUTES_ROLE_BUCKETS) else None
