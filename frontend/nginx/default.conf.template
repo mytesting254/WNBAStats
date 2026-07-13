@@ -1,6 +1,7 @@
 server {
     listen 80;
     server_name _;
+    etag off;
 
     resolver 127.0.0.11 ipv6=off;
     set $backend_upstream ${BACKEND_UPSTREAM};
@@ -9,13 +10,15 @@ server {
     index index.html;
 
     location = /index.html {
-        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0" always;
+        add_header Surrogate-Control "no-store" always;
         add_header Pragma "no-cache" always;
         add_header Expires "0" always;
     }
 
     location = /runtime-config.js {
-        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0" always;
+        add_header Surrogate-Control "no-store" always;
         add_header Pragma "no-cache" always;
         add_header Expires "0" always;
     }
@@ -26,7 +29,8 @@ server {
     }
 
     location /api/ {
-        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0" always;
+        add_header Surrogate-Control "no-store" always;
         add_header Pragma "no-cache" always;
         add_header Expires "0" always;
         proxy_pass $backend_upstream;
@@ -42,7 +46,8 @@ server {
     }
 
     location / {
-        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Cache-Control "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0, s-maxage=0" always;
+        add_header Surrogate-Control "no-store" always;
         add_header Pragma "no-cache" always;
         add_header Expires "0" always;
         try_files $uri $uri/ /index.html;
