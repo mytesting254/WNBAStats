@@ -4268,7 +4268,6 @@ function SpecialStocksView({
                     <col className="special-col-probability" />
                     <col className="special-col-probability" />
                     <col className="special-col-probability" />
-                    <col className="special-col-settled" />
                     <col className="special-col-captured" />
                   </colgroup>
                   <thead>
@@ -4284,7 +4283,6 @@ function SpecialStocksView({
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("block_prob_2_plus")}>2+ BLK {sortIndicator("block_prob_2_plus")}</button></th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("stocks_prob_2_plus")}>2+ Stocks {sortIndicator("stocks_prob_2_plus")}</button></th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("stocks_prob_3_plus")}>3+ Stocks {sortIndicator("stocks_prob_3_plus")}</button></th>
-                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("actual_stocks")}>Settled {sortIndicator("actual_stocks")}</button></th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("captured_at")}>Captured {sortIndicator("captured_at")}</button></th>
                     </tr>
                   </thead>
@@ -4326,17 +4324,12 @@ function SpecialStocksView({
                         <td>{formatPercent(snapshot.block_prob_2_plus)}</td>
                         <td>{formatPercent(snapshot.stocks_prob_2_plus)}</td>
                         <td>{formatPercent(snapshot.stocks_prob_3_plus)}</td>
-                        <td>
-                          {snapshot.actual_stocks == null
-                            ? "Pending"
-                            : `${formatNumber(snapshot.actual_steals ?? null)} STL | ${formatNumber(snapshot.actual_blocks ?? null)} BLK`}
-                        </td>
                         <td>{formatDateTime(snapshot.captured_at)}</td>
                       </tr>
                     ))}
                     {!selectedCard.players.length && (
                       <tr>
-                        <td colSpan={13}>No special props generated for this game yet.</td>
+                        <td colSpan={12}>No special props generated for this game yet.</td>
                       </tr>
                     )}
                   </tbody>

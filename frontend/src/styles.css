@@ -1178,7 +1178,7 @@ tbody tr.selected {
 }
 
 .special-props-table {
-  min-width: 1370px;
+  min-width: 1150px;
   background: #ffffff;
 }
 
@@ -1196,10 +1196,6 @@ tbody tr.selected {
 
 .special-props-table .special-col-probability {
   width: 96px;
-}
-
-.special-props-table .special-col-settled {
-  width: 220px;
 }
 
 .special-props-table .special-col-captured {
@@ -1254,11 +1250,6 @@ tbody tr.selected {
 
 .special-props-table th:nth-child(12),
 .special-props-table td:nth-child(12) {
-  min-width: 220px;
-}
-
-.special-props-table th:nth-child(13),
-.special-props-table td:nth-child(13) {
   min-width: 156px;
 }
 
