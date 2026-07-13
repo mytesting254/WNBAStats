@@ -65,6 +65,8 @@ export type SpecialStocksSnapshot = {
   team_logo_url?: string | null;
   board_player_count?: number;
   board_candidate_count_50_plus?: number;
+  board_candidate_threshold?: number;
+  board_candidate_count_threshold?: number;
   board_avg_prob_2_plus?: number;
   board_avg_prob_3_plus?: number;
   board_top_projected_stocks?: number;

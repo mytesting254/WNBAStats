@@ -24,6 +24,11 @@ _STOCKS_RECENT_WINDOW_GAMES = 12
 _STOCKS_STABILITY_WINDOW_GAMES = 24
 _STOCKS_PROMOTION_WINDOW_GAMES = 3
 _SNAPSHOT_DELTA_TOLERANCE = 1e-4
+SPECIALS_DEFAULT_HIGH_THRESHOLD = 0.50
+SPECIALS_DEFAULT_WATCH_THRESHOLD = 0.40
+SPECIALS_MIN_SETTLED_THRESHOLD_ROWS = 40
+SPECIALS_MIN_THRESHOLD_BUCKET_ROWS = 10
+SPECIALS_MIN_THRESHOLD_BUCKET_HITS = 4
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -133,6 +138,8 @@ def ensure_tracking_schema() -> Path:
                     game_date TEXT NOT NULL,
                     player_count INTEGER NOT NULL DEFAULT 0,
                     candidate_count_50_plus INTEGER NOT NULL DEFAULT 0,
+                    candidate_threshold REAL NOT NULL DEFAULT 0.5,
+                    candidate_count_threshold INTEGER NOT NULL DEFAULT 0,
                     avg_prob_2_plus REAL NOT NULL DEFAULT 0,
                     avg_prob_3_plus REAL NOT NULL DEFAULT 0,
                     top_projected_stocks REAL NOT NULL DEFAULT 0,
@@ -193,6 +200,25 @@ def ensure_tracking_schema() -> Path:
                         for snapshot_id, projected_stocks in stale_three_plus_rows
                     ],
                 )
+            board_summary_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(game_board_summaries)").fetchall()
+            }
+            if "candidate_threshold" not in board_summary_columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE game_board_summaries ADD COLUMN candidate_threshold REAL NOT NULL DEFAULT 0.5"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            if "candidate_count_threshold" not in board_summary_columns:
+                try:
+                    conn.execute(
+                        "ALTER TABLE game_board_summaries ADD COLUMN candidate_count_threshold INTEGER NOT NULL DEFAULT 0"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
     return path
 
 
@@ -1256,6 +1282,98 @@ def _player_recent_stocks_hit_rate(
     return None if bundle["recent_hit_rate_2_plus"] is None else float(bundle["recent_hit_rate_2_plus"])
 
 
+def default_special_threshold_recommendations() -> dict[str, Any]:
+    return {
+        "status": "insufficient_history",
+        "high_confidence_threshold": SPECIALS_DEFAULT_HIGH_THRESHOLD,
+        "watch_threshold": SPECIALS_DEFAULT_WATCH_THRESHOLD,
+        "settled_rows": 0,
+        "evaluated_thresholds": [],
+    }
+
+
+def fit_special_threshold_recommendations(settled_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(settled_rows) < SPECIALS_MIN_SETTLED_THRESHOLD_ROWS:
+        result = default_special_threshold_recommendations()
+        result["settled_rows"] = len(settled_rows)
+        return result
+    threshold_candidates = [round(value, 2) for value in (0.38, 0.40, 0.42, 0.45, 0.48, 0.50, 0.53, 0.55, 0.58, 0.60)]
+    evaluations: list[dict[str, Any]] = []
+    for threshold in threshold_candidates:
+        bucket = [row for row in settled_rows if float(row.get("stocks_prob_2_plus") or 0.0) >= threshold]
+        support = len(bucket)
+        hits = sum(1 for row in bucket if float(row.get("actual_stocks") or 0.0) >= 2.0)
+        hit_rate = (hits / support) if support else None
+        eligible = (
+            support >= SPECIALS_MIN_THRESHOLD_BUCKET_ROWS
+            and hits >= SPECIALS_MIN_THRESHOLD_BUCKET_HITS
+            and hit_rate is not None
+            and hit_rate >= threshold
+        )
+        evaluations.append(
+            {
+                "threshold": threshold,
+                "support": support,
+                "hits": hits,
+                "hit_rate": round(hit_rate, 4) if hit_rate is not None else None,
+                "eligible": eligible,
+            }
+        )
+    eligible = [row for row in evaluations if bool(row["eligible"])]
+    high_confidence_threshold = (
+        max(float(row["threshold"]) for row in eligible)
+        if eligible
+        else SPECIALS_DEFAULT_HIGH_THRESHOLD
+    )
+    watch_candidates = [
+        row for row in evaluations
+        if float(row["threshold"]) < high_confidence_threshold
+        and int(row["support"]) >= SPECIALS_MIN_THRESHOLD_BUCKET_ROWS
+    ]
+    watch_threshold = (
+        max(float(row["threshold"]) for row in watch_candidates)
+        if watch_candidates
+        else SPECIALS_DEFAULT_WATCH_THRESHOLD
+    )
+    return {
+        "status": "fit" if eligible else "fallback_defaults",
+        "high_confidence_threshold": round(high_confidence_threshold, 2),
+        "watch_threshold": round(min(watch_threshold, high_confidence_threshold - 0.01), 2)
+        if watch_threshold >= high_confidence_threshold
+        else round(watch_threshold, 2),
+        "settled_rows": len(settled_rows),
+        "evaluated_thresholds": evaluations,
+    }
+
+
+def settled_latest_special_rows(tracking: sqlite3.Connection) -> list[dict[str, Any]]:
+    rows = tracking.execute(
+        """
+        WITH latest AS (
+            SELECT
+                ps.*,
+                st.actual_steals,
+                st.actual_blocks,
+                CASE
+                    WHEN st.snapshot_id IS NULL THEN NULL
+                    ELSE st.actual_steals + st.actual_blocks
+                END AS actual_stocks,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ps.game_id, ps.player_id
+                    ORDER BY ps.captured_at DESC, ps.id DESC
+                ) AS snapshot_rank
+            FROM projection_snapshots ps
+            JOIN settlements st ON st.snapshot_id = ps.id
+        )
+        SELECT *
+        FROM latest
+        WHERE snapshot_rank = 1
+        ORDER BY game_date, captured_at, id
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def rebuild_team_prep_context(
     conn: sqlite3.Connection,
     game_ids: list[int] | None = None,
@@ -1502,6 +1620,10 @@ def rebuild_game_board_summaries(
 ) -> int:
     tracking = _open_tracking_connection()
     try:
+        threshold_recommendations = fit_special_threshold_recommendations(settled_latest_special_rows(tracking))
+        candidate_threshold = float(
+            threshold_recommendations.get("high_confidence_threshold") or SPECIALS_DEFAULT_HIGH_THRESHOLD
+        )
         normalized_game_ids = tuple(sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0}))
         normalized_dates = tuple(sorted({str(game_date).strip() for game_date in (target_dates or []) if str(game_date).strip()}))
         filter_sql = " WHERE latest.snapshot_rank = 1"
@@ -1535,6 +1657,7 @@ def rebuild_game_board_summaries(
                 latest.game_date,
                 COUNT(*) AS player_count,
                 SUM(CASE WHEN COALESCE(latest.stocks_prob_2_plus, 0) >= 0.5 THEN 1 ELSE 0 END) AS candidate_count_50_plus,
+                SUM(CASE WHEN COALESCE(latest.stocks_prob_2_plus, 0) >= ? THEN 1 ELSE 0 END) AS candidate_count_threshold,
                 AVG(COALESCE(latest.stocks_prob_2_plus, 0)) AS avg_prob_2_plus,
                 AVG(COALESCE(latest.stocks_prob_3_plus, 0)) AS avg_prob_3_plus,
                 MAX(COALESCE(latest.projected_stocks, 0)) AS top_projected_stocks,
@@ -1556,7 +1679,7 @@ def rebuild_game_board_summaries(
             GROUP BY latest.game_id, latest.game_date
             ORDER BY latest.game_date, latest.game_id
             """,
-            params,
+            (candidate_threshold, *params),
         ).fetchall()
         built_at = datetime.now(timezone.utc).isoformat()
         summary_rows = [
@@ -1565,6 +1688,8 @@ def rebuild_game_board_summaries(
                 str(row["game_date"]),
                 int(row["player_count"] or 0),
                 int(row["candidate_count_50_plus"] or 0),
+                candidate_threshold,
+                int(row["candidate_count_threshold"] or 0),
                 float(row["avg_prob_2_plus"] or 0.0),
                 float(row["avg_prob_3_plus"] or 0.0),
                 float(row["top_projected_stocks"] or 0.0),
@@ -1591,13 +1716,15 @@ def rebuild_game_board_summaries(
                         game_date,
                         player_count,
                         candidate_count_50_plus,
+                        candidate_threshold,
+                        candidate_count_threshold,
                         avg_prob_2_plus,
                         avg_prob_3_plus,
                         top_projected_stocks,
                         top_prob_2_plus,
                         top_player_name,
                         built_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     summary_rows,
                 )
@@ -2220,6 +2347,8 @@ def list_game_board_summaries(
                 game_date,
                 player_count,
                 candidate_count_50_plus,
+                candidate_threshold,
+                candidate_count_threshold,
                 avg_prob_2_plus,
                 avg_prob_3_plus,
                 top_projected_stocks,

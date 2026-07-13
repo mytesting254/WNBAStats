@@ -3742,6 +3742,8 @@ def test_special_stocks_batches_context_without_losing_recent_history(monkeypatc
     for row in rows:
         assert int(row["board_player_count"]) == 2
         assert int(row["board_candidate_count_50_plus"]) >= 1
+        assert float(row["board_candidate_threshold"]) >= 0.5
+        assert int(row["board_candidate_count_threshold"]) >= 1
         assert float(row["board_avg_prob_2_plus"]) > 0.0
         assert row["board_top_player_name"]
         assert row["recent_values"]
@@ -4167,7 +4169,7 @@ def test_prepare_stocks_data_targets_selected_games(monkeypatch, tmp_path) -> No
         ]
         summary_row = tracking.execute(
             """
-            SELECT player_count, candidate_count_50_plus, top_player_name
+            SELECT player_count, candidate_count_50_plus, candidate_threshold, candidate_count_threshold, top_player_name
             FROM game_board_summaries
             WHERE game_id = ?
             """,
@@ -4186,7 +4188,9 @@ def test_prepare_stocks_data_targets_selected_games(monkeypatch, tmp_path) -> No
     assert summary_row is not None
     assert int(summary_row[0]) > 0
     assert int(summary_row[1]) >= 0
-    assert str(summary_row[2])
+    assert float(summary_row[2]) >= 0.5
+    assert int(summary_row[3]) >= 0
+    assert str(summary_row[4])
     assert prep_run is not None
     assert str(prep_run[0]) == "completed"
     assert str(prep_run[1]) == "game_ids"
@@ -4499,7 +4503,7 @@ def test_special_threshold_recommendations_fallback_when_history_is_sparse() -> 
         {"stocks_prob_2_plus": 0.47, "actual_stocks": 2.0},
     ]
 
-    result = main_module._fit_special_threshold_recommendations(rows)
+    result = stocks_tracking_module.fit_special_threshold_recommendations(rows)
 
     assert result["status"] == "insufficient_history"
     assert result["high_confidence_threshold"] == 0.5
@@ -4514,7 +4518,7 @@ def test_special_threshold_recommendations_fit_high_confidence_cutoff() -> None:
     rows.extend({"stocks_prob_2_plus": 0.48, "actual_stocks": 2.0} for _ in range(10))
     rows.extend({"stocks_prob_2_plus": 0.42, "actual_stocks": 1.0} for _ in range(10))
 
-    result = main_module._fit_special_threshold_recommendations(rows)
+    result = stocks_tracking_module.fit_special_threshold_recommendations(rows)
 
     assert result["status"] == "fit"
     assert result["settled_rows"] == 42

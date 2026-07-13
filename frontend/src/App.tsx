@@ -4059,7 +4059,7 @@ function SpecialStocksView({
       const current = grouped.get(snapshot.game_id);
       if (current) {
         current.players.push(snapshot);
-        if (snapshot.board_candidate_count_50_plus == null && (snapshot.stocks_prob_2_plus ?? 0) >= 0.5) {
+        if (snapshot.board_candidate_count_threshold == null && (snapshot.stocks_prob_2_plus ?? 0) >= highConfidenceThreshold) {
           current.candidateCount50Plus += 1;
         }
       } else {
@@ -4070,8 +4070,8 @@ function SpecialStocksView({
           homeTeam: snapshot.home_team ?? null,
           awayTeam: snapshot.away_team ?? null,
           candidateCount50Plus:
-            snapshot.board_candidate_count_50_plus
-            ?? ((snapshot.stocks_prob_2_plus ?? 0) >= 0.5 ? 1 : 0),
+            snapshot.board_candidate_count_threshold
+            ?? ((snapshot.stocks_prob_2_plus ?? 0) >= highConfidenceThreshold ? 1 : 0),
           avgProb2Plus: 0,
           playerCount: snapshot.board_player_count ?? 0,
           players: [snapshot],
@@ -4080,9 +4080,8 @@ function SpecialStocksView({
     }
     return Array.from(grouped.values()).map((card) => ({
       ...card,
-      candidateCount50Plus: card.players.filter(
-        (player) => (player.stocks_prob_2_plus ?? 0) >= highConfidenceThreshold,
-      ).length,
+      candidateCount50Plus: card.players[0]?.board_candidate_count_threshold
+        ?? card.players.filter((player) => (player.stocks_prob_2_plus ?? 0) >= highConfidenceThreshold).length,
       avgProb2Plus: card.players[0]?.board_avg_prob_2_plus
         ?? (card.players.length > 0
           ? card.players.reduce((sum, player) => sum + (player.stocks_prob_2_plus ?? 0), 0) / card.players.length
