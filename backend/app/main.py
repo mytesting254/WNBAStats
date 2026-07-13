@@ -5925,6 +5925,84 @@ def _line_discrepancies_for_games(conn, game_ids: list[int]) -> list[dict]:
     return sorted(payload, key=lambda item: (item["line_gap"], item["price_gap"]), reverse=True)
 
 
+def _best_side_sportsbooks_for_prop_lines(conn, prop_line_ids: list[int]) -> dict[int, dict[str, str | None]]:
+    normalized_ids = sorted({int(prop_line_id) for prop_line_id in prop_line_ids if int(prop_line_id) > 0})
+    if not normalized_ids:
+        return {}
+    placeholders = ",".join("?" for _ in normalized_ids)
+    rows = conn.execute(
+        """
+        SELECT
+            pl.id AS prop_line_id,
+            pl.over_odds,
+            pl.under_odds,
+            spl.provider,
+            spl.sportsbook,
+            spl.side,
+            spl.price
+        FROM prop_lines pl
+        JOIN players p ON p.id = pl.player_id
+        JOIN sportsbook_prop_lines spl ON spl.game_id = pl.game_id
+          AND spl.market = pl.market
+          AND spl.line = pl.line
+          AND (
+              (spl.provider_player_id IS NOT NULL AND spl.provider_player_id = p.id)
+              OR """
+        + _player_name_match_clause("p.full_name", "spl.player_name")
+        + """
+          )
+        WHERE pl.id IN ("""
+        + placeholders
+        + """)
+          AND spl.side IN ('over', 'under')
+        ORDER BY pl.id, spl.side, spl.price DESC, spl.sportsbook
+        """,
+        tuple(normalized_ids),
+    ).fetchall()
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        prop_line_id = int(row["prop_line_id"])
+        grouped.setdefault(prop_line_id, []).append(dict(row))
+    result: dict[int, dict[str, str | None]] = {}
+    for prop_line_id, group_rows in grouped.items():
+        has_covers = any(str(row["provider"]) == "covers" for row in group_rows)
+        label_map: dict[str, str | None] = {"over": None, "under": None}
+        for side, odds_key in (("over", "over_odds"), ("under", "under_odds")):
+            target_price = next(
+                (int(row[odds_key]) for row in group_rows if row.get(odds_key) is not None),
+                None,
+            )
+            if target_price is None:
+                continue
+            candidates = [
+                row
+                for row in group_rows
+                if str(row["side"]) == side
+                and int(row["price"]) == target_price
+                and ((not has_covers) or str(row["provider"]) == "covers")
+            ]
+            if not candidates:
+                candidates = [
+                    row
+                    for row in group_rows
+                    if str(row["side"]) == side and int(row["price"]) == target_price
+                ]
+            if candidates:
+                chosen = sorted(
+                    candidates,
+                    key=lambda row: (
+                        0 if str(row["provider"]) == "covers" else 1,
+                        str(row["sportsbook"]),
+                    ),
+                )[0]
+                label_map[side] = str(chosen["sportsbook"])
+        result[prop_line_id] = {
+            "best_over_sportsbook": label_map["over"],
+            "best_under_sportsbook": label_map["under"],
+        }
+    return result
+
+
 def _value_board_payload(
     conn,
     game_id: int | None = None,
@@ -6062,6 +6140,10 @@ def _value_board_payload(
         """,
         params,
     ).fetchall()
+    best_book_map = _best_side_sportsbooks_for_prop_lines(
+        conn,
+        [int(row["prop_line_id"]) for row in rows if row["prop_line_id"] is not None],
+    )
     payload = []
     fallback_payload = []
     freshness_cache: dict[tuple[int, int], dict[str, Any]] = {}
@@ -6069,6 +6151,14 @@ def _value_board_payload(
         is_active_time = _is_active_game_time(row["start_time"])
         item = dict(row)
         item["prop_line_id"] = int(item["prop_line_id"])
+        best_books = best_book_map.get(item["prop_line_id"], {})
+        item["best_over_sportsbook"] = best_books.get("best_over_sportsbook")
+        item["best_under_sportsbook"] = best_books.get("best_under_sportsbook")
+        item["display_sportsbook"] = (
+            item["best_over_sportsbook"]
+            if str(item.get("recommended_side")) == "over"
+            else item["best_under_sportsbook"]
+        ) or item.get("sportsbook")
         item = _repair_prediction_item_if_needed(conn, item)
         if _player_is_unavailable(conn, int(item["player_id"])):
             continue
@@ -6540,12 +6630,25 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
         """,
         (float(min_ev), float(min_edge)),
     ).fetchall()
+    best_book_map = _best_side_sportsbooks_for_prop_lines(
+        conn,
+        [int(row["prop_line_id"]) for row in rows if row["prop_line_id"] is not None],
+    )
     value_board_prediction_ids = {int(item["id"]) for item in _value_board_payload(conn)}
     gem_prop_line_ids = {int(item["prop_line_id"]) for item in _build_current_gems(conn, "balanced")}
     payload = []
     freshness_cache: dict[tuple[int, int], dict[str, Any]] = {}
     for row in rows:
         item = dict(row)
+        item["prop_line_id"] = int(item["prop_line_id"])
+        best_books = best_book_map.get(item["prop_line_id"], {})
+        item["best_over_sportsbook"] = best_books.get("best_over_sportsbook")
+        item["best_under_sportsbook"] = best_books.get("best_under_sportsbook")
+        item["display_sportsbook"] = (
+            item["best_over_sportsbook"]
+            if str(item.get("recommended_side")) == "over"
+            else item["best_under_sportsbook"]
+        ) or item.get("sportsbook")
         item = _repair_prediction_item_if_needed(conn, item)
         if _player_is_unavailable(conn, int(item["player_id"])):
             continue

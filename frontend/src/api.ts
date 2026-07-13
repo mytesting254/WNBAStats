@@ -6,6 +6,9 @@
   team: string;
   team_logo_url?: string | null;
   sportsbook: string;
+  best_over_sportsbook?: string | null;
+  best_under_sportsbook?: string | null;
+  display_sportsbook?: string | null;
   market: string;
   line: number;
   over_odds: number;

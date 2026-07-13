@@ -309,6 +309,7 @@ export function App() {
   const [activeTab, setActiveTab] = useState<DashboardTab>("props");
   const [market, setMarket] = useState("all");
   const [confidence, setConfidence] = useState("all");
+  const [sportsbookFilter, setSportsbookFilter] = useState("all");
   const [modelProbabilityOrder, setModelProbabilityOrder] = useState<SortDirection>("desc");
   const [selected, setSelected] = useState<ValueProp | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -670,14 +671,15 @@ export function App() {
       .filter((prop) => {
         const marketMatch = market === "all" || prop.market === market;
         const confidenceMatch = confidence === "all" || prop.confidence === confidence;
-        return marketMatch && confidenceMatch;
+        const sportsbookMatch = sportsbookFilter === "all" || displaySportsbookName(prop) === sportsbookFilter;
+        return marketMatch && confidenceMatch && sportsbookMatch;
       })
       .sort((a, b) =>
         modelProbabilityOrder === "asc"
           ? a.model_probability - b.model_probability
           : b.model_probability - a.model_probability
       );
-  }, [props, market, confidence, modelProbabilityOrder]);
+  }, [props, market, confidence, sportsbookFilter, modelProbabilityOrder]);
   const gems = useMemo(() => buildGems(props, discrepancies), [props, discrepancies]);
   const activeTabLoading = activeTab === "props" ? loading : tabLoading[activeTab];
 
@@ -1275,16 +1277,19 @@ export function App() {
       <DashboardErrorBoundary key={activeTab} onReset={handleReload}>
         {activeTab === "props" ? (
           <PropsView
+            items={props}
             filtered={filtered}
             loading={loading}
             error={error}
             cacheStatus={cacheStatus?.views.props ?? null}
             market={market}
             confidence={confidence}
+            sportsbookFilter={sportsbookFilter}
             modelProbabilityOrder={modelProbabilityOrder}
             selected={selected}
             setMarket={setMarket}
             setConfidence={setConfidence}
+            setSportsbookFilter={setSportsbookFilter}
             setModelProbabilityOrder={setModelProbabilityOrder}
             setSelected={setSelected}
           />
@@ -2557,32 +2562,49 @@ function ModelsView({
 }
 
 function PropsView({
+  items,
   filtered,
   loading,
   error,
   cacheStatus,
   market,
   confidence,
+  sportsbookFilter,
   modelProbabilityOrder,
   selected,
   setMarket,
   setConfidence,
+  setSportsbookFilter,
   setModelProbabilityOrder,
   setSelected
 }: {
+  items: ValueProp[];
   filtered: ValueProp[];
   loading: boolean;
   error: string | null;
   cacheStatus: CacheViewStatus | null;
   market: string;
   confidence: string;
+  sportsbookFilter: string;
   modelProbabilityOrder: SortDirection;
   selected: ValueProp | null;
   setMarket: (market: string) => void;
   setConfidence: (confidence: string) => void;
+  setSportsbookFilter: (sportsbook: string) => void;
   setModelProbabilityOrder: (order: SortDirection) => void;
   setSelected: (prop: ValueProp) => void;
 }) {
+  const sportsbookOptions = useMemo(
+    () =>
+      sportsbookFilterOptions(
+        items.filter((prop) => {
+          const marketMatch = market === "all" || prop.market === market;
+          const confidenceMatch = confidence === "all" || prop.confidence === confidence;
+          return marketMatch && confidenceMatch;
+        })
+      ),
+    [items, market, confidence]
+  );
   return (
     <section className="workspace">
       <div className="board-panel">
@@ -2610,6 +2632,17 @@ function PropsView({
             <option value="high">High</option>
             <option value="medium">Medium</option>
             <option value="low">Low</option>
+          </select>
+          <select
+            value={sportsbookFilter}
+            onChange={(event) => setSportsbookFilter(event.target.value)}
+            aria-label="Props best sportsbook filter"
+          >
+            {sportsbookOptions.map((sportsbook) => (
+              <option key={`props-book-${sportsbook}`} value={sportsbook}>
+                {sportsbook === "all" ? "All best books" : sportsbook}
+              </option>
+            ))}
           </select>
           <select
             value={modelProbabilityOrder}
@@ -2644,7 +2677,7 @@ function PropsView({
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
-                        <span>{prop.team} | {prop.sportsbook}</span>
+                        <span>{prop.team} | {displaySportsbookName(prop)}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-l5`)}
                       </div>
                     </div>
@@ -2677,7 +2710,7 @@ function PropsView({
               <div className="detail-title">
                 <TeamLogo src={selected.team_logo_url} alt={`${selected.team} logo`} />
                 <div>
-                  <p className="eyebrow">{selected.team} | {selected.sportsbook}</p>
+                  <p className="eyebrow">{selected.team} | {displaySportsbookName(selected)}</p>
                   <h3><PlayerLabel name={selected.player} position={selected.position} increasedRole={selected.increased_role} /></h3>
                 </div>
               </div>
@@ -2815,7 +2848,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
       .filter((g) => marketFilter === "all" || g.market === marketFilter)
       .filter((g) => confidenceFilter === "all" || g.confidence === confidenceFilter)
       .filter((g) => sideFilter === "all" || g.recommended_side === sideFilter)
-      .filter((g) => sportsbookFilter === "all" || g.sportsbook === sportsbookFilter)
+      .filter((g) => sportsbookFilter === "all" || displaySportsbookName(g) === sportsbookFilter)
       .sort((a, b) => {
         const aVal = sortField === "gem_score" ? a.gem_score
           : sortField === "expected_value" ? a.expected_value
@@ -2927,7 +2960,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                     {renderRecentFormWithMinutes(g, `${g.id}-gem-flat-l5`)}
                   </td>
                   <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
-                  <td>{g.sportsbook}</td>
+                  <td>{displaySportsbookName(g)}</td>
                   <td>{formatPercent(g.edge)}</td>
                   <td>{formatPercent(g.expected_value)}</td>
                   <td>{g.line_gap.toFixed(1)}</td>
@@ -3014,7 +3047,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                             {renderRecentFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-l5`)}
                           </td>
                           <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
-                          <td>{g.sportsbook}</td>
+                          <td>{displaySportsbookName(g)}</td>
                           <td>{formatPercent(g.edge)}</td>
                           <td>{formatPercent(g.expected_value)}</td>
                           <td>
@@ -3813,7 +3846,7 @@ function WatchlistView({
     .filter((prop) => (marketFilter === "all" || prop.market === marketFilter))
     .filter((prop) => (sideFilter === "all" || prop.recommended_side === sideFilter))
     .filter((prop) => (confidenceFilter === "all" || prop.confidence === confidenceFilter))
-    .filter((prop) => (sportsbookFilter === "all" || prop.sportsbook === sportsbookFilter))
+    .filter((prop) => (sportsbookFilter === "all" || displaySportsbookName(prop) === sportsbookFilter))
     .sort((a, b) => compareCandidateProps(a, b, candidateSort, sortDirection));
 
   return (
@@ -3954,7 +3987,7 @@ function WatchlistView({
                       </td>
                       <td>{marketLabel(prop.market)}</td>
                       <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
-                      <td>{prop.sportsbook}</td>
+                      <td>{displaySportsbookName(prop)}</td>
                       <td>{prop.line.toFixed(1)}</td>
                       <td>{prop.projection.toFixed(1)}</td>
                       <td>{formatSigned(prop.projection - prop.line)}</td>
@@ -4401,7 +4434,7 @@ function MatchupProps({
       const marketMatch = marketFilter === "all" || prop.market === marketFilter;
       const sideMatch = sideFilter === "all" || prop.recommended_side === sideFilter;
       const confidenceMatch = confidenceFilter === "all" || prop.confidence === confidenceFilter;
-      const sportsbookMatch = sportsbookFilter === "all" || prop.sportsbook === sportsbookFilter;
+      const sportsbookMatch = sportsbookFilter === "all" || displaySportsbookName(prop) === sportsbookFilter;
       return marketMatch && sideMatch && confidenceMatch && sportsbookMatch;
     })
     .sort((a, b) => compareCandidateProps(a, b, candidateSort, sortDirection));
@@ -4639,7 +4672,7 @@ function MatchupProps({
                   </td>
                   <td>{marketLabel(prop.market)}</td>
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
-                  <td>{prop.sportsbook}</td>
+                  <td>{displaySportsbookName(prop)}</td>
                   <td>{prop.line.toFixed(1)}</td>
                   <td>{prop.projection.toFixed(1)}</td>
                   <td>{formatSigned(prop.projection - prop.line)}</td>
@@ -5414,11 +5447,15 @@ function compareDiscrepancies(a: LineDiscrepancy, b: LineDiscrepancy, field: Dis
   return (b.line_gap - a.line_gap) || (b.price_gap - a.price_gap) || a.player_name.localeCompare(b.player_name);
 }
 
-function sportsbookFilterOptions(items: Array<{ sportsbook: string }>) {
+function displaySportsbookName(item: { sportsbook: string; display_sportsbook?: string | null }) {
+  return item.display_sportsbook?.trim() || item.sportsbook?.trim() || "Unknown";
+}
+
+function sportsbookFilterOptions(items: Array<{ sportsbook: string; display_sportsbook?: string | null }>) {
   const options = Array.from(
     new Set(
       items
-        .map((item) => item.sportsbook?.trim())
+        .map((item) => displaySportsbookName(item))
         .filter((sportsbook): sportsbook is string => Boolean(sportsbook))
     )
   ).sort((a, b) => a.localeCompare(b));
