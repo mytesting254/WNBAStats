@@ -104,6 +104,19 @@ MARKET_VOLATILITY_FLOORS = {
     "blocks_steals": 1.1,
     "points_rebounds_assists": 5.0,
 }
+MARKET_WINSORIZATION_SCALES = {
+    "points": 1.75,
+    "rebounds": 1.6,
+    "assists": 1.6,
+    "points_rebounds": 1.8,
+    "points_assists": 1.8,
+    "rebounds_assists": 1.7,
+    "points_rebounds_assists": 1.9,
+    "threes": 1.45,
+    "steals": 1.35,
+    "blocks": 1.35,
+    "blocks_steals": 1.4,
+}
 RESIDUAL_PROMOTION_MIN_ROWS = 100
 RESIDUAL_PROMOTION_MIN_MAE_IMPROVEMENT = 0.0
 RESIDUAL_PROMOTION_MIN_RMSE_IMPROVEMENT = 0.0
@@ -764,15 +777,20 @@ def feature_snapshot(
     if not history:
         return FeatureSnapshot([0.0 for _ in FEATURE_NAMES], 0.0, "No historical stats found; projection defaults to 0.")
 
-    values = [_market_value(row, market) for row in history_rows]
+    values = _winsorize_history_values([_market_value(row, market) for row in history_rows], market)
     minutes = [float(row["minutes"]) for row in history_rows]
+    sample_weights = [
+        _historical_blowout_weight(row, str(row["rotation_role"] or rotation_role))
+        for row in history_rows
+    ]
     rates = [value / max(minute, 1.0) for value, minute in zip(values, minutes)]
     last_5 = values[:5]
     last_10 = values
-    recent_avg = sum(last_5) / len(last_5)
-    last_10_avg = sum(last_10) / len(last_10)
-    weighted_recent = _weighted_average(values)
-    weighted_rate = _weighted_average(rates)
+    recent_weights = sample_weights[: len(last_5)]
+    recent_avg = sum(value * weight for value, weight in zip(last_5, recent_weights)) / max(sum(recent_weights), 1e-9)
+    last_10_avg = sum(value * weight for value, weight in zip(last_10, sample_weights)) / max(sum(sample_weights), 1e-9)
+    weighted_recent = _weighted_average([value * weight for value, weight in zip(values, sample_weights)])
+    weighted_rate = _weighted_average([value * weight for value, weight in zip(rates, sample_weights)])
     ewma_value = _ewma_newest_first(values, alpha=0.42)
     ewma_minutes = _ewma_newest_first(minutes, alpha=0.38)
     minutes_trend = _recent_trend(minutes)
@@ -3569,6 +3587,33 @@ def _ewma_newest_first(values: list[float], alpha: float) -> float:
     return estimate
 
 
+def _quantile(sorted_values: list[float], q: float) -> float:
+    if not sorted_values:
+        return 0.0
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    position = max(0.0, min(float(len(sorted_values) - 1), q * float(len(sorted_values) - 1)))
+    lower = int(math.floor(position))
+    upper = int(math.ceil(position))
+    if lower == upper:
+        return float(sorted_values[lower])
+    weight = position - lower
+    return ((1.0 - weight) * float(sorted_values[lower])) + (weight * float(sorted_values[upper]))
+
+
+def _winsorize_history_values(values: list[float], market: str) -> list[float]:
+    if len(values) < 4:
+        return [max(0.0, float(value)) for value in values]
+    sorted_values = sorted(float(value) for value in values)
+    q1 = _quantile(sorted_values, 0.25)
+    q3 = _quantile(sorted_values, 0.75)
+    iqr = max(q3 - q1, _market_volatility_floor(market) * 0.5)
+    scale = MARKET_WINSORIZATION_SCALES.get(market, 1.6)
+    lower = max(0.0, q1 - (scale * iqr))
+    upper = q3 + (scale * iqr)
+    return [_clamp(float(value), lower, upper) for value in values]
+
+
 def _ewma_volatility_newest_first(values: list[float], center: float, market: str) -> float:
     if len(values) < 2:
         return _market_volatility_floor(market)
@@ -3616,7 +3661,18 @@ def _player_history(
     if before_game_date is not None:
         rows = conn.execute(
             f"""
-            SELECT s.*, g.game_date, p.rotation_role
+            SELECT s.*, g.game_date, p.rotation_role,
+                (
+                    SELECT ABS(tgr.points - tgr.opponent_points)
+                    FROM team_game_results tgr
+                    WHERE tgr.game_id = s.game_id
+                      AND tgr.team_id = COALESCE((
+                        SELECT h.team_id FROM player_team_history h
+                        WHERE h.player_id = s.player_id AND h.game_id = s.game_id
+                        ORDER BY h.id DESC LIMIT 1
+                      ), p.team_id)
+                    LIMIT 1
+                ) AS team_margin
             FROM player_game_stats s
             JOIN games g ON g.id = s.game_id
             JOIN players p ON p.id = s.player_id
@@ -3635,7 +3691,18 @@ def _player_history(
     else:
         rows = conn.execute(
             f"""
-            SELECT s.*, g.game_date, p.rotation_role
+            SELECT s.*, g.game_date, p.rotation_role,
+                (
+                    SELECT ABS(tgr.points - tgr.opponent_points)
+                    FROM team_game_results tgr
+                    WHERE tgr.game_id = s.game_id
+                      AND tgr.team_id = COALESCE((
+                        SELECT h.team_id FROM player_team_history h
+                        WHERE h.player_id = s.player_id AND h.game_id = s.game_id
+                        ORDER BY h.id DESC LIMIT 1
+                      ), p.team_id)
+                    LIMIT 1
+                ) AS team_margin
             FROM player_game_stats s
             JOIN games g ON g.id = s.game_id
             JOIN players p ON p.id = s.player_id
@@ -3651,6 +3718,7 @@ def _player_history(
             "minutes": float(row["minutes"]),
             "rotation_role": row["rotation_role"],
             "game_date": str(row["game_date"]),
+            "is_blowout": bool(float(row["team_margin"] or 0.0) >= 15.0),
         }
         for row in rows
     ]
@@ -3678,7 +3746,18 @@ def _player_recent_feature_rows(
                     SELECT h.team_id FROM player_team_history h
                     WHERE h.player_id = s.player_id AND h.game_id = s.game_id
                     ORDER BY h.id DESC LIMIT 1
-                ), p.team_id) AS resolved_team_id
+                ), p.team_id) AS resolved_team_id,
+                (
+                    SELECT ABS(tgr.points - tgr.opponent_points)
+                    FROM team_game_results tgr
+                    WHERE tgr.game_id = s.game_id
+                      AND tgr.team_id = COALESCE((
+                        SELECT h.team_id FROM player_team_history h
+                        WHERE h.player_id = s.player_id AND h.game_id = s.game_id
+                        ORDER BY h.id DESC LIMIT 1
+                      ), p.team_id)
+                    LIMIT 1
+                ) AS team_margin
             FROM player_game_stats s
             JOIN games g ON g.id = s.game_id
             JOIN players p ON p.id = s.player_id
@@ -3701,7 +3780,18 @@ def _player_recent_feature_rows(
                 SELECT h.team_id FROM player_team_history h
                 WHERE h.player_id = s.player_id AND h.game_id = s.game_id
                 ORDER BY h.id DESC LIMIT 1
-            ), p.team_id) AS resolved_team_id
+            ), p.team_id) AS resolved_team_id,
+            (
+                SELECT ABS(tgr.points - tgr.opponent_points)
+                FROM team_game_results tgr
+                WHERE tgr.game_id = s.game_id
+                  AND tgr.team_id = COALESCE((
+                    SELECT h.team_id FROM player_team_history h
+                    WHERE h.player_id = s.player_id AND h.game_id = s.game_id
+                    ORDER BY h.id DESC LIMIT 1
+                  ), p.team_id)
+                LIMIT 1
+            ) AS team_margin
         FROM player_game_stats s
         JOIN games g ON g.id = s.game_id
         JOIN players p ON p.id = s.player_id
@@ -4226,6 +4316,27 @@ def _h2h_factor_from_rows(
 def _weighted_average(values: list[float]) -> float:
     weights = list(range(len(values), 0, -1))
     return sum(value * weight for value, weight in zip(values, weights)) / sum(weights)
+
+
+def _historical_row_is_blowout(row: sqlite3.Row | dict[str, object]) -> bool:
+    if isinstance(row, sqlite3.Row):
+        margin = row["team_margin"] if "team_margin" in row.keys() else None
+    else:
+        margin = row.get("team_margin")
+        if margin is None:
+            margin = 15.0 if row.get("is_blowout") else 0.0
+    return float(margin or 0.0) >= 15.0
+
+
+def _historical_blowout_weight(row: sqlite3.Row | dict[str, object], rotation_role: str | None) -> float:
+    if not _historical_row_is_blowout(row):
+        return 1.0
+    role = str(rotation_role or "starter").strip().lower()
+    if role in {"star", "starter"}:
+        return 0.72
+    if role == "rotation":
+        return 0.82
+    return 0.92
 
 
 def _game_context(conn: sqlite3.Connection, player_id: int, game_id: int | None) -> dict:

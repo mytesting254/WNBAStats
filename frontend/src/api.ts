@@ -63,6 +63,13 @@ export type SpecialStocksSnapshot = {
   position?: string | null;
   team?: string | null;
   team_logo_url?: string | null;
+  board_player_count?: number;
+  board_candidate_count_50_plus?: number;
+  board_avg_prob_2_plus?: number;
+  board_avg_prob_3_plus?: number;
+  board_top_projected_stocks?: number;
+  board_top_prob_2_plus?: number;
+  board_top_player_name?: string | null;
   recent_values?: number[];
   recent_minutes?: number[];
   actual_steals?: number | null;

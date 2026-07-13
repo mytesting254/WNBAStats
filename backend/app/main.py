@@ -53,6 +53,7 @@ from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_r
 from .settlement import settle_completed_props
 from .stocks_tracking import (
     get_tracking_db_path,
+    list_game_board_summaries,
     list_special_stocks,
     prune_special_snapshots,
     queue_prepare_stocks_games,
@@ -1043,68 +1044,33 @@ def special_stocks() -> list[dict[str, Any]]:
         rows = list_special_stocks()
         if not rows:
             return []
+        requested_pairs = sorted(
+            {
+                (int(item["game_id"]), int(item["player_id"]))
+                for item in rows
+                if item.get("game_id") is not None and item.get("player_id") is not None
+            }
+        )
+        if not requested_pairs:
+            return []
+        board_summaries = {
+            int(row["game_id"]): row
+            for row in list_game_board_summaries(
+                game_ids=sorted({game_id for game_id, _ in requested_pairs}),
+            )
+        }
+        active_prop_pairs = _active_special_prop_pairs(conn, requested_pairs)
+        game_rows = _special_game_rows_by_pair(conn, requested_pairs)
+        recent_history = _special_recent_history_by_pair(conn, requested_pairs, limit=5)
         for item in rows:
             game_id = item.get("game_id")
             player_id = item.get("player_id")
             if game_id is None or player_id is None:
                 continue
-            active_prop_row = conn.execute(
-                """
-                SELECT 1
-                FROM prop_lines
-                WHERE game_id = ? AND player_id = ?
-                LIMIT 1
-                """,
-                (int(game_id), int(player_id)),
-            ).fetchone()
-            if active_prop_row is None:
+            pair = (int(game_id), int(player_id))
+            if pair not in active_prop_pairs:
                 continue
-            game_row = conn.execute(
-                """
-                SELECT
-                    g.status,
-                    g.game_date,
-                    g.start_time,
-                    home.abbreviation AS home_team,
-                    away.abbreviation AS away_team,
-                    p.position,
-                    rt.abbreviation AS team,
-                    rt.logo_url AS team_logo_url
-                FROM games g
-                JOIN players p ON p.id = ?
-                JOIN teams home ON home.id = g.home_team_id
-                JOIN teams away ON away.id = g.away_team_id
-                JOIN teams rt ON rt.id = (
-                    SELECT COALESCE(
-                        (
-                            SELECT h.team_id
-                            FROM player_team_history h
-                            WHERE h.player_id = p.id
-                              AND h.game_id = g.id
-                            ORDER BY h.id DESC
-                            LIMIT 1
-                        ),
-                        (
-                            SELECT h.team_id
-                            FROM player_team_history h
-                            WHERE h.player_id = p.id
-                              AND h.team_id IN (g.home_team_id, g.away_team_id)
-                            ORDER BY h.id DESC
-                            LIMIT 1
-                        ),
-                        (
-                            CASE
-                                WHEN p.team_id IN (g.home_team_id, g.away_team_id) THEN p.team_id
-                                ELSE NULL
-                            END
-                        ),
-                        p.team_id
-                    )
-                )
-                WHERE g.id = ?
-                """,
-                (int(player_id), int(game_id)),
-            ).fetchone()
+            game_row = game_rows.get(pair)
             if game_row is None:
                 continue
             game_date = _app_local_game_date(game_row["game_date"], game_row["start_time"])
@@ -1120,19 +1086,17 @@ def special_stocks() -> list[dict[str, Any]]:
             item["position"] = game_row["position"]
             item["team"] = game_row["team"]
             item["team_logo_url"] = game_row["team_logo_url"]
-            item["recent_values"] = _recent_market_values(
-                conn,
-                player_id=int(player_id),
-                market="blocks_steals",
-                game_id=int(game_id),
-                limit=5,
-            )
-            item["recent_minutes"] = _recent_minutes_played(
-                conn,
-                player_id=int(player_id),
-                game_id=int(game_id),
-                limit=5,
-            )
+            board_summary = board_summaries.get(int(game_id))
+            if board_summary is not None:
+                item["board_player_count"] = int(board_summary.get("player_count") or 0)
+                item["board_candidate_count_50_plus"] = int(board_summary.get("candidate_count_50_plus") or 0)
+                item["board_avg_prob_2_plus"] = float(board_summary.get("avg_prob_2_plus") or 0.0)
+                item["board_avg_prob_3_plus"] = float(board_summary.get("avg_prob_3_plus") or 0.0)
+                item["board_top_projected_stocks"] = float(board_summary.get("top_projected_stocks") or 0.0)
+                item["board_top_prob_2_plus"] = float(board_summary.get("top_prob_2_plus") or 0.0)
+                item["board_top_player_name"] = board_summary.get("top_player_name")
+            item["recent_values"] = list(recent_history.get(pair, {}).get("recent_values", []))
+            item["recent_minutes"] = list(recent_history.get(pair, {}).get("recent_minutes", []))
             visible_rows.append(item)
     return visible_rows
 
@@ -6157,6 +6121,156 @@ def _recent_minutes_played(conn, *, player_id: int, game_id: int, limit: int = 5
         (int(game_id), int(player_id), int(limit)),
     ).fetchall()
     return [round(float(row["minutes"] or 0.0), 1) for row in rows]
+
+
+def _special_target_pair_params(pairs: list[tuple[int, int]]) -> tuple[str, tuple[int, ...]]:
+    placeholders = ",".join("(?, ?)" for _ in pairs)
+    params = tuple(value for pair in pairs for value in pair)
+    return placeholders, params
+
+
+def _active_special_prop_pairs(conn, pairs: list[tuple[int, int]]) -> set[tuple[int, int]]:
+    if not pairs:
+        return set()
+    placeholders, params = _special_target_pair_params(pairs)
+    rows = conn.execute(
+        f"""
+        WITH target_pairs(game_id, player_id) AS (
+            VALUES {placeholders}
+        )
+        SELECT DISTINCT tp.game_id, tp.player_id
+        FROM target_pairs tp
+        JOIN prop_lines pl
+          ON pl.game_id = tp.game_id
+         AND pl.player_id = tp.player_id
+        """,
+        params,
+    ).fetchall()
+    return {(int(row["game_id"]), int(row["player_id"])) for row in rows}
+
+
+def _special_game_rows_by_pair(conn, pairs: list[tuple[int, int]]) -> dict[tuple[int, int], sqlite3.Row]:
+    if not pairs:
+        return {}
+    placeholders, params = _special_target_pair_params(pairs)
+    rows = conn.execute(
+        f"""
+        WITH target_pairs(game_id, player_id) AS (
+            VALUES {placeholders}
+        )
+        SELECT
+            tp.game_id,
+            tp.player_id,
+            g.status,
+            g.game_date,
+            g.start_time,
+            home.abbreviation AS home_team,
+            away.abbreviation AS away_team,
+            p.position,
+            rt.abbreviation AS team,
+            rt.logo_url AS team_logo_url
+        FROM target_pairs tp
+        JOIN games g ON g.id = tp.game_id
+        JOIN players p ON p.id = tp.player_id
+        JOIN teams home ON home.id = g.home_team_id
+        JOIN teams away ON away.id = g.away_team_id
+        LEFT JOIN teams rt ON rt.id = (
+            SELECT COALESCE(
+                (
+                    SELECT h.team_id
+                    FROM player_team_history h
+                    WHERE h.player_id = p.id
+                      AND h.game_id = g.id
+                    ORDER BY h.id DESC
+                    LIMIT 1
+                ),
+                (
+                    SELECT h.team_id
+                    FROM player_team_history h
+                    WHERE h.player_id = p.id
+                      AND h.team_id IN (g.home_team_id, g.away_team_id)
+                    ORDER BY h.id DESC
+                    LIMIT 1
+                ),
+                (
+                    CASE
+                        WHEN p.team_id IN (g.home_team_id, g.away_team_id) THEN p.team_id
+                        ELSE NULL
+                    END
+                ),
+                p.team_id
+            )
+        )
+        """,
+        params,
+    ).fetchall()
+    return {(int(row["game_id"]), int(row["player_id"])): row for row in rows}
+
+
+def _special_recent_history_by_pair(
+    conn,
+    pairs: list[tuple[int, int]],
+    *,
+    limit: int,
+) -> dict[tuple[int, int], dict[str, list[float]]]:
+    if not pairs:
+        return {}
+    placeholders, pair_params = _special_target_pair_params(pairs)
+    rows = conn.execute(
+        f"""
+        WITH target_pairs(game_id, player_id) AS (
+            VALUES {placeholders}
+        ),
+        ranked_history AS (
+            SELECT
+                tp.game_id AS target_game_id,
+                tp.player_id,
+                s.points,
+                s.rebounds,
+                s.assists,
+                s.threes,
+                s.steals,
+                s.blocks,
+                s.minutes,
+                ROW_NUMBER() OVER (
+                    PARTITION BY tp.game_id, tp.player_id
+                    ORDER BY g.game_date DESC, s.game_id DESC
+                ) AS history_rank
+            FROM target_pairs tp
+            JOIN games target ON target.id = tp.game_id
+            JOIN player_game_stats s ON s.player_id = tp.player_id
+            JOIN games g ON g.id = s.game_id
+            WHERE g.game_date < target.game_date
+               OR (g.game_date = target.game_date AND s.game_id < target.id)
+        )
+        SELECT
+            target_game_id AS game_id,
+            player_id,
+            points,
+            rebounds,
+            assists,
+            threes,
+            steals,
+            blocks,
+            minutes,
+            history_rank
+        FROM ranked_history
+        WHERE history_rank <= ?
+        ORDER BY game_id, player_id, history_rank
+        """,
+        pair_params + (int(limit),),
+    ).fetchall()
+    history: dict[tuple[int, int], dict[str, list[float]]] = {
+        (game_id, player_id): {"recent_values": [], "recent_minutes": []}
+        for game_id, player_id in pairs
+    }
+    for row in rows:
+        key = (int(row["game_id"]), int(row["player_id"]))
+        market_value = _market_value_from_stats_row(row, "blocks_steals")
+        if market_value is not None:
+            history[key]["recent_values"].append(round(float(market_value), 1))
+        history[key]["recent_minutes"].append(round(float(row["minutes"] or 0.0), 1))
+    return history
 
 
 def _player_data_freshness(

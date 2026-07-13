@@ -50,6 +50,11 @@ Current implementation notes:
 - scheduled prep now materializes `player_prep_features` per game/player/market so snapshot generation can reuse cached contextual projections and recent `2+ stocks` hit-rate inputs
 - scheduled prep now materializes `team_prep_context` per game/team so all candidates on one side share the same cached pace, opponent-allowed, and turnover-pressure context
 - scheduled prep now materializes `game_board_summaries` per game so matchup-level counts and top-board metrics are precomputed for tomorrow reads
+- the Specials read path now batches active-prop, matchup-context, and recent-history lookups instead of issuing per-player N+1 queries
+- the Specials tab now consumes precomputed `game_board_summaries` for matchup-level counts and board averages instead of deriving those from raw snapshot rows in the UI
+- snapshot prep now skips unchanged `(game_id, player_id)` writes by comparing against the latest cached row before inserting a new snapshot
+- specials calibration now uses smaller neighborhood windows plus explicit minimum total-history floors before any empirical blend can activate
+- historical prep/projection inputs now downweight blowout rows by role and winsorize per-market tails before recent/stability anchors are blended
 - live mounted-runtime validation completed end to end in about `1m 1s` for a `3`-game / `79`-candidate ET-today slate
 
 ## Current Optimization Track
@@ -371,7 +376,8 @@ Do not rerun the full slate unless the schedule itself changed broadly.
 ## Remaining Steps
 
 1. Re-evaluate the tuned `12/24` Stocks windows against live hit-rate and coverage after more settled rows accumulate.
-2. Decide whether the UI/API should read `game_board_summaries` directly instead of rebuilding those matchup-level aggregates in-memory.
+2. Revisit Specials recommendation thresholds once the settled Special-snapshot history is large enough to support a real threshold fit.
+3. Decide whether starter-heavy markets should exclude extreme blowout rows entirely once we have enough same-role history to spare.
 
 ## Non-Goals
 

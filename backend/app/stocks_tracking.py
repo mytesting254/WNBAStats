@@ -11,7 +11,7 @@ from typing import Any
 
 from .db import connect
 from .paths import get_db_path
-from .player_prop_model import COMPONENT_MODEL_VERSION, _rest_factor, feature_snapshot
+from .player_prop_model import COMPONENT_MODEL_VERSION, _rest_factor, _winsorize_history_values, feature_snapshot
 from .timezone_utils import APP_TIMEZONE, local_today_iso
 
 
@@ -23,6 +23,7 @@ _SCHEMA_INIT_LOCK = threading.Lock()
 _STOCKS_RECENT_WINDOW_GAMES = 12
 _STOCKS_STABILITY_WINDOW_GAMES = 24
 _STOCKS_PROMOTION_WINDOW_GAMES = 3
+_SNAPSHOT_DELTA_TOLERANCE = 1e-4
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -267,10 +268,112 @@ def _record_prep_run(
         tracking.close()
 
 
+def _snapshot_rows_match(
+    latest_row: sqlite3.Row | None,
+    candidate_row: tuple[object, ...],
+) -> bool:
+    if latest_row is None:
+        return False
+    comparable_columns = (
+        ("player_name", 2),
+        ("game_date", 3),
+        ("model_version", 5),
+        ("projected_steals", 6),
+        ("projected_blocks", 7),
+        ("projected_stocks", 8),
+        ("steal_prob_1_plus", 9),
+        ("steal_prob_2_plus", 10),
+        ("block_prob_1_plus", 11),
+        ("block_prob_2_plus", 12),
+        ("stocks_prob_2_plus", 13),
+        ("stocks_prob_3_plus", 14),
+        ("data_quality", 15),
+    )
+    for column_name, tuple_index in comparable_columns:
+        latest_value = latest_row[column_name]
+        current_value = candidate_row[tuple_index]
+        if isinstance(current_value, float):
+            if abs(float(latest_value or 0.0) - float(current_value)) > _SNAPSHOT_DELTA_TOLERANCE:
+                return False
+        else:
+            if latest_value != current_value:
+                return False
+    return True
+
+
+def _latest_snapshot_rows_by_pair(
+    tracking: sqlite3.Connection,
+    *,
+    game_ids: list[int] | None = None,
+    target_dates: list[str] | None = None,
+) -> dict[tuple[int, int], sqlite3.Row]:
+    normalized_game_ids = tuple(sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0}))
+    normalized_dates = tuple(sorted({str(game_date).strip() for game_date in (target_dates or []) if str(game_date).strip()}))
+    filter_sql = ""
+    params: tuple[object, ...] = ()
+    if normalized_game_ids:
+        placeholders = ",".join("?" for _ in normalized_game_ids)
+        filter_sql = f" WHERE ps.game_id IN ({placeholders})"
+        params = normalized_game_ids
+    elif normalized_dates:
+        placeholders = ",".join("?" for _ in normalized_dates)
+        filter_sql = f" WHERE ps.game_date IN ({placeholders})"
+        params = normalized_dates
+    rows = tracking.execute(
+        """
+        WITH latest AS (
+            SELECT
+                ps.*,
+                ROW_NUMBER() OVER (
+                    PARTITION BY ps.game_id, ps.player_id
+                    ORDER BY ps.captured_at DESC, ps.id DESC
+                ) AS snapshot_rank
+            FROM projection_snapshots ps
+        """
+        + filter_sql
+        + """
+        )
+        SELECT
+            game_id,
+            player_id,
+            player_name,
+            game_date,
+            captured_at,
+            model_version,
+            projected_steals,
+            projected_blocks,
+            projected_stocks,
+            steal_prob_1_plus,
+            steal_prob_2_plus,
+            block_prob_1_plus,
+            block_prob_2_plus,
+            stocks_prob_2_plus,
+            stocks_prob_3_plus,
+            data_quality
+        FROM latest
+        WHERE snapshot_rank = 1
+        """,
+        params,
+    ).fetchall()
+    return {(int(row["game_id"]), int(row["player_id"])): row for row in rows}
+
+
 def _stocks_market_value(row: sqlite3.Row, market: str) -> float:
     if market == "blocks_steals":
         return float((row["blocks"] or 0.0) + (row["steals"] or 0.0))
     return float(row[market] or 0.0)
+
+
+def _stocks_history_weight(row: sqlite3.Row) -> float:
+    margin = float(row["team_margin"] or 0.0) if "team_margin" in row.keys() else 0.0
+    if margin < 15.0:
+        return 1.0
+    rotation_role = str(row["rotation_role"] or "starter").strip().lower()
+    if rotation_role in {"star", "starter"}:
+        return 0.72
+    if rotation_role == "rotation":
+        return 0.82
+    return 0.92
 
 
 def _stocks_market_column(market: str) -> str:
@@ -460,7 +563,22 @@ def _player_stocks_history_rows(
                     LIMIT 1
                 ), p.team_id) = g.away_team_id THEN COALESCE(g.rest_days_away, 2)
                 ELSE 2
-            END AS rest_days
+            END AS rest_days,
+            p.rotation_role,
+            (
+                SELECT ABS(tgr.points - tgr.opponent_points)
+                FROM team_game_results tgr
+                WHERE tgr.game_id = s.game_id
+                  AND tgr.team_id = COALESCE((
+                    SELECT h.team_id
+                    FROM player_team_history h
+                    WHERE h.player_id = s.player_id
+                      AND h.game_id = s.game_id
+                    ORDER BY h.id DESC
+                    LIMIT 1
+                  ), p.team_id)
+                LIMIT 1
+            ) AS team_margin
         FROM player_game_stats s
         JOIN games g ON g.id = s.game_id
         JOIN players p ON p.id = s.player_id
@@ -514,10 +632,12 @@ def _build_player_stocks_feature_bundle(
             "rest_days": target_rest_days,
             "is_home": target_is_home,
         }
-    values = [_stocks_market_value(row, market) for row in rows]
+    values = _winsorize_history_values([_stocks_market_value(row, market) for row in rows], market)
+    sample_weights = [_stocks_history_weight(row) for row in rows]
     recent_values = values[:_STOCKS_RECENT_WINDOW_GAMES]
-    recent_avg = sum(recent_values) / len(recent_values)
-    stability_avg = sum(values) / len(values)
+    recent_weights = sample_weights[: len(recent_values)]
+    recent_avg = sum(value * weight for value, weight in zip(recent_values, recent_weights)) / max(sum(recent_weights), 1e-9)
+    stability_avg = sum(value * weight for value, weight in zip(values, sample_weights)) / max(sum(sample_weights), 1e-9)
     all_anchor = (
         (0.65 * recent_avg)
         + (0.35 * stability_avg)
@@ -525,17 +645,20 @@ def _build_player_stocks_feature_bundle(
     same_venue_rows = [row for row in rows if row["is_home"] is not None and int(row["is_home"]) == target_is_home]
     same_venue_avg = 0.0
     if len(same_venue_rows) >= 3:
-        same_venue_values = [_stocks_market_value(row, market) for row in same_venue_rows]
-        same_venue_avg = sum(same_venue_values) / len(same_venue_values)
+        same_venue_values = _winsorize_history_values([_stocks_market_value(row, market) for row in same_venue_rows], market)
+        same_venue_weights = [_stocks_history_weight(row) for row in same_venue_rows]
+        same_venue_avg = sum(value * weight for value, weight in zip(same_venue_values, same_venue_weights)) / max(sum(same_venue_weights), 1e-9)
         venue_recent = same_venue_values[:_STOCKS_RECENT_WINDOW_GAMES]
+        venue_recent_weights = same_venue_weights[: len(venue_recent)]
         venue_anchor = (
-            (0.70 * (sum(venue_recent) / len(venue_recent)))
+            (0.70 * (sum(value * weight for value, weight in zip(venue_recent, venue_recent_weights)) / max(sum(venue_recent_weights), 1e-9)))
             + (0.30 * same_venue_avg)
         )
         contextual_anchor = (0.65 * all_anchor) + (0.35 * venue_anchor)
     elif same_venue_rows:
-        same_venue_values = [_stocks_market_value(row, market) for row in same_venue_rows]
-        same_venue_avg = sum(same_venue_values) / len(same_venue_values)
+        same_venue_values = _winsorize_history_values([_stocks_market_value(row, market) for row in same_venue_rows], market)
+        same_venue_weights = [_stocks_history_weight(row) for row in same_venue_rows]
+        same_venue_avg = sum(value * weight for value, weight in zip(same_venue_values, same_venue_weights)) / max(sum(same_venue_weights), 1e-9)
         contextual_anchor = (0.85 * all_anchor) + (0.15 * same_venue_avg)
     else:
         contextual_anchor = all_anchor
@@ -546,8 +669,8 @@ def _build_player_stocks_feature_bundle(
     overall_hits = [1.0 if (_stocks_market_value(row, "blocks_steals")) >= 2.0 else 0.0 for row in rows]
     recent_hits = overall_hits[:_STOCKS_RECENT_WINDOW_GAMES]
     overall_rate = (
-        (0.65 * (sum(recent_hits) / len(recent_hits)))
-        + (0.35 * (sum(overall_hits) / len(overall_hits)))
+        (0.65 * (sum(value * weight for value, weight in zip(recent_hits, recent_weights)) / max(sum(recent_weights), 1e-9)))
+        + (0.35 * (sum(value * weight for value, weight in zip(overall_hits, sample_weights)) / max(sum(sample_weights), 1e-9)))
     )
     same_venue_hits = [
         1.0 if _stocks_market_value(row, "blocks_steals") >= 2.0 else 0.0
@@ -557,13 +680,18 @@ def _build_player_stocks_feature_bundle(
     recent_hit_rate = overall_rate
     if len(same_venue_hits) >= 3:
         venue_recent_hits = same_venue_hits[:_STOCKS_RECENT_WINDOW_GAMES]
+        same_venue_hit_weights = [_stocks_history_weight(row) for row in same_venue_rows]
+        venue_recent_hit_weights = same_venue_hit_weights[: len(venue_recent_hits)]
         venue_rate = (
-            (0.70 * (sum(venue_recent_hits) / len(venue_recent_hits)))
-            + (0.30 * (sum(same_venue_hits) / len(same_venue_hits)))
+            (0.70 * (sum(value * weight for value, weight in zip(venue_recent_hits, venue_recent_hit_weights)) / max(sum(venue_recent_hit_weights), 1e-9)))
+            + (0.30 * (sum(value * weight for value, weight in zip(same_venue_hits, same_venue_hit_weights)) / max(sum(same_venue_hit_weights), 1e-9)))
         )
         recent_hit_rate = (0.70 * overall_rate) + (0.30 * venue_rate)
     elif same_venue_hits:
-        recent_hit_rate = (0.85 * overall_rate) + (0.15 * (sum(same_venue_hits) / len(same_venue_hits)))
+        same_venue_hit_weights = [_stocks_history_weight(row) for row in same_venue_rows]
+        recent_hit_rate = (0.85 * overall_rate) + (
+            0.15 * (sum(value * weight for value, weight in zip(same_venue_hits, same_venue_hit_weights)) / max(sum(same_venue_hit_weights), 1e-9))
+        )
     return {
         "contextual_projection": max(0.0, stabilized),
         "recent_avg": recent_avg,
@@ -997,15 +1125,15 @@ def _poisson_at_least(mean: float, threshold: int) -> float:
 def _special_market_probability_config(market: str, threshold: int) -> dict[str, float | int]:
     if market == "steals":
         if threshold <= 1:
-            return {"sample_limit": 120, "min_samples": 24, "max_weight": 0.70}
-        return {"sample_limit": 100, "min_samples": 22, "max_weight": 0.68}
+            return {"sample_limit": 36, "min_samples": 18, "min_history_rows": 48, "max_weight": 0.45}
+        return {"sample_limit": 32, "min_samples": 16, "min_history_rows": 48, "max_weight": 0.40}
     if market == "blocks":
         if threshold <= 1:
-            return {"sample_limit": 120, "min_samples": 24, "max_weight": 0.68}
-        return {"sample_limit": 90, "min_samples": 20, "max_weight": 0.62}
+            return {"sample_limit": 32, "min_samples": 16, "min_history_rows": 52, "max_weight": 0.38}
+        return {"sample_limit": 24, "min_samples": 14, "min_history_rows": 56, "max_weight": 0.30}
     if threshold >= 3:
-        return {"sample_limit": 80, "min_samples": 26, "max_weight": 0.52}
-    return {"sample_limit": 80, "min_samples": 20, "max_weight": 0.75}
+        return {"sample_limit": 24, "min_samples": 16, "min_history_rows": 60, "max_weight": 0.32}
+    return {"sample_limit": 36, "min_samples": 18, "min_history_rows": 52, "max_weight": 0.48}
 
 
 def _special_projected_column(market: str) -> str:
@@ -1032,12 +1160,41 @@ def _calibrated_special_probability(
     projected_value: float,
     raw_probability: float,
     game_date: str,
+    history_count_cache: dict[tuple[str, str], int] | None = None,
 ) -> float:
     config = _special_market_probability_config(market, threshold)
     projected_column = _special_projected_column(market)
     sample_limit = int(config["sample_limit"])
     min_samples = int(config["min_samples"])
+    min_history_rows = int(config["min_history_rows"])
     max_weight = float(config["max_weight"])
+    history_cache = history_count_cache if history_count_cache is not None else {}
+    history_key = (str(market), str(game_date))
+    total_history_rows = history_cache.get(history_key)
+    if total_history_rows is None:
+        history_row = tracking.execute(
+            f"""
+            WITH settled_latest AS (
+                SELECT
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ps.game_id, ps.player_id
+                        ORDER BY ps.captured_at DESC, ps.id DESC
+                    ) AS snapshot_rank
+                FROM projection_snapshots ps
+                JOIN settlements st ON st.snapshot_id = ps.id
+                WHERE ps.game_date < ?
+            )
+            SELECT COUNT(*)
+            FROM settled_latest
+            WHERE snapshot_rank = 1
+            """
+            ,
+            (str(game_date),),
+        ).fetchone()
+        total_history_rows = int(history_row[0] or 0) if history_row is not None else 0
+        history_cache[history_key] = total_history_rows
+    if total_history_rows < min_history_rows:
+        return raw_probability
     rows = tracking.execute(
         f"""
         WITH settled_latest AS (
@@ -1459,8 +1616,10 @@ def snapshot_stocks(
     try:
         shared_runtime_cache: dict[str, dict[tuple, object]] = runtime_cache if runtime_cache is not None else {}
         component_snapshot_cache = shared_runtime_cache.setdefault("stocks_component_snapshot", {})
+        calibration_history_cache: dict[tuple[str, str], int] = {}
         rows = _candidate_players_for_snapshot(conn, tracking, game_ids=game_ids, target_dates=target_dates)
         now = datetime.now(timezone.utc).isoformat()
+        latest_rows = _latest_snapshot_rows_by_pair(tracking, game_ids=game_ids, target_dates=target_dates)
         rows_to_insert: list[tuple[object, ...]] = []
         for row in rows:
             game_id = int(row["game_id"])
@@ -1507,6 +1666,7 @@ def snapshot_stocks(
                 projected_value=float(steals),
                 raw_probability=_poisson_at_least(float(steals), 1),
                 game_date=str(game_date),
+                history_count_cache=calibration_history_cache,
             )
             steal_prob_2_plus = _calibrated_special_probability(
                 tracking,
@@ -1515,6 +1675,7 @@ def snapshot_stocks(
                 projected_value=float(steals),
                 raw_probability=_poisson_at_least(float(steals), 2),
                 game_date=str(game_date),
+                history_count_cache=calibration_history_cache,
             )
             block_prob_1_plus = _calibrated_special_probability(
                 tracking,
@@ -1523,6 +1684,7 @@ def snapshot_stocks(
                 projected_value=float(blocks),
                 raw_probability=_poisson_at_least(float(blocks), 1),
                 game_date=str(game_date),
+                history_count_cache=calibration_history_cache,
             )
             block_prob_2_plus = _calibrated_special_probability(
                 tracking,
@@ -1531,6 +1693,7 @@ def snapshot_stocks(
                 projected_value=float(blocks),
                 raw_probability=_poisson_at_least(float(blocks), 2),
                 game_date=str(game_date),
+                history_count_cache=calibration_history_cache,
             )
             projected_stocks = float(projected_stocks)
             stocks_prob_2_plus = _calibrated_special_probability(
@@ -1540,6 +1703,7 @@ def snapshot_stocks(
                 projected_value=projected_stocks,
                 raw_probability=_poisson_at_least(projected_stocks, 2),
                 game_date=str(game_date),
+                history_count_cache=calibration_history_cache,
             )
             prepared_stocks_row = prepared_features.get("blocks_steals")
             recent_hit_rate = (
@@ -1567,27 +1731,30 @@ def snapshot_stocks(
                 projected_value=projected_stocks,
                 raw_probability=_poisson_at_least(projected_stocks, 3),
                 game_date=str(game_date),
+                history_count_cache=calibration_history_cache,
             )
-            rows_to_insert.append(
-                (
-                    int(game_id),
-                    int(player_id),
-                    str(player_name),
-                    str(game_date),
-                    now,
-                    COMPONENT_MODEL_VERSION,
-                    float(steals),
-                    float(blocks),
-                    projected_stocks,
-                    steal_prob_1_plus,
-                    steal_prob_2_plus,
-                    block_prob_1_plus,
-                    block_prob_2_plus,
-                    stocks_prob_2_plus,
-                    stocks_prob_3_plus,
-                    "model_only",
-                )
+            candidate_snapshot = (
+                int(game_id),
+                int(player_id),
+                str(player_name),
+                str(game_date),
+                now,
+                COMPONENT_MODEL_VERSION,
+                float(steals),
+                float(blocks),
+                projected_stocks,
+                steal_prob_1_plus,
+                steal_prob_2_plus,
+                block_prob_1_plus,
+                block_prob_2_plus,
+                stocks_prob_2_plus,
+                stocks_prob_3_plus,
+                "model_only",
             )
+            latest_row = latest_rows.get((game_id, player_id))
+            if _snapshot_rows_match(latest_row, candidate_snapshot):
+                continue
+            rows_to_insert.append(candidate_snapshot)
         if rows_to_insert:
             tracking.executemany(
                 """
@@ -2023,6 +2190,51 @@ def list_special_stocks(*, include_history: bool = False) -> list[dict[str, Any]
             if projected_stocks > 0 and float(item.get("stocks_prob_3_plus") or 0.0) <= 0.0:
                 item["stocks_prob_3_plus"] = _poisson_at_least(projected_stocks, 3)
         return items
+    finally:
+        tracking.close()
+
+
+def list_game_board_summaries(
+    *,
+    game_ids: list[int] | None = None,
+    target_dates: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    tracking = _open_tracking_connection()
+    try:
+        normalized_game_ids = tuple(sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0}))
+        normalized_dates = tuple(sorted({str(game_date).strip() for game_date in (target_dates or []) if str(game_date).strip()}))
+        filter_sql = ""
+        params: tuple[object, ...] = ()
+        if normalized_game_ids:
+            placeholders = ",".join("?" for _ in normalized_game_ids)
+            filter_sql = f" WHERE game_id IN ({placeholders})"
+            params = normalized_game_ids
+        elif normalized_dates:
+            placeholders = ",".join("?" for _ in normalized_dates)
+            filter_sql = f" WHERE game_date IN ({placeholders})"
+            params = normalized_dates
+        rows = tracking.execute(
+            """
+            SELECT
+                game_id,
+                game_date,
+                player_count,
+                candidate_count_50_plus,
+                avg_prob_2_plus,
+                avg_prob_3_plus,
+                top_projected_stocks,
+                top_prob_2_plus,
+                top_player_name,
+                built_at
+            FROM game_board_summaries
+            """
+            + filter_sql
+            + """
+            ORDER BY game_date, game_id
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
     finally:
         tracking.close()
 

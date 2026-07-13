@@ -4050,13 +4050,14 @@ function SpecialStocksView({
       awayTeam: string | null;
       candidateCount50Plus: number;
       avgProb2Plus: number;
+      playerCount: number;
       players: SpecialStocksSnapshot[];
     }>();
     for (const snapshot of snapshots) {
       const current = grouped.get(snapshot.game_id);
       if (current) {
         current.players.push(snapshot);
-        if ((snapshot.stocks_prob_2_plus ?? 0) >= 0.5) {
+        if (snapshot.board_candidate_count_50_plus == null && (snapshot.stocks_prob_2_plus ?? 0) >= 0.5) {
           current.candidateCount50Plus += 1;
         }
       } else {
@@ -4066,18 +4067,22 @@ function SpecialStocksView({
           startTime: snapshot.start_time ?? null,
           homeTeam: snapshot.home_team ?? null,
           awayTeam: snapshot.away_team ?? null,
-          candidateCount50Plus: (snapshot.stocks_prob_2_plus ?? 0) >= 0.5 ? 1 : 0,
+          candidateCount50Plus:
+            snapshot.board_candidate_count_50_plus
+            ?? ((snapshot.stocks_prob_2_plus ?? 0) >= 0.5 ? 1 : 0),
           avgProb2Plus: 0,
+          playerCount: snapshot.board_player_count ?? 0,
           players: [snapshot],
         });
       }
     }
     return Array.from(grouped.values()).map((card) => ({
       ...card,
-      avgProb2Plus:
-        card.players.length > 0
+      avgProb2Plus: card.players[0]?.board_avg_prob_2_plus
+        ?? (card.players.length > 0
           ? card.players.reduce((sum, player) => sum + (player.stocks_prob_2_plus ?? 0), 0) / card.players.length
-          : 0,
+          : 0),
+      playerCount: card.players[0]?.board_player_count ?? (card.playerCount > 0 ? card.playerCount : card.players.length),
       players: card.players.slice().sort((left, right) => {
         const tierValue = (snapshot: SpecialStocksSnapshot) => (
           (snapshot.stocks_prob_2_plus ?? 0) >= 0.5 ? 2 : (snapshot.stocks_prob_2_plus ?? 0) >= 0.4 ? 1 : 0
@@ -4189,7 +4194,7 @@ function SpecialStocksView({
             >
               <span>{formatDate(card.startTime || card.gameDate)}</span>
               <strong>{card.awayTeam && card.homeTeam ? `${card.awayTeam} at ${card.homeTeam}` : `Game ${card.gameId}`}</strong>
-              <em>{`${card.candidateCount50Plus} at 50%+ | ${card.players.length} props`}</em>
+              <em>{`${card.candidateCount50Plus} at 50%+ | ${card.playerCount} props`}</em>
             </button>
           ))}
         </div>
@@ -4199,7 +4204,7 @@ function SpecialStocksView({
               <div className="panel-header compact">
                 <div>
                   <h3>Model-only Stocks Board</h3>
-                  <p>{`${selectedCard.players.length} slate players with regular lines ranked by 2+ stocks probability`}</p>
+                  <p>{`${selectedCard.playerCount} slate players with regular lines ranked by 2+ stocks probability`}</p>
                   <p>{`${selectedCard.candidateCount50Plus} players are at 50%+ for 2+ stocks. Board average: ${formatPercent(selectedCard.avgProb2Plus)}`}</p>
                   <p>No sportsbook line is attached. These rows are for internal tracking and UI review.</p>
                 </div>

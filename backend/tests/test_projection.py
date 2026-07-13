@@ -3611,6 +3611,146 @@ def test_special_stocks_only_returns_scheduled_games(monkeypatch, tmp_path) -> N
     assert int(rows[0]["game_id"]) == int(scheduled_row["game_id"])
 
 
+def test_special_stocks_batches_context_without_losing_recent_history(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        scheduled_row = conn.execute(
+            """
+            SELECT
+                g.id AS game_id,
+                g.game_date,
+                g.home_team_id,
+                g.away_team_id,
+                p.id AS player_id,
+                p.full_name AS player_name
+            FROM games g
+            JOIN prop_lines pl ON pl.game_id = g.id
+            JOIN players p ON p.id = pl.player_id
+            WHERE g.status = 'scheduled'
+            ORDER BY g.game_date, g.id, p.id
+            LIMIT 1
+            """
+        ).fetchone()
+        assert scheduled_row is not None
+        scheduled_game_id = int(scheduled_row["game_id"])
+        scheduled_game_date = str(scheduled_row["game_date"])
+        second_player = conn.execute(
+            """
+            SELECT p.id AS player_id, p.full_name AS player_name
+            FROM players p
+            JOIN player_game_stats s ON s.player_id = p.id
+            WHERE p.team_id IN (?, ?)
+              AND p.id <> ?
+            GROUP BY p.id, p.full_name
+            ORDER BY p.id
+            LIMIT 1
+            """,
+            (
+                int(scheduled_row["home_team_id"]),
+                int(scheduled_row["away_team_id"]),
+                int(scheduled_row["player_id"]),
+            ),
+        ).fetchone()
+        assert second_player is not None
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                990001,
+                scheduled_game_id,
+                int(second_player["player_id"]),
+                "test-book",
+                "points",
+                8.5,
+                -110,
+                -110,
+                "2026-07-11T09:00:00+00:00",
+            ),
+        )
+        conn.commit()
+        scheduled_rows = [
+            {
+                "game_id": scheduled_game_id,
+                "player_id": int(scheduled_row["player_id"]),
+                "player_name": str(scheduled_row["player_name"]),
+                "game_date": scheduled_game_date,
+            },
+            {
+                "game_id": scheduled_game_id,
+                "player_id": int(second_player["player_id"]),
+                "player_name": str(second_player["player_name"]),
+                "game_date": scheduled_game_date,
+            },
+        ]
+
+    stocks_tracking_module.ensure_tracking_schema()
+    with sqlite3.connect(tracking_path) as tracking:
+        tracking.executemany(
+            """
+            INSERT INTO projection_snapshots (
+                game_id,
+                player_id,
+                player_name,
+                game_date,
+                captured_at,
+                model_version,
+                projected_steals,
+                projected_blocks,
+                projected_stocks,
+                steal_prob_1_plus,
+                steal_prob_2_plus,
+                block_prob_1_plus,
+                block_prob_2_plus,
+                stocks_prob_2_plus,
+                data_quality
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+                [
+                    (
+                        int(row["game_id"]),
+                        int(row["player_id"]),
+                        str(row["player_name"]),
+                        str(row["game_date"]),
+                        f"2026-07-11T1{index}:00:00+00:00",
+                        MODEL_VERSION,
+                        1.0 + index,
+                    0.5,
+                    1.5 + index,
+                    0.6,
+                    0.2,
+                    0.4,
+                    0.1,
+                    0.55 + (0.05 * index),
+                    "model_only",
+                )
+                for index, row in enumerate(scheduled_rows)
+            ],
+        )
+        tracking.commit()
+    stocks_tracking_module.rebuild_game_board_summaries(game_ids=[scheduled_game_id])
+
+    monkeypatch.setattr(main_module, "_local_today_iso", lambda: scheduled_game_date)
+    rows = main_module.special_stocks()
+
+    assert len(rows) == 2
+    for row in rows:
+        assert int(row["board_player_count"]) == 2
+        assert int(row["board_candidate_count_50_plus"]) >= 1
+        assert float(row["board_avg_prob_2_plus"]) > 0.0
+        assert row["board_top_player_name"]
+        assert row["recent_values"]
+        assert row["recent_minutes"]
+        assert row["team"] is not None
+        assert row["home_team"] is not None
+        assert row["away_team"] is not None
+
+
 def test_rebuild_candidate_players_populates_tracking_pool(monkeypatch, tmp_path) -> None:
     load_test_history()
     tracking_path = tmp_path / "stocks-tracking.sqlite"
@@ -4112,6 +4252,44 @@ def test_snapshot_stocks_prefers_precomputed_player_prep_features(monkeypatch, t
     assert written > 0
 
 
+def test_snapshot_stocks_skips_unchanged_rows(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        stocks_tracking_module.rebuild_candidate_players(conn)
+        stocks_tracking_module.rebuild_team_prep_context(conn)
+        stocks_tracking_module.rebuild_player_prep_features(conn)
+        first_written = stocks_tracking_module.snapshot_stocks(conn)
+        second_written = stocks_tracking_module.snapshot_stocks(conn)
+
+    assert first_written > 0
+    assert second_written == 0
+    with sqlite3.connect(tracking_path) as tracking:
+        snapshot_count = tracking.execute("SELECT COUNT(*) FROM projection_snapshots").fetchone()[0]
+
+    assert int(snapshot_count) == int(first_written)
+
+
+def test_history_winsorization_clips_market_outliers() -> None:
+    clipped = player_prop_model_module._winsorize_history_values([1.0, 1.0, 2.0, 2.0, 9.0], "blocks_steals")
+
+    assert len(clipped) == 5
+    assert clipped[-1] < 9.0
+    assert clipped[-1] > 2.0
+
+
+def test_blowout_history_weight_downweights_starter_rows() -> None:
+    starter_weight = player_prop_model_module._historical_blowout_weight({"team_margin": 19.0}, "starter")
+    bench_weight = player_prop_model_module._historical_blowout_weight({"team_margin": 19.0}, "bench")
+    close_weight = player_prop_model_module._historical_blowout_weight({"team_margin": 8.0}, "starter")
+
+    assert starter_weight < bench_weight
+    assert starter_weight < 1.0
+    assert close_weight == 1.0
+
+
 def test_special_probability_calibration_is_market_specific(monkeypatch, tmp_path) -> None:
     tracking_path = tmp_path / "stocks-tracking.sqlite"
     monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
@@ -4230,6 +4408,88 @@ def test_special_probability_calibration_is_market_specific(monkeypatch, tmp_pat
     assert steals_calibrated > steals_raw
     assert stocks_calibrated < stocks_raw
 
+
+def test_special_probability_calibration_requires_minimum_history_support(monkeypatch, tmp_path) -> None:
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+    stocks_tracking_module.ensure_tracking_schema()
+
+    with sqlite3.connect(tracking_path) as tracking:
+        tracking.row_factory = sqlite3.Row
+        rows = []
+        settlements = []
+        for idx in range(20):
+            snapshot_id = idx + 1
+            rows.append(
+                (
+                    snapshot_id,
+                    6100 + idx,
+                    7100 + idx,
+                    f"Sparse History Player {idx}",
+                    "2026-05-01",
+                    f"2026-05-01T0{idx % 10}:00:00+00:00",
+                    COMPONENT_MODEL_VERSION,
+                    1.1,
+                    0.4,
+                    1.5,
+                    0.67,
+                    0.30,
+                    0.33,
+                    0.10,
+                    0.44,
+                    0.14,
+                    "model_only",
+                )
+            )
+            settlements.append((snapshot_id, 1, 0, "2026-05-02T00:00:00+00:00"))
+        tracking.executemany(
+            """
+            INSERT INTO projection_snapshots (
+                id,
+                game_id,
+                player_id,
+                player_name,
+                game_date,
+                captured_at,
+                model_version,
+                projected_steals,
+                projected_blocks,
+                projected_stocks,
+                steal_prob_1_plus,
+                steal_prob_2_plus,
+                block_prob_1_plus,
+                block_prob_2_plus,
+                stocks_prob_2_plus,
+                stocks_prob_3_plus,
+                data_quality
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        tracking.executemany(
+            """
+            INSERT INTO settlements (
+                snapshot_id,
+                actual_steals,
+                actual_blocks,
+                settled_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            settlements,
+        )
+        tracking.commit()
+
+        raw_probability = 1 - math.exp(-1.1)
+        calibrated = stocks_tracking_module._calibrated_special_probability(
+            tracking,
+            market="steals",
+            threshold=1,
+            projected_value=1.1,
+            raw_probability=raw_probability,
+            game_date="2026-05-10",
+        )
+
+    assert calibrated == raw_probability
 
 def test_feature_snapshot_reuses_shared_player_context_with_runtime_cache(monkeypatch) -> None:
     load_test_history()
