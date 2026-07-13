@@ -4256,6 +4256,21 @@ function SpecialStocksView({
               </div>
               <div className="table-wrap special-props-table-wrap">
                 <table className="props-table special-props-table">
+                  <colgroup>
+                    <col className="special-col-player" />
+                    <col className="special-col-tier" />
+                    <col className="special-col-metric" />
+                    <col className="special-col-metric" />
+                    <col className="special-col-metric" />
+                    <col className="special-col-probability" />
+                    <col className="special-col-probability" />
+                    <col className="special-col-probability" />
+                    <col className="special-col-probability" />
+                    <col className="special-col-probability" />
+                    <col className="special-col-probability" />
+                    <col className="special-col-settled" />
+                    <col className="special-col-captured" />
+                  </colgroup>
                   <thead>
                     <tr>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("player_name")}>Player {sortIndicator("player_name")}</button></th>

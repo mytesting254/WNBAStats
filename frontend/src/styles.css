@@ -1178,8 +1178,32 @@ tbody tr.selected {
 }
 
 .special-props-table {
-  min-width: 1180px;
+  min-width: 1370px;
   background: #ffffff;
+}
+
+.special-props-table .special-col-player {
+  width: 320px;
+}
+
+.special-props-table .special-col-tier {
+  width: 96px;
+}
+
+.special-props-table .special-col-metric {
+  width: 84px;
+}
+
+.special-props-table .special-col-probability {
+  width: 96px;
+}
+
+.special-props-table .special-col-settled {
+  width: 220px;
+}
+
+.special-props-table .special-col-captured {
+  width: 156px;
 }
 
 .special-props-table thead th {
@@ -1214,12 +1238,12 @@ tbody tr.selected {
   background: #f8fbff;
 }
 
-.special-props-table td:nth-child(n + 2):nth-child(-n + 10) {
+.special-props-table td:nth-child(n + 2):nth-child(-n + 11) {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-.special-props-table th:nth-child(n + 2):nth-child(-n + 10) {
+.special-props-table th:nth-child(n + 2):nth-child(-n + 11) {
   text-align: right;
 }
 
@@ -1228,8 +1252,14 @@ tbody tr.selected {
   color: #101828;
 }
 
-.special-props-table td:nth-child(11) {
+.special-props-table th:nth-child(12),
+.special-props-table td:nth-child(12) {
   min-width: 220px;
+}
+
+.special-props-table th:nth-child(13),
+.special-props-table td:nth-child(13) {
+  min-width: 156px;
 }
 
 .special-player-cell > span {
