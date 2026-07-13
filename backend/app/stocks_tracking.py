@@ -23,6 +23,10 @@ _STOCKS_RECENT_WINDOW_GAMES = 10
 _STOCKS_STABILITY_WINDOW_GAMES = 20
 
 
+def _clamp(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(upper, value))
+
+
 def get_tracking_db_path() -> Path:
     configured = os.getenv("WNBA_STOCKS_TRACKING_DB", "").strip()
     if configured:
@@ -89,9 +93,44 @@ def ensure_tracking_schema() -> Path:
                     built_at TEXT NOT NULL,
                     PRIMARY KEY (game_id, player_id)
                 );
+                CREATE TABLE IF NOT EXISTS player_prep_features (
+                    game_id INTEGER NOT NULL,
+                    player_id INTEGER NOT NULL,
+                    player_name TEXT NOT NULL,
+                    game_date TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    base_projection REAL NOT NULL DEFAULT 0,
+                    contextual_projection REAL NOT NULL DEFAULT 0,
+                    recent_avg REAL NOT NULL DEFAULT 0,
+                    stability_avg REAL NOT NULL DEFAULT 0,
+                    same_venue_avg REAL NOT NULL DEFAULT 0,
+                    same_venue_games INTEGER NOT NULL DEFAULT 0,
+                    recent_hit_rate_2_plus REAL,
+                    rest_days INTEGER NOT NULL DEFAULT 2,
+                    is_home INTEGER,
+                    built_at TEXT NOT NULL,
+                    PRIMARY KEY (game_id, player_id, market)
+                );
+                CREATE TABLE IF NOT EXISTS team_prep_context (
+                    game_id INTEGER NOT NULL,
+                    game_date TEXT NOT NULL,
+                    team_id INTEGER NOT NULL,
+                    opponent_id INTEGER NOT NULL,
+                    is_home INTEGER NOT NULL,
+                    pace_factor REAL NOT NULL DEFAULT 1,
+                    steals_allowed_factor REAL NOT NULL DEFAULT 1,
+                    blocks_allowed_factor REAL NOT NULL DEFAULT 1,
+                    stocks_allowed_factor REAL NOT NULL DEFAULT 1,
+                    turnover_pressure_factor REAL NOT NULL DEFAULT 1,
+                    built_at TEXT NOT NULL,
+                    PRIMARY KEY (game_id, team_id)
+                );
                 CREATE INDEX IF NOT EXISTS idx_stocks_snapshots_game ON projection_snapshots(game_id, player_id);
                 CREATE INDEX IF NOT EXISTS idx_stocks_prepared_games_date ON prepared_games(game_date, start_time, game_id);
                 CREATE INDEX IF NOT EXISTS idx_stocks_candidates_game ON candidate_players(game_id, player_id);
+                CREATE INDEX IF NOT EXISTS idx_stocks_player_prep_game ON player_prep_features(game_id, player_id, market);
+                CREATE INDEX IF NOT EXISTS idx_stocks_player_prep_date ON player_prep_features(game_date, game_id, player_id);
+                CREATE INDEX IF NOT EXISTS idx_stocks_team_context_game ON team_prep_context(game_id, team_id);
                 """
             )
             columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(projection_snapshots)").fetchall()}
@@ -137,15 +176,118 @@ def _stocks_market_value(row: sqlite3.Row, market: str) -> float:
     return float(row[market] or 0.0)
 
 
-def _contextual_stocks_component_projection(
+def _stocks_market_column(market: str) -> str:
+    if market == "blocks_steals":
+        return "(COALESCE(s.blocks, 0) + COALESCE(s.steals, 0))"
+    return f"COALESCE(s.{market}, 0)"
+
+
+def _stocks_avg_scalar(conn: sqlite3.Connection, sql: str, params: tuple[object, ...] = ()) -> float | None:
+    row = conn.execute(sql, params).fetchone()
+    if row is None:
+        return None
+    value = row[0]
+    if value is None:
+        return None
+    return float(value)
+
+
+def _stocks_pace_factor(conn: sqlite3.Connection, team_id: int, opponent_id: int) -> float:
+    league_pace = _stocks_avg_scalar(conn, "SELECT AVG(possessions) FROM team_game_results") or 78.0
+    team_pace = _stocks_avg_scalar(conn, "SELECT AVG(possessions) FROM team_game_results WHERE team_id = ?", (team_id,)) or league_pace
+    opponent_pace = _stocks_avg_scalar(conn, "SELECT AVG(possessions) FROM team_game_results WHERE team_id = ?", (opponent_id,)) or league_pace
+    return _clamp(((team_pace + opponent_pace) / 2.0) / league_pace, 0.94, 1.06)
+
+
+def _stocks_opponent_allowed_factor(conn: sqlite3.Connection, opponent_id: int, market: str) -> float:
+    market_sql = _stocks_market_column(market)
+    opponent_allowed = _stocks_avg_scalar(
+        conn,
+        f"""
+        SELECT AVG({market_sql})
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        JOIN games g ON g.id = s.game_id
+        WHERE CASE
+            WHEN p.team_id = g.home_team_id THEN g.away_team_id
+            ELSE g.home_team_id
+        END = ?
+        """,
+        (int(opponent_id),),
+    )
+    league_allowed = _stocks_avg_scalar(
+        conn,
+        f"""
+        SELECT AVG({market_sql})
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        """
+    )
+    if opponent_allowed is None or league_allowed is None or league_allowed <= 0:
+        return 1.0
+    return _clamp(opponent_allowed / league_allowed, 0.90, 1.10)
+
+
+def _stocks_turnover_pressure_factor(conn: sqlite3.Connection, opponent_id: int) -> float:
+    opponent_turnovers = _stocks_avg_scalar(
+        conn,
+        """
+        SELECT AVG(COALESCE(s.turnovers, 0))
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        JOIN games g ON g.id = s.game_id
+        WHERE CASE
+            WHEN p.team_id = g.home_team_id THEN g.away_team_id
+            ELSE g.home_team_id
+        END = ?
+        """,
+        (int(opponent_id),),
+    )
+    league_turnovers = _stocks_avg_scalar(conn, "SELECT AVG(COALESCE(turnovers, 0)) FROM player_game_stats")
+    if opponent_turnovers is None or league_turnovers is None or league_turnovers <= 0:
+        return 1.0
+    return _clamp(opponent_turnovers / league_turnovers, 0.90, 1.12)
+
+
+def _stocks_matchup_context_multiplier(context: sqlite3.Row | dict[str, object] | None, market: str) -> float:
+    if context is None:
+        return 1.0
+    pace_factor = float(context["pace_factor"] or 1.0)
+    steals_allowed_factor = float(context["steals_allowed_factor"] or 1.0)
+    blocks_allowed_factor = float(context["blocks_allowed_factor"] or 1.0)
+    stocks_allowed_factor = float(context["stocks_allowed_factor"] or 1.0)
+    turnover_pressure_factor = float(context["turnover_pressure_factor"] or 1.0)
+    if market == "steals":
+        return _clamp(
+            (0.50 * steals_allowed_factor)
+            + (0.25 * turnover_pressure_factor)
+            + (0.25 * pace_factor),
+            0.90,
+            1.12,
+        )
+    if market == "blocks":
+        return _clamp(
+            (0.65 * blocks_allowed_factor)
+            + (0.35 * pace_factor),
+            0.90,
+            1.12,
+        )
+    return _clamp(
+        (0.45 * stocks_allowed_factor)
+        + (0.20 * steals_allowed_factor)
+        + (0.20 * blocks_allowed_factor)
+        + (0.15 * pace_factor),
+        0.90,
+        1.12,
+    )
+
+
+def _player_stocks_target_context(
     conn: sqlite3.Connection,
     *,
     player_id: int,
     game_id: int,
-    game_date: str,
-    market: str,
-    base_projection: float,
-) -> float:
+ ) -> tuple[int | None, int]:
     target_row = conn.execute(
         """
         SELECT
@@ -166,11 +308,20 @@ def _contextual_stocks_component_projection(
         """,
         (int(player_id), int(game_id)),
     ).fetchone()
-    if target_row is None or target_row["is_home"] is None:
-        return float(base_projection)
-    target_is_home = int(target_row["is_home"])
-    target_rest_days = int(target_row["rest_days"] or 2)
-    rows = conn.execute(
+    if target_row is None:
+        return None, 2
+    target_is_home = target_row["is_home"]
+    return (None if target_is_home is None else int(target_is_home), int(target_row["rest_days"] or 2))
+
+
+def _player_stocks_history_rows(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    game_date: str,
+    game_id: int,
+) -> list[sqlite3.Row]:
+    return conn.execute(
         f"""
         SELECT
             s.steals,
@@ -230,31 +381,124 @@ def _contextual_stocks_component_projection(
         """,
         (int(player_id), str(game_date), int(game_id), str(game_date)),
     ).fetchall()
+
+
+def _build_player_stocks_feature_bundle(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    game_id: int,
+    game_date: str,
+    market: str,
+    base_projection: float,
+    matchup_context: sqlite3.Row | dict[str, object] | None = None,
+) -> dict[str, float | int | None]:
+    target_is_home, target_rest_days = _player_stocks_target_context(conn, player_id=player_id, game_id=game_id)
+    rows = _player_stocks_history_rows(conn, player_id=player_id, game_date=game_date, game_id=game_id)
+    if target_is_home is None:
+        return {
+            "contextual_projection": float(base_projection),
+            "recent_avg": 0.0,
+            "stability_avg": 0.0,
+            "same_venue_avg": 0.0,
+            "same_venue_games": 0,
+            "recent_hit_rate_2_plus": None,
+            "rest_days": target_rest_days,
+            "is_home": None,
+        }
     if not rows:
-        return max(0.0, float(base_projection) * _rest_factor(target_rest_days))
+        return {
+            "contextual_projection": max(0.0, float(base_projection) * _rest_factor(target_rest_days)),
+            "recent_avg": 0.0,
+            "stability_avg": 0.0,
+            "same_venue_avg": 0.0,
+            "same_venue_games": 0,
+            "recent_hit_rate_2_plus": None,
+            "rest_days": target_rest_days,
+            "is_home": target_is_home,
+        }
     values = [_stocks_market_value(row, market) for row in rows]
     recent_values = values[:_STOCKS_RECENT_WINDOW_GAMES]
+    recent_avg = sum(recent_values) / len(recent_values)
+    stability_avg = sum(values) / len(values)
     all_anchor = (
-        (0.65 * (sum(recent_values) / len(recent_values)))
-        + (0.35 * (sum(values) / len(values)))
+        (0.65 * recent_avg)
+        + (0.35 * stability_avg)
     )
     same_venue_rows = [row for row in rows if row["is_home"] is not None and int(row["is_home"]) == target_is_home]
+    same_venue_avg = 0.0
     if len(same_venue_rows) >= 3:
         same_venue_values = [_stocks_market_value(row, market) for row in same_venue_rows]
+        same_venue_avg = sum(same_venue_values) / len(same_venue_values)
         venue_recent = same_venue_values[:_STOCKS_RECENT_WINDOW_GAMES]
         venue_anchor = (
             (0.70 * (sum(venue_recent) / len(venue_recent)))
-            + (0.30 * (sum(same_venue_values) / len(same_venue_values)))
+            + (0.30 * same_venue_avg)
         )
         contextual_anchor = (0.65 * all_anchor) + (0.35 * venue_anchor)
     elif same_venue_rows:
         same_venue_values = [_stocks_market_value(row, market) for row in same_venue_rows]
-        contextual_anchor = (0.85 * all_anchor) + (0.15 * (sum(same_venue_values) / len(same_venue_values)))
+        same_venue_avg = sum(same_venue_values) / len(same_venue_values)
+        contextual_anchor = (0.85 * all_anchor) + (0.15 * same_venue_avg)
     else:
         contextual_anchor = all_anchor
     rest_adjusted_anchor = contextual_anchor * _rest_factor(target_rest_days)
     stabilized = (0.72 * float(base_projection)) + (0.28 * float(rest_adjusted_anchor))
-    return max(0.0, stabilized)
+    matchup_multiplier = _stocks_matchup_context_multiplier(matchup_context, market)
+    stabilized *= matchup_multiplier
+    overall_hits = [1.0 if (_stocks_market_value(row, "blocks_steals")) >= 2.0 else 0.0 for row in rows]
+    recent_hits = overall_hits[:_STOCKS_RECENT_WINDOW_GAMES]
+    overall_rate = (
+        (0.65 * (sum(recent_hits) / len(recent_hits)))
+        + (0.35 * (sum(overall_hits) / len(overall_hits)))
+    )
+    same_venue_hits = [
+        1.0 if _stocks_market_value(row, "blocks_steals") >= 2.0 else 0.0
+        for row in rows
+        if row["is_home"] is not None and int(row["is_home"]) == target_is_home
+    ]
+    recent_hit_rate = overall_rate
+    if len(same_venue_hits) >= 3:
+        venue_recent_hits = same_venue_hits[:_STOCKS_RECENT_WINDOW_GAMES]
+        venue_rate = (
+            (0.70 * (sum(venue_recent_hits) / len(venue_recent_hits)))
+            + (0.30 * (sum(same_venue_hits) / len(same_venue_hits)))
+        )
+        recent_hit_rate = (0.70 * overall_rate) + (0.30 * venue_rate)
+    elif same_venue_hits:
+        recent_hit_rate = (0.85 * overall_rate) + (0.15 * (sum(same_venue_hits) / len(same_venue_hits)))
+    return {
+        "contextual_projection": max(0.0, stabilized),
+        "recent_avg": recent_avg,
+        "stability_avg": stability_avg,
+        "same_venue_avg": same_venue_avg,
+        "same_venue_games": len(same_venue_rows),
+        "recent_hit_rate_2_plus": recent_hit_rate,
+        "rest_days": target_rest_days,
+        "is_home": target_is_home,
+    }
+
+
+def _contextual_stocks_component_projection(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    game_id: int,
+    game_date: str,
+    market: str,
+    base_projection: float,
+    matchup_context: sqlite3.Row | dict[str, object] | None = None,
+) -> float:
+    bundle = _build_player_stocks_feature_bundle(
+        conn,
+        player_id=player_id,
+        game_id=game_id,
+        game_date=game_date,
+        market=market,
+        base_projection=base_projection,
+        matchup_context=matchup_context,
+    )
+    return float(bundle["contextual_projection"] or 0.0)
 
 
 def rebuild_prepared_games(
@@ -560,7 +804,8 @@ def _candidate_players_for_snapshot(
             cp.game_id,
             cp.game_date,
             cp.player_id,
-            cp.player_name
+            cp.player_name,
+            cp.team_id
         FROM candidate_players cp
         """
         + filter_sql
@@ -582,7 +827,8 @@ def _candidate_players_for_snapshot(
             cp.game_id,
             cp.game_date,
             cp.player_id,
-            cp.player_name
+            cp.player_name,
+            cp.team_id
         FROM candidate_players cp
         """
         + filter_sql
@@ -657,87 +903,255 @@ def _player_recent_stocks_hit_rate(
     game_id: int,
     game_date: str,
 ) -> float | None:
-    target_row = conn.execute(
+    bundle = _build_player_stocks_feature_bundle(
+        conn,
+        player_id=player_id,
+        game_id=game_id,
+        game_date=game_date,
+        market="blocks_steals",
+        base_projection=0.0,
+    )
+    return None if bundle["recent_hit_rate_2_plus"] is None else float(bundle["recent_hit_rate_2_plus"])
+
+
+def rebuild_team_prep_context(
+    conn: sqlite3.Connection,
+    game_ids: list[int] | None = None,
+    target_dates: list[str] | None = None,
+) -> int:
+    tracking = _open_tracking_connection()
+    try:
+        normalized_game_ids = tuple(sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0}))
+        normalized_dates = tuple(sorted({str(game_date).strip() for game_date in (target_dates or []) if str(game_date).strip()}))
+        filter_sql = ""
+        params: tuple[object, ...] = ()
+        if normalized_game_ids:
+            placeholders = ",".join("?" for _ in normalized_game_ids)
+            filter_sql = f" WHERE pg.game_id IN ({placeholders})"
+            params = normalized_game_ids
+        elif normalized_dates:
+            placeholders = ",".join("?" for _ in normalized_dates)
+            filter_sql = f" WHERE pg.game_date IN ({placeholders})"
+            params = normalized_dates
+        rows = tracking.execute(
+            """
+            SELECT
+                pg.game_id,
+                pg.game_date,
+                pg.home_team_id,
+                pg.away_team_id
+            FROM prepared_games pg
+            """
+            + filter_sql
+            + """
+            ORDER BY pg.game_date, pg.start_time, pg.game_id
+            """,
+            params,
+        ).fetchall()
+        built_at = datetime.now(timezone.utc).isoformat()
+        context_rows: list[tuple[object, ...]] = []
+        for row in rows:
+            game_id = int(row["game_id"])
+            game_date = str(row["game_date"])
+            home_team_id = int(row["home_team_id"])
+            away_team_id = int(row["away_team_id"])
+            for team_id, opponent_id, is_home in (
+                (home_team_id, away_team_id, 1),
+                (away_team_id, home_team_id, 0),
+            ):
+                context_rows.append(
+                    (
+                        game_id,
+                        game_date,
+                        team_id,
+                        opponent_id,
+                        is_home,
+                        _stocks_pace_factor(conn, team_id, opponent_id),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "steals"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "blocks"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "blocks_steals"),
+                        _stocks_turnover_pressure_factor(conn, opponent_id),
+                        built_at,
+                    )
+                )
+        with tracking:
+            if normalized_game_ids:
+                placeholders = ",".join("?" for _ in normalized_game_ids)
+                tracking.execute(f"DELETE FROM team_prep_context WHERE game_id IN ({placeholders})", normalized_game_ids)
+            elif normalized_dates:
+                placeholders = ",".join("?" for _ in normalized_dates)
+                tracking.execute(f"DELETE FROM team_prep_context WHERE game_date IN ({placeholders})", normalized_dates)
+            else:
+                tracking.execute("DELETE FROM team_prep_context")
+            if context_rows:
+                tracking.executemany(
+                    """
+                    INSERT INTO team_prep_context (
+                        game_id,
+                        game_date,
+                        team_id,
+                        opponent_id,
+                        is_home,
+                        pace_factor,
+                        steals_allowed_factor,
+                        blocks_allowed_factor,
+                        stocks_allowed_factor,
+                        turnover_pressure_factor,
+                        built_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    context_rows,
+                )
+        return len(context_rows)
+    finally:
+        tracking.close()
+
+
+def _team_prep_context_for_game(
+    tracking: sqlite3.Connection,
+    *,
+    game_id: int,
+    team_id: int | None,
+) -> sqlite3.Row | None:
+    if team_id is None:
+        return None
+    return tracking.execute(
         """
-        SELECT
-            CASE
-                WHEN p.team_id = g.home_team_id THEN 1
-                WHEN p.team_id = g.away_team_id THEN 0
-                ELSE NULL
-            END AS is_home
-        FROM games g
-        JOIN players p ON p.id = ?
-        WHERE g.id = ?
+        SELECT *
+        FROM team_prep_context
+        WHERE game_id = ?
+          AND team_id = ?
         LIMIT 1
         """,
-        (int(player_id), int(game_id)),
+        (int(game_id), int(team_id)),
     ).fetchone()
-    target_is_home = None if target_row is None else target_row["is_home"]
-    rows = conn.execute(
-        f"""
+
+
+def rebuild_player_prep_features(
+    conn: sqlite3.Connection,
+    game_ids: list[int] | None = None,
+    target_dates: list[str] | None = None,
+    runtime_cache: dict[str, dict[tuple, object]] | None = None,
+) -> int:
+    tracking = _open_tracking_connection()
+    try:
+        shared_runtime_cache: dict[str, dict[tuple, object]] = runtime_cache if runtime_cache is not None else {}
+        component_snapshot_cache = shared_runtime_cache.setdefault("stocks_component_snapshot", {})
+        rows = _candidate_players_for_snapshot(conn, tracking, game_ids=game_ids, target_dates=target_dates)
+        normalized_game_ids = tuple(sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0}))
+        normalized_dates = tuple(sorted({str(game_date).strip() for game_date in (target_dates or []) if str(game_date).strip()}))
+        built_at = datetime.now(timezone.utc).isoformat()
+        prep_rows: list[tuple[object, ...]] = []
+        for row in rows:
+            game_id = int(row["game_id"])
+            game_date = str(row["game_date"])
+            player_id = int(row["player_id"])
+            player_name = str(row["player_name"])
+            team_id = int(row["team_id"]) if row["team_id"] is not None else None
+            matchup_context = _team_prep_context_for_game(tracking, game_id=game_id, team_id=team_id)
+            for market in ("steals", "blocks", "blocks_steals"):
+                cache_key = (player_id, market, game_id)
+                snapshot = component_snapshot_cache.get(cache_key)
+                if snapshot is None:
+                    snapshot = feature_snapshot(
+                        conn,
+                        player_id,
+                        market,
+                        game_id,
+                        allow_training=False,
+                        use_live_minutes_context=False,
+                        runtime_cache=shared_runtime_cache,
+                    )
+                    component_snapshot_cache[cache_key] = snapshot
+                base_projection = float(snapshot.component_projection)
+                bundle = _build_player_stocks_feature_bundle(
+                    conn,
+                    player_id=player_id,
+                    game_id=game_id,
+                    game_date=game_date,
+                    market=market,
+                    base_projection=base_projection,
+                    matchup_context=matchup_context,
+                )
+                prep_rows.append(
+                    (
+                        game_id,
+                        player_id,
+                        player_name,
+                        game_date,
+                        market,
+                        base_projection,
+                        float(bundle["contextual_projection"] or 0.0),
+                        float(bundle["recent_avg"] or 0.0),
+                        float(bundle["stability_avg"] or 0.0),
+                        float(bundle["same_venue_avg"] or 0.0),
+                        int(bundle["same_venue_games"] or 0),
+                        (
+                            None
+                            if bundle["recent_hit_rate_2_plus"] is None
+                            else float(bundle["recent_hit_rate_2_plus"])
+                        ),
+                        int(bundle["rest_days"] or 2),
+                        bundle["is_home"],
+                        built_at,
+                    )
+                )
+        with tracking:
+            if normalized_game_ids:
+                placeholders = ",".join("?" for _ in normalized_game_ids)
+                tracking.execute(f"DELETE FROM player_prep_features WHERE game_id IN ({placeholders})", normalized_game_ids)
+            elif normalized_dates:
+                placeholders = ",".join("?" for _ in normalized_dates)
+                tracking.execute(f"DELETE FROM player_prep_features WHERE game_date IN ({placeholders})", normalized_dates)
+            else:
+                tracking.execute("DELETE FROM player_prep_features")
+            if prep_rows:
+                tracking.executemany(
+                    """
+                    INSERT INTO player_prep_features (
+                        game_id,
+                        player_id,
+                        player_name,
+                        game_date,
+                        market,
+                        base_projection,
+                        contextual_projection,
+                        recent_avg,
+                        stability_avg,
+                        same_venue_avg,
+                        same_venue_games,
+                        recent_hit_rate_2_plus,
+                        rest_days,
+                        is_home,
+                        built_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    prep_rows,
+                )
+        return len(prep_rows)
+    finally:
+        tracking.close()
+
+
+def _player_prep_features_for_game(
+    tracking: sqlite3.Connection,
+    *,
+    game_id: int,
+    player_id: int,
+) -> dict[str, sqlite3.Row]:
+    rows = tracking.execute(
+        """
         SELECT
-            COALESCE(s.steals, 0) + COALESCE(s.blocks, 0) AS actual_stocks,
-            CASE
-                WHEN COALESCE((
-                    SELECT h.team_id
-                    FROM player_team_history h
-                    WHERE h.player_id = s.player_id
-                      AND h.game_id = s.game_id
-                    ORDER BY h.id DESC
-                    LIMIT 1
-                ), p.team_id) = g.home_team_id THEN 1
-                WHEN COALESCE((
-                    SELECT h.team_id
-                    FROM player_team_history h
-                    WHERE h.player_id = s.player_id
-                      AND h.game_id = s.game_id
-                    ORDER BY h.id DESC
-                    LIMIT 1
-                ), p.team_id) = g.away_team_id THEN 0
-                ELSE NULL
-            END AS is_home
-        FROM player_game_stats s
-        JOIN games g ON g.id = s.game_id
-        JOIN players p ON p.id = s.player_id
-        WHERE s.player_id = ?
-          AND g.game_date < ?
-          AND s.game_id <> ?
-        ORDER BY
-            CASE
-                WHEN substr(g.game_date, 1, 4) = substr(?, 1, 4) THEN 0
-                ELSE 1
-            END,
-            g.game_date DESC,
-            s.game_id DESC
-        LIMIT {_STOCKS_STABILITY_WINDOW_GAMES}
+            market,
+            contextual_projection,
+            recent_hit_rate_2_plus
+        FROM player_prep_features
+        WHERE game_id = ?
+          AND player_id = ?
         """,
-        (int(player_id), str(game_date), int(game_id), str(game_date)),
+        (int(game_id), int(player_id)),
     ).fetchall()
-    if not rows:
-        return None
-    overall_hits = [1.0 if float(row["actual_stocks"] or 0.0) >= 2.0 else 0.0 for row in rows]
-    recent_hits = overall_hits[:_STOCKS_RECENT_WINDOW_GAMES]
-    overall_rate = (
-        (0.65 * (sum(recent_hits) / len(recent_hits)))
-        + (0.35 * (sum(overall_hits) / len(overall_hits)))
-    )
-    if target_is_home is None:
-        return overall_rate
-    same_venue_hits = [
-        1.0 if float(row["actual_stocks"] or 0.0) >= 2.0 else 0.0
-        for row in rows
-        if row["is_home"] is not None and int(row["is_home"]) == int(target_is_home)
-    ]
-    if len(same_venue_hits) >= 3:
-        venue_recent_hits = same_venue_hits[:_STOCKS_RECENT_WINDOW_GAMES]
-        venue_rate = (
-            (0.70 * (sum(venue_recent_hits) / len(venue_recent_hits)))
-            + (0.30 * (sum(same_venue_hits) / len(same_venue_hits)))
-        )
-        return (0.70 * overall_rate) + (0.30 * venue_rate)
-    if same_venue_hits:
-        return (0.85 * overall_rate) + (0.15 * (sum(same_venue_hits) / len(same_venue_hits)))
-    return overall_rate
+    return {str(row["market"]): row for row in rows}
 
 
 def snapshot_stocks(
@@ -758,7 +1172,13 @@ def snapshot_stocks(
             game_date = str(row["game_date"])
             player_id = int(row["player_id"])
             player_name = str(row["player_name"])
+            team_id = int(row["team_id"]) if row["team_id"] is not None else None
+            prepared_features = _player_prep_features_for_game(tracking, game_id=game_id, player_id=player_id)
+            matchup_context = _team_prep_context_for_game(tracking, game_id=game_id, team_id=team_id)
             def _component_projection(market: str) -> float:
+                prepared_row = prepared_features.get(market)
+                if prepared_row is not None:
+                    return float(prepared_row["contextual_projection"] or 0.0)
                 cache_key = (player_id, market, game_id)
                 snapshot = component_snapshot_cache.get(cache_key)
                 if snapshot is None:
@@ -779,6 +1199,7 @@ def snapshot_stocks(
                     game_date=game_date,
                     market=market,
                     base_projection=float(snapshot.component_projection),
+                    matchup_context=matchup_context,
                 )
 
             steals = _component_projection("steals")
@@ -790,12 +1211,19 @@ def snapshot_stocks(
                 projected_stocks=projected_stocks,
                 game_date=str(game_date),
             )
-            recent_hit_rate = _player_recent_stocks_hit_rate(
-                conn,
-                player_id=player_id,
-                game_id=game_id,
-                game_date=str(game_date),
+            prepared_stocks_row = prepared_features.get("blocks_steals")
+            recent_hit_rate = (
+                None
+                if prepared_stocks_row is None or prepared_stocks_row["recent_hit_rate_2_plus"] is None
+                else float(prepared_stocks_row["recent_hit_rate_2_plus"])
             )
+            if recent_hit_rate is None:
+                recent_hit_rate = _player_recent_stocks_hit_rate(
+                    conn,
+                    player_id=player_id,
+                    game_id=game_id,
+                    game_date=str(game_date),
+                )
             if recent_hit_rate is not None:
                 history_weight = 0.18 if projected_stocks < 1.5 else 0.28 if projected_stocks < 2.5 else 0.22
                 stocks_prob_2_plus = ((1.0 - history_weight) * stocks_prob_2_plus) + (
@@ -906,6 +1334,8 @@ def prepare_stocks_data(
             "game_ids": [],
             "prepared_games": 0,
             "candidate_players": 0,
+            "team_prep_context": 0,
+            "player_prep_features": 0,
             "snapshots_written": 0,
         }
     prepared_games = rebuild_prepared_games(conn, target_dates=normalized_dates)
@@ -925,12 +1355,21 @@ def prepare_stocks_data(
         tracking.close()
     game_ids = [int(row["game_id"]) for row in rows if int(row["game_id"]) > 0]
     candidate_players = rebuild_candidate_players(conn, game_ids=game_ids, target_dates=normalized_dates)
+    team_prep_context = rebuild_team_prep_context(conn, game_ids=game_ids, target_dates=normalized_dates)
+    player_prep_features = rebuild_player_prep_features(
+        conn,
+        game_ids=game_ids,
+        target_dates=normalized_dates,
+        runtime_cache=None,
+    )
     snapshots_written = snapshot_stocks(conn, game_ids=game_ids, target_dates=normalized_dates, runtime_cache=None)
     return {
         "selected_dates": normalized_dates,
         "game_ids": game_ids,
         "prepared_games": prepared_games,
         "candidate_players": candidate_players,
+        "team_prep_context": team_prep_context,
+        "player_prep_features": player_prep_features,
         "snapshots_written": snapshots_written,
         "prepared_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -1194,6 +1194,24 @@ tbody tr.selected {
   color: #667085;
 }
 
+.table-sort-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.table-sort-button:hover {
+  color: #101828;
+}
+
 .special-props-table tbody tr {
   transition: background 160ms ease;
 }

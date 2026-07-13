@@ -47,6 +47,8 @@ Current implementation notes:
 - candidate eligibility now uses the last `10` games instead of `8`
 - the fast prep estimator uses a `10`-game recent window with a `20`-game stabilizing window
 - the fast prep estimator blends same-home/away history and scheduled-game `rest_days` into the component baseline without re-enabling the expensive learned/minutes path
+- scheduled prep now materializes `player_prep_features` per game/player/market so snapshot generation can reuse cached contextual projections and recent `2+ stocks` hit-rate inputs
+- scheduled prep now materializes `team_prep_context` per game/team so all candidates on one side share the same cached pace, opponent-allowed, and turnover-pressure context
 - live mounted-runtime validation completed end to end in about `1m 1s` for a `3`-game / `79`-candidate ET-today slate
 
 ## Current Optimization Track
@@ -72,6 +74,121 @@ Expected impact:
 - less repeated scanning of `player_game_stats` from the main DB
 - more predictable cron runtime as the candidate pool grows
 - cleaner separation between canonical history reads and derived Stocks prep outputs
+
+## Next Four Optimization Tracks
+
+These are the next four high-value Stocks improvements to implement together after the current prep foundation:
+
+1. `player_prep_features` materialization
+2. opponent/team-context caching for Specials
+3. richer candidate inclusion logic
+4. market-specific probability calibration for `stocks 2+` / `stocks 3+`
+
+### 1. `player_prep_features` Materialization
+
+Goal:
+
+- compute reusable player-level Stocks prep features once during scheduled prep
+- persist them in `stocks_tracking.sqlite`
+- let `snapshot_stocks()` reuse cached feature rows instead of rebuilding the same historical context repeatedly
+
+Planned contents:
+
+- per-game, per-player, per-market base component projection
+- contextualized projection after home/away and `rest_days` blending
+- recent-window and stabilizing-window anchors
+- same-venue sample counts and venue-adjusted rates
+- recent `2+ stocks` hit-rate inputs
+
+Expected win:
+
+- faster reruns
+- less pressure on `wnba.sqlite`
+- more stable cron runtime as candidate counts increase
+
+Current status:
+
+- implemented
+- `prepare_stocks_data()` now builds `player_prep_features` before `snapshot_stocks()`
+- `snapshot_stocks()` prefers cached prep rows and falls back to on-demand feature generation only when the cache is missing
+
+### 2. Opponent And Team-Context Caching
+
+Goal:
+
+- add more matchup-specific defensive context without making live regeneration expensive
+
+Planned context to precompute per game/team:
+
+- opponent stocks allowed tendencies
+- turnover-pressure indicators
+- pace / possession context
+- rim-protection and block environment
+- role/archetype-sensitive opponent allowances
+- injury-driven opportunity or suppression context at the team level
+
+Expected win:
+
+- better Specials ranking quality
+- better differentiation for defensive specialists whose value depends more on matchup than raw recent average
+- reusable game-level context shared across every candidate in the same matchup
+
+Current status:
+
+- implemented
+- scheduled prep now builds `team_prep_context` rows per game/team
+- cached context currently includes pace, opponent steals allowed, opponent blocks allowed, combined stocks allowed, and turnover-pressure factors
+- `player_prep_features` now consumes that cached matchup context, and snapshot fallback paths reuse it when available
+
+### 3. Richer Candidate Inclusion Logic
+
+Goal:
+
+- widen candidate discovery without flooding the live board with low-value fringe names
+
+Planned additions:
+
+- role-based inclusion for defensive specialists even when minutes are modest
+- lineup-promotion detection
+- injury-opportunity replacement detection
+- opponent-sensitive boosts for players who profile well against a specific matchup
+- overnight long-tail candidate scoring with stricter UI filtering at serve time
+
+Expected win:
+
+- fewer missed Stocks candidates
+- better coverage in games where value comes from role change rather than season-long baseline usage
+- better use of the ahead-of-time cron path instead of live discovery
+
+### 4. Market-Specific Probability Calibration
+
+Goal:
+
+- stop treating `steals`, `blocks`, `stocks 2+`, and `stocks 3+` as if they share the same probability shape
+
+Planned calibration work:
+
+- separate blend weights by market
+- separate support thresholds by market
+- use history/calibration differently for `stocks 2+` versus `stocks 3+`
+- explicitly test sparse-market stability before promotion
+- preserve conservative behavior for long-tail `3+` outputs
+
+Expected win:
+
+- cleaner ordering of live Specials cards
+- fewer inflated `3+` outputs
+- better hit-rate alignment between displayed probability and real outcome frequency
+
+## Quality Controls
+
+The four-track optimization pass should keep these safeguards:
+
+- no promotion of learned player-prop overlays unless they beat the component baseline
+- cached prep features must have an on-demand fallback path
+- wide candidate discovery should happen in prep, not in user-facing requests
+- `stocks 3+` should stay conservative and support-aware
+- matchup boosts should be bounded so single noisy opponent splits do not overtake the baseline
 
 ## Target Architecture
 
@@ -224,8 +341,8 @@ Do not rerun the full slate unless the schedule itself changed broadly.
 
 ## Remaining Steps
 
-1. Add `player_prep_features` materialization in `stocks_tracking.sqlite` so projection context is computed once per scheduled prep run.
-2. Make `snapshot_stocks()` prefer cached prep features and fall back to on-demand context rebuilding only when needed.
+1. Expand candidate selection with role-based specialists, lineup-promotion detection, and injury-opportunity replacements.
+2. Refit market-specific calibration for `steals`, `blocks`, `stocks 2+`, and `stocks 3+` separately.
 3. Add optional prep metadata / job-run tables if we want observability in `stocks_tracking.sqlite`.
 4. Wire roster-change invalidation to targeted stocks refreshes by affected game.
 5. Decide and test the optimal historical windows for candidate eligibility and stocks summaries.

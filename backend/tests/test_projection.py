@@ -3747,6 +3747,81 @@ def test_snapshot_stocks_can_use_candidate_pool_without_prop_lines(monkeypatch, 
     assert len(set(runtime_cache_ids)) == 1
 
 
+def test_rebuild_player_prep_features_populates_tracking_cache(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        candidate_count = stocks_tracking_module.rebuild_candidate_players(conn)
+        built = stocks_tracking_module.rebuild_player_prep_features(conn)
+
+    assert candidate_count > 0
+    assert built >= candidate_count * 3
+    with sqlite3.connect(tracking_path) as tracking:
+        tracking.row_factory = sqlite3.Row
+        row = tracking.execute(
+            """
+            SELECT
+                game_id,
+                player_id,
+                market,
+                contextual_projection,
+                rest_days
+            FROM player_prep_features
+            ORDER BY game_id, player_id, market
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert int(row["game_id"]) > 0
+    assert int(row["player_id"]) > 0
+    assert str(row["market"]) in {"steals", "blocks", "blocks_steals"}
+    assert float(row["contextual_projection"]) >= 0.0
+    assert int(row["rest_days"]) >= 0
+
+
+def test_rebuild_team_prep_context_populates_tracking_cache(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        stocks_tracking_module.rebuild_prepared_games(conn)
+        built = stocks_tracking_module.rebuild_team_prep_context(conn)
+
+    assert built > 0
+    with sqlite3.connect(tracking_path) as tracking:
+        tracking.row_factory = sqlite3.Row
+        row = tracking.execute(
+            """
+            SELECT
+                game_id,
+                team_id,
+                opponent_id,
+                pace_factor,
+                steals_allowed_factor,
+                blocks_allowed_factor,
+                stocks_allowed_factor,
+                turnover_pressure_factor
+            FROM team_prep_context
+            ORDER BY game_id, team_id
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert int(row["game_id"]) > 0
+    assert int(row["team_id"]) > 0
+    assert int(row["opponent_id"]) > 0
+    assert float(row["pace_factor"]) > 0.0
+    assert float(row["steals_allowed_factor"]) > 0.0
+    assert float(row["blocks_allowed_factor"]) > 0.0
+    assert float(row["stocks_allowed_factor"]) > 0.0
+    assert float(row["turnover_pressure_factor"]) > 0.0
+
+
 def test_prepare_stocks_data_targets_selected_dates(monkeypatch, tmp_path) -> None:
     load_test_history()
     tracking_path = tmp_path / "stocks-tracking.sqlite"
@@ -3771,6 +3846,8 @@ def test_prepare_stocks_data_targets_selected_dates(monkeypatch, tmp_path) -> No
     assert result["selected_dates"] == [scheduled_dates[0]]
     assert result["prepared_games"] > 0
     assert result["candidate_players"] > 0
+    assert result["team_prep_context"] >= result["prepared_games"] * 2
+    assert result["player_prep_features"] >= result["candidate_players"] * 3
     assert result["snapshots_written"] > 0
     with sqlite3.connect(tracking_path) as tracking:
         prepared_dates = [
@@ -3785,9 +3862,23 @@ def test_prepare_stocks_data_targets_selected_dates(monkeypatch, tmp_path) -> No
                 "SELECT DISTINCT game_date FROM candidate_players ORDER BY game_date"
             ).fetchall()
         ]
+        prep_feature_dates = [
+            str(row[0])
+            for row in tracking.execute(
+                "SELECT DISTINCT game_date FROM player_prep_features ORDER BY game_date"
+            ).fetchall()
+        ]
+        team_context_dates = [
+            str(row[0])
+            for row in tracking.execute(
+                "SELECT DISTINCT game_date FROM team_prep_context ORDER BY game_date"
+            ).fetchall()
+        ]
 
     assert prepared_dates == [scheduled_dates[0]]
     assert tracked_dates == [scheduled_dates[0]]
+    assert team_context_dates == [scheduled_dates[0]]
+    assert prep_feature_dates == [scheduled_dates[0]]
 
 
 def test_snapshot_stocks_uses_shared_runtime_cache_by_default(monkeypatch, tmp_path) -> None:
@@ -3824,6 +3915,27 @@ def test_snapshot_stocks_uses_shared_runtime_cache_by_default(monkeypatch, tmp_p
     assert written > 0
     assert runtime_cache_ids
     assert len(set(runtime_cache_ids)) == 1
+
+
+def test_snapshot_stocks_prefers_precomputed_player_prep_features(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        stocks_tracking_module.rebuild_candidate_players(conn)
+        built = stocks_tracking_module.rebuild_player_prep_features(conn)
+
+    def fail_feature_snapshot(*args, **kwargs):
+        raise AssertionError("snapshot_stocks should use precomputed player prep features")
+
+    monkeypatch.setattr(stocks_tracking_module, "feature_snapshot", fail_feature_snapshot)
+
+    with connect() as conn:
+        written = stocks_tracking_module.snapshot_stocks(conn)
+
+    assert built > 0
+    assert written > 0
 
 
 def test_feature_snapshot_reuses_shared_player_context_with_runtime_cache(monkeypatch) -> None:

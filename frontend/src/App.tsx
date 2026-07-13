@@ -96,6 +96,20 @@ const WNBA_TEAM_LOGOS: Record<string, string> = {
 type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "special" | "discrepancies" | "roster" | "models" | "data";
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
+type SpecialStocksSortField =
+  | "player_name"
+  | "tier"
+  | "projected_steals"
+  | "projected_blocks"
+  | "projected_stocks"
+  | "steal_prob_1_plus"
+  | "steal_prob_2_plus"
+  | "block_prob_1_plus"
+  | "block_prob_2_plus"
+  | "stocks_prob_2_plus"
+  | "stocks_prob_3_plus"
+  | "actual_stocks"
+  | "captured_at";
 type SortDirection = "desc" | "asc";
 type TabLoadingState = Record<DashboardTab, boolean>;
 type CacheUpdateEvent = { id: number; created_at: string; views: string[] };
@@ -4025,6 +4039,8 @@ function SpecialStocksView({
   onGenerate: () => void;
 }) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
+  const [sortField, setSortField] = useState<SpecialStocksSortField>("stocks_prob_2_plus");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const cards = useMemo(() => {
     const grouped = new Map<number, {
       gameId: number;
@@ -4063,11 +4079,57 @@ function SpecialStocksView({
           ? card.players.reduce((sum, player) => sum + (player.stocks_prob_2_plus ?? 0), 0) / card.players.length
           : 0,
       players: card.players.slice().sort((left, right) => {
-        const probabilityDelta = (right.stocks_prob_2_plus ?? 0) - (left.stocks_prob_2_plus ?? 0);
-        if (Math.abs(probabilityDelta) > 0.0001) {
-          return probabilityDelta;
+        const tierValue = (snapshot: SpecialStocksSnapshot) => (
+          (snapshot.stocks_prob_2_plus ?? 0) >= 0.5 ? 2 : (snapshot.stocks_prob_2_plus ?? 0) >= 0.4 ? 1 : 0
+        );
+        const valueForSort = (snapshot: SpecialStocksSnapshot, field: SpecialStocksSortField) => {
+          switch (field) {
+            case "player_name":
+              return snapshot.player_name ?? "";
+            case "tier":
+              return tierValue(snapshot);
+            case "projected_steals":
+              return snapshot.projected_steals ?? 0;
+            case "projected_blocks":
+              return snapshot.projected_blocks ?? 0;
+            case "projected_stocks":
+              return snapshot.projected_stocks ?? 0;
+            case "steal_prob_1_plus":
+              return snapshot.steal_prob_1_plus ?? 0;
+            case "steal_prob_2_plus":
+              return snapshot.steal_prob_2_plus ?? 0;
+            case "block_prob_1_plus":
+              return snapshot.block_prob_1_plus ?? 0;
+            case "block_prob_2_plus":
+              return snapshot.block_prob_2_plus ?? 0;
+            case "stocks_prob_2_plus":
+              return snapshot.stocks_prob_2_plus ?? 0;
+            case "stocks_prob_3_plus":
+              return snapshot.stocks_prob_3_plus ?? 0;
+            case "actual_stocks":
+              return snapshot.actual_stocks ?? -1;
+            case "captured_at":
+              return Date.parse(snapshot.captured_at ?? "") || 0;
+            default:
+              return 0;
+          }
+        };
+        const leftValue = valueForSort(left, sortField);
+        const rightValue = valueForSort(right, sortField);
+        let comparison = 0;
+        if (typeof leftValue === "string" && typeof rightValue === "string") {
+          comparison = leftValue.localeCompare(rightValue);
+        } else {
+          comparison = Number(leftValue) - Number(rightValue);
         }
-        return right.projected_stocks - left.projected_stocks;
+        if (comparison === 0) {
+          const probabilityDelta = (right.stocks_prob_2_plus ?? 0) - (left.stocks_prob_2_plus ?? 0);
+          if (Math.abs(probabilityDelta) > 0.0001) {
+            return probabilityDelta;
+          }
+          return right.projected_stocks - left.projected_stocks;
+        }
+        return sortDirection === "asc" ? comparison : -comparison;
       }),
     })).sort((left, right) => {
       const leftTime = Date.parse(left.startTime || left.gameDate);
@@ -4083,8 +4145,22 @@ function SpecialStocksView({
       }
       return leftTime - rightTime;
     });
-  }, [snapshots]);
+  }, [snapshots, sortDirection, sortField]);
   const selectedCard = cards.find((card) => card.gameId === selectedGameId) ?? cards[0] ?? null;
+  const toggleSort = (field: SpecialStocksSortField) => {
+    if (sortField === field) {
+      setSortDirection((current) => (current === "desc" ? "asc" : "desc"));
+      return;
+    }
+    setSortField(field);
+    setSortDirection(field === "player_name" || field === "captured_at" ? "asc" : "desc");
+  };
+  const sortIndicator = (field: SpecialStocksSortField) => {
+    if (sortField !== field) {
+      return "↕";
+    }
+    return sortDirection === "asc" ? "↑" : "↓";
+  };
 
   return (
     <section className="matchup-list">
@@ -4165,19 +4241,19 @@ function SpecialStocksView({
                 <table className="props-table special-props-table">
                   <thead>
                     <tr>
-                      <th>Player</th>
-                      <th>Tier</th>
-                      <th>STL</th>
-                      <th>BLK</th>
-                      <th>STL+BLK</th>
-                      <th>1+ STL</th>
-                      <th>2+ STL</th>
-                      <th>1+ BLK</th>
-                      <th>2+ BLK</th>
-                      <th>2+ Stocks</th>
-                      <th>3+ Stocks</th>
-                      <th>Settled</th>
-                      <th>Captured</th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("player_name")}>Player {sortIndicator("player_name")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("tier")}>Tier {sortIndicator("tier")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("projected_steals")}>STL {sortIndicator("projected_steals")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("projected_blocks")}>BLK {sortIndicator("projected_blocks")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("projected_stocks")}>STL+BLK {sortIndicator("projected_stocks")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("steal_prob_1_plus")}>1+ STL {sortIndicator("steal_prob_1_plus")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("steal_prob_2_plus")}>2+ STL {sortIndicator("steal_prob_2_plus")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("block_prob_1_plus")}>1+ BLK {sortIndicator("block_prob_1_plus")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("block_prob_2_plus")}>2+ BLK {sortIndicator("block_prob_2_plus")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("stocks_prob_2_plus")}>2+ Stocks {sortIndicator("stocks_prob_2_plus")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("stocks_prob_3_plus")}>3+ Stocks {sortIndicator("stocks_prob_3_plus")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("actual_stocks")}>Settled {sortIndicator("actual_stocks")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("captured_at")}>Captured {sortIndicator("captured_at")}</button></th>
                     </tr>
                   </thead>
                   <tbody>
