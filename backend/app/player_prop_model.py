@@ -19,7 +19,7 @@ from .odds import american_to_implied_probability
 from .timezone_utils import APP_TIMEZONE
 
 
-MODEL_VERSION = "adaptive-context-v5-minutes-residual"
+MODEL_VERSION = "adaptive-context-v6-minutes-live-context"
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
 MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
@@ -89,6 +89,9 @@ MINUTES_FEATURE_NAMES = [
     "new_team_minutes_trend",
     "teammate_minutes_redistribution",
     "rotation_stability",
+    "recent_team_minute_share",
+    "recent_minute_rank",
+    "recent_position_minute_share",
 ]
 
 MARKET_VOLATILITY_FLOORS = {
@@ -969,6 +972,16 @@ def _shared_projection_context(
     recent_minutes_avg = sum(minutes[:5]) / min(len(minutes), 5)
     last_10_minutes_avg = sum(minutes) / len(minutes)
     minute_volatility = _minute_volatility(minutes)
+    lineup_context = (
+        _minutes_lineup_context(
+            conn,
+            player_id=player_id,
+            team_id=int(context["team_id"]),
+            history_rows=history_rows,
+        )
+        if use_live_minutes_context
+        else None
+    )
     blowout = _blowout_adjustment(conn, context, rotation_role)
     if use_injury_context:
         injury = _injury_adjustment_for_prop(
@@ -1010,6 +1023,18 @@ def _shared_projection_context(
                 player_id=player_id,
                 team_id=int(context["team_id"]),
                 history_rows=history_rows,
+            )
+            if use_live_minutes_context
+            else None
+        ),
+        lineup_context=lineup_context,
+        opportunity_context=(
+            _live_minutes_opportunity_context(
+                conn,
+                player_id=player_id,
+                team_id=int(context["team_id"]),
+                position=str(history_rows[0]["position"] or ""),
+                as_of_date=reference_game_date,
             )
             if use_live_minutes_context
             else None
@@ -2271,6 +2296,22 @@ def _historical_training_features(
             baseline_avg=last_10_avg,
         )
     blowout = _blowout_adjustment(None, context, str(row["rotation_role"] or "starter"))
+    lineup_context = (
+        _minutes_lineup_context_from_player_rows(
+            conn,
+            player_id=int(row["player_id"]),
+            team_id=int(context["team_id"]),
+            player_rows=player_rows,
+            row_index=row_index,
+        )
+        if player_rows is not None and row_index is not None
+        else _minutes_lineup_context(
+            conn,
+            player_id=int(row["player_id"]),
+            team_id=int(context["team_id"]),
+            history_rows=recent_rows,
+        ) if recent_rows else None
+    )
     projected_minutes, _minutes_note = _project_minutes(
         None,
         player_id=int(row["player_id"]),
@@ -2286,6 +2327,7 @@ def _historical_training_features(
         injury_delta=0.0,
         injury_status="available",
         recent_absence_days=_days_between_game_dates(previous_game_date, current_game_date),
+        lineup_context=lineup_context,
         before_game_date=current_game_date,
     )
     rate_projection = weighted_rate * projected_minutes
@@ -2464,6 +2506,13 @@ def _minutes_training_rows(
                 "minutes_delta": 0.0,
                 "hard_cap_zero": False,
             }
+            lineup_context = _minutes_lineup_context_from_player_rows(
+                conn,
+                player_id=int(player["id"]),
+                team_id=int(context["team_id"]),
+                player_rows=rows,
+                row_index=idx,
+            )
             role_state = _classify_minutes_role(
                 rotation_role=str(current["rotation_role"] or "starter"),
                 recent_minutes_avg=recent_minutes_avg,
@@ -2474,6 +2523,7 @@ def _minutes_training_rows(
                 injury_status=str(injury["status"]),
                 injury_delta=float(injury["minutes_delta"]),
                 recent_absence_days=recent_absence_days,
+                lineup_context=lineup_context,
             )
             if bucket_filter is not None and role_state.bucket != bucket_filter:
                 continue
@@ -2497,6 +2547,7 @@ def _minutes_training_rows(
                 injury_delta=float(injury["minutes_delta"]),
                 recent_absence_days=recent_absence_days,
                 team_transition=team_transition,
+                lineup_context=lineup_context,
             )
             recent_blend = _minutes_recent_blend(
                 recent_minutes_avg=recent_minutes_avg,
@@ -2540,7 +2591,9 @@ def _project_minutes(
     injury_status: str,
     recent_absence_days: float | None,
     team_transition: list[float] | None = None,
-    before_game_date: str | None,
+    lineup_context: list[float] | None = None,
+    opportunity_context: list[float] | None = None,
+    before_game_date: str | None = None,
     allow_training: bool = True,
 ) -> tuple[float, str]:
     base_heuristic = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
@@ -2576,6 +2629,8 @@ def _project_minutes(
         injury_status=injury_status,
         injury_delta=injury_delta,
         recent_absence_days=recent_absence_days,
+        lineup_context=lineup_context,
+        opportunity_context=opportunity_context,
     )
     learned_minutes = None
     blend_note = "heuristic only"
@@ -2599,6 +2654,7 @@ def _project_minutes(
                 injury_delta=injury_delta,
                 recent_absence_days=recent_absence_days,
                 team_transition=team_transition,
+                lineup_context=lineup_context,
             )
             learned_delta = _predict(minutes_model, minutes_features)
             learned_minutes = max(0.0, recent_blend + learned_delta)
@@ -2684,6 +2740,7 @@ def _project_minutes(
         blowout_delta=blowout_delta,
         recent_minutes_avg=recent_minutes_avg,
         last_10_minutes_avg=last_10_minutes_avg,
+        opportunity_context=opportunity_context,
     )
     projected, stable_context_notes = _apply_minutes_stable_context_cap(
         projected=projected,
@@ -2696,6 +2753,7 @@ def _project_minutes(
         injury_delta=injury_delta,
         recent_absence_days=recent_absence_days,
         team_transition=team_transition,
+        opportunity_context=opportunity_context,
     )
     projected = _clamp(projected, lower_bound, upper_bound)
     if abs(venue_delta) >= 0.05:
@@ -2865,6 +2923,7 @@ def _apply_minutes_stable_context_cap(
     injury_delta: float,
     recent_absence_days: float | None,
     team_transition: list[float] | None,
+    opportunity_context: list[float] | None,
 ) -> tuple[float, list[str]]:
     notes: list[str] = []
     status = str(injury_status or "").strip().lower()
@@ -2872,6 +2931,11 @@ def _apply_minutes_stable_context_cap(
         return projected, notes
     games_since_joining_team = float((team_transition or [0.0])[0] if team_transition else 0.0)
     transitional = 0.0 < games_since_joining_team <= 10.0
+    normalized_opportunity = list(opportunity_context or [0.0, 0.0])
+    if len(normalized_opportunity) < 2:
+        normalized_opportunity = (normalized_opportunity + [0.0, 0.0])[:2]
+    same_position_unavailable_minutes = float(normalized_opportunity[0])
+    same_position_key_out_count = float(normalized_opportunity[1])
     dynamic_context = any(
         (
             abs(injury_delta) >= 1.0,
@@ -2881,6 +2945,7 @@ def _apply_minutes_stable_context_cap(
             minute_volatility >= 8.0,
             abs(minutes_trend) >= 3.5,
             transitional,
+            same_position_unavailable_minutes >= 18.0 and same_position_key_out_count >= 1.0,
         )
     )
     if dynamic_context:
@@ -3011,6 +3076,8 @@ def _classify_minutes_role(
     injury_status: str,
     injury_delta: float,
     recent_absence_days: float | None,
+    lineup_context: list[float] | None = None,
+    opportunity_context: list[float] | None = None,
 ) -> MinutesRoleState:
     recent_median = recent_minutes_avg if last_10_minutes_avg <= 0 else ((recent_minutes_avg * 0.65) + (last_10_minutes_avg * 0.35))
     anchor = (0.45 * recent_minutes_avg) + (0.30 * recent_median) + (0.25 * ewma_minutes)
@@ -3028,6 +3095,31 @@ def _classify_minutes_role(
         anchor += min(2.5, injury_delta * 1.2)
     if recent_absence_days is not None and recent_absence_days >= 7:
         anchor -= 3.0 if recent_absence_days >= 14 else 1.8
+    normalized_lineup_context = list(lineup_context or [0.0, 0.5, 0.0])
+    if len(normalized_lineup_context) < 3:
+        normalized_lineup_context = (normalized_lineup_context + [0.0, 0.5, 0.0])[:3]
+    recent_team_minute_share = float(normalized_lineup_context[0])
+    recent_minute_rank = float(normalized_lineup_context[1])
+    recent_position_minute_share = float(normalized_lineup_context[2])
+    if recent_team_minute_share > 0.0:
+        anchor += _clamp((recent_team_minute_share - 0.14) * 14.0, -1.4, 2.2)
+    if recent_minute_rank >= 0.78:
+        anchor += 1.0
+    elif recent_minute_rank <= 0.42:
+        anchor -= 1.0
+    if recent_position_minute_share >= 0.58:
+        anchor += 0.6
+    elif 0.0 < recent_position_minute_share <= 0.34:
+        anchor -= 0.4
+    normalized_opportunity = list(opportunity_context or [0.0, 0.0])
+    if len(normalized_opportunity) < 2:
+        normalized_opportunity = (normalized_opportunity + [0.0, 0.0])[:2]
+    same_position_unavailable_minutes = float(normalized_opportunity[0])
+    same_position_key_out_count = float(normalized_opportunity[1])
+    if same_position_unavailable_minutes >= 12.0:
+        anchor += min(2.4, same_position_unavailable_minutes / 12.0)
+    if same_position_key_out_count >= 1.0 and role_text in {"rotation", "bench"}:
+        anchor += 0.8
     if role_text == "star":
         anchor = max(anchor, 29.0)
     elif role_text == "bench":
@@ -3113,6 +3205,7 @@ def _apply_minutes_hard_rules(
     blowout_delta: float,
     recent_minutes_avg: float,
     last_10_minutes_avg: float,
+    opportunity_context: list[float] | None = None,
 ) -> tuple[float, list[str]]:
     notes: list[str] = []
     status = str(injury_status or "").strip().lower()
@@ -3141,6 +3234,28 @@ def _apply_minutes_hard_rules(
             projected = floor
             notes.append("hard rule injury replacement floor")
 
+    normalized_opportunity = list(opportunity_context or [0.0, 0.0])
+    if len(normalized_opportunity) < 2:
+        normalized_opportunity = (normalized_opportunity + [0.0, 0.0])[:2]
+    same_position_unavailable_minutes = float(normalized_opportunity[0])
+    same_position_key_out_count = float(normalized_opportunity[1])
+    if (
+        same_position_unavailable_minutes >= 18.0
+        and same_position_key_out_count >= 1.0
+        and role_state.bucket in {"starter_volatile", "rotation", "bench"}
+    ):
+        opportunity_floor = min(
+            role_state.upper_bound,
+            max(
+                role_state.lower_bound,
+                recent_minutes_avg + min(2.0, same_position_unavailable_minutes / 18.0),
+                last_10_minutes_avg - 0.5,
+            ),
+        )
+        if projected < opportunity_floor:
+            projected = opportunity_floor
+            notes.append("hard rule same-position vacancy floor")
+
     return projected, notes
 
 
@@ -3166,6 +3281,7 @@ def _minutes_feature_values(
     injury_delta: float,
     recent_absence_days: float | None,
     team_transition: list[float] | None = None,
+    lineup_context: list[float] | None = None,
 ) -> list[float]:
     role_flags = {
         "core_starter": 0.0,
@@ -3181,6 +3297,9 @@ def _minutes_feature_values(
     normalized_team_transition = list(team_transition or [0.0, 0.0, 0.0, 0.5])
     if len(normalized_team_transition) < 4:
         normalized_team_transition = (normalized_team_transition + [0.0, 0.0, 0.0, 0.5])[:4]
+    normalized_lineup_context = list(lineup_context or [0.0, 0.5, 0.0])
+    if len(normalized_lineup_context) < 3:
+        normalized_lineup_context = (normalized_lineup_context + [0.0, 0.5, 0.0])[:3]
     return [
         ewma_minutes,
         recent_minutes_avg,
@@ -3204,6 +3323,9 @@ def _minutes_feature_values(
         float(normalized_team_transition[1]),
         float(normalized_team_transition[2]),
         float(normalized_team_transition[3]),
+        float(normalized_lineup_context[0]),
+        float(normalized_lineup_context[1]),
+        float(normalized_lineup_context[2]),
     ]
 
 
@@ -3900,6 +4022,111 @@ def _team_transition_features_from_player_rows(
     return _team_transition_features_from_games(conn, player_id, current_team_rows)
 
 
+def _minutes_lineup_context(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    team_id: int,
+    history_rows: list[sqlite3.Row],
+) -> list[float]:
+    current_team_rows: list[sqlite3.Row] = []
+    for row in history_rows:
+        if _historical_row_team_id(row) != team_id:
+            break
+        current_team_rows.append(row)
+    return _minutes_lineup_context_from_games(conn, player_id, current_team_rows)
+
+
+def _minutes_lineup_context_from_player_rows(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    team_id: int,
+    player_rows: list[sqlite3.Row],
+    row_index: int | None,
+) -> list[float]:
+    if row_index is None:
+        return [0.0, 0.5, 0.0]
+    current_team_rows: list[sqlite3.Row] = []
+    for row in reversed(player_rows[:row_index]):
+        if _historical_row_team_id(row) != team_id:
+            break
+        current_team_rows.append(row)
+    return _minutes_lineup_context_from_games(conn, player_id, current_team_rows)
+
+
+def _minutes_lineup_context_from_games(
+    conn: sqlite3.Connection,
+    player_id: int,
+    current_team_rows: list[sqlite3.Row],
+) -> list[float]:
+    if not current_team_rows:
+        return [0.0, 0.5, 0.0]
+
+    recent_rows = current_team_rows[:8]
+    game_ids = tuple(int(row["game_id"]) for row in recent_rows)
+    team_id = int(_historical_row_team_id(recent_rows[0]) or 0)
+    position_prefix = str(recent_rows[0]["position"] or "").strip().upper()[:1]
+    cache = _connection_training_cache_bucket(conn, "minutes_lineup_context")
+    cache_key = (int(player_id), team_id, position_prefix, game_ids)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return list(cached)  # type: ignore[arg-type]
+
+    placeholders = ",".join("?" for _ in game_ids)
+    roster_rows = conn.execute(
+        f"""
+        SELECT DISTINCT h.game_id, h.player_id, s.minutes, p.position
+        FROM player_team_history h
+        JOIN player_game_stats s
+          ON s.player_id = h.player_id AND s.game_id = h.game_id
+        JOIN players p ON p.id = h.player_id
+        WHERE h.game_id IN ({placeholders})
+          AND h.team_id = ?
+        """,
+        (*game_ids, team_id),
+    ).fetchall()
+
+    roster_minutes: dict[int, list[tuple[int, float, str]]] = {game_id: [] for game_id in game_ids}
+    for row in roster_rows:
+        roster_minutes[int(row["game_id"])].append(
+            (
+                int(row["player_id"]),
+                float(row["minutes"] or 0.0),
+                str(row["position"] or "").strip().upper()[:1],
+            )
+        )
+
+    team_shares: list[float] = []
+    minute_ranks: list[float] = []
+    position_shares: list[float] = []
+    for row in recent_rows:
+        game_id = int(row["game_id"])
+        player_minutes = float(row["minutes"] or 0.0)
+        game_roster = roster_minutes.get(game_id) or []
+        if not game_roster:
+            continue
+        total_minutes = sum(item[1] for item in game_roster)
+        if total_minutes > 0.0:
+            team_shares.append(player_minutes / total_minutes)
+        ordered_minutes = sorted((item[1] for item in game_roster), reverse=True)
+        if ordered_minutes:
+            rank_index = next((idx for idx, value in enumerate(ordered_minutes) if abs(value - player_minutes) < 0.01), len(ordered_minutes) - 1)
+            minute_ranks.append(1.0 if len(ordered_minutes) == 1 else 1.0 - (rank_index / max(len(ordered_minutes) - 1, 1)))
+        if position_prefix:
+            position_total = sum(item[1] for item in game_roster if item[2] == position_prefix)
+            if position_total > 0.0:
+                position_shares.append(player_minutes / position_total)
+
+    result = [
+        float(sum(team_shares) / len(team_shares)) if team_shares else 0.0,
+        float(sum(minute_ranks) / len(minute_ranks)) if minute_ranks else 0.5,
+        float(sum(position_shares) / len(position_shares)) if position_shares else 0.0,
+    ]
+    cache[cache_key] = tuple(result)
+    return result
+
+
 def _team_transition_features_from_games(
     conn: sqlite3.Connection,
     player_id: int,
@@ -3959,6 +4186,98 @@ def _team_transition_features_from_games(
         float(teammate_shift),
         float(rotation_stability),
     ]
+
+
+def _live_minutes_opportunity_context(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    team_id: int,
+    position: str | None,
+    as_of_date: str | None,
+) -> list[float]:
+    position_prefix = str(position or "").strip().upper()[:1]
+    cache = _connection_training_cache_bucket(conn, "live_minutes_opportunity_context")
+    cache_key = (int(player_id), int(team_id), position_prefix, str(as_of_date or ""))
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return list(cached)  # type: ignore[arg-type]
+
+    date_filter = "AND DATE(i.captured_at) <= DATE(?)" if as_of_date else ""
+    params: list[object] = []
+    if as_of_date:
+        params.append(as_of_date)
+    params.append(team_id)
+    if as_of_date:
+        params.append(as_of_date)
+        params.append(as_of_date)
+    teammate_rows = conn.execute(
+        f"""
+        SELECT
+            p.id AS player_id,
+            p.position,
+            p.rotation_role,
+            lower(trim(i.status)) AS status,
+            COALESCE(
+                (
+                    SELECT AVG(sample.minutes)
+                    FROM (
+                        SELECT s.minutes
+                        FROM player_game_stats s
+                        JOIN games g ON g.id = s.game_id
+                        WHERE s.player_id = p.id
+                          {"AND DATE(g.game_date) <= DATE(?)" if as_of_date else ""}
+                        ORDER BY g.game_date DESC, s.game_id DESC
+                        LIMIT 8
+                    ) sample
+                ),
+                0.0
+            ) AS recent_minutes
+        FROM injuries i
+        JOIN players p ON p.id = i.player_id
+        WHERE p.team_id = ?
+          {date_filter}
+          AND i.captured_at = (
+              SELECT MAX(i2.captured_at)
+              FROM injuries i2
+              WHERE i2.player_id = i.player_id
+              {date_filter.replace("i.", "i2.")}
+          )
+        """,
+        params,
+    ).fetchall()
+
+    miss_weight = {
+        "out": 1.0,
+        "inactive": 1.0,
+        "suspended": 1.0,
+        "unavailable": 1.0,
+        "doubtful": 0.75,
+        "questionable": 0.35,
+        "gtd": 0.35,
+    }
+    same_position_unavailable_minutes = 0.0
+    same_position_key_out_count = 0.0
+    for row in teammate_rows:
+        teammate_id = int(row["player_id"])
+        if teammate_id == int(player_id):
+            continue
+        status_weight = miss_weight.get(str(row["status"] or "").strip().lower())
+        if status_weight is None:
+            continue
+        teammate_position = str(row["position"] or "").strip().upper()[:1]
+        if position_prefix and teammate_position and teammate_position != position_prefix:
+            continue
+        recent_minutes = float(row["recent_minutes"] or 0.0)
+        if recent_minutes <= 0.0:
+            continue
+        weighted_minutes = recent_minutes * status_weight
+        same_position_unavailable_minutes += weighted_minutes
+        if weighted_minutes >= 14.0 or str(row["rotation_role"] or "").strip().lower() in {"star", "starter"}:
+            same_position_key_out_count += 1.0
+    result = [float(same_position_unavailable_minutes), float(same_position_key_out_count)]
+    cache[cache_key] = tuple(result)
+    return result
 
 
 def _market_value(row: sqlite3.Row, market: str) -> float:

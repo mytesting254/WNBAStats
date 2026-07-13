@@ -1759,12 +1759,46 @@ def test_minutes_feature_values_include_role_shift_signals() -> None:
         spread_abs=6.5,
         injury_delta=1.5,
         recent_absence_days=8.0,
+        lineup_context=[0.19, 0.82, 0.61],
     )
     feature_map = dict(zip(MINUTES_FEATURE_NAMES, features))
 
     assert feature_map["recent_change_ratio"] == pytest.approx(24.0 / 18.0)
     assert feature_map["recent_vs_ewma_gap"] == pytest.approx(4.0)
     assert feature_map["absence_return_flag"] == pytest.approx(1.0)
+    assert feature_map["recent_team_minute_share"] == pytest.approx(0.19)
+    assert feature_map["recent_minute_rank"] == pytest.approx(0.82)
+    assert feature_map["recent_position_minute_share"] == pytest.approx(0.61)
+
+
+def test_minutes_role_classification_uses_lineup_and_vacancy_context() -> None:
+    baseline = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=21.0,
+        last_10_minutes_avg=20.0,
+        ewma_minutes=20.5,
+        minutes_trend=1.0,
+        minute_volatility=4.5,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+    )
+    promoted = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=21.0,
+        last_10_minutes_avg=20.0,
+        ewma_minutes=20.5,
+        minutes_trend=1.0,
+        minute_volatility=4.5,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        lineup_context=[0.18, 0.85, 0.60],
+        opportunity_context=[22.0, 1.0],
+    )
+
+    assert promoted.anchor_minutes > baseline.anchor_minutes
+    assert promoted.bucket in {"starter_volatile", "core_starter"}
 
 
 def test_train_minutes_model_returns_model_with_history() -> None:

@@ -74,6 +74,7 @@ from .player_prop_model import (
     _ewma_newest_first,
     _historical_game_context,
     _minute_volatility,
+    _minutes_lineup_context_from_player_rows,
     _player_training_rows,
     _project_minutes,
     _recent_trend,
@@ -4516,6 +4517,13 @@ def minutes_diagnostics(start_date: str | None = None) -> dict[str, Any]:
                     player_rows=training_rows,
                     row_index=idx,
                 )
+                lineup_context = _minutes_lineup_context_from_player_rows(
+                    conn,
+                    player_id=player_id,
+                    team_id=int(current["team_id"]),
+                    player_rows=training_rows,
+                    row_index=idx,
+                )
                 learned_minutes, _ = _project_minutes(
                     conn,
                     player_id=player_id,
@@ -4532,6 +4540,7 @@ def minutes_diagnostics(start_date: str | None = None) -> dict[str, Any]:
                     injury_status="available",
                     recent_absence_days=recent_absence_days,
                     team_transition=team_transition,
+                    lineup_context=lineup_context,
                     before_game_date=game_date,
                     allow_training=False,
                 )
@@ -4545,6 +4554,7 @@ def minutes_diagnostics(start_date: str | None = None) -> dict[str, Any]:
                     injury_status="available",
                     injury_delta=0.0,
                     recent_absence_days=recent_absence_days,
+                    lineup_context=lineup_context,
                 )
                 heuristic_minutes = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
                 recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
