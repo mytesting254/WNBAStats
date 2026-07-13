@@ -49,6 +49,30 @@ Current implementation notes:
 - the fast prep estimator blends same-home/away history and scheduled-game `rest_days` into the component baseline without re-enabling the expensive learned/minutes path
 - live mounted-runtime validation completed end to end in about `1m 1s` for a `3`-game / `79`-candidate ET-today slate
 
+## Current Optimization Track
+
+The next projections optimization should keep the same model behavior but reduce repeated prep work:
+
+- materialize per-player prep features into `stocks_tracking.sqlite`
+- compute those features once during the nightly / scheduled prep run
+- let snapshot generation read cached prep features instead of re-querying historical context for every rerun
+- keep a fallback path so snapshots can still rebuild on demand if cached prep features are missing
+
+Planned cached prep fields:
+
+- base component projection per market (`steals`, `blocks`, `blocks_steals`)
+- contextualized projection after venue and `rest_days` blending
+- recent and stabilizing history anchors
+- same-home/away sample counts
+- recent `2+ stocks` hit-rate blend inputs
+
+Expected impact:
+
+- faster reruns for today-only targeted refreshes
+- less repeated scanning of `player_game_stats` from the main DB
+- more predictable cron runtime as the candidate pool grows
+- cleaner separation between canonical history reads and derived Stocks prep outputs
+
 ## Target Architecture
 
 Use `wnba.sqlite` as the canonical source of truth and `stocks_tracking.sqlite` as the derived-work database.
@@ -81,6 +105,7 @@ Responsibilities:
 
 - identify upcoming scheduled games
 - build candidate pools per game
+- materialize reusable player prep features per game/player/market
 - compute recent stocks summaries from history
 - generate initial stocks snapshots
 - prepare tomorrow/today data before users request it
@@ -101,7 +126,7 @@ Responsibilities:
 
 - roster / injury changes
 - sportsbook line changes if needed for related views
-- targeted regeneration for affected games only
+- targeted regeneration for affected games only, preferably from cached prep features when the underlying slate has already been prepared
 
 For stocks specifically, roster changes should be the main invalidation trigger.
 
@@ -199,10 +224,12 @@ Do not rerun the full slate unless the schedule itself changed broadly.
 
 ## Remaining Steps
 
-1. Add optional prep metadata / job-run tables if we want observability in `stocks_tracking.sqlite`.
-2. Wire roster-change invalidation to targeted stocks refreshes by affected game.
-3. Decide and test the optimal historical windows for candidate eligibility and stocks summaries.
-4. Expand tomorrow-prep outputs if we want extra precomputed summaries for the UI.
+1. Add `player_prep_features` materialization in `stocks_tracking.sqlite` so projection context is computed once per scheduled prep run.
+2. Make `snapshot_stocks()` prefer cached prep features and fall back to on-demand context rebuilding only when needed.
+3. Add optional prep metadata / job-run tables if we want observability in `stocks_tracking.sqlite`.
+4. Wire roster-change invalidation to targeted stocks refreshes by affected game.
+5. Decide and test the optimal historical windows for candidate eligibility and stocks summaries.
+6. Expand tomorrow-prep outputs if we want extra precomputed summaries for the UI.
 
 ## Non-Goals
 
