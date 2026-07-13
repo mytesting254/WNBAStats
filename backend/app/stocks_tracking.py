@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import sqlite3
@@ -19,8 +20,9 @@ _SNAPSHOT_JOB_RUNNING = False
 _PREP_JOB_LOCK = threading.Lock()
 _PREP_JOB_RUNNING = False
 _SCHEMA_INIT_LOCK = threading.Lock()
-_STOCKS_RECENT_WINDOW_GAMES = 10
-_STOCKS_STABILITY_WINDOW_GAMES = 20
+_STOCKS_RECENT_WINDOW_GAMES = 12
+_STOCKS_STABILITY_WINDOW_GAMES = 24
+_STOCKS_PROMOTION_WINDOW_GAMES = 3
 
 
 def _clamp(value: float, lower: float, upper: float) -> float:
@@ -125,12 +127,44 @@ def ensure_tracking_schema() -> Path:
                     built_at TEXT NOT NULL,
                     PRIMARY KEY (game_id, team_id)
                 );
+                CREATE TABLE IF NOT EXISTS game_board_summaries (
+                    game_id INTEGER PRIMARY KEY,
+                    game_date TEXT NOT NULL,
+                    player_count INTEGER NOT NULL DEFAULT 0,
+                    candidate_count_50_plus INTEGER NOT NULL DEFAULT 0,
+                    avg_prob_2_plus REAL NOT NULL DEFAULT 0,
+                    avg_prob_3_plus REAL NOT NULL DEFAULT 0,
+                    top_projected_stocks REAL NOT NULL DEFAULT 0,
+                    top_prob_2_plus REAL NOT NULL DEFAULT 0,
+                    top_player_name TEXT,
+                    built_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS prep_runs (
+                    id INTEGER PRIMARY KEY,
+                    status TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    target_dates_json TEXT NOT NULL,
+                    game_ids_json TEXT NOT NULL,
+                    selected_dates_json TEXT NOT NULL,
+                    selected_game_ids_json TEXT NOT NULL,
+                    prepared_games INTEGER NOT NULL DEFAULT 0,
+                    candidate_players INTEGER NOT NULL DEFAULT 0,
+                    team_prep_context INTEGER NOT NULL DEFAULT 0,
+                    player_prep_features INTEGER NOT NULL DEFAULT 0,
+                    game_board_summaries INTEGER NOT NULL DEFAULT 0,
+                    snapshots_written INTEGER NOT NULL DEFAULT 0,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    error_message TEXT
+                );
                 CREATE INDEX IF NOT EXISTS idx_stocks_snapshots_game ON projection_snapshots(game_id, player_id);
                 CREATE INDEX IF NOT EXISTS idx_stocks_prepared_games_date ON prepared_games(game_date, start_time, game_id);
                 CREATE INDEX IF NOT EXISTS idx_stocks_candidates_game ON candidate_players(game_id, player_id);
                 CREATE INDEX IF NOT EXISTS idx_stocks_player_prep_game ON player_prep_features(game_id, player_id, market);
                 CREATE INDEX IF NOT EXISTS idx_stocks_player_prep_date ON player_prep_features(game_date, game_id, player_id);
                 CREATE INDEX IF NOT EXISTS idx_stocks_team_context_game ON team_prep_context(game_id, team_id);
+                CREATE INDEX IF NOT EXISTS idx_stocks_board_summaries_date ON game_board_summaries(game_date, game_id);
+                CREATE INDEX IF NOT EXISTS idx_stocks_prep_runs_finished ON prep_runs(finished_at, id);
                 """
             )
             columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(projection_snapshots)").fetchall()}
@@ -168,6 +202,69 @@ def _open_tracking_connection() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
     return conn
+
+
+def _record_prep_run(
+    *,
+    status: str,
+    scope: str,
+    target_dates: list[str],
+    game_ids: list[int],
+    selected_dates: list[str],
+    selected_game_ids: list[int],
+    prepared_games: int,
+    candidate_players: int,
+    team_prep_context: int,
+    player_prep_features: int,
+    game_board_summaries: int,
+    snapshots_written: int,
+    started_at: str,
+    finished_at: str,
+    error_message: str | None = None,
+) -> None:
+    tracking = _open_tracking_connection()
+    try:
+        tracking.execute(
+            """
+            INSERT INTO prep_runs (
+                status,
+                scope,
+                target_dates_json,
+                game_ids_json,
+                selected_dates_json,
+                selected_game_ids_json,
+                prepared_games,
+                candidate_players,
+                team_prep_context,
+                player_prep_features,
+                game_board_summaries,
+                snapshots_written,
+                started_at,
+                finished_at,
+                error_message
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(status),
+                str(scope),
+                json.dumps(list(target_dates)),
+                json.dumps([int(game_id) for game_id in game_ids]),
+                json.dumps(list(selected_dates)),
+                json.dumps([int(game_id) for game_id in selected_game_ids]),
+                int(prepared_games),
+                int(candidate_players),
+                int(team_prep_context),
+                int(player_prep_features),
+                int(game_board_summaries),
+                int(snapshots_written),
+                str(started_at),
+                str(finished_at),
+                None if error_message is None else str(error_message),
+            ),
+        )
+        tracking.commit()
+    finally:
+        tracking.close()
 
 
 def _stocks_market_value(row: sqlite3.Row, market: str) -> float:
@@ -646,8 +743,8 @@ def rebuild_candidate_players(
         placeholders = ",".join("?" for _ in selected_game_ids)
         game_filter = f" AND g.id IN ({placeholders})"
         params = selected_game_ids
-        rows = conn.execute(
-            """
+        candidate_query = (
+            f"""
             WITH scheduled_games AS (
                 SELECT
                     g.id AS game_id,
@@ -658,14 +755,17 @@ def rebuild_candidate_players(
                 WHERE g.status = 'scheduled'
             """
             + game_filter
-            + """
+            + f"""
             ),
             recent_stats AS (
                 SELECT
                     s.player_id,
-                    COUNT(*) AS recent_games,
-                    AVG(s.minutes) AS recent_minutes_avg,
-                    AVG(COALESCE(s.steals, 0) + COALESCE(s.blocks, 0)) AS recent_stocks_avg
+                    SUM(CASE WHEN s.stat_rank <= {_STOCKS_RECENT_WINDOW_GAMES} THEN 1 ELSE 0 END) AS recent_games,
+                    AVG(CASE WHEN s.stat_rank <= {_STOCKS_RECENT_WINDOW_GAMES} THEN s.minutes END) AS recent_minutes_avg,
+                    AVG(CASE WHEN s.stat_rank <= {_STOCKS_RECENT_WINDOW_GAMES} THEN COALESCE(s.steals, 0) + COALESCE(s.blocks, 0) END) AS recent_stocks_avg,
+                    AVG(CASE WHEN s.stat_rank <= {_STOCKS_PROMOTION_WINDOW_GAMES} THEN s.minutes END) AS last3_minutes_avg,
+                    AVG(CASE WHEN s.stat_rank <= {_STOCKS_PROMOTION_WINDOW_GAMES} THEN COALESCE(s.steals, 0) + COALESCE(s.blocks, 0) END) AS last3_stocks_avg,
+                    AVG(CASE WHEN s.stat_rank <= {_STOCKS_STABILITY_WINDOW_GAMES} THEN s.minutes END) AS stability_minutes_avg
                 FROM (
                     SELECT
                         s.*,
@@ -676,7 +776,7 @@ def rebuild_candidate_players(
                     FROM player_game_stats s
                     JOIN games g ON g.id = s.game_id
                 ) s
-                WHERE s.stat_rank <= 10
+                WHERE s.stat_rank <= {_STOCKS_STABILITY_WINDOW_GAMES}
                 GROUP BY s.player_id
             ),
             latest_injuries AS (
@@ -688,6 +788,15 @@ def rebuild_candidate_players(
                         ORDER BY i.captured_at DESC, i.id DESC
                     ) AS injury_rank
                 FROM injuries i
+            ),
+            team_unavailable AS (
+                SELECT
+                    p.team_id,
+                    COUNT(*) AS unavailable_count
+                FROM players p
+                JOIN latest_injuries li ON li.player_id = p.id AND li.injury_rank = 1
+                WHERE COALESCE(li.status, 'available') IN ('out', 'inactive', 'suspended', 'unavailable')
+                GROUP BY p.team_id
             )
             SELECT
                 sg.game_id,
@@ -699,12 +808,17 @@ def rebuild_candidate_players(
                 p.rotation_role,
                 COALESCE(rs.recent_minutes_avg, 0.0) AS recent_minutes_avg,
                 COALESCE(rs.recent_stocks_avg, 0.0) AS recent_stocks_avg,
-                COALESCE(rs.recent_games, 0) AS recent_games
+                COALESCE(rs.recent_games, 0) AS recent_games,
+                COALESCE(rs.last3_minutes_avg, 0.0) AS last3_minutes_avg,
+                COALESCE(rs.last3_stocks_avg, 0.0) AS last3_stocks_avg,
+                COALESCE(rs.stability_minutes_avg, 0.0) AS stability_minutes_avg,
+                COALESCE(tu.unavailable_count, 0) AS team_unavailable_count
             FROM scheduled_games sg
             JOIN players p ON p.team_id IN (sg.home_team_id, sg.away_team_id)
             JOIN teams t ON t.id = p.team_id
             JOIN recent_stats rs ON rs.player_id = p.id
             LEFT JOIN latest_injuries li ON li.player_id = p.id AND li.injury_rank = 1
+            LEFT JOIN team_unavailable tu ON tu.team_id = p.team_id
             WHERE COALESCE(li.status, 'available') NOT IN ('out', 'inactive', 'suspended', 'unavailable')
               AND (
                     COALESCE(rs.recent_minutes_avg, 0.0) >= 14.0
@@ -713,18 +827,54 @@ def rebuild_candidate_players(
                         COALESCE(rs.recent_games, 0) >= 4
                     AND COALESCE(rs.recent_minutes_avg, 0.0) >= 10.0
                  )
+                 OR (
+                        COALESCE(rs.recent_games, 0) >= 4
+                    AND COALESCE(rs.recent_minutes_avg, 0.0) >= 8.0
+                    AND COALESCE(rs.recent_stocks_avg, 0.0) >= 1.1
+                    AND lower(trim(COALESCE(p.rotation_role, 'rotation'))) IN ('star', 'starter', 'rotation', 'bench')
+                 )
+                 OR (
+                        COALESCE(rs.recent_games, 0) >= 3
+                    AND COALESCE(rs.last3_minutes_avg, 0.0) >= 16.0
+                    AND COALESCE(rs.last3_minutes_avg, 0.0) >= COALESCE(rs.stability_minutes_avg, 0.0) + 4.0
+                 )
+                 OR (
+                        COALESCE(tu.unavailable_count, 0) >= 2
+                    AND COALESCE(rs.recent_games, 0) >= 3
+                    AND COALESCE(rs.recent_minutes_avg, 0.0) >= 8.0
+                 )
               )
-            ORDER BY sg.game_id, rs.recent_stocks_avg DESC, rs.recent_minutes_avg DESC, p.full_name
-            """,
-            params,
-        ).fetchall()
+            ORDER BY
+                sg.game_id,
+                rs.recent_stocks_avg DESC,
+                rs.last3_minutes_avg DESC,
+                rs.recent_minutes_avg DESC,
+                p.full_name
+            """
+        )
+        rows = conn.execute(candidate_query, params).fetchall()
         built_at = datetime.now(timezone.utc).isoformat()
         candidate_rows: list[tuple[object, ...]] = []
         touched_game_ids = sorted({int(row["game_id"]) for row in rows})
         for row in rows:
+            rotation_role = str(row["rotation_role"] or "").strip().lower()
             recent_minutes_avg = float(row["recent_minutes_avg"] or 0.0)
             recent_stocks_avg = float(row["recent_stocks_avg"] or 0.0)
-            if recent_stocks_avg >= 1.8:
+            last3_minutes_avg = float(row["last3_minutes_avg"] or 0.0)
+            stability_minutes_avg = float(row["stability_minutes_avg"] or 0.0)
+            team_unavailable_count = int(row["team_unavailable_count"] or 0)
+            is_defensive_specialist = (
+                recent_stocks_avg >= 1.1
+                and recent_minutes_avg >= 8.0
+                and rotation_role in {"star", "starter", "rotation", "bench"}
+            )
+            if last3_minutes_avg >= 16.0 and last3_minutes_avg >= stability_minutes_avg + 4.0:
+                candidate_reason = "recent lineup promotion"
+            elif is_defensive_specialist:
+                candidate_reason = "defensive specialist profile"
+            elif team_unavailable_count >= 2 and recent_minutes_avg >= 8.0:
+                candidate_reason = "injury opportunity replacement"
+            elif recent_stocks_avg >= 1.8:
                 candidate_reason = "recent stocks specialist"
             elif recent_minutes_avg >= 22.0:
                 candidate_reason = "stable rotation minutes"
@@ -844,18 +994,55 @@ def _poisson_at_least(mean: float, threshold: int) -> float:
     return 1 - sum(math.exp(-safe_mean) * safe_mean**k / math.factorial(k) for k in range(threshold))
 
 
-def _calibrated_stocks_two_plus_probability(
+def _special_market_probability_config(market: str, threshold: int) -> dict[str, float | int]:
+    if market == "steals":
+        if threshold <= 1:
+            return {"sample_limit": 120, "min_samples": 24, "max_weight": 0.70}
+        return {"sample_limit": 100, "min_samples": 22, "max_weight": 0.68}
+    if market == "blocks":
+        if threshold <= 1:
+            return {"sample_limit": 120, "min_samples": 24, "max_weight": 0.68}
+        return {"sample_limit": 90, "min_samples": 20, "max_weight": 0.62}
+    if threshold >= 3:
+        return {"sample_limit": 80, "min_samples": 26, "max_weight": 0.52}
+    return {"sample_limit": 80, "min_samples": 20, "max_weight": 0.75}
+
+
+def _special_projected_column(market: str) -> str:
+    if market == "steals":
+        return "projected_steals"
+    if market == "blocks":
+        return "projected_blocks"
+    return "projected_stocks"
+
+
+def _special_actual_value(row: sqlite3.Row, market: str) -> float:
+    if market == "steals":
+        return float(row["actual_steals"] or 0.0)
+    if market == "blocks":
+        return float(row["actual_blocks"] or 0.0)
+    return float(row["actual_steals"] or 0.0) + float(row["actual_blocks"] or 0.0)
+
+
+def _calibrated_special_probability(
     tracking: sqlite3.Connection,
     *,
-    projected_stocks: float,
+    market: str,
+    threshold: int,
+    projected_value: float,
+    raw_probability: float,
     game_date: str,
 ) -> float:
-    raw_probability = _poisson_at_least(projected_stocks, 2)
+    config = _special_market_probability_config(market, threshold)
+    projected_column = _special_projected_column(market)
+    sample_limit = int(config["sample_limit"])
+    min_samples = int(config["min_samples"])
+    max_weight = float(config["max_weight"])
     rows = tracking.execute(
-        """
+        f"""
         WITH settled_latest AS (
             SELECT
-                ps.projected_stocks,
+                ps.{projected_column} AS projected_value,
                 st.actual_steals,
                 st.actual_blocks,
                 ROW_NUMBER() OVER (
@@ -867,31 +1054,29 @@ def _calibrated_stocks_two_plus_probability(
             WHERE ps.game_date < ?
         )
         SELECT
-            projected_stocks,
+            projected_value,
             actual_steals,
             actual_blocks
         FROM settled_latest
         WHERE snapshot_rank = 1
-        ORDER BY ABS(projected_stocks - ?) ASC
-        LIMIT 80
+        ORDER BY ABS(projected_value - ?) ASC
+        LIMIT {sample_limit}
         """,
-        (str(game_date), float(projected_stocks)),
+        (str(game_date), float(projected_value)),
     ).fetchall()
-    if len(rows) < 20:
+    if len(rows) < min_samples:
         return raw_probability
-    hits = 0
     weighted_hits = 0.0
     total_weight = 0.0
     for row in rows:
-        actual_stocks = float(row["actual_steals"] or 0.0) + float(row["actual_blocks"] or 0.0)
-        hit = 1.0 if actual_stocks >= 2.0 else 0.0
-        hits += int(hit)
-        distance = abs(float(row["projected_stocks"] or 0.0) - float(projected_stocks))
+        actual_value = _special_actual_value(row, market)
+        hit = 1.0 if actual_value >= float(threshold) else 0.0
+        distance = abs(float(row["projected_value"] or 0.0) - float(projected_value))
         weight = 1.0 / (1.0 + distance)
         weighted_hits += hit * weight
         total_weight += weight
-    empirical_probability = weighted_hits / total_weight if total_weight > 0 else (hits / len(rows))
-    sample_weight = min(0.75, len(rows) / 80.0)
+    empirical_probability = weighted_hits / total_weight if total_weight > 0 else raw_probability
+    sample_weight = min(max_weight, len(rows) / float(sample_limit))
     blended_probability = ((1.0 - sample_weight) * raw_probability) + (sample_weight * empirical_probability)
     return max(0.0, min(1.0, blended_probability))
 
@@ -1154,6 +1339,116 @@ def _player_prep_features_for_game(
     return {str(row["market"]): row for row in rows}
 
 
+def rebuild_game_board_summaries(
+    game_ids: list[int] | None = None,
+    target_dates: list[str] | None = None,
+) -> int:
+    tracking = _open_tracking_connection()
+    try:
+        normalized_game_ids = tuple(sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0}))
+        normalized_dates = tuple(sorted({str(game_date).strip() for game_date in (target_dates or []) if str(game_date).strip()}))
+        filter_sql = " WHERE latest.snapshot_rank = 1"
+        params: tuple[object, ...] = ()
+        if normalized_game_ids:
+            placeholders = ",".join("?" for _ in normalized_game_ids)
+            filter_sql += f" AND latest.game_id IN ({placeholders})"
+            params = normalized_game_ids
+        elif normalized_dates:
+            placeholders = ",".join("?" for _ in normalized_dates)
+            filter_sql += f" AND latest.game_date IN ({placeholders})"
+            params = normalized_dates
+        rows = tracking.execute(
+            """
+            WITH latest AS (
+                SELECT
+                    ps.game_id,
+                    ps.game_date,
+                    ps.player_name,
+                    ps.projected_stocks,
+                    ps.stocks_prob_2_plus,
+                    ps.stocks_prob_3_plus,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ps.game_id, ps.player_id
+                        ORDER BY ps.captured_at DESC, ps.id DESC
+                    ) AS snapshot_rank
+                FROM projection_snapshots ps
+            )
+            SELECT
+                latest.game_id,
+                latest.game_date,
+                COUNT(*) AS player_count,
+                SUM(CASE WHEN COALESCE(latest.stocks_prob_2_plus, 0) >= 0.5 THEN 1 ELSE 0 END) AS candidate_count_50_plus,
+                AVG(COALESCE(latest.stocks_prob_2_plus, 0)) AS avg_prob_2_plus,
+                AVG(COALESCE(latest.stocks_prob_3_plus, 0)) AS avg_prob_3_plus,
+                MAX(COALESCE(latest.projected_stocks, 0)) AS top_projected_stocks,
+                MAX(COALESCE(latest.stocks_prob_2_plus, 0)) AS top_prob_2_plus,
+                (
+                    SELECT latest_inner.player_name
+                    FROM latest latest_inner
+                    WHERE latest_inner.snapshot_rank = 1
+                      AND latest_inner.game_id = latest.game_id
+                    ORDER BY COALESCE(latest_inner.stocks_prob_2_plus, 0) DESC,
+                             COALESCE(latest_inner.projected_stocks, 0) DESC,
+                             latest_inner.player_name
+                    LIMIT 1
+                ) AS top_player_name
+            FROM latest
+            """
+            + filter_sql
+            + """
+            GROUP BY latest.game_id, latest.game_date
+            ORDER BY latest.game_date, latest.game_id
+            """,
+            params,
+        ).fetchall()
+        built_at = datetime.now(timezone.utc).isoformat()
+        summary_rows = [
+            (
+                int(row["game_id"]),
+                str(row["game_date"]),
+                int(row["player_count"] or 0),
+                int(row["candidate_count_50_plus"] or 0),
+                float(row["avg_prob_2_plus"] or 0.0),
+                float(row["avg_prob_3_plus"] or 0.0),
+                float(row["top_projected_stocks"] or 0.0),
+                float(row["top_prob_2_plus"] or 0.0),
+                str(row["top_player_name"] or "") if row["top_player_name"] is not None else None,
+                built_at,
+            )
+            for row in rows
+        ]
+        with tracking:
+            if normalized_game_ids:
+                placeholders = ",".join("?" for _ in normalized_game_ids)
+                tracking.execute(f"DELETE FROM game_board_summaries WHERE game_id IN ({placeholders})", normalized_game_ids)
+            elif normalized_dates:
+                placeholders = ",".join("?" for _ in normalized_dates)
+                tracking.execute(f"DELETE FROM game_board_summaries WHERE game_date IN ({placeholders})", normalized_dates)
+            else:
+                tracking.execute("DELETE FROM game_board_summaries")
+            if summary_rows:
+                tracking.executemany(
+                    """
+                    INSERT INTO game_board_summaries (
+                        game_id,
+                        game_date,
+                        player_count,
+                        candidate_count_50_plus,
+                        avg_prob_2_plus,
+                        avg_prob_3_plus,
+                        top_projected_stocks,
+                        top_prob_2_plus,
+                        top_player_name,
+                        built_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    summary_rows,
+                )
+        return len(summary_rows)
+    finally:
+        tracking.close()
+
+
 def snapshot_stocks(
     conn: sqlite3.Connection,
     game_ids: list[int] | None = None,
@@ -1205,10 +1500,45 @@ def snapshot_stocks(
             steals = _component_projection("steals")
             blocks = _component_projection("blocks")
             projected_stocks = _component_projection("blocks_steals")
-            projected_stocks = float(projected_stocks)
-            stocks_prob_2_plus = _calibrated_stocks_two_plus_probability(
+            steal_prob_1_plus = _calibrated_special_probability(
                 tracking,
-                projected_stocks=projected_stocks,
+                market="steals",
+                threshold=1,
+                projected_value=float(steals),
+                raw_probability=_poisson_at_least(float(steals), 1),
+                game_date=str(game_date),
+            )
+            steal_prob_2_plus = _calibrated_special_probability(
+                tracking,
+                market="steals",
+                threshold=2,
+                projected_value=float(steals),
+                raw_probability=_poisson_at_least(float(steals), 2),
+                game_date=str(game_date),
+            )
+            block_prob_1_plus = _calibrated_special_probability(
+                tracking,
+                market="blocks",
+                threshold=1,
+                projected_value=float(blocks),
+                raw_probability=_poisson_at_least(float(blocks), 1),
+                game_date=str(game_date),
+            )
+            block_prob_2_plus = _calibrated_special_probability(
+                tracking,
+                market="blocks",
+                threshold=2,
+                projected_value=float(blocks),
+                raw_probability=_poisson_at_least(float(blocks), 2),
+                game_date=str(game_date),
+            )
+            projected_stocks = float(projected_stocks)
+            stocks_prob_2_plus = _calibrated_special_probability(
+                tracking,
+                market="blocks_steals",
+                threshold=2,
+                projected_value=projected_stocks,
+                raw_probability=_poisson_at_least(projected_stocks, 2),
                 game_date=str(game_date),
             )
             prepared_stocks_row = prepared_features.get("blocks_steals")
@@ -1230,7 +1560,14 @@ def snapshot_stocks(
                     history_weight * float(recent_hit_rate)
                 )
                 stocks_prob_2_plus = max(0.0, min(1.0, stocks_prob_2_plus))
-            stocks_prob_3_plus = _poisson_at_least(projected_stocks, 3)
+            stocks_prob_3_plus = _calibrated_special_probability(
+                tracking,
+                market="blocks_steals",
+                threshold=3,
+                projected_value=projected_stocks,
+                raw_probability=_poisson_at_least(projected_stocks, 3),
+                game_date=str(game_date),
+            )
             rows_to_insert.append(
                 (
                     int(game_id),
@@ -1242,10 +1579,10 @@ def snapshot_stocks(
                     float(steals),
                     float(blocks),
                     projected_stocks,
-                    _poisson_at_least(float(steals), 1),
-                    _poisson_at_least(float(steals), 2),
-                    _poisson_at_least(float(blocks), 1),
-                    _poisson_at_least(float(blocks), 2),
+                    steal_prob_1_plus,
+                    steal_prob_2_plus,
+                    block_prob_1_plus,
+                    block_prob_2_plus,
                     stocks_prob_2_plus,
                     stocks_prob_3_plus,
                     "model_only",
@@ -1320,7 +1657,10 @@ def prepare_stocks_data(
     conn: sqlite3.Connection,
     *,
     target_dates: list[str] | None = None,
+    game_ids: list[int] | None = None,
 ) -> dict[str, Any]:
+    started_at = datetime.now(timezone.utc).isoformat()
+    normalized_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
     normalized_dates = sorted(
         {
             str(value).strip()
@@ -1328,7 +1668,7 @@ def prepare_stocks_data(
             if str(value).strip()
         }
     )
-    if not normalized_dates:
+    if not normalized_dates and not normalized_game_ids:
         return {
             "selected_dates": [],
             "game_ids": [],
@@ -1336,43 +1676,109 @@ def prepare_stocks_data(
             "candidate_players": 0,
             "team_prep_context": 0,
             "player_prep_features": 0,
+            "game_board_summaries": 0,
             "snapshots_written": 0,
         }
-    prepared_games = rebuild_prepared_games(conn, target_dates=normalized_dates)
-    tracking = _open_tracking_connection()
     try:
-        placeholders = ",".join("?" for _ in normalized_dates)
-        rows = tracking.execute(
-            f"""
-            SELECT game_id
-            FROM prepared_games
-            WHERE game_date IN ({placeholders})
-            ORDER BY game_date, start_time, game_id
-            """,
-            tuple(normalized_dates),
-        ).fetchall()
-    finally:
-        tracking.close()
-    game_ids = [int(row["game_id"]) for row in rows if int(row["game_id"]) > 0]
-    candidate_players = rebuild_candidate_players(conn, game_ids=game_ids, target_dates=normalized_dates)
-    team_prep_context = rebuild_team_prep_context(conn, game_ids=game_ids, target_dates=normalized_dates)
-    player_prep_features = rebuild_player_prep_features(
-        conn,
-        game_ids=game_ids,
-        target_dates=normalized_dates,
-        runtime_cache=None,
-    )
-    snapshots_written = snapshot_stocks(conn, game_ids=game_ids, target_dates=normalized_dates, runtime_cache=None)
-    return {
-        "selected_dates": normalized_dates,
-        "game_ids": game_ids,
-        "prepared_games": prepared_games,
-        "candidate_players": candidate_players,
-        "team_prep_context": team_prep_context,
-        "player_prep_features": player_prep_features,
-        "snapshots_written": snapshots_written,
-        "prepared_at": datetime.now(timezone.utc).isoformat(),
-    }
+        if normalized_game_ids:
+            prepared_games = rebuild_prepared_games(conn, game_ids=normalized_game_ids)
+        else:
+            prepared_games = rebuild_prepared_games(conn, target_dates=normalized_dates)
+        tracking = _open_tracking_connection()
+        try:
+            if normalized_game_ids:
+                placeholders = ",".join("?" for _ in normalized_game_ids)
+                rows = tracking.execute(
+                    f"""
+                    SELECT game_id, game_date
+                    FROM prepared_games
+                    WHERE game_id IN ({placeholders})
+                    ORDER BY game_date, start_time, game_id
+                    """,
+                    tuple(normalized_game_ids),
+                ).fetchall()
+            else:
+                placeholders = ",".join("?" for _ in normalized_dates)
+                rows = tracking.execute(
+                    f"""
+                    SELECT game_id, game_date
+                    FROM prepared_games
+                    WHERE game_date IN ({placeholders})
+                    ORDER BY game_date, start_time, game_id
+                    """,
+                    tuple(normalized_dates),
+                ).fetchall()
+        finally:
+            tracking.close()
+        selected_game_ids = [int(row["game_id"]) for row in rows if int(row["game_id"]) > 0]
+        selected_dates = sorted({str(row["game_date"]).strip() for row in rows if str(row["game_date"]).strip()})
+        candidate_players = rebuild_candidate_players(conn, game_ids=selected_game_ids, target_dates=selected_dates or None)
+        team_prep_context = rebuild_team_prep_context(conn, game_ids=selected_game_ids, target_dates=selected_dates or None)
+        player_prep_features = rebuild_player_prep_features(
+            conn,
+            game_ids=selected_game_ids,
+            target_dates=selected_dates or None,
+            runtime_cache=None,
+        )
+        snapshots_written = snapshot_stocks(
+            conn,
+            game_ids=selected_game_ids,
+            target_dates=selected_dates or None,
+            runtime_cache=None,
+        )
+        game_board_summaries = rebuild_game_board_summaries(
+            game_ids=selected_game_ids,
+            target_dates=selected_dates or None,
+        )
+        finished_at = datetime.now(timezone.utc).isoformat()
+        _record_prep_run(
+            status="completed",
+            scope="game_ids" if normalized_game_ids else "dates",
+            target_dates=normalized_dates,
+            game_ids=normalized_game_ids,
+            selected_dates=selected_dates,
+            selected_game_ids=selected_game_ids,
+            prepared_games=prepared_games,
+            candidate_players=candidate_players,
+            team_prep_context=team_prep_context,
+            player_prep_features=player_prep_features,
+            game_board_summaries=game_board_summaries,
+            snapshots_written=snapshots_written,
+            started_at=started_at,
+            finished_at=finished_at,
+            error_message=None,
+        )
+        return {
+            "selected_dates": selected_dates,
+            "game_ids": selected_game_ids,
+            "prepared_games": prepared_games,
+            "candidate_players": candidate_players,
+            "team_prep_context": team_prep_context,
+            "player_prep_features": player_prep_features,
+            "game_board_summaries": game_board_summaries,
+            "snapshots_written": snapshots_written,
+            "prepared_at": finished_at,
+        }
+    except Exception as exc:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        _record_prep_run(
+            status="failed",
+            scope="game_ids" if normalized_game_ids else "dates",
+            target_dates=normalized_dates,
+            game_ids=normalized_game_ids,
+            selected_dates=[],
+            selected_game_ids=[],
+            prepared_games=0,
+            candidate_players=0,
+            team_prep_context=0,
+            player_prep_features=0,
+            game_board_summaries=0,
+            snapshots_written=0,
+            started_at=started_at,
+            finished_at=finished_at,
+            error_message=str(exc),
+        )
+        raise
 
 
 def queue_prepare_stocks_data(target_dates: list[str] | None = None) -> bool:
@@ -1394,6 +1800,31 @@ def queue_prepare_stocks_data(target_dates: list[str] | None = None) -> bool:
         try:
             with connect() as conn:
                 prepare_stocks_data(conn, target_dates=normalized_dates)
+        except Exception:
+            pass
+        finally:
+            with _PREP_JOB_LOCK:
+                _PREP_JOB_RUNNING = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+
+def queue_prepare_stocks_games(game_ids: list[int] | None = None) -> bool:
+    global _PREP_JOB_RUNNING
+    normalized_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+    if not normalized_game_ids:
+        return False
+    with _PREP_JOB_LOCK:
+        if _PREP_JOB_RUNNING:
+            return False
+        _PREP_JOB_RUNNING = True
+
+    def _run() -> None:
+        global _PREP_JOB_RUNNING
+        try:
+            with connect() as conn:
+                prepare_stocks_data(conn, game_ids=normalized_game_ids)
         except Exception:
             pass
         finally:

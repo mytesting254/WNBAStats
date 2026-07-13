@@ -44,11 +44,12 @@ Current implementation notes:
 - derived prep/output stays in `stocks_tracking.sqlite`
 - default prep dates are today + tomorrow in `America/New_York`
 - the initial production schedule is 11:00 PM `America/New_York` to prepare tomorrow's slate on the night before
-- candidate eligibility now uses the last `10` games instead of `8`
-- the fast prep estimator uses a `10`-game recent window with a `20`-game stabilizing window
+- candidate eligibility now uses the last `12` games instead of the earlier `10`
+- the fast prep estimator now uses a `12`-game recent window with a `24`-game stabilizing window
 - the fast prep estimator blends same-home/away history and scheduled-game `rest_days` into the component baseline without re-enabling the expensive learned/minutes path
 - scheduled prep now materializes `player_prep_features` per game/player/market so snapshot generation can reuse cached contextual projections and recent `2+ stocks` hit-rate inputs
 - scheduled prep now materializes `team_prep_context` per game/team so all candidates on one side share the same cached pace, opponent-allowed, and turnover-pressure context
+- scheduled prep now materializes `game_board_summaries` per game so matchup-level counts and top-board metrics are precomputed for tomorrow reads
 - live mounted-runtime validation completed end to end in about `1m 1s` for a `3`-game / `79`-candidate ET-today slate
 
 ## Current Optimization Track
@@ -160,6 +161,13 @@ Expected win:
 - better coverage in games where value comes from role change rather than season-long baseline usage
 - better use of the ahead-of-time cron path instead of live discovery
 
+Current status:
+
+- implemented
+- candidate selection now has explicit inclusion paths for defensive-specialist profiles, recent lineup promotions, and injury-opportunity replacements
+- the prep query now uses recent-12, recent-3, and stabilizing-24 windows instead of only one recent-minutes/stocks threshold
+- candidate reasons now distinguish stable rotation, recent promotion, defensive specialist profile, and injury replacement context
+
 ### 4. Market-Specific Probability Calibration
 
 Goal:
@@ -180,14 +188,21 @@ Expected win:
 - fewer inflated `3+` outputs
 - better hit-rate alignment between displayed probability and real outcome frequency
 
+Current status:
+
+- implemented
+- settled-history calibration is now split by market and threshold instead of only applying to `2+ stocks`
+- `steals`, `blocks`, `2+ stocks`, and `3+ stocks` each now use their own support thresholds, sample limits, and blend weights
+- the player-history blend remains specific to `2+ stocks`, while long-tail `3+` outputs stay more conservative
+
 ## Quality Controls
 
-The four-track optimization pass should keep these safeguards:
+The four-track optimization pass now keeps these safeguards:
 
 - no promotion of learned player-prop overlays unless they beat the component baseline
 - cached prep features must have an on-demand fallback path
 - wide candidate discovery should happen in prep, not in user-facing requests
-- `stocks 3+` should stay conservative and support-aware
+- `stocks 3+` stays conservative and support-aware
 - matchup boosts should be bounded so single noisy opponent splits do not overtake the baseline
 
 ## Target Architecture
@@ -208,6 +223,8 @@ Use `wnba.sqlite` as the canonical source of truth and `stocks_tracking.sqlite` 
 - prepared games for the selected slate
 - candidate players per scheduled game
 - candidate build metadata
+- prep run metadata
+- game-level board summaries
 - recent stocks summaries per player
 - prepared specials snapshots for today and tomorrow
 - job timestamps / invalidation metadata
@@ -223,6 +240,7 @@ Responsibilities:
 - identify upcoming scheduled games
 - build candidate pools per game
 - materialize reusable player prep features per game/player/market
+- record prep-run scope, counts, and timestamps for observability
 - compute recent stocks summaries from history
 - generate initial stocks snapshots
 - prepare tomorrow/today data before users request it
@@ -321,7 +339,10 @@ Current code paths:
 - `rebuild_candidate_players(conn, game_ids=None, target_dates=None)`
 - `snapshot_stocks(conn, game_ids=None, target_dates=None, runtime_cache=None)`
 - `prepare_stocks_data(conn, target_dates=None)`
+- `prepare_stocks_data(conn, target_dates=None, game_ids=None)`
 - `default_prep_dates(include_tomorrow=True)`
+- `queue_prepare_stocks_games(game_ids=None)`
+- `rebuild_game_board_summaries(game_ids=None, target_dates=None)`
 
 These are enough for:
 
@@ -337,16 +358,20 @@ Rebuild affected game entries in `stocks_tracking.sqlite` when:
 - a scheduled game changes status or date
 - team/player identity context changes materially
 
+Current status:
+
+- roster/injury-triggered refresh now supports targeted game invalidation
+- the Rotowire injury import path queues a game-scoped Stocks prep refresh for the affected scheduled games
+- game-scoped prep reuses the same prep pipeline, but only for selected `game_id` values
+- prep runs are now recorded in `prep_runs` with scope, selected dates/games, counts, status, and timestamps
+- matchup-level board summaries are now recorded in `game_board_summaries` with player counts, `50%+` counts, average probabilities, and top-board metrics
+
 Do not rerun the full slate unless the schedule itself changed broadly.
 
 ## Remaining Steps
 
-1. Expand candidate selection with role-based specialists, lineup-promotion detection, and injury-opportunity replacements.
-2. Refit market-specific calibration for `steals`, `blocks`, `stocks 2+`, and `stocks 3+` separately.
-3. Add optional prep metadata / job-run tables if we want observability in `stocks_tracking.sqlite`.
-4. Wire roster-change invalidation to targeted stocks refreshes by affected game.
-5. Decide and test the optimal historical windows for candidate eligibility and stocks summaries.
-6. Expand tomorrow-prep outputs if we want extra precomputed summaries for the UI.
+1. Re-evaluate the tuned `12/24` Stocks windows against live hit-rate and coverage after more settled rows accumulate.
+2. Decide whether the UI/API should read `game_board_summaries` directly instead of rebuilding those matchup-level aggregates in-memory.
 
 ## Non-Goals
 

@@ -51,7 +51,14 @@ from .player_identity import player_is_skeletal, repair_shadow_player_identities
 from .projections import LiveRebuildResult, rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
-from .stocks_tracking import get_tracking_db_path, list_special_stocks, prune_special_snapshots, settle_stocks, snapshot_stocks
+from .stocks_tracking import (
+    get_tracking_db_path,
+    list_special_stocks,
+    prune_special_snapshots,
+    queue_prepare_stocks_games,
+    settle_stocks,
+    snapshot_stocks,
+)
 from .player_prop_model import (
     MODEL_VERSION,
     _blowout_adjustment,
@@ -4705,6 +4712,17 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
         else {
             "status": "not_needed",
             "scope": "injury_update",
+            "target_game_ids": affected_game_ids if roster_changed else [],
+        }
+    )
+    result["specials"] = (
+        {
+            "status": "queued" if queue_prepare_stocks_games(affected_game_ids) else "busy",
+            "target_game_ids": affected_game_ids,
+        }
+        if roster_changed and affected_game_ids
+        else {
+            "status": "not_needed",
             "target_game_ids": affected_game_ids if roster_changed else [],
         }
     )
