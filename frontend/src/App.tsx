@@ -308,6 +308,7 @@ export function App() {
   const [recoveringDbLock, setRecoveringDbLock] = useState(false);
   const [activeTab, setActiveTab] = useState<DashboardTab>("props");
   const [market, setMarket] = useState("all");
+  const [sideFilter, setSideFilter] = useState("all");
   const [confidence, setConfidence] = useState("all");
   const [sportsbookFilter, setSportsbookFilter] = useState("all");
   const [modelProbabilityOrder, setModelProbabilityOrder] = useState<SortDirection>("desc");
@@ -670,16 +671,17 @@ export function App() {
     return props
       .filter((prop) => {
         const marketMatch = market === "all" || prop.market === market;
+        const sideMatch = sideFilter === "all" || prop.recommended_side === sideFilter;
         const confidenceMatch = confidence === "all" || prop.confidence === confidence;
         const sportsbookMatch = sportsbookFilter === "all" || displaySportsbookName(prop) === sportsbookFilter;
-        return marketMatch && confidenceMatch && sportsbookMatch;
+        return marketMatch && sideMatch && confidenceMatch && sportsbookMatch;
       })
       .sort((a, b) =>
         modelProbabilityOrder === "asc"
           ? a.model_probability - b.model_probability
           : b.model_probability - a.model_probability
       );
-  }, [props, market, confidence, sportsbookFilter, modelProbabilityOrder]);
+  }, [props, market, sideFilter, confidence, sportsbookFilter, modelProbabilityOrder]);
   const gems = useMemo(() => buildGems(props, discrepancies), [props, discrepancies]);
   const activeTabLoading = activeTab === "props" ? loading : tabLoading[activeTab];
 
@@ -1283,11 +1285,13 @@ export function App() {
             error={error}
             cacheStatus={cacheStatus?.views.props ?? null}
             market={market}
+            sideFilter={sideFilter}
             confidence={confidence}
             sportsbookFilter={sportsbookFilter}
             modelProbabilityOrder={modelProbabilityOrder}
             selected={selected}
             setMarket={setMarket}
+            setSideFilter={setSideFilter}
             setConfidence={setConfidence}
             setSportsbookFilter={setSportsbookFilter}
             setModelProbabilityOrder={setModelProbabilityOrder}
@@ -2568,11 +2572,13 @@ function PropsView({
   error,
   cacheStatus,
   market,
+  sideFilter,
   confidence,
   sportsbookFilter,
   modelProbabilityOrder,
   selected,
   setMarket,
+  setSideFilter,
   setConfidence,
   setSportsbookFilter,
   setModelProbabilityOrder,
@@ -2584,11 +2590,13 @@ function PropsView({
   error: string | null;
   cacheStatus: CacheViewStatus | null;
   market: string;
+  sideFilter: string;
   confidence: string;
   sportsbookFilter: string;
   modelProbabilityOrder: SortDirection;
   selected: ValueProp | null;
   setMarket: (market: string) => void;
+  setSideFilter: (side: string) => void;
   setConfidence: (confidence: string) => void;
   setSportsbookFilter: (sportsbook: string) => void;
   setModelProbabilityOrder: (order: SortDirection) => void;
@@ -2599,11 +2607,12 @@ function PropsView({
       sportsbookFilterOptions(
         items.filter((prop) => {
           const marketMatch = market === "all" || prop.market === market;
+          const sideMatch = sideFilter === "all" || prop.recommended_side === sideFilter;
           const confidenceMatch = confidence === "all" || prop.confidence === confidence;
-          return marketMatch && confidenceMatch;
+          return marketMatch && sideMatch && confidenceMatch;
         })
       ),
-    [items, market, confidence]
+    [items, market, sideFilter, confidence]
   );
   return (
     <section className="workspace">
@@ -2624,6 +2633,18 @@ function PropsView({
             {markets.map((item) => (
               <button key={item.id} className={market === item.id ? "active" : ""} onClick={() => setMarket(item.id)}>
                 {item.label}
+              </button>
+            ))}
+          </div>
+          <div className="segmented candidate-tabs" aria-label="Prop side filter">
+            {["all", "over", "under"].map((side) => (
+              <button
+                key={`props-side-${side}`}
+                className={sideFilter === side ? "active" : ""}
+                type="button"
+                onClick={() => setSideFilter(side)}
+              >
+                {side === "all" ? "Both" : side.toUpperCase()}
               </button>
             ))}
           </div>

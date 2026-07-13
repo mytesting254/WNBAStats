@@ -2656,6 +2656,7 @@ def _project_minutes(
     projected = _apply_minutes_recency_floor(
         projected=projected,
         role_state=role_state,
+        recent_blend=recent_blend,
         recency_anchor=recency_anchor,
         recent_minutes_avg=recent_minutes_avg,
         last_10_minutes_avg=last_10_minutes_avg,
@@ -2684,6 +2685,18 @@ def _project_minutes(
         recent_minutes_avg=recent_minutes_avg,
         last_10_minutes_avg=last_10_minutes_avg,
     )
+    projected, stable_context_notes = _apply_minutes_stable_context_cap(
+        projected=projected,
+        role_state=role_state,
+        recent_blend=recent_blend,
+        recency_anchor=recency_anchor,
+        minutes_trend=minutes_trend,
+        minute_volatility=minute_volatility,
+        injury_status=injury_status,
+        injury_delta=injury_delta,
+        recent_absence_days=recent_absence_days,
+        team_transition=team_transition,
+    )
     projected = _clamp(projected, lower_bound, upper_bound)
     if abs(venue_delta) >= 0.05:
         venue_note = f", venue {venue_delta:+.1f}"
@@ -2692,7 +2705,8 @@ def _project_minutes(
     learned_note = f", learned {learned_minutes:.1f}" if learned_minutes is not None else ""
     anchor_note = f", recency anchor {recency_anchor:.1f} @ {anchor_weight:.0%}"
     baseline_note = f", baseline {reference_baseline:.1f} @ {baseline_guard_weight:.0%}"
-    hard_rule_suffix = f", {'; '.join(hard_rule_notes)}" if hard_rule_notes else ""
+    all_rule_notes = [*hard_rule_notes, *stable_context_notes]
+    hard_rule_suffix = f", {'; '.join(all_rule_notes)}" if all_rule_notes else ""
     return projected, f"{role_state.bucket} bounds {lower_bound:.1f}-{upper_bound:.1f}{venue_note}, {blend_note}{learned_note}{anchor_note}{baseline_note}{hard_rule_suffix}"
 
 
@@ -2808,6 +2822,7 @@ def _apply_minutes_recency_floor(
     *,
     projected: float,
     role_state: MinutesRoleState,
+    recent_blend: float,
     recency_anchor: float,
     recent_minutes_avg: float,
     last_10_minutes_avg: float,
@@ -2832,7 +2847,54 @@ def _apply_minutes_recency_floor(
         floor = max(floor, recent_minutes_avg - 1.5)
     if role_state.recent_drop and minutes_trend <= -4.0:
         floor -= 1.5
-    return max(projected, max(role_state.lower_bound, floor))
+    floor = max(projected, max(role_state.lower_bound, floor))
+    if role_state.bucket == "core_starter" and not role_state.recent_drop:
+        floor = max(floor, recent_blend - 2.0)
+    return floor
+
+
+def _apply_minutes_stable_context_cap(
+    *,
+    projected: float,
+    role_state: MinutesRoleState,
+    recent_blend: float,
+    recency_anchor: float,
+    minutes_trend: float,
+    minute_volatility: float,
+    injury_status: str,
+    injury_delta: float,
+    recent_absence_days: float | None,
+    team_transition: list[float] | None,
+) -> tuple[float, list[str]]:
+    notes: list[str] = []
+    status = str(injury_status or "").strip().lower()
+    if status in {"questionable", "gtd", "doubtful"}:
+        return projected, notes
+    games_since_joining_team = float((team_transition or [0.0])[0] if team_transition else 0.0)
+    transitional = 0.0 < games_since_joining_team <= 10.0
+    dynamic_context = any(
+        (
+            abs(injury_delta) >= 1.0,
+            recent_absence_days is not None and recent_absence_days >= 7.0,
+            role_state.recent_drop,
+            role_state.recent_spike,
+            minute_volatility >= 8.0,
+            abs(minutes_trend) >= 3.5,
+            transitional,
+        )
+    )
+    if dynamic_context:
+        return projected, notes
+    tolerance = 2.2 if role_state.bucket == "core_starter" else 2.8 if role_state.bucket in {"starter_volatile", "rotation"} else 3.2
+    if abs(recency_anchor - recent_blend) <= 0.75:
+        tolerance -= 0.4
+    tolerance = max(1.8, tolerance)
+    lower_cap = recent_blend - tolerance
+    upper_cap = recent_blend + tolerance
+    capped = _clamp(projected, lower_cap, upper_cap)
+    if abs(capped - projected) >= 0.05:
+        notes.append("stable-context recent blend cap")
+    return capped, notes
 
 
 def _venue_minutes_adjustment(

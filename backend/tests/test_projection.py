@@ -1668,6 +1668,72 @@ def test_minutes_projection_stabilizes_against_overly_low_learned_output(monkeyp
     assert "baseline " in note
 
 
+def test_minutes_projection_caps_stable_context_near_recent_blend(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.player_prop_model.train_minutes_model",
+        lambda *_args, **_kwargs: RidgeModel(
+            market="minutes:core_starter",
+            rows=500,
+            intercept=0.0,
+            coefficients=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_means=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_scales=[1.0] * len(MINUTES_FEATURE_NAMES),
+        ),
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 18.0)
+    monkeypatch.setattr("backend.app.player_prop_model._venue_minutes_adjustment", lambda *_args, **_kwargs: 0.0)
+
+    recent_minutes_avg = 31.0
+    last_10_minutes_avg = 30.0
+    recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
+    projected, note = _project_minutes(
+        sqlite3.connect(":memory:"),
+        player_id=1006,
+        game_id=2060,
+        rotation_role="starter",
+        ewma_minutes=30.5,
+        minutes_trend=0.6,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minute_volatility=3.4,
+        context={"is_home": True, "rest_days": 2, "team_spread": 3.5},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=None,
+        team_transition=[18.0, 0.2, 0.0, 0.78],
+        before_game_date=None,
+    )
+
+    assert projected <= recent_blend + 2.2
+    assert projected >= recent_blend - 2.2
+    assert "stable-context recent blend cap" in note
+
+
+def test_minutes_metric_summary_exposes_production_alias() -> None:
+    summary = main_module._minutes_metric_summary(
+        [
+            {
+                "learned_error": 2.0,
+                "heuristic_error": 1.0,
+                "recent5_error": 0.5,
+                "recent10_error": -0.5,
+                "recent_blend_error": 0.25,
+            },
+            {
+                "learned_error": -1.0,
+                "heuristic_error": -2.0,
+                "recent5_error": -1.5,
+                "recent10_error": 1.5,
+                "recent_blend_error": -0.75,
+            },
+        ]
+    )
+
+    assert summary["production_mae"] == summary["learned_mae"] == 1.5
+    assert summary["production_bias"] == summary["learned_bias"] == 0.5
+
+
 def test_minutes_feature_values_include_role_shift_signals() -> None:
     role_state = _classify_minutes_role(
         rotation_role="rotation",

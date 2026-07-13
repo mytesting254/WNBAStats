@@ -4446,23 +4446,29 @@ def _minutes_metric_summary(rows: list[dict[str, float | str | int | None]]) -> 
     if not rows:
         return {
             "rows": 0,
+            "production_mae": None,
             "learned_mae": None,
             "heuristic_mae": None,
             "recent5_mae": None,
             "recent10_mae": None,
             "recent_blend_mae": None,
+            "production_bias": None,
             "learned_bias": None,
             "heuristic_bias": None,
         }
     count = len(rows)
+    production_mae = round(sum(abs(float(row["learned_error"])) for row in rows) / count, 3)
+    production_bias = round(sum(float(row["learned_error"]) for row in rows) / count, 3)
     return {
         "rows": count,
-        "learned_mae": round(sum(abs(float(row["learned_error"])) for row in rows) / count, 3),
+        "production_mae": production_mae,
+        "learned_mae": production_mae,
         "heuristic_mae": round(sum(abs(float(row["heuristic_error"])) for row in rows) / count, 3),
         "recent5_mae": round(sum(abs(float(row["recent5_error"])) for row in rows) / count, 3),
         "recent10_mae": round(sum(abs(float(row["recent10_error"])) for row in rows) / count, 3),
         "recent_blend_mae": round(sum(abs(float(row["recent_blend_error"])) for row in rows) / count, 3),
-        "learned_bias": round(sum(float(row["learned_error"]) for row in rows) / count, 3),
+        "production_bias": production_bias,
+        "learned_bias": production_bias,
         "heuristic_bias": round(sum(float(row["heuristic_error"]) for row in rows) / count, 3),
     }
 
