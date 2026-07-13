@@ -2796,11 +2796,13 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
   const [marketFilter, setMarketFilter] = useState("all");
   const [confidenceFilter, setConfidenceFilter] = useState("all");
   const [sideFilter, setSideFilter] = useState("all");
+  const [sportsbookFilter, setSportsbookFilter] = useState("all");
   const [sortField, setSortField] = useState<"gem_score" | "expected_value" | "edge" | "line_gap" | "price_gap">("gem_score");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [groupedByMatchup, setGroupedByMatchup] = useState(true);
   const [matchupCap, setMatchupCap] = useState(3);
   const [selectedGroupKey, setSelectedGroupKey] = useState<string | null>(null);
+  const sportsbookOptions = useMemo(() => sportsbookFilterOptions(gems), [gems]);
   const shown = useMemo(() => {
     const cfg = {
       conservative: { minScore: 0.55, limit: 20 },
@@ -2813,6 +2815,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
       .filter((g) => marketFilter === "all" || g.market === marketFilter)
       .filter((g) => confidenceFilter === "all" || g.confidence === confidenceFilter)
       .filter((g) => sideFilter === "all" || g.recommended_side === sideFilter)
+      .filter((g) => sportsbookFilter === "all" || g.sportsbook === sportsbookFilter)
       .sort((a, b) => {
         const aVal = sortField === "gem_score" ? a.gem_score
           : sortField === "expected_value" ? a.expected_value
@@ -2828,7 +2831,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
         return sortDirection === "asc" ? delta : -delta;
       })
       .slice(0, cfg.limit);
-  }, [gems, preset, marketFilter, confidenceFilter, sideFilter, sortField, sortDirection]);
+  }, [gems, preset, marketFilter, confidenceFilter, sideFilter, sportsbookFilter, sortField, sortDirection]);
   const grouped = useMemo(() => groupGemsByMatchup(shown, matchupCap, matchups), [shown, matchupCap, matchups]);
   const selectedGroup = grouped.find((group) => group.key === selectedGroupKey) ?? grouped[0] ?? null;
 
@@ -2866,6 +2869,13 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
             <option value="over">Over</option>
             <option value="under">Under</option>
           </select>
+          <select value={sportsbookFilter} onChange={(event) => setSportsbookFilter(event.target.value)} aria-label="Gem best sportsbook filter">
+            {sportsbookOptions.map((sportsbook) => (
+              <option key={`gem-book-${sportsbook}`} value={sportsbook}>
+                {sportsbook === "all" ? "All best books" : sportsbook}
+              </option>
+            ))}
+          </select>
           <select value={sortField} onChange={(event) => setSortField(event.target.value as typeof sortField)} aria-label="Gem sort field">
             <option value="gem_score">Sort: Gem score</option>
             <option value="expected_value">Sort: EV</option>
@@ -2898,6 +2908,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
               <tr>
                 <th>Player</th>
                 <th>Pick</th>
+                <th>Best</th>
                 <th>Edge</th>
                 <th>EV</th>
                 <th>Line Gap</th>
@@ -2912,10 +2923,11 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                 <tr key={`gem-${g.id}`}>
                   <td>
                     <strong>{g.player}</strong>
-                    <span>{g.team} | {marketLabel(g.market)} | {g.sportsbook}</span>
+                    <span>{g.team} | {marketLabel(g.market)}</span>
                     {renderRecentFormWithMinutes(g, `${g.id}-gem-flat-l5`)}
                   </td>
                   <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
+                  <td>{g.sportsbook}</td>
                   <td>{formatPercent(g.edge)}</td>
                   <td>{formatPercent(g.expected_value)}</td>
                   <td>{g.line_gap.toFixed(1)}</td>
@@ -2933,7 +2945,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
               ))}
               {!shown.length && (
                 <tr>
-                  <td colSpan={9}>No gems pass the {preset} preset right now.</td>
+                  <td colSpan={10}>No gems pass the {preset} preset right now.</td>
                 </tr>
               )}
             </tbody>
@@ -2986,6 +2998,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                       <tr>
                         <th>Player</th>
                         <th>Pick</th>
+                        <th>Best</th>
                         <th>Edge</th>
                         <th>EV</th>
                         <th>Signals</th>
@@ -2997,10 +3010,11 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                         <tr key={`group-gem-${selectedGroup.key}-${g.id}`}>
                           <td>
                             <strong>{g.player}</strong>
-                            <span>{g.team} | {marketLabel(g.market)} | {g.sportsbook}</span>
+                            <span>{g.team} | {marketLabel(g.market)}</span>
                             {renderRecentFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-l5`)}
                           </td>
                           <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
+                          <td>{g.sportsbook}</td>
                           <td>{formatPercent(g.edge)}</td>
                           <td>{formatPercent(g.expected_value)}</td>
                           <td>
@@ -3768,8 +3782,10 @@ function WatchlistView({
   const [marketFilter, setMarketFilter] = useState("all");
   const [sideFilter, setSideFilter] = useState("all");
   const [confidenceFilter, setConfidenceFilter] = useState("all");
+  const [sportsbookFilter, setSportsbookFilter] = useState("all");
   const [candidateSort, setCandidateSort] = useState<CandidateSortField>("expected_value");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const sportsbookOptions = useMemo(() => sportsbookFilterOptions(watchlist), [watchlist]);
 
   const gameGroups = useMemo(() => {
     const map = new Map<number, { gameId: number; startTime: string; away: string; home: string; count: number }>();
@@ -3797,6 +3813,7 @@ function WatchlistView({
     .filter((prop) => (marketFilter === "all" || prop.market === marketFilter))
     .filter((prop) => (sideFilter === "all" || prop.recommended_side === sideFilter))
     .filter((prop) => (confidenceFilter === "all" || prop.confidence === confidenceFilter))
+    .filter((prop) => (sportsbookFilter === "all" || prop.sportsbook === sportsbookFilter))
     .sort((a, b) => compareCandidateProps(a, b, candidateSort, sortDirection));
 
   return (
@@ -3864,6 +3881,17 @@ function WatchlistView({
                 <option value="low">Low</option>
               </select>
               <select
+                aria-label="Watchlist best sportsbook filter"
+                value={sportsbookFilter}
+                onChange={(event) => setSportsbookFilter(event.target.value)}
+              >
+                {sportsbookOptions.map((sportsbook) => (
+                  <option key={`watch-book-${sportsbook}`} value={sportsbook}>
+                    {sportsbook === "all" ? "All best books" : sportsbook}
+                  </option>
+                ))}
+              </select>
+              <select
                 aria-label="Sort watchlist"
                 value={candidateSort}
                 onChange={(event) => setCandidateSort(event.target.value as CandidateSortField)}
@@ -3901,6 +3929,7 @@ function WatchlistView({
                     <th>Player</th>
                     <th>Market</th>
                     <th>Side</th>
+                    <th>Best</th>
                     <th>Line</th>
                     <th>Proj</th>
                     <th>Diff</th>
@@ -3918,13 +3947,14 @@ function WatchlistView({
                           <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                           <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
-                        <span>{prop.team} | {prop.sportsbook}</span>
+                        <span>{prop.team}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-watch-l5`)}
                           </div>
                         </div>
                       </td>
                       <td>{marketLabel(prop.market)}</td>
                       <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
+                      <td>{prop.sportsbook}</td>
                       <td>{prop.line.toFixed(1)}</td>
                       <td>{prop.projection.toFixed(1)}</td>
                       <td>{formatSigned(prop.projection - prop.line)}</td>
@@ -3936,7 +3966,7 @@ function WatchlistView({
                   ))}
                   {!filtered.length && (
                     <tr>
-                      <td colSpan={10}>No watchlist props match current filters.</td>
+                      <td colSpan={11}>No watchlist props match current filters.</td>
                     </tr>
                   )}
                 </tbody>
@@ -4359,17 +4389,20 @@ function MatchupProps({
   const [marketFilter, setMarketFilter] = useState("all");
   const [sideFilter, setSideFilter] = useState("all");
   const [confidenceFilter, setConfidenceFilter] = useState("all");
+  const [sportsbookFilter, setSportsbookFilter] = useState("all");
   const [candidateView, setCandidateView] = useState<"positive" | "all">("all");
   const [candidateSort, setCandidateSort] = useState<CandidateSortField>("expected_value");
   const [discrepancySort, setDiscrepancySort] = useState<DiscrepancySortField>("line_gap");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const sportsbookOptions = useMemo(() => sportsbookFilterOptions(props), [props]);
 
   const filteredProps = props
     .filter((prop) => {
       const marketMatch = marketFilter === "all" || prop.market === marketFilter;
       const sideMatch = sideFilter === "all" || prop.recommended_side === sideFilter;
       const confidenceMatch = confidenceFilter === "all" || prop.confidence === confidenceFilter;
-      return marketMatch && sideMatch && confidenceMatch;
+      const sportsbookMatch = sportsbookFilter === "all" || prop.sportsbook === sportsbookFilter;
+      return marketMatch && sideMatch && confidenceMatch && sportsbookMatch;
     })
     .sort((a, b) => compareCandidateProps(a, b, candidateSort, sortDirection));
   const positiveProps = filteredProps.filter((prop) => qualifiesForParlayCandidate(prop));
@@ -4474,6 +4507,17 @@ function MatchupProps({
               <option value="medium">Medium</option>
               <option value="low">Low</option>
             </select>
+            <select
+              aria-label="Parlay best sportsbook filter"
+              value={sportsbookFilter}
+              onChange={(event) => setSportsbookFilter(event.target.value)}
+            >
+              {sportsbookOptions.map((sportsbook) => (
+                <option key={`parlay-book-${sportsbook}`} value={sportsbook}>
+                  {sportsbook === "all" ? "All best books" : sportsbook}
+                </option>
+              ))}
+            </select>
             <div className="segmented candidate-tabs" aria-label="Candidate view">
               <button
                 className={candidateView === "positive" ? "active" : ""}
@@ -4570,6 +4614,7 @@ function MatchupProps({
                 <th>Player</th>
                 <th>Market</th>
                 <th>Side</th>
+                <th>Best</th>
                 <th>Line</th>
                 <th>Proj</th>
                 <th>Diff</th>
@@ -4587,13 +4632,14 @@ function MatchupProps({
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
-                        <span>{prop.team} | {prop.sportsbook}</span>
+                        <span>{prop.team}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-matchup-l5`)}
                       </div>
                     </div>
                   </td>
                   <td>{marketLabel(prop.market)}</td>
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
+                  <td>{prop.sportsbook}</td>
                   <td>{prop.line.toFixed(1)}</td>
                   <td>{prop.projection.toFixed(1)}</td>
                   <td>{formatSigned(prop.projection - prop.line)}</td>
@@ -4605,7 +4651,7 @@ function MatchupProps({
               ))}
               {!visibleProps.length && (
                 <tr>
-                  <td colSpan={10}>No modeled parlay candidates match these filters.</td>
+                  <td colSpan={11}>No modeled parlay candidates match these filters.</td>
                 </tr>
               )}
             </tbody>
@@ -5366,6 +5412,17 @@ function compareDiscrepancies(a: LineDiscrepancy, b: LineDiscrepancy, field: Dis
     return primary;
   }
   return (b.line_gap - a.line_gap) || (b.price_gap - a.price_gap) || a.player_name.localeCompare(b.player_name);
+}
+
+function sportsbookFilterOptions(items: Array<{ sportsbook: string }>) {
+  const options = Array.from(
+    new Set(
+      items
+        .map((item) => item.sportsbook?.trim())
+        .filter((sportsbook): sportsbook is string => Boolean(sportsbook))
+    )
+  ).sort((a, b) => a.localeCompare(b));
+  return ["all", ...options];
 }
 
 function discrepancySortValue(item: LineDiscrepancy, field: DiscrepancySortField) {
