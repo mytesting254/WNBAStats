@@ -55,6 +55,8 @@ Current implementation notes:
 - snapshot prep now skips unchanged `(game_id, player_id)` writes by comparing against the latest cached row before inserting a new snapshot
 - specials calibration now uses smaller neighborhood windows plus explicit minimum total-history floors before any empirical blend can activate
 - historical prep/projection inputs now downweight blowout rows by role and winsorize per-market tails before recent/stability anchors are blended
+- Specials stats now expose support-gated threshold-fit scaffolding for `high` and `watch` cutoffs from settled `2+ stocks` snapshot history, while falling back to `50% / 40%` defaults when the sample is too thin
+- the Specials board now uses the fitted `high` threshold for visible candidate counts and hit-rate display when support is sufficient, instead of hard-coded `50%+` labeling
 - live mounted-runtime validation completed end to end in about `1m 1s` for a `3`-game / `79`-candidate ET-today slate
 
 ## Current Optimization Track
@@ -376,7 +378,7 @@ Do not rerun the full slate unless the schedule itself changed broadly.
 ## Remaining Steps
 
 1. Re-evaluate the tuned `12/24` Stocks windows against live hit-rate and coverage after more settled rows accumulate.
-2. Revisit Specials recommendation thresholds once the settled Special-snapshot history is large enough to support a real threshold fit.
+2. Promote the fitted Specials thresholds into precomputed board-summary prep once the live settled sample is large enough that the fitter is reliably off the fallback defaults.
 3. Decide whether starter-heavy markets should exclude extreme blowout rows entirely once we have enough same-role history to spare.
 
 ## Non-Goals

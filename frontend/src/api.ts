@@ -91,6 +91,23 @@ export type SpecialStocksPerformance = {
   candidate_count_50_plus: number;
   candidate_hits_2_plus: number;
   candidate_hit_rate_2_plus: number | null;
+  recommended_candidate_threshold: number;
+  recommended_candidate_count: number;
+  recommended_candidate_hits_2_plus: number;
+  recommended_candidate_hit_rate_2_plus: number | null;
+  threshold_recommendations: {
+    status: string;
+    high_confidence_threshold: number;
+    watch_threshold: number;
+    settled_rows: number;
+    evaluated_thresholds: Array<{
+      threshold: number;
+      support: number;
+      hits: number;
+      hit_rate: number | null;
+      eligible: boolean;
+    }>;
+  };
   calibration_buckets: Array<{
     label: string;
     min_prob: number;

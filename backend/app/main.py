@@ -119,6 +119,11 @@ ROSTER_TTL_SECONDS = int(os.getenv("ROSTER_TTL_SECONDS", "300"))
 RATE_LIMIT_MUTATION_CAPACITY = float(os.getenv("RATE_LIMIT_MUTATION_CAPACITY", "10"))
 RATE_LIMIT_MUTATION_REFILL_PER_SEC = float(os.getenv("RATE_LIMIT_MUTATION_REFILL_PER_SEC", "0.5"))
 RATE_LIMIT_REFRESH_CAPACITY = float(os.getenv("RATE_LIMIT_REFRESH_CAPACITY", "6"))
+SPECIALS_DEFAULT_HIGH_THRESHOLD = 0.50
+SPECIALS_DEFAULT_WATCH_THRESHOLD = 0.40
+SPECIALS_MIN_SETTLED_THRESHOLD_ROWS = 40
+SPECIALS_MIN_THRESHOLD_BUCKET_ROWS = 10
+SPECIALS_MIN_THRESHOLD_BUCKET_HITS = 4
 RATE_LIMIT_REFRESH_REFILL_PER_SEC = float(os.getenv("RATE_LIMIT_REFRESH_REFILL_PER_SEC", "0.33"))
 _RATE_BUCKETS: dict[tuple[str, str], tuple[float, float]] = {}
 _RATE_LOCK = threading.Lock()
@@ -1101,6 +1106,73 @@ def special_stocks() -> list[dict[str, Any]]:
     return visible_rows
 
 
+def _default_special_threshold_recommendations() -> dict[str, Any]:
+    return {
+        "status": "insufficient_history",
+        "high_confidence_threshold": SPECIALS_DEFAULT_HIGH_THRESHOLD,
+        "watch_threshold": SPECIALS_DEFAULT_WATCH_THRESHOLD,
+        "settled_rows": 0,
+        "evaluated_thresholds": [],
+    }
+
+
+def _fit_special_threshold_recommendations(settled_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if len(settled_rows) < SPECIALS_MIN_SETTLED_THRESHOLD_ROWS:
+        result = _default_special_threshold_recommendations()
+        result["settled_rows"] = len(settled_rows)
+        return result
+    threshold_candidates = [round(value, 2) for value in (0.38, 0.40, 0.42, 0.45, 0.48, 0.50, 0.53, 0.55, 0.58, 0.60)]
+    evaluations: list[dict[str, Any]] = []
+    for threshold in threshold_candidates:
+        bucket = [
+            row for row in settled_rows
+            if float(row.get("stocks_prob_2_plus") or 0.0) >= threshold
+        ]
+        support = len(bucket)
+        hits = sum(1 for row in bucket if float(row.get("actual_stocks") or 0.0) >= 2.0)
+        hit_rate = (hits / support) if support else None
+        eligible = (
+            support >= SPECIALS_MIN_THRESHOLD_BUCKET_ROWS
+            and hits >= SPECIALS_MIN_THRESHOLD_BUCKET_HITS
+            and hit_rate is not None
+            and hit_rate >= threshold
+        )
+        evaluations.append(
+            {
+                "threshold": threshold,
+                "support": support,
+                "hits": hits,
+                "hit_rate": round(hit_rate, 4) if hit_rate is not None else None,
+                "eligible": eligible,
+            }
+        )
+    eligible = [row for row in evaluations if bool(row["eligible"])]
+    high_confidence_threshold = (
+        max(float(row["threshold"]) for row in eligible)
+        if eligible
+        else SPECIALS_DEFAULT_HIGH_THRESHOLD
+    )
+    watch_candidates = [
+        row for row in evaluations
+        if float(row["threshold"]) < high_confidence_threshold
+        and int(row["support"]) >= SPECIALS_MIN_THRESHOLD_BUCKET_ROWS
+    ]
+    watch_threshold = (
+        max(float(row["threshold"]) for row in watch_candidates)
+        if watch_candidates
+        else SPECIALS_DEFAULT_WATCH_THRESHOLD
+    )
+    return {
+        "status": "fit" if eligible else "fallback_defaults",
+        "high_confidence_threshold": round(high_confidence_threshold, 2),
+        "watch_threshold": round(min(watch_threshold, high_confidence_threshold - 0.01), 2)
+        if watch_threshold >= high_confidence_threshold
+        else round(watch_threshold, 2),
+        "settled_rows": len(settled_rows),
+        "evaluated_thresholds": evaluations,
+    }
+
+
 @app.get("/api/special/stats")
 def special_stocks_stats() -> dict[str, Any]:
     empty_buckets = [
@@ -1124,6 +1196,11 @@ def special_stocks_stats() -> dict[str, Any]:
             "candidate_count_50_plus": 0,
             "candidate_hits_2_plus": 0,
             "candidate_hit_rate_2_plus": None,
+            "recommended_candidate_threshold": SPECIALS_DEFAULT_HIGH_THRESHOLD,
+            "recommended_candidate_count": 0,
+            "recommended_candidate_hits_2_plus": 0,
+            "recommended_candidate_hit_rate_2_plus": None,
+            "threshold_recommendations": _default_special_threshold_recommendations(),
             "calibration_buckets": empty_buckets,
         }
     with connect() as conn:
@@ -1173,6 +1250,16 @@ def special_stocks_stats() -> dict[str, Any]:
             "avg_prob": round(avg_bucket_prob, 4) if avg_bucket_prob is not None else None,
             "hit_rate": round(bucket_hits / len(bucket_rows), 4) if bucket_rows else None,
         })
+    threshold_recommendations = _fit_special_threshold_recommendations(settled_rows)
+    recommended_candidate_threshold = float(
+        threshold_recommendations.get("high_confidence_threshold") or SPECIALS_DEFAULT_HIGH_THRESHOLD
+    )
+    recommended_candidate_rows = [
+        row for row in settled_rows if float(row.get("stocks_prob_2_plus") or 0.0) >= recommended_candidate_threshold
+    ]
+    recommended_candidate_hits_2_plus = sum(
+        1 for row in recommended_candidate_rows if float(row.get("actual_stocks") or 0.0) >= 2.0
+    )
     return {
         "total_latest": len(rows),
         "settled_count": len(settled_rows),
@@ -1186,6 +1273,15 @@ def special_stocks_stats() -> dict[str, Any]:
         "candidate_count_50_plus": len(candidate_rows),
         "candidate_hits_2_plus": candidate_hits_2_plus,
         "candidate_hit_rate_2_plus": round(candidate_hits_2_plus / len(candidate_rows), 4) if candidate_rows else None,
+        "recommended_candidate_threshold": round(recommended_candidate_threshold, 2),
+        "recommended_candidate_count": len(recommended_candidate_rows),
+        "recommended_candidate_hits_2_plus": recommended_candidate_hits_2_plus,
+        "recommended_candidate_hit_rate_2_plus": (
+            round(recommended_candidate_hits_2_plus / len(recommended_candidate_rows), 4)
+            if recommended_candidate_rows
+            else None
+        ),
+        "threshold_recommendations": threshold_recommendations,
         "calibration_buckets": calibration_buckets,
     }
 

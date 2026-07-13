@@ -4041,6 +4041,8 @@ function SpecialStocksView({
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const [sortField, setSortField] = useState<SpecialStocksSortField>("stocks_prob_2_plus");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const highConfidenceThreshold = performance?.threshold_recommendations?.high_confidence_threshold ?? 0.5;
+  const watchThreshold = performance?.threshold_recommendations?.watch_threshold ?? 0.4;
   const cards = useMemo(() => {
     const grouped = new Map<number, {
       gameId: number;
@@ -4078,6 +4080,9 @@ function SpecialStocksView({
     }
     return Array.from(grouped.values()).map((card) => ({
       ...card,
+      candidateCount50Plus: card.players.filter(
+        (player) => (player.stocks_prob_2_plus ?? 0) >= highConfidenceThreshold,
+      ).length,
       avgProb2Plus: card.players[0]?.board_avg_prob_2_plus
         ?? (card.players.length > 0
           ? card.players.reduce((sum, player) => sum + (player.stocks_prob_2_plus ?? 0), 0) / card.players.length
@@ -4085,7 +4090,11 @@ function SpecialStocksView({
       playerCount: card.players[0]?.board_player_count ?? (card.playerCount > 0 ? card.playerCount : card.players.length),
       players: card.players.slice().sort((left, right) => {
         const tierValue = (snapshot: SpecialStocksSnapshot) => (
-          (snapshot.stocks_prob_2_plus ?? 0) >= 0.5 ? 2 : (snapshot.stocks_prob_2_plus ?? 0) >= 0.4 ? 1 : 0
+          (snapshot.stocks_prob_2_plus ?? 0) >= highConfidenceThreshold
+            ? 2
+            : (snapshot.stocks_prob_2_plus ?? 0) >= watchThreshold
+              ? 1
+              : 0
         );
         const valueForSort = (snapshot: SpecialStocksSnapshot, field: SpecialStocksSortField) => {
           switch (field) {
@@ -4150,7 +4159,7 @@ function SpecialStocksView({
       }
       return leftTime - rightTime;
     });
-  }, [snapshots, sortDirection, sortField]);
+  }, [highConfidenceThreshold, snapshots, sortDirection, sortField, watchThreshold]);
   const selectedCard = cards.find((card) => card.gameId === selectedGameId) ?? cards[0] ?? null;
   const toggleSort = (field: SpecialStocksSortField) => {
     if (sortField === field) {
@@ -4194,7 +4203,7 @@ function SpecialStocksView({
             >
               <span>{formatDate(card.startTime || card.gameDate)}</span>
               <strong>{card.awayTeam && card.homeTeam ? `${card.awayTeam} at ${card.homeTeam}` : `Game ${card.gameId}`}</strong>
-              <em>{`${card.candidateCount50Plus} at 50%+ | ${card.playerCount} props`}</em>
+              <em>{`${card.candidateCount50Plus} at ${formatPercent(highConfidenceThreshold)}+ | ${card.playerCount} props`}</em>
             </button>
           ))}
         </div>
@@ -4205,7 +4214,8 @@ function SpecialStocksView({
                 <div>
                   <h3>Model-only Stocks Board</h3>
                   <p>{`${selectedCard.playerCount} slate players with regular lines ranked by 2+ stocks probability`}</p>
-                  <p>{`${selectedCard.candidateCount50Plus} players are at 50%+ for 2+ stocks. Board average: ${formatPercent(selectedCard.avgProb2Plus)}`}</p>
+                  <p>{`${selectedCard.candidateCount50Plus} players are at ${formatPercent(highConfidenceThreshold)}+ for 2+ stocks. Board average: ${formatPercent(selectedCard.avgProb2Plus)}`}</p>
+                  <p>{`Tier cutoffs: high ${formatPercent(highConfidenceThreshold)} | watch ${formatPercent(watchThreshold)}`}</p>
                   <p>No sportsbook line is attached. These rows are for internal tracking and UI review.</p>
                 </div>
               </div>
@@ -4214,7 +4224,10 @@ function SpecialStocksView({
                 <MiniStat label="Pending" value={String(performance?.pending_count ?? 0)} />
                 <MiniStat label="2+ Stocks Hit" value={formatPercent(performance?.hit_rate_2_plus ?? undefined)} />
                 <MiniStat label="3+ Stocks Hit" value={formatPercent(performance?.hit_rate_3_plus ?? undefined)} />
-                <MiniStat label="50%+ Hit" value={formatPercent(performance?.candidate_hit_rate_2_plus ?? undefined)} />
+                <MiniStat
+                  label={`${formatPercent(highConfidenceThreshold)}+ Hit`}
+                  value={formatPercent(performance?.recommended_candidate_hit_rate_2_plus ?? undefined)}
+                />
                 <MiniStat label="Avg 2+ Prob" value={formatPercent(performance?.avg_prob_2_plus ?? undefined)} />
                 <MiniStat label="Avg 3+ Prob" value={formatPercent(performance?.avg_prob_3_plus ?? undefined)} />
               </div>
@@ -4283,7 +4296,13 @@ function SpecialStocksView({
                             </div>
                           </div>
                         </td>
-                        <td>{(snapshot.stocks_prob_2_plus ?? 0) >= 0.5 ? "50%+" : (snapshot.stocks_prob_2_plus ?? 0) >= 0.4 ? "40%+" : "Watch"}</td>
+                        <td>
+                          {(snapshot.stocks_prob_2_plus ?? 0) >= highConfidenceThreshold
+                            ? "High"
+                            : (snapshot.stocks_prob_2_plus ?? 0) >= watchThreshold
+                              ? "Watch"
+                              : "Below"}
+                        </td>
                         <td>{formatNumber(snapshot.projected_steals)}</td>
                         <td>{formatNumber(snapshot.projected_blocks)}</td>
                         <td>{formatNumber(snapshot.projected_stocks)}</td>

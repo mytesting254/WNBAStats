@@ -4491,6 +4491,116 @@ def test_special_probability_calibration_requires_minimum_history_support(monkey
 
     assert calibrated == raw_probability
 
+
+def test_special_threshold_recommendations_fallback_when_history_is_sparse() -> None:
+    rows = [
+        {"stocks_prob_2_plus": 0.62, "actual_stocks": 2.0},
+        {"stocks_prob_2_plus": 0.54, "actual_stocks": 1.0},
+        {"stocks_prob_2_plus": 0.47, "actual_stocks": 2.0},
+    ]
+
+    result = main_module._fit_special_threshold_recommendations(rows)
+
+    assert result["status"] == "insufficient_history"
+    assert result["high_confidence_threshold"] == 0.5
+    assert result["watch_threshold"] == 0.4
+    assert result["settled_rows"] == 3
+
+
+def test_special_threshold_recommendations_fit_high_confidence_cutoff() -> None:
+    rows: list[dict[str, float]] = []
+    rows.extend({"stocks_prob_2_plus": 0.60, "actual_stocks": 2.0} for _ in range(12))
+    rows.extend({"stocks_prob_2_plus": 0.55, "actual_stocks": 2.0} for _ in range(10))
+    rows.extend({"stocks_prob_2_plus": 0.48, "actual_stocks": 2.0} for _ in range(10))
+    rows.extend({"stocks_prob_2_plus": 0.42, "actual_stocks": 1.0} for _ in range(10))
+
+    result = main_module._fit_special_threshold_recommendations(rows)
+
+    assert result["status"] == "fit"
+    assert result["settled_rows"] == 42
+    assert float(result["high_confidence_threshold"]) >= 0.55
+    assert float(result["watch_threshold"]) < float(result["high_confidence_threshold"])
+    assert result["evaluated_thresholds"]
+
+
+def test_special_stocks_stats_exposes_recommended_threshold_fields(monkeypatch, tmp_path) -> None:
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+    stocks_tracking_module.ensure_tracking_schema()
+
+    with sqlite3.connect(tracking_path) as tracking:
+        rows = []
+        settlements = []
+        for idx in range(42):
+            snapshot_id = idx + 1
+            probability = 0.6 if idx < 12 else 0.55 if idx < 22 else 0.48 if idx < 32 else 0.42
+            actual_stocks = 2 if idx < 32 else 1
+            rows.append(
+                (
+                    snapshot_id,
+                    9000 + idx,
+                    10000 + idx,
+                    f"Threshold Player {idx}",
+                    "2026-05-01",
+                    f"2026-05-01T0{idx % 10}:00:00+00:00",
+                    COMPONENT_MODEL_VERSION,
+                    0.8,
+                    0.6,
+                    1.8,
+                    0.55,
+                    0.22,
+                    0.48,
+                    0.18,
+                    probability,
+                    0.12,
+                    "model_only",
+                )
+            )
+            settlements.append((snapshot_id, actual_stocks - 1, 1, "2026-05-02T00:00:00+00:00"))
+        tracking.executemany(
+            """
+            INSERT INTO projection_snapshots (
+                id,
+                game_id,
+                player_id,
+                player_name,
+                game_date,
+                captured_at,
+                model_version,
+                projected_steals,
+                projected_blocks,
+                projected_stocks,
+                steal_prob_1_plus,
+                steal_prob_2_plus,
+                block_prob_1_plus,
+                block_prob_2_plus,
+                stocks_prob_2_plus,
+                stocks_prob_3_plus,
+                data_quality
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        tracking.executemany(
+            """
+            INSERT INTO settlements (
+                snapshot_id,
+                actual_steals,
+                actual_blocks,
+                settled_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            settlements,
+        )
+        tracking.commit()
+
+    result = main_module.special_stocks_stats()
+
+    assert float(result["recommended_candidate_threshold"]) >= 0.55
+    assert int(result["recommended_candidate_count"]) in {12, 22}
+    assert int(result["recommended_candidate_hits_2_plus"]) == int(result["recommended_candidate_count"])
+    assert float(result["recommended_candidate_hit_rate_2_plus"]) == 1.0
+
 def test_feature_snapshot_reuses_shared_player_context_with_runtime_cache(monkeypatch) -> None:
     load_test_history()
     call_count = 0
