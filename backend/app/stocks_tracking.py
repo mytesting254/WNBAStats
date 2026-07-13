@@ -2219,6 +2219,7 @@ def _delete_stale_pending_snapshots(
         game_id = int(row["game_id"])
         player_id = int(row["player_id"])
         game_row = conn.execute("SELECT status FROM games WHERE id = ?", (game_id,)).fetchone()
+        game_status = str(game_row["status"] or "").lower() if game_row is not None else ""
         active_prop_row = conn.execute(
             """
             SELECT 1
@@ -2230,7 +2231,21 @@ def _delete_stale_pending_snapshots(
         ).fetchone()
         if active_prop_row is not None:
             continue
-        if game_row is None or str(game_row["status"] or "").lower() == "scheduled":
+        if game_row is None or game_status == "scheduled":
+            snapshot_ids.append(int(row["id"]))
+            continue
+        if game_status != "final":
+            continue
+        stat_row = conn.execute(
+            """
+            SELECT 1
+            FROM player_game_stats
+            WHERE game_id = ? AND player_id = ?
+            LIMIT 1
+            """,
+            (game_id, player_id),
+        ).fetchone()
+        if stat_row is None:
             snapshot_ids.append(int(row["id"]))
     if not snapshot_ids:
         return 0

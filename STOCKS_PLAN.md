@@ -53,11 +53,13 @@ Current implementation notes:
 - the Specials read path now batches active-prop, matchup-context, and recent-history lookups instead of issuing per-player N+1 queries
 - the Specials tab now consumes precomputed `game_board_summaries` for matchup-level counts and board averages instead of deriving those from raw snapshot rows in the UI
 - snapshot prep now skips unchanged `(game_id, player_id)` writes by comparing against the latest cached row before inserting a new snapshot
+- Special-tracking `game_date` should stay aligned to the canonical slate date from `games.game_date` (ET slate date), even when late games cross midnight in UTC
 - specials calibration now uses smaller neighborhood windows plus explicit minimum total-history floors before any empirical blend can activate
 - historical prep/projection inputs now downweight blowout rows by role and winsorize per-market tails before recent/stability anchors are blended
 - starter-heavy prep/projection paths now also drop only `20+` margin blowout rows once at least `5` competitive games remain, so stars keep enough sample while late-game noise stops inflating anchors
 - Specials stats now expose support-gated threshold-fit scaffolding for `high` and `watch` cutoffs from settled `2+ stocks` snapshot history, while falling back to `50% / 40%` defaults when the sample is too thin
 - the Specials board and prep summaries now use the fitted `high` threshold for candidate counts and hit-rate display when support is sufficient, instead of hard-coded `50%+` labeling
+- stale pending Special rows for final games are now pruned when no matching `player_game_stats` row exists and there is no active prop line for that player/game, which prevents permanently pending late-slate bench rows
 - live mounted-runtime validation completed end to end in about `1m 1s` for a `3`-game / `79`-candidate ET-today slate
 
 ## Current Optimization Track
