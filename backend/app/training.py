@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .game_predictions import evaluate_game_residual_models
 from .paths import get_cache_dir
+from .minutes_training_db import minutes_training_db_signature
 from .player_prop_model import (
     DEFAULT_TUNING_CONFIG,
     FEATURE_NAMES,
@@ -268,6 +269,7 @@ def _training_data_signature(conn: sqlite3.Connection) -> str:
     payload = {
         "training_start_date": _training_start_date(),
         "model_tuning_config": DEFAULT_TUNING_CONFIG.to_dict(),
+        "minutes_training_db_signature": minutes_training_db_signature(conn),
     }
     for table in (
         "games",

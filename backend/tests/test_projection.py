@@ -1889,6 +1889,18 @@ def test_minutes_training_db_excludes_dnp_and_persists_quality_flags() -> None:
     assert int(exclusion_counts["did_not_play"]) >= 1
 
 
+def test_training_data_signature_includes_minutes_training_db_signature() -> None:
+    load_test_history()
+    clear_model_cache()
+
+    with connect() as conn:
+        ensure_minutes_training_db(conn, force=True)
+        signature = training_module._training_data_signature(conn)
+
+    assert isinstance(signature, str)
+    assert len(signature) == 16
+
+
 def test_player_archetype_profile_classifies_usage_scorer_and_assist_guard() -> None:
     load_test_history()
     with connect() as conn:
