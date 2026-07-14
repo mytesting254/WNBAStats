@@ -622,6 +622,22 @@ def _json_text(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":"))
 
 
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    if row is None:
+        return default
+    if isinstance(row, dict):
+        return row.get(key, default)
+    if isinstance(row, sqlite3.Row):
+        return row[key] if key in row.keys() else default
+    getter = getattr(row, "get", None)
+    if callable(getter):
+        return getter(key, default)
+    try:
+        return row[key]
+    except Exception:
+        return default
+
+
 def _create_prop_sync_job_record(
     scope: str,
     *,
@@ -1473,21 +1489,21 @@ def special_stocks_stats() -> dict[str, Any]:
     with sqlite3.connect(path) as tracking:
         tracking.row_factory = sqlite3.Row
         settled_rows = settled_latest_special_rows(tracking)
-    pending_count = sum(1 for row in rows if row.get("actual_stocks") is None)
-    hits_2_plus = sum(1 for row in settled_rows if float(row.get("actual_stocks") or 0.0) >= 2.0)
+    pending_count = sum(1 for row in rows if _row_value(row, "actual_stocks") is None)
+    hits_2_plus = sum(1 for row in settled_rows if float(_row_value(row, "actual_stocks") or 0.0) >= 2.0)
     avg_prob_2_plus = (
-        sum(float(row.get("stocks_prob_2_plus") or 0.0) for row in settled_rows) / len(settled_rows)
+        sum(float(_row_value(row, "stocks_prob_2_plus") or 0.0) for row in settled_rows) / len(settled_rows)
         if settled_rows
         else None
     )
-    hits_3_plus = sum(1 for row in settled_rows if float(row.get("actual_stocks") or 0.0) >= 3.0)
+    hits_3_plus = sum(1 for row in settled_rows if float(_row_value(row, "actual_stocks") or 0.0) >= 3.0)
     avg_prob_3_plus = (
-        sum(float(row.get("stocks_prob_3_plus") or 0.0) for row in settled_rows) / len(settled_rows)
+        sum(float(_row_value(row, "stocks_prob_3_plus") or 0.0) for row in settled_rows) / len(settled_rows)
         if settled_rows
         else None
     )
-    candidate_rows = [row for row in settled_rows if float(row.get("stocks_prob_2_plus") or 0.0) >= 0.5]
-    candidate_hits_2_plus = sum(1 for row in candidate_rows if float(row.get("actual_stocks") or 0.0) >= 2.0)
+    candidate_rows = [row for row in settled_rows if float(_row_value(row, "stocks_prob_2_plus") or 0.0) >= 0.5]
+    candidate_hits_2_plus = sum(1 for row in candidate_rows if float(_row_value(row, "actual_stocks") or 0.0) >= 2.0)
     bucket_defs = [
         ("0-40%", 0.0, 0.4),
         ("40-50%", 0.4, 0.5),
@@ -1498,12 +1514,12 @@ def special_stocks_stats() -> dict[str, Any]:
     for label, min_prob, max_prob in bucket_defs:
         bucket_rows = [
             row for row in settled_rows
-            if float(row.get("stocks_prob_2_plus") or 0.0) >= min_prob
-            and (max_prob is None or float(row.get("stocks_prob_2_plus") or 0.0) < max_prob)
+            if float(_row_value(row, "stocks_prob_2_plus") or 0.0) >= min_prob
+            and (max_prob is None or float(_row_value(row, "stocks_prob_2_plus") or 0.0) < max_prob)
         ]
-        bucket_hits = sum(1 for row in bucket_rows if float(row.get("actual_stocks") or 0.0) >= 2.0)
+        bucket_hits = sum(1 for row in bucket_rows if float(_row_value(row, "actual_stocks") or 0.0) >= 2.0)
         avg_bucket_prob = (
-            sum(float(row.get("stocks_prob_2_plus") or 0.0) for row in bucket_rows) / len(bucket_rows)
+            sum(float(_row_value(row, "stocks_prob_2_plus") or 0.0) for row in bucket_rows) / len(bucket_rows)
             if bucket_rows
             else None
         )
@@ -1521,10 +1537,10 @@ def special_stocks_stats() -> dict[str, Any]:
         threshold_recommendations.get("high_confidence_threshold") or SPECIALS_DEFAULT_HIGH_THRESHOLD
     )
     recommended_candidate_rows = [
-        row for row in settled_rows if float(row.get("stocks_prob_2_plus") or 0.0) >= recommended_candidate_threshold
+        row for row in settled_rows if float(_row_value(row, "stocks_prob_2_plus") or 0.0) >= recommended_candidate_threshold
     ]
     recommended_candidate_hits_2_plus = sum(
-        1 for row in recommended_candidate_rows if float(row.get("actual_stocks") or 0.0) >= 2.0
+        1 for row in recommended_candidate_rows if float(_row_value(row, "actual_stocks") or 0.0) >= 2.0
     )
     return {
         "total_latest": len(rows),

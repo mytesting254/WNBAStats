@@ -5225,10 +5225,15 @@ def _weighted_average(values: list[float]) -> float:
 def _historical_row_margin(row: sqlite3.Row | dict[str, object]) -> float:
     if isinstance(row, sqlite3.Row):
         margin = row["team_margin"] if "team_margin" in row.keys() else None
-    else:
+    elif isinstance(row, dict):
         margin = row.get("team_margin")
         if margin is None:
             margin = 15.0 if row.get("is_blowout") else 0.0
+    else:
+        try:
+            margin = row["team_margin"]  # type: ignore[index]
+        except Exception:
+            margin = None
     return float(margin or 0.0)
 
 
