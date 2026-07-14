@@ -4966,8 +4966,10 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
         result["affected_game_ids"] = _scheduled_game_ids_for_teams(conn, result.get("affected_team_ids", []))
         delete_json_cache(ROSTER_CACHE_NAME)
         delete_json_cache(MATCHUPS_CACHE_NAME)
-        result["published_payloads"] = _refresh_roster_read_payloads(conn)
-        result["roster"] = _roster_payload(conn, refresh_lineups=False)
+        roster_payload = _roster_payload(conn, refresh_lineups=False)
+        write_json_cache(ROSTER_CACHE_NAME, _cache_envelope(roster_payload, ROSTER_TTL_SECONDS))
+        result["published_payloads"] = {ROSTER_CACHE_NAME: len(roster_payload)}
+        result["roster"] = roster_payload
     affected_game_ids = list(result.get("affected_game_ids") or [])
     roster_changed = bool(result.get("roster_changed"))
     result["repair"] = (
