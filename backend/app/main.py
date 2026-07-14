@@ -3777,10 +3777,11 @@ def void_dnp_props(game_id: int, player_id: int, confirmation: str) -> dict[str,
 
 @app.get("/api/value-board", dependencies=[Depends(_protect_force_refresh)])
 def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
+    cached_injury_refresh = _cached_rotowire_refresh_metadata()
     if force_refresh:
         started = datetime.now(timezone.utc)
         with connect() as conn:
-            _publish_matchup_snapshot_aggregates(conn)
+            _publish_matchup_snapshot_aggregates(conn, injury_refresh=cached_injury_refresh)
             payload = _read_cached_payload(VALUE_BOARD_CACHE_NAME) or []
         compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
         _set_observability_headers(response, VALUE_BOARD_CACHE_NAME, "BYPASS", round(compute_ms, 2))
@@ -3790,7 +3791,7 @@ def value_board(response: Response, force_refresh: bool = False) -> list[dict]:
             aggregates = _aggregate_matchup_snapshot_payloads(conn)
             if aggregates is not None:
                 return aggregates[0]
-            _publish_matchup_snapshot_aggregates(conn)
+            _publish_matchup_snapshot_aggregates(conn, injury_refresh=cached_injury_refresh)
             return _read_cached_payload(VALUE_BOARD_CACHE_NAME) or []
     payload, status, compute_ms = _read_through_cache_with_meta(
         VALUE_BOARD_CACHE_NAME,
@@ -5563,11 +5564,12 @@ def ball_dont_lie_history(
 
 @app.get("/api/matchups", dependencies=[Depends(_protect_force_refresh)])
 def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
+    cached_injury_refresh = _cached_rotowire_refresh_metadata()
     def compute() -> list[dict]:
         with connect() as conn:
             aggregates = _aggregate_matchup_snapshot_payloads(conn)
             if aggregates is None:
-                _publish_matchup_snapshot_aggregates(conn)
+                _publish_matchup_snapshot_aggregates(conn, injury_refresh=cached_injury_refresh)
                 return _read_cached_payload(MATCHUPS_CACHE_NAME) or []
             return aggregates[1]
 

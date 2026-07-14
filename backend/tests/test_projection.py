@@ -604,6 +604,78 @@ def test_publish_matchup_snapshot_aggregates_uses_supplied_injury_refresh(monkey
     assert result[main_module.MATCHUPS_CACHE_NAME] == 1
 
 
+def test_value_board_rebuild_uses_cached_rotowire_refresh_metadata(monkeypatch) -> None:
+    captured_injury_refresh: list[dict[str, object]] = []
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module, "_aggregate_matchup_snapshot_payloads", lambda conn: None)
+    monkeypatch.setattr(
+        main_module,
+        "_cached_rotowire_refresh_metadata",
+        lambda: {"source": "cache", "captured_at": "2026-07-14T10:00:00+00:00", "from_cache": True},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_publish_matchup_snapshot_aggregates",
+        lambda conn, game_ids=None, full_refresh=True, injury_refresh=None: captured_injury_refresh.append(dict(injury_refresh or {})) or {main_module.VALUE_BOARD_CACHE_NAME: 1},
+    )
+    monkeypatch.setattr(main_module, "_read_cached_payload", lambda name, allow_stale=False: [{"id": 1}] if name == main_module.VALUE_BOARD_CACHE_NAME else None)
+    monkeypatch.setattr(
+        main_module,
+        "_read_through_cache_with_meta",
+        lambda cache_name, ttl_seconds, compute: (compute(), "MISS", 0.0),
+    )
+    monkeypatch.setattr(main_module, "_set_observability_headers", lambda *args, **kwargs: None)
+
+    result = main_module.value_board(Response())
+
+    assert result == [{"id": 1}]
+    assert captured_injury_refresh == [{"source": "cache", "captured_at": "2026-07-14T10:00:00+00:00", "from_cache": True}]
+
+
+def test_matchups_rebuild_uses_cached_rotowire_refresh_metadata(monkeypatch) -> None:
+    captured_injury_refresh: list[dict[str, object]] = []
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module, "_aggregate_matchup_snapshot_payloads", lambda conn: None)
+    monkeypatch.setattr(
+        main_module,
+        "_cached_rotowire_refresh_metadata",
+        lambda: {"source": "cache", "captured_at": "2026-07-14T10:00:00+00:00", "from_cache": True},
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_publish_matchup_snapshot_aggregates",
+        lambda conn, game_ids=None, full_refresh=True, injury_refresh=None: captured_injury_refresh.append(dict(injury_refresh or {})) or {main_module.MATCHUPS_CACHE_NAME: 1},
+    )
+    monkeypatch.setattr(main_module, "_read_cached_payload", lambda name, allow_stale=False: [{"id": 1}] if name == main_module.MATCHUPS_CACHE_NAME else None)
+    monkeypatch.setattr(
+        main_module,
+        "_read_through_cache_with_meta",
+        lambda cache_name, ttl_seconds, compute: (compute(), "MISS", 0.0),
+    )
+    monkeypatch.setattr(main_module, "_set_observability_headers", lambda *args, **kwargs: None)
+
+    result = main_module.matchups(Response())
+
+    assert result == [{"id": 1}]
+    assert captured_injury_refresh == [{"source": "cache", "captured_at": "2026-07-14T10:00:00+00:00", "from_cache": True}]
+
+
 def test_watchlist_performance_uses_read_cache(monkeypatch) -> None:
     payload = {
         "qualified": 1,
