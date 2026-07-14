@@ -19,7 +19,7 @@ from .odds import american_to_implied_probability
 from .timezone_utils import APP_TIMEZONE
 
 
-MODEL_VERSION = "adaptive-context-v8-minutes-competition-context"
+MODEL_VERSION = "adaptive-context-v10-market-gated-context"
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
 MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
@@ -64,6 +64,14 @@ FEATURE_NAMES = [
     "new_team_minutes_trend",
     "teammate_minutes_redistribution",
     "rotation_stability",
+    "recent_team_minute_share",
+    "recent_minute_rank",
+    "recent_position_minute_share",
+    "same_position_unavailable_minutes",
+    "same_position_key_out_count",
+    "same_position_opportunity_persistence",
+    "same_position_competition_minutes",
+    "recent_opponent_factor",
 ]
 FEATURE_INDEX = {name: idx for idx, name in enumerate(FEATURE_NAMES)}
 MINUTES_FEATURE_NAMES = [
@@ -126,6 +134,24 @@ MARKET_WINSORIZATION_SCALES = {
     "steals": 1.35,
     "blocks": 1.35,
     "blocks_steals": 1.4,
+}
+
+MARKET_CONTEXT_FEATURE_POLICY = {
+    "points": {
+        "lineup": True,
+        "opportunity": True,
+        "recent_opponent": True,
+    },
+    "points_rebounds": {
+        "lineup": True,
+        "opportunity": True,
+        "recent_opponent": True,
+    },
+    "threes": {
+        "lineup": False,
+        "opportunity": False,
+        "recent_opponent": True,
+    },
 }
 RESIDUAL_PROMOTION_MIN_ROWS = 100
 RESIDUAL_PROMOTION_MIN_MAE_IMPROVEMENT = 0.0
@@ -300,6 +326,9 @@ class RidgeModel:
 
 @dataclass(frozen=True)
 class TrainingSample:
+    source_prop_line_id: int | None
+    source_player_id: int
+    source_game_id: int
     features: list[float]
     target: float
     game_date: str
@@ -307,10 +336,15 @@ class TrainingSample:
     segment: str
     baseline: float
     is_recent_transfer: bool = False
+    sample_count: int = 0
+    avg_minutes: float = 0.0
 
 
 @dataclass(frozen=True)
 class FinalProjectionSample:
+    source_prop_line_id: int | None
+    source_player_id: int
+    source_game_id: int
     features: list[float]
     target: float
     game_date: str
@@ -333,6 +367,7 @@ class TrainingSampleDiagnostics:
     skipped_incomplete_context: int = 0
     skipped_ambiguous_team_identity: int = 0
     skipped_missing_snapshot: int = 0
+    skipped_market_curation: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
@@ -343,6 +378,7 @@ class TrainingSampleDiagnostics:
             "skipped_incomplete_context": int(self.skipped_incomplete_context),
             "skipped_ambiguous_team_identity": int(self.skipped_ambiguous_team_identity),
             "skipped_missing_snapshot": int(self.skipped_missing_snapshot),
+            "skipped_market_curation": int(self.skipped_market_curation),
         }
 
 
@@ -759,6 +795,35 @@ def _market_stabilization_profile(market: str) -> tuple[float, float]:
     return 0.84, 1.20
 
 
+def _market_context_features(
+    market: str,
+    *,
+    lineup_context: list[float] | None,
+    opportunity_context: list[float] | None,
+    recent_opponent_factor: float,
+) -> list[float]:
+    policy = MARKET_CONTEXT_FEATURE_POLICY.get(str(market), {})
+    lineup_enabled = bool(policy.get("lineup"))
+    opportunity_enabled = bool(policy.get("opportunity"))
+    recent_opponent_enabled = bool(policy.get("recent_opponent"))
+    normalized_lineup = list(lineup_context or [0.0, 0.5, 0.0])
+    if len(normalized_lineup) < 3:
+        normalized_lineup = (normalized_lineup + [0.0, 0.5, 0.0])[:3]
+    normalized_opportunity = list(opportunity_context or [0.0, 0.0, 0.0, 0.0])
+    if len(normalized_opportunity) < 4:
+        normalized_opportunity = (normalized_opportunity + [0.0, 0.0, 0.0, 0.0])[:4]
+    return [
+        float(normalized_lineup[0]) if lineup_enabled else 0.0,
+        float(normalized_lineup[1]) if lineup_enabled else 0.0,
+        float(normalized_lineup[2]) if lineup_enabled else 0.0,
+        float(normalized_opportunity[0]) if opportunity_enabled else 0.0,
+        float(normalized_opportunity[1]) if opportunity_enabled else 0.0,
+        float(normalized_opportunity[2]) if opportunity_enabled else 0.0,
+        float(normalized_opportunity[3]) if opportunity_enabled else 0.0,
+        float(recent_opponent_factor) if recent_opponent_enabled else 1.0,
+    ]
+
+
 def feature_snapshot(
     conn: sqlite3.Connection,
     player_id: int,
@@ -833,6 +898,7 @@ def feature_snapshot(
 
     pace_factor = _cached_pace_factor(conn, context["team_id"], context["opponent_id"]) if context else 1.0
     opponent_factor = _cached_opponent_factor(conn, context["opponent_id"], market) if context else 1.0
+    recent_opponent_factor = _cached_recent_opponent_factor(conn, context["opponent_id"], market) if context else 1.0
     common_opponent_factor = _cached_common_opponent_factor(
         conn,
         player_id,
@@ -856,6 +922,14 @@ def feature_snapshot(
     usage_multiplier *= injury["usage_multiplier"]
     archetype = shared["archetype"]
     team_transition = shared["team_transition"]
+    lineup_context = list(shared.get("lineup_context") or [0.0, 0.5, 0.0])
+    opportunity_context = list(shared.get("opportunity_context") or [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    market_context_features = _market_context_features(
+        market,
+        lineup_context=lineup_context,
+        opportunity_context=opportunity_context,
+        recent_opponent_factor=recent_opponent_factor,
+    )
 
     component_projection = (
         component_base
@@ -892,6 +966,7 @@ def feature_snapshot(
         game_total,
         *archetype.feature_values(),
         *team_transition,
+        *market_context_features,
     ]
     archetype_note = ", ".join(archetype.labels()) or "balanced"
     reason = (
@@ -909,6 +984,9 @@ def feature_snapshot(
         f" Team transition: {int(team_transition[0])} games with team, minutes trend {team_transition[1]:+.1f}, "
         f"teammate minutes shift {team_transition[2]:+.2f}, rotation stability {team_transition[3]:.2f}."
         f" Minutes projection: {minutes_note}."
+        f" Lineup share {float(lineup_context[0]):.2f}, lineup rank {float(lineup_context[1]):.2f}, position share {float(lineup_context[2]):.2f}."
+        f" Opportunity unavailable {float(opportunity_context[0]):.1f}, key outs {float(opportunity_context[1]):.1f}, persistence {float(opportunity_context[2]):.2f}, competition {float(opportunity_context[3]):.1f}."
+        f" Recent opponent {recent_opponent_factor:.2f}."
     )
     return FeatureSnapshot(
         features,
@@ -1071,6 +1149,18 @@ def _shared_projection_context(
         "adjustment_note": adjustment_note,
         "archetype": _player_archetype_profile_from_rows(history_rows, fallback_rotation_role=rotation_role),
         "team_transition": team_transition,
+        "lineup_context": lineup_context,
+        "opportunity_context": (
+            _live_minutes_opportunity_context(
+                conn,
+                player_id=player_id,
+                team_id=int(context["team_id"]),
+                position=str(history_rows[0]["position"] or ""),
+                as_of_date=reference_game_date,
+            )
+            if use_live_minutes_context
+            else None
+        ),
     }
     if cache is not None:
         cache[cache_key] = shared
@@ -1380,7 +1470,7 @@ def _standardize_feature_rows(
     return means, scales, standardized
 
 
-def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
+def _build_training_samples_inline(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
     cache = _connection_training_cache_bucket(conn, "training_samples")
     cache_key = ("base", str(market))
     if cache_key in cache:
@@ -1429,6 +1519,9 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[Train
             )
             samples.append(
                 TrainingSample(
+                    source_prop_line_id=None,
+                    source_player_id=int(rows[idx]["player_id"]),
+                    source_game_id=int(rows[idx]["game_id"]),
                     features=features,
                     target=values[idx],
                     game_date=game_date,
@@ -1439,6 +1532,8 @@ def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[Train
                     # not to a simpler last-10 average proxy.
                     baseline=float(features[FEATURE_NAMES.index("component_projection")]),
                     is_recent_transfer=_is_recent_transfer_training_row(rows, idx),
+                    sample_count=len(recent_rows),
+                    avg_minutes=(sum(minute_history) / len(minute_history)) if minute_history else 0.0,
                 )
             )
     diagnostics = TrainingSampleDiagnostics(
@@ -1457,15 +1552,29 @@ def _is_recent_transfer_training_row(rows: list[sqlite3.Row], row_index: int) ->
     if row_index <= 0:
         return False
     current_team_id = _historical_row_team_id(rows[row_index])
+    return _is_recent_transfer_team_history(reversed(rows[:row_index]), current_team_id)
+
+
+def _is_recent_transfer_feature_rows(history_rows: list[sqlite3.Row], target_team_id: int) -> bool:
+    return _is_recent_transfer_team_history(history_rows, target_team_id)
+
+
+def _is_recent_transfer_team_history(rows: object, target_team_id: int) -> bool:
     games_with_current_team = 0
     prior_team_ids: set[int] = set()
-    for row in reversed(rows[:row_index]):
+    for row in rows:
         team_id = _historical_row_team_id(row)
-        if team_id == current_team_id and not prior_team_ids:
+        if team_id == target_team_id and not prior_team_ids:
             games_with_current_team += 1
             continue
         prior_team_ids.add(team_id)
-    return 0 < games_with_current_team <= 12 and any(team_id != current_team_id for team_id in prior_team_ids)
+    return 0 < games_with_current_team <= 12 and any(team_id != target_team_id for team_id in prior_team_ids)
+
+
+def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
+    from .player_prop_training_db import load_player_prop_training_samples
+
+    return load_player_prop_training_samples(conn, market=market, sample_kind="raw", force_rebuild=False)
 
 
 def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
@@ -1473,7 +1582,7 @@ def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[flo
     return [(sample.features, sample.target) for sample in samples]
 
 
-def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
+def _build_residual_training_samples_inline(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
     cache = _connection_training_cache_bucket(conn, "residual_training_samples")
     cache_key = ("residual", str(market))
     if cache_key in cache:
@@ -1544,14 +1653,24 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[l
             skipped_missing_snapshot += 1
             continue
         target = float(row["actual_result"]) - float(row["line"])
+        sample_count, avg_minutes = _player_sample_quality(conn, int(row["player_id"]), int(row["game_id"]))
         samples.append(
             TrainingSample(
+                source_prop_line_id=int(row["prop_line_id"]),
+                source_player_id=int(row["player_id"]),
+                source_game_id=int(row["game_id"]),
                 features=snapshot.values,
                 target=target,
                 game_date=game_date,
                 season=game_date[:4],
                 segment=game_date[:7],
                 baseline=0.0,
+                is_recent_transfer=_is_recent_transfer_feature_rows(
+                    recent_rows,
+                    _historical_row_team_id(training_row),
+                ),
+                sample_count=int(sample_count),
+                avg_minutes=float(avg_minutes),
             )
         )
     diagnostics = TrainingSampleDiagnostics(
@@ -1567,12 +1686,18 @@ def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[l
     return samples, diagnostics
 
 
+def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
+    from .player_prop_training_db import load_player_prop_training_samples
+
+    return load_player_prop_training_samples(conn, market=market, sample_kind="residual", force_rebuild=False)
+
+
 def _residual_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
     samples, _diagnostics = _residual_training_samples(conn, market)
     return [(sample.features, sample.target) for sample in samples]
 
 
-def _final_projection_samples(conn: sqlite3.Connection, market: str) -> tuple[list[FinalProjectionSample], TrainingSampleDiagnostics]:
+def _build_final_projection_samples_inline(conn: sqlite3.Connection, market: str) -> tuple[list[FinalProjectionSample], TrainingSampleDiagnostics]:
     cache = _connection_training_cache_bucket(conn, "final_projection_samples")
     cache_key = ("final", str(market))
     if cache_key in cache:
@@ -1589,6 +1714,7 @@ def _final_projection_samples(conn: sqlite3.Connection, market: str) -> tuple[li
     rows = conn.execute(
         """
         SELECT
+            pl.id AS prop_line_id,
             pl.player_id,
             pl.game_id,
             pl.market,
@@ -1647,6 +1773,9 @@ def _final_projection_samples(conn: sqlite3.Connection, market: str) -> tuple[li
         sample_count, avg_minutes = _player_sample_quality(conn, int(row["player_id"]), int(row["game_id"]))
         samples.append(
             FinalProjectionSample(
+                source_prop_line_id=int(row["prop_line_id"]) if "prop_line_id" in row.keys() and row["prop_line_id"] is not None else None,
+                source_player_id=int(row["player_id"]),
+                source_game_id=int(row["game_id"]),
                 features=snapshot.values,
                 target=float(row["actual_result"]),
                 game_date=game_date,
@@ -1672,6 +1801,12 @@ def _final_projection_samples(conn: sqlite3.Connection, market: str) -> tuple[li
     )
     cache[cache_key] = (samples, diagnostics)
     return samples, diagnostics
+
+
+def _final_projection_samples(conn: sqlite3.Connection, market: str) -> tuple[list[FinalProjectionSample], TrainingSampleDiagnostics]:
+    from .player_prop_training_db import load_player_prop_final_projection_samples
+
+    return load_player_prop_final_projection_samples(conn, market=market, force_rebuild=False)
 
 
 def _has_complete_training_context(row: sqlite3.Row) -> bool:
@@ -2268,6 +2403,7 @@ def _historical_training_features(
     context = _historical_game_context(row)
     pace_factor = _cached_pace_factor(conn, int(context["team_id"]), int(context["opponent_id"]))
     opponent_factor = _cached_opponent_factor(conn, int(context["opponent_id"]), market)
+    recent_opponent_factor = _cached_recent_opponent_factor(conn, int(context["opponent_id"]), market)
     if player_rows is not None and row_index is not None:
         common_opponent_factor = _common_opponent_factor_from_rows(
             conn,
@@ -2387,6 +2523,12 @@ def _historical_training_features(
         player_rows=player_rows or [],
         row_index=row_index,
     )
+    market_context_features = _market_context_features(
+        market,
+        lineup_context=lineup_context,
+        opportunity_context=opportunity_context,
+        recent_opponent_factor=recent_opponent_factor,
+    )
     return [
         component_projection,
         weighted_recent,
@@ -2409,6 +2551,7 @@ def _historical_training_features(
         game_total,
         *archetype.feature_values(),
         *team_transition,
+        *market_context_features,
     ]
 
 
@@ -4933,6 +5076,14 @@ def _cached_player_archetype_profile(
     return cache[key]  # type: ignore[return-value]
 
 
+def _cached_recent_opponent_factor(conn: sqlite3.Connection, opponent_id: int, market: str) -> float:
+    cache = _connection_training_cache_bucket(conn, "recent_opponent_factor")
+    key = (int(opponent_id), str(market))
+    if key not in cache:
+        cache[key] = _recent_opponent_factor(conn, opponent_id, market)
+    return cache[key]  # type: ignore[return-value]
+
+
 def _cached_player_common_opponent_rows(
     conn: sqlite3.Connection,
     player_id: int,
@@ -5364,6 +5515,38 @@ def _opponent_factor(conn: sqlite3.Connection, opponent_id: int, market: str) ->
     opponent_allowed = sum(_market_value(row, market) for row in opponent_rows) / len(opponent_rows)
     league_allowed = sum(_market_value(row, market) for row in league_rows) / len(league_rows)
     return _clamp(opponent_allowed / league_allowed, 0.90, 1.10) if league_allowed > 0 else 1.0
+
+
+def _recent_opponent_factor(conn: sqlite3.Connection, opponent_id: int, market: str) -> float:
+    opponent_rows = conn.execute(
+        """
+        SELECT s.*
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        JOIN games g ON g.id = s.game_id
+        WHERE CASE
+            WHEN p.team_id = g.home_team_id THEN g.away_team_id
+            ELSE g.home_team_id
+        END = ?
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT 60
+        """,
+        (opponent_id,),
+    ).fetchall()
+    league_rows = conn.execute(
+        """
+        SELECT s.*
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT 300
+        """
+    ).fetchall()
+    if not opponent_rows or not league_rows:
+        return 1.0
+    opponent_allowed = sum(_market_value(row, market) for row in opponent_rows) / len(opponent_rows)
+    league_allowed = sum(_market_value(row, market) for row in league_rows) / len(league_rows)
+    return _clamp(opponent_allowed / league_allowed, 0.88, 1.12) if league_allowed > 0 else 1.0
 
 
 def _common_opponent_factor(

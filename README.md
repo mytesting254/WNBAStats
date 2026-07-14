@@ -822,6 +822,7 @@ source scripts/live_env.sh
 ```
 
 That resolves `WNBA_DB_PATH`, `WNBA_CACHE_DIR`, and `WNBA_SNAPSHOT_DIR` to the active app-attached volume before you run maintenance commands.
+Curated training rebuilds follow the same pathing, so `wnba-training.sqlite` is written beside the active `WNBA_DB_PATH` on the mounted volume unless you override `WNBA_TRAINING_DB_PATH` explicitly.
 
 For automated production backups, prefer a host scheduler instead of an app-process watcher. Example systemd units are provided at:
 
@@ -1001,6 +1002,23 @@ Current live status checked on `2026-07-12`:
 - those payloads do not include sportsbook historical `steals`, `blocks`, or `blocks_steals`; the `Special` tab remains in-house projection only
 
 ## Model Training
+
+The standard setup for any new curated training dataset is documented in [TRAINING_SETUP.md](TRAINING_SETUP.md). Use that pattern for future trainable models so raw runtime data, curated examples, and derived training assets all stay on the mounted volume.
+
+Model/training doc map:
+
+- [FIXING_NEEDED.md](FIXING_NEEDED.md)
+  - consolidated pending model work
+  - active-now versus later backlog
+- [TRAINING_SETUP.md](TRAINING_SETUP.md)
+  - required pattern for new trainable model families
+  - mounted-volume persistence, curated DBs, and signatures
+- [PLAYER_PROP_CURATION.md](PLAYER_PROP_CURATION.md)
+  - player-prop curated training design and remaining cleanup
+- [STOCKS_PLAN.md](STOCKS_PLAN.md)
+  - Specials/stocks prep, calibration, and performance work
+- [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+  - operational/runtime failure cases
 
 The admin-only Model Lab tab trains against the active Turso database and records two benchmarks:
 

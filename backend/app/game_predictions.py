@@ -11,6 +11,7 @@ try:
 except ImportError:  # pragma: no cover - fallback remains exercised without numpy installed
     np = None
 
+from .game_training_db import game_training_db_signature, load_game_training_rows
 from .player_prop_model import _before_training_start, _training_start_date
 
 TOTAL_CALIBRATION_MIN_SAMPLES = 12
@@ -45,8 +46,26 @@ GAME_DIRECT_FEATURE_NAMES = [
     "pace_factor",
     "rest_days_home",
     "rest_days_away",
+    "rest_day_diff",
     "home_game_count",
     "away_game_count",
+    "recent_scoring_delta",
+    "recent_allowed_delta",
+    "season_scoring_delta",
+    "season_allowed_delta",
+    "recent_possessions_delta",
+    "season_possessions_delta",
+    "home_recent_vs_season_points",
+    "away_recent_vs_season_points",
+    "home_recent_vs_season_allowed",
+    "away_recent_vs_season_allowed",
+    "home_recent_vs_season_possessions",
+    "away_recent_vs_season_possessions",
+    "spread_home",
+    "game_total",
+    "home_implied_prob",
+    "away_implied_prob",
+    "vig_free_home_prob",
 ]
 GAME_MARGIN_FEATURE_NAMES = [
     "projected_margin",
@@ -91,6 +110,7 @@ class _GamePredictionCache:
         self._league_possessions: float | None = None
         self._weighted_recent_cache: dict[tuple[int, str], float] = {}
         self._injury_factor_cache: dict[int, dict[str, float | int | str]] = {}
+        self.runtime_cache: dict[str, dict[tuple, object]] = {}
         self._prepare_team_summaries(team_ids)
 
     def _prepare_team_summaries(self, team_ids: tuple[int, ...]) -> None:
@@ -227,8 +247,14 @@ def project_game(
         cache,
         home_team_id=home_team_id,
         away_team_id=away_team_id,
+        game_id=int(game["id"]),
+        game_date=str(game.get("game_date") or "") or None,
         rest_days_home=int(game["rest_days_home"] or 2),
         rest_days_away=int(game["rest_days_away"] or 2),
+        spread_home=spread_home,
+        game_total=game_total,
+        home_moneyline=_coerce_float(game.get("home_moneyline")),
+        away_moneyline=_coerce_float(game.get("away_moneyline")),
     )
     direct_margin = _predict_direct_game_value(conn, "margin", direct_features)
     direct_total = _predict_direct_game_value(conn, "total", direct_features)
@@ -331,6 +357,27 @@ def _coerce_float(value: object) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _moneyline_implied_probability(value: float | None) -> float | None:
+    if value is None:
+        return None
+    if value > 0:
+        return 100.0 / (value + 100.0)
+    if value < 0:
+        return (-value) / ((-value) + 100.0)
+    return None
+
+
+def _vig_free_home_probability(home_moneyline: float | None, away_moneyline: float | None) -> float | None:
+    home_prob = _moneyline_implied_probability(home_moneyline)
+    away_prob = _moneyline_implied_probability(away_moneyline)
+    if home_prob is None or away_prob is None:
+        return None
+    denom = home_prob + away_prob
+    if denom <= 0:
+        return None
+    return home_prob / denom
 
 
 def _insufficient_history_payload(game: Mapping[str, Any], home_history_count: int, away_history_count: int) -> dict:
@@ -504,8 +551,14 @@ def _direct_game_features(
     *,
     home_team_id: int,
     away_team_id: int,
+    game_id: int,
+    game_date: str | None,
     rest_days_home: int,
     rest_days_away: int,
+    spread_home: float | None,
+    game_total: float | None,
+    home_moneyline: float | None,
+    away_moneyline: float | None,
 ) -> list[float]:
     home_recent_points = cache.weighted_recent(home_team_id, "points")
     away_recent_points = cache.weighted_recent(away_team_id, "points")
@@ -533,6 +586,12 @@ def _direct_game_features(
         rest_days_away=rest_days_away,
         home_game_count=cache.team_count(home_team_id),
         away_game_count=cache.team_count(away_team_id),
+        home_recent_possessions=cache.weighted_recent(home_team_id, "possessions"),
+        away_recent_possessions=cache.weighted_recent(away_team_id, "possessions"),
+        spread_home=spread_home,
+        game_total=game_total,
+        home_moneyline=home_moneyline,
+        away_moneyline=away_moneyline,
     )
 
 
@@ -553,7 +612,22 @@ def _assemble_direct_game_features(
     rest_days_away: int,
     home_game_count: int | float,
     away_game_count: int | float,
+    home_recent_possessions: float,
+    away_recent_possessions: float,
+    spread_home: float | None,
+    game_total: float | None,
+    home_moneyline: float | None,
+    away_moneyline: float | None,
 ) -> list[float]:
+    recent_scoring_delta = float(home_recent_points) - float(away_recent_points)
+    recent_allowed_delta = float(home_recent_allowed) - float(away_recent_allowed)
+    season_scoring_delta = float(home_average_points) - float(away_average_points)
+    season_allowed_delta = float(home_average_allowed) - float(away_average_allowed)
+    recent_possessions_delta = float(home_recent_possessions) - float(away_recent_possessions)
+    season_possessions_delta = float(home_average_possessions) - float(away_average_possessions)
+    home_implied_prob = _moneyline_implied_probability(home_moneyline) or 0.5
+    away_implied_prob = _moneyline_implied_probability(away_moneyline) or 0.5
+    vig_free_home_prob = _vig_free_home_probability(home_moneyline, away_moneyline) or 0.5
     return [
         home_recent_points,
         away_recent_points,
@@ -568,8 +642,26 @@ def _assemble_direct_game_features(
         pace_factor,
         float(rest_days_home),
         float(rest_days_away),
+        float(rest_days_home) - float(rest_days_away),
         float(home_game_count),
         float(away_game_count),
+        recent_scoring_delta,
+        recent_allowed_delta,
+        season_scoring_delta,
+        season_allowed_delta,
+        recent_possessions_delta,
+        season_possessions_delta,
+        float(home_recent_points) - float(home_average_points),
+        float(away_recent_points) - float(away_average_points),
+        float(home_recent_allowed) - float(home_average_allowed),
+        float(away_recent_allowed) - float(away_average_allowed),
+        float(home_recent_possessions) - float(home_average_possessions),
+        float(away_recent_possessions) - float(away_average_possessions),
+        float(spread_home or 0.0),
+        float(game_total or 0.0),
+        home_implied_prob,
+        away_implied_prob,
+        vig_free_home_prob,
     ]
 
 
@@ -752,6 +844,12 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                 rest_days_away=int(row["rest_days_away"] or 2),
                 home_game_count=home_context["games"],
                 away_game_count=away_context["games"],
+                home_recent_possessions=home_context["recent_possessions"],
+                away_recent_possessions=away_context["recent_possessions"],
+                spread_home=_coerce_float(row["spread_home"]),
+                game_total=_coerce_float(row["game_total"]),
+                home_moneyline=None,
+                away_moneyline=None,
             )
             adjusted_margin = baseline_margin
             adjusted_total = baseline_total
@@ -918,7 +1016,7 @@ def _train_direct_game_model(conn: sqlite3.Connection, target: str) -> _DirectGa
     cached = _DIRECT_MODEL_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    rows = _direct_game_training_rows(conn, target)
+    rows, _info = load_game_training_rows(conn, target=target, force_rebuild=False)
     min_rows = GAME_TOTAL_DECISION_MODEL_MIN_ROWS if target in {"total_market", "ats_market"} else GAME_DIRECT_MODEL_MIN_ROWS
     if len(rows) < min_rows:
         return None
@@ -931,133 +1029,8 @@ def _train_direct_game_model(conn: sqlite3.Connection, target: str) -> _DirectGa
 def _direct_model_signature(conn: sqlite3.Connection) -> tuple[str, int, int, str]:
     db_row = conn.execute("PRAGMA database_list").fetchone()
     db_path = str(db_row["file"] if isinstance(db_row, sqlite3.Row) else db_row[2])
-    row = conn.execute(
-        """
-        SELECT COUNT(*) AS count, COALESCE(MAX(id), 0) AS max_id
-        FROM games
-        WHERE status = 'final'
-        """
-    ).fetchone()
-    return db_path, int(row["count"] or 0), int(row["max_id"] or 0), _training_start_date()
-
-
-def _direct_game_training_rows(conn: sqlite3.Connection, target: str) -> list[tuple[list[float], float]]:
-    rows = conn.execute(
-        """
-        SELECT
-            g.id,
-            g.game_date,
-            g.start_time,
-            g.home_team_id,
-            g.away_team_id,
-            g.rest_days_home,
-            g.rest_days_away,
-            g.game_total,
-            g.spread_home,
-            home_result.points AS home_points,
-            away_result.points AS away_points,
-            home_result.possessions AS home_possessions,
-            away_result.possessions AS away_possessions
-        FROM games g
-        JOIN team_game_results home_result ON home_result.game_id = g.id AND home_result.team_id = g.home_team_id
-        JOIN team_game_results away_result ON away_result.game_id = g.id AND away_result.team_id = g.away_team_id
-        WHERE g.status = 'final'
-          AND home_result.points IS NOT NULL
-          AND away_result.points IS NOT NULL
-        ORDER BY g.game_date ASC, g.start_time ASC, g.id ASC
-        """
-    ).fetchall()
-    history: dict[int, dict[str, Any]] = {}
-    training_rows: list[tuple[list[float], float]] = []
-    training_start = _training_start_date()
-    for row in rows:
-        use_target_row = not _before_training_start(str(row["game_date"]), training_start)
-        home_team_id = int(row["home_team_id"])
-        away_team_id = int(row["away_team_id"])
-        home_context = _team_history_context(history.get(home_team_id))
-        away_context = _team_history_context(history.get(away_team_id))
-        if home_context["games"] >= 3 and away_context["games"] >= 3:
-            pace_factor = _clamp(
-                ((home_context["avg_possessions"] + away_context["avg_possessions"]) / 2.0) / _historical_league_possessions(history),
-                0.94,
-                1.06,
-            )
-            features = _assemble_direct_game_features(
-                home_recent_points=home_context["recent_points"],
-                away_recent_points=away_context["recent_points"],
-                home_recent_allowed=home_context["recent_allowed"],
-                away_recent_allowed=away_context["recent_allowed"],
-                home_average_points=home_context["avg_points"],
-                away_average_points=away_context["avg_points"],
-                home_average_allowed=home_context["avg_allowed"],
-                away_average_allowed=away_context["avg_allowed"],
-                home_average_possessions=home_context["avg_possessions"],
-                away_average_possessions=away_context["avg_possessions"],
-                pace_factor=pace_factor,
-                rest_days_home=int(row["rest_days_home"] or 2),
-                rest_days_away=int(row["rest_days_away"] or 2),
-                home_game_count=home_context["games"],
-                away_game_count=away_context["games"],
-            )
-            if not use_target_row:
-                pass
-            elif target == "margin":
-                training_rows.append((features, float(row["home_points"]) - float(row["away_points"])))
-            elif target == "total":
-                training_rows.append((features, float(row["home_points"]) + float(row["away_points"])))
-            elif target == "total_market":
-                market_total = _coerce_float(row["game_total"])
-                if market_total is not None and market_total > 0:
-                    baseline_home = _baseline_points_from_context(
-                        team_context=home_context,
-                        opponent_context=away_context,
-                        is_home=True,
-                        rest_days=int(row["rest_days_home"] or 2),
-                    )
-                    baseline_away = _baseline_points_from_context(
-                        team_context=away_context,
-                        opponent_context=home_context,
-                        is_home=False,
-                        rest_days=int(row["rest_days_away"] or 2),
-                    )
-                    baseline_total = baseline_home + baseline_away
-                    actual_total = float(row["home_points"]) + float(row["away_points"])
-                    training_rows.append(([*features, baseline_total - market_total, market_total], actual_total - market_total))
-            else:
-                spread_home = _coerce_float(row["spread_home"])
-                if spread_home is not None:
-                    baseline_home = _baseline_points_from_context(
-                        team_context=home_context,
-                        opponent_context=away_context,
-                        is_home=True,
-                        rest_days=int(row["rest_days_home"] or 2),
-                    )
-                    baseline_away = _baseline_points_from_context(
-                        team_context=away_context,
-                        opponent_context=home_context,
-                        is_home=False,
-                        rest_days=int(row["rest_days_away"] or 2),
-                    )
-                    baseline_margin = baseline_home - baseline_away
-                    actual_margin = float(row["home_points"]) - float(row["away_points"])
-                    training_rows.append(([*features, baseline_margin + spread_home, spread_home], actual_margin + spread_home))
-        _append_team_history(
-            history,
-            team_id=home_team_id,
-            game_date=str(row["game_date"]),
-            points=float(row["home_points"]),
-            opponent_points=float(row["away_points"]),
-            possessions=float(row["home_possessions"] or row["away_possessions"] or 78.0),
-        )
-        _append_team_history(
-            history,
-            team_id=away_team_id,
-            game_date=str(row["game_date"]),
-            points=float(row["away_points"]),
-            opponent_points=float(row["home_points"]),
-            possessions=float(row["away_possessions"] or row["home_possessions"] or 78.0),
-        )
-    return training_rows
+    signature = game_training_db_signature(conn)
+    return db_path, len(signature), int(signature[:8], 16), signature
 
 
 def _fit_direct_game_model(

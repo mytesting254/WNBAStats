@@ -719,6 +719,95 @@ def init_db() -> None:
             ON cache_events(created_at DESC, id DESC)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mutation_audit_log (
+                id INTEGER PRIMARY KEY,
+                action TEXT NOT NULL,
+                status TEXT NOT NULL,
+                request_id TEXT,
+                method TEXT,
+                path TEXT,
+                actor_type TEXT NOT NULL,
+                actor_id TEXT,
+                actor_name TEXT,
+                client_ip TEXT,
+                details_json TEXT,
+                target_json TEXT,
+                result_json TEXT,
+                error_text TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mutation_audit_created_at
+            ON mutation_audit_log(created_at DESC, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_mutation_audit_action
+            ON mutation_audit_log(action, created_at DESC, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_runs (
+                id INTEGER PRIMARY KEY,
+                job_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trigger_action TEXT,
+                request_id TEXT,
+                source_path TEXT,
+                actor_type TEXT NOT NULL,
+                actor_id TEXT,
+                actor_name TEXT,
+                target_json TEXT,
+                metadata_json TEXT,
+                result_json TEXT,
+                last_error TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                duration_ms REAL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_job_runs_started_at
+            ON job_runs(started_at DESC, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_job_runs_type_status
+            ON job_runs(job_type, status, started_at DESC, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS job_run_events (
+                id INTEGER PRIMARY KEY,
+                job_run_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                level TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                message TEXT NOT NULL,
+                details_json TEXT,
+                FOREIGN KEY (job_run_id) REFERENCES job_runs(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_job_run_events_job
+            ON job_run_events(job_run_id, created_at ASC, id ASC)
+            """
+        )
 
 
 SCHEMA = """
@@ -1037,6 +1126,56 @@ CREATE TABLE IF NOT EXISTS prop_sync_jobs (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS mutation_audit_log (
+    id INTEGER PRIMARY KEY,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    request_id TEXT,
+    method TEXT,
+    path TEXT,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT,
+    actor_name TEXT,
+    client_ip TEXT,
+    details_json TEXT,
+    target_json TEXT,
+    result_json TEXT,
+    error_text TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_runs (
+    id INTEGER PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    trigger_action TEXT,
+    request_id TEXT,
+    source_path TEXT,
+    actor_type TEXT NOT NULL,
+    actor_id TEXT,
+    actor_name TEXT,
+    target_json TEXT,
+    metadata_json TEXT,
+    result_json TEXT,
+    last_error TEXT,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    duration_ms REAL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_run_events (
+    id INTEGER PRIMARY KEY,
+    job_run_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    level TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    message TEXT NOT NULL,
+    details_json TEXT,
+    FOREIGN KEY (job_run_id) REFERENCES job_runs(id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_player_stats_player_game ON player_game_stats(player_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_team_results_team_game ON team_game_results(team_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_player_game_availability_game ON player_game_availability(game_id, player_id);
@@ -1052,4 +1191,9 @@ CREATE INDEX IF NOT EXISTS idx_gem_snapshot_items_prop_line ON gem_snapshot_item
 CREATE INDEX IF NOT EXISTS idx_watchlist_snapshots_date ON watchlist_snapshots(snapshot_date);
 CREATE INDEX IF NOT EXISTS idx_watchlist_snapshot_items_snapshot ON watchlist_snapshot_items(snapshot_id);
 CREATE INDEX IF NOT EXISTS idx_watchlist_snapshot_items_prop_line ON watchlist_snapshot_items(prop_line_id);
+CREATE INDEX IF NOT EXISTS idx_mutation_audit_created_at ON mutation_audit_log(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_mutation_audit_action ON mutation_audit_log(action, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_job_runs_started_at ON job_runs(started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_job_runs_type_status ON job_runs(job_type, status, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_job_run_events_job ON job_run_events(job_run_id, created_at ASC, id ASC);
 """

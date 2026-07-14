@@ -7,15 +7,19 @@ import os
 from pathlib import Path
 from typing import Any
 
-
-ROOT = Path(__file__).resolve().parents[1]
+from backend.app.paths import get_db_path
 
 
 def _set_default_env(args: argparse.Namespace) -> None:
     os.environ.setdefault("USE_TURSO", "0")
     os.environ.setdefault("USE_LOCAL_DB", "true")
-    os.environ.setdefault("WNBA_DB_PATH", str(args.db_path or ROOT / "data" / "wnba.sqlite"))
-    os.environ.setdefault("WNBA_CACHE_DIR", str(args.cache_dir or Path(os.environ["WNBA_DB_PATH"]).resolve().parent / "cache"))
+    if args.db_path:
+        os.environ["WNBA_DB_PATH"] = str(Path(args.db_path).resolve())
+    os.environ.setdefault("WNBA_DB_PATH", str(get_db_path()))
+    if args.cache_dir:
+        os.environ["WNBA_CACHE_DIR"] = str(Path(args.cache_dir).resolve())
+    else:
+        os.environ.setdefault("WNBA_CACHE_DIR", str(Path(os.environ["WNBA_DB_PATH"]).resolve().parent / "cache"))
     if args.training_start_date:
         os.environ["WNBA_TRAINING_START_DATE"] = args.training_start_date
     if args.max_workers is not None:
@@ -27,9 +31,9 @@ def _json_default(value: Any) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run WNBA model training against a local SQLite database.")
-    parser.add_argument("--db-path", type=Path, help="SQLite DB path. Defaults to data/wnba.sqlite.")
-    parser.add_argument("--cache-dir", type=Path, help="Model/cache output directory. Defaults beside the DB.")
+    parser = argparse.ArgumentParser(description="Run WNBA model training against the active SQLite database.")
+    parser.add_argument("--db-path", type=Path, help="SQLite DB path. Defaults to the active WNBA_DB_PATH/runtime DB.")
+    parser.add_argument("--cache-dir", type=Path, help="Model/cache output directory. Defaults beside the active DB.")
     parser.add_argument("--training-start-date", help="Optional WNBA_TRAINING_START_DATE override in YYYY-MM-DD format.")
     parser.add_argument("--max-workers", type=int, help="Optional WNBA_TRAINING_MAX_WORKERS override.")
     parser.add_argument("--skip-prewarm", action="store_true", help="Only save Model Lab metrics; do not prewarm projection model caches.")

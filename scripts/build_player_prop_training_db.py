@@ -5,14 +5,14 @@ import os
 from pathlib import Path
 
 from backend.app.db import connect, init_db
-from backend.app.minutes_training_db import ensure_minutes_training_db
 from backend.app.paths import get_db_path, get_training_db_path
+from backend.app.player_prop_training_db import ensure_player_prop_training_db
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build or refresh the curated minutes training SQLite database.")
+    parser = argparse.ArgumentParser(description="Build or refresh the curated player-prop training dataset.")
     parser.add_argument("--db-path", type=Path, help="Source app SQLite DB path. Defaults to the active WNBA_DB_PATH/runtime DB.")
-    parser.add_argument("--training-db-path", type=Path, help="Target minutes training DB path.")
+    parser.add_argument("--training-db-path", type=Path, help="Target shared training DB path.")
     parser.add_argument("--force", action="store_true", help="Force a full rebuild even if metadata matches.")
     args = parser.parse_args()
 
@@ -23,7 +23,7 @@ def main() -> None:
 
     init_db()
     with connect() as conn:
-        info = ensure_minutes_training_db(conn, force=bool(args.force))
+        info = ensure_player_prop_training_db(conn, force=bool(args.force))
 
     print(
         {

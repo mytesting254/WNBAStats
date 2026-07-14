@@ -4,12 +4,14 @@ import asyncio
 from collections import Counter
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
 import sqlite3
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from typing import Annotated
@@ -189,6 +191,315 @@ class LoginRequest(BaseModel):
 
 class DeleteStalePayloadRequest(BaseModel):
     acknowledgement: str
+
+
+LOGGER = logging.getLogger("wnbastats.audit")
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _truncate_text(value: Any, limit: int = 400) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...<{len(text) - limit} more chars>"
+
+
+def _normalize_audit_payload(value: Any, *, depth: int = 0) -> Any:
+    if depth >= 4:
+        return _truncate_text(value, 200)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        return _truncate_text(value, 500)
+    if isinstance(value, dict):
+        items = list(value.items())
+        payload = {
+            str(key): _normalize_audit_payload(item, depth=depth + 1)
+            for key, item in items[:40]
+        }
+        if len(items) > 40:
+            payload["_truncated_keys"] = len(items) - 40
+        return payload
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+        payload = [_normalize_audit_payload(item, depth=depth + 1) for item in items[:25]]
+        if len(items) > 25:
+            payload.append({"_truncated_items": len(items) - 25})
+        return payload
+    return _truncate_text(repr(value), 300)
+
+
+def _audit_log(level: int, event_type: str, **fields: Any) -> None:
+    payload = {
+        "ts": _utc_now_iso(),
+        "event": event_type,
+        **{key: _normalize_audit_payload(value) for key, value in fields.items() if value is not None},
+    }
+    LOGGER.log(level, json.dumps(payload, ensure_ascii=True, separators=(",", ":")))
+
+
+def _request_id(request: Request | None) -> str:
+    if request is None:
+        return uuid.uuid4().hex
+    existing_state = getattr(request.state, "audit_request_id", None)
+    if existing_state:
+        return str(existing_state)
+    existing = (request.headers.get("x-request-id") or "").strip()
+    request_id = existing or uuid.uuid4().hex
+    request.state.audit_request_id = request_id
+    return request_id
+
+
+def _request_client_ip(request: Request | None) -> str | None:
+    if request is None:
+        return None
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded_for:
+        return forwarded_for
+    return request.client.host if request.client is not None else None
+
+
+def _audit_actor(request: Request | None) -> dict[str, Any]:
+    if request is None:
+        return {"actor_type": "system", "actor_id": None, "actor_name": "system"}
+    user = _current_session_user(request)
+    if user is not None:
+        return {"actor_type": "session", "actor_id": str(user.user_id), "actor_name": user.username}
+    if request.headers.get("x-api-key") or request.headers.get("authorization"):
+        return {"actor_type": "api_key", "actor_id": None, "actor_name": "api_key"}
+    return {"actor_type": "anonymous", "actor_id": None, "actor_name": "anonymous"}
+
+
+def _create_mutation_audit_record(
+    request: Request,
+    action: str,
+    *,
+    details: Any = None,
+    target: Any = None,
+) -> int | None:
+    actor = _audit_actor(request)
+    now = _utc_now_iso()
+    try:
+        with connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO mutation_audit_log (
+                    action, status, request_id, method, path, actor_type, actor_id, actor_name,
+                    client_ip, details_json, target_json, created_at, updated_at
+                ) VALUES (?, 'started', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    action,
+                    _request_id(request),
+                    request.method.upper(),
+                    request.url.path,
+                    actor["actor_type"],
+                    actor["actor_id"],
+                    actor["actor_name"],
+                    _request_client_ip(request),
+                    _json_text(_normalize_audit_payload(details)) if details is not None else None,
+                    _json_text(_normalize_audit_payload(target)) if target is not None else None,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            audit_id = int(cursor.lastrowid) if cursor.lastrowid is not None else None
+    except Exception as exc:
+        _audit_log(logging.ERROR, "audit.mutation.persist_failed", action=action, error=str(exc))
+        return None
+    _audit_log(logging.INFO, "audit.mutation.started", action=action, audit_id=audit_id, path=request.url.path, actor=actor)
+    return audit_id
+
+
+def _finish_mutation_audit_record(
+    audit_id: int | None,
+    *,
+    status: str,
+    result: Any = None,
+    error_text: str | None = None,
+) -> None:
+    if not audit_id:
+        return
+    now = _utc_now_iso()
+    try:
+        with connect() as conn:
+            conn.execute(
+                """
+                UPDATE mutation_audit_log
+                SET status = ?, result_json = ?, error_text = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    _json_text(_normalize_audit_payload(result)) if result is not None else None,
+                    _truncate_text(error_text, 1200),
+                    now,
+                    int(audit_id),
+                ),
+            )
+            conn.commit()
+    except Exception as exc:
+        _audit_log(logging.ERROR, "audit.mutation.finish_failed", audit_id=audit_id, error=str(exc))
+
+
+def _run_audited_mutation(
+    request: Request,
+    action: str,
+    func: Callable[[], Any],
+    *,
+    details: Any = None,
+    target: Any = None,
+) -> Any:
+    audit_id = _create_mutation_audit_record(request, action, details=details, target=target)
+    try:
+        result = func()
+    except HTTPException as exc:
+        _finish_mutation_audit_record(audit_id, status=f"http_{exc.status_code}", error_text=str(exc.detail))
+        _audit_log(logging.WARNING, "audit.mutation.http_error", action=action, audit_id=audit_id, status_code=exc.status_code, error=str(exc.detail))
+        raise
+    except Exception as exc:
+        _finish_mutation_audit_record(audit_id, status="error", error_text=str(exc))
+        _audit_log(logging.ERROR, "audit.mutation.error", action=action, audit_id=audit_id, error=str(exc))
+        raise
+    _finish_mutation_audit_record(audit_id, status="completed", result=result)
+    _audit_log(logging.INFO, "audit.mutation.completed", action=action, audit_id=audit_id, result=result)
+    return result
+
+
+def _create_job_run(
+    job_type: str,
+    *,
+    request: Request | None = None,
+    trigger_action: str | None = None,
+    source_path: str | None = None,
+    metadata: Any = None,
+    target: Any = None,
+) -> int | None:
+    actor = _audit_actor(request)
+    started_at = _utc_now_iso()
+    try:
+        with connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO job_runs (
+                    job_type, status, trigger_action, request_id, source_path, actor_type, actor_id,
+                    actor_name, target_json, metadata_json, started_at, updated_at
+                ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_type,
+                    trigger_action,
+                    _request_id(request),
+                    source_path,
+                    actor["actor_type"],
+                    actor["actor_id"],
+                    actor["actor_name"],
+                    _json_text(_normalize_audit_payload(target)) if target is not None else None,
+                    _json_text(_normalize_audit_payload(metadata)) if metadata is not None else None,
+                    started_at,
+                    started_at,
+                ),
+            )
+            conn.commit()
+            job_run_id = int(cursor.lastrowid) if cursor.lastrowid is not None else None
+    except Exception as exc:
+        _audit_log(logging.ERROR, "audit.job.persist_failed", job_type=job_type, error=str(exc))
+        return None
+    _audit_log(logging.INFO, "audit.job.started", job_type=job_type, job_run_id=job_run_id, actor=actor, target=target)
+    return job_run_id
+
+
+def _append_job_run_event(
+    job_run_id: int | None,
+    event_type: str,
+    message: str,
+    *,
+    level: str = "info",
+    details: Any = None,
+) -> None:
+    if not job_run_id:
+        return
+    try:
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO job_run_events (job_run_id, created_at, level, event_type, message, details_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(job_run_id),
+                    _utc_now_iso(),
+                    level,
+                    event_type,
+                    message,
+                    _json_text(_normalize_audit_payload(details)) if details is not None else None,
+                ),
+            )
+            conn.commit()
+    except Exception as exc:
+        _audit_log(logging.ERROR, "audit.job.event_failed", job_run_id=job_run_id, error=str(exc), event_type=event_type)
+        return
+    log_level = logging.ERROR if level == "error" else logging.WARNING if level == "warning" else logging.INFO
+    _audit_log(log_level, event_type, job_run_id=job_run_id, message=message, details=details)
+
+
+def _finish_job_run(
+    job_run_id: int | None,
+    *,
+    status: str,
+    result: Any = None,
+    error_text: str | None = None,
+) -> None:
+    if not job_run_id:
+        return
+    finished_at = _utc_now_iso()
+    try:
+        with connect() as conn:
+            row = conn.execute("SELECT started_at FROM job_runs WHERE id = ?", (int(job_run_id),)).fetchone()
+            duration_ms = None
+            if row and row["started_at"]:
+                try:
+                    started = datetime.fromisoformat(str(row["started_at"]).replace("Z", "+00:00"))
+                    finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+                    duration_ms = round((finished - started).total_seconds() * 1000.0, 2)
+                except ValueError:
+                    duration_ms = None
+            conn.execute(
+                """
+                UPDATE job_runs
+                SET status = ?, result_json = ?, last_error = ?, finished_at = ?, duration_ms = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    _json_text(_normalize_audit_payload(result)) if result is not None else None,
+                    _truncate_text(error_text, 1200),
+                    finished_at,
+                    duration_ms,
+                    finished_at,
+                    int(job_run_id),
+                ),
+            )
+            conn.commit()
+    except Exception as exc:
+        _audit_log(logging.ERROR, "audit.job.finish_failed", job_run_id=job_run_id, error=str(exc))
+        return
+    _audit_log(
+        logging.ERROR if status == "failed" else logging.INFO,
+        "audit.job.completed",
+        job_run_id=job_run_id,
+        status=status,
+        error=error_text,
+        result=result,
+    )
 
 
 def _is_sqlite_locked_error(exc: sqlite3.OperationalError) -> bool:
@@ -501,7 +812,7 @@ def _mutate_model_training_state(
         }
 
 
-def _queue_model_training_job() -> dict[str, Any]:
+def _queue_model_training_job(request: Request | None = None) -> dict[str, Any]:
     with _MODEL_TRAIN_LOCK:
         if _MODEL_TRAIN_STATE.get("running"):
             return {
@@ -511,6 +822,13 @@ def _queue_model_training_job() -> dict[str, Any]:
             }
 
     started_at = datetime.now(timezone.utc).isoformat()
+    job_run_id = _create_job_run(
+        "model_training",
+        request=request,
+        trigger_action="api.models.train" if request is not None else "internal.model_training",
+        source_path=request.url.path if request is not None else "/api/models/train",
+        metadata={"started_at": started_at},
+    )
     _mutate_model_training_state(
         running=True,
         started_at=started_at,
@@ -520,6 +838,7 @@ def _queue_model_training_job() -> dict[str, Any]:
         status="queued",
         message="Model training queued.",
     )
+    _append_job_run_event(job_run_id, "job.queued", "Model training queued.")
 
     def _run() -> None:
         _mutate_model_training_state(
@@ -531,6 +850,7 @@ def _queue_model_training_job() -> dict[str, Any]:
             status="running",
             message="Model training is running.",
         )
+        _append_job_run_event(job_run_id, "job.running", "Model training started.")
         try:
             with connect() as conn:
                 result = run_walk_forward_training(conn)
@@ -546,6 +866,8 @@ def _queue_model_training_job() -> dict[str, Any]:
                 status=str(result.get("status") or "completed"),
                 message="Model training finished.",
             )
+            _append_job_run_event(job_run_id, "job.publish", "Model training finished and payloads were published.", details=result)
+            _finish_job_run(job_run_id, status=str(result.get("status") or "completed"), result=result)
         except Exception as exc:
             _mutate_model_training_state(
                 running=False,
@@ -556,6 +878,8 @@ def _queue_model_training_job() -> dict[str, Any]:
                 status="error",
                 message=f"Model training failed: {exc}",
             )
+            _append_job_run_event(job_run_id, "job.failed", f"Model training failed: {exc}", level="error")
+            _finish_job_run(job_run_id, status="failed", error_text=str(exc))
 
     threading.Thread(target=_run, name="model-training", daemon=True).start()
     return {
@@ -1897,7 +2221,15 @@ def _protect_force_refresh(
 
 
 @app.post("/api/special/stocks/generate", dependencies=[Depends(_protect_mutation)])
-def generate_special_stocks() -> dict[str, int]:
+def generate_special_stocks(request: Request) -> dict[str, int]:
+    return _run_audited_mutation(
+        request,
+        "special.stocks.generate",
+        lambda: _generate_special_stocks(),
+    )
+
+
+def _generate_special_stocks() -> dict[str, int]:
     with connect() as conn:
         return {"generated": snapshot_stocks(conn)}
 
@@ -1993,11 +2325,19 @@ async def cache_events(
 
 
 @app.post("/api/cache/stale-payloads/delete", dependencies=[Depends(_protect_mutation)])
-def delete_stale_payloads(payload: DeleteStalePayloadRequest) -> dict[str, Any]:
+def delete_stale_payloads(request: Request, payload: DeleteStalePayloadRequest) -> dict[str, Any]:
+    return _run_audited_mutation(
+        request,
+        "cache.stale_payloads.delete",
+        lambda: _delete_stale_payloads_checked(payload),
+        details={"acknowledgement": payload.acknowledgement},
+    )
+
+
+def _delete_stale_payloads_checked(payload: DeleteStalePayloadRequest) -> dict[str, Any]:
     if payload.acknowledgement.strip() != DELETE_STALE_PAYLOAD_ACK:
         raise HTTPException(status_code=400, detail=f"Type {DELETE_STALE_PAYLOAD_ACK!r} to confirm stale payload deletion.")
-    result = _delete_stale_payloads()
-    return result
+    return _delete_stale_payloads()
 
 
 @app.get("/api/db/lock", dependencies=[Depends(_protect_mutation)])
@@ -2006,8 +2346,8 @@ def audit_db_lock() -> dict[str, Any]:
 
 
 @app.post("/api/db/unlock", dependencies=[Depends(_protect_mutation)])
-def recover_db_lock() -> dict[str, Any]:
-    return _recover_sqlite_lock()
+def recover_db_lock(request: Request) -> dict[str, Any]:
+    return _run_audited_mutation(request, "db.unlock", _recover_sqlite_lock)
 
 
 @app.post("/api/auth/login")
@@ -2052,6 +2392,92 @@ def auth_logout(request: Request, response: Response) -> dict[str, Any]:
 @app.get("/api/admin/provider-status", dependencies=[Depends(_protect_mutation)])
 def admin_provider_status() -> dict[str, Any]:
     return {"odds_api": {"configured": bool(os.getenv("ODDS_API_KEY", "").strip())}}
+
+
+@app.get("/api/admin/audit-log", dependencies=[Depends(_protect_mutation)])
+def admin_audit_log(limit: int = Query(default=100, ge=1, le=500), action: str | None = None) -> dict[str, Any]:
+    query = """
+        SELECT id, action, status, request_id, method, path, actor_type, actor_id, actor_name,
+               client_ip, details_json, target_json, result_json, error_text, created_at, updated_at
+        FROM mutation_audit_log
+    """
+    params: list[Any] = []
+    if action:
+        query += " WHERE action = ?"
+        params.append(action.strip())
+    query += " ORDER BY created_at DESC, id DESC LIMIT ?"
+    params.append(int(limit))
+    with connect() as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        for key in ("details_json", "target_json", "result_json"):
+            try:
+                item[key.removesuffix("_json")] = json.loads(str(item.pop(key))) if item.get(key) else None
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item[key.removesuffix("_json")] = None
+        items.append(item)
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/admin/job-runs", dependencies=[Depends(_protect_mutation)])
+def admin_job_runs(
+    limit: int = Query(default=100, ge=1, le=500),
+    job_type: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    query = """
+        SELECT id, job_type, status, trigger_action, request_id, source_path, actor_type, actor_id,
+               actor_name, target_json, metadata_json, result_json, last_error, started_at,
+               finished_at, duration_ms, updated_at
+        FROM job_runs
+        WHERE 1 = 1
+    """
+    params: list[Any] = []
+    if job_type:
+        query += " AND job_type = ?"
+        params.append(job_type.strip())
+    if status:
+        query += " AND status = ?"
+        params.append(status.strip())
+    query += " ORDER BY started_at DESC, id DESC LIMIT ?"
+    params.append(int(limit))
+    with connect() as conn:
+        rows = conn.execute(query, tuple(params)).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        for key in ("target_json", "metadata_json", "result_json"):
+            try:
+                item[key.removesuffix("_json")] = json.loads(str(item.pop(key))) if item.get(key) else None
+            except (TypeError, ValueError, json.JSONDecodeError):
+                item[key.removesuffix("_json")] = None
+        items.append(item)
+    return {"count": len(items), "items": items}
+
+
+@app.get("/api/admin/job-runs/{job_run_id}/events", dependencies=[Depends(_protect_mutation)])
+def admin_job_run_events(job_run_id: int) -> dict[str, Any]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, job_run_id, created_at, level, event_type, message, details_json
+            FROM job_run_events
+            WHERE job_run_id = ?
+            ORDER BY created_at ASC, id ASC
+            """,
+            (int(job_run_id),),
+        ).fetchall()
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["details"] = json.loads(str(item.pop("details_json"))) if item.get("details_json") else None
+        except (TypeError, ValueError, json.JSONDecodeError):
+            item["details"] = None
+        items.append(item)
+    return {"count": len(items), "items": items}
 
 
 @app.get("/api/admin/team-conflicts", dependencies=[Depends(_protect_mutation)])
@@ -3532,13 +3958,13 @@ def _maybe_repair_current_slate_after_settlement(conn) -> dict[str, Any] | None:
 
 
 @app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
-def recalculate(response: Response) -> dict[str, int]:
+def recalculate(request: Request, response: Response) -> dict[str, int]:
     # Keep the legacy route for backward compatibility, but make stale clients visible.
     response.headers["Deprecation"] = "true"
     response.headers["Sunset"] = "Wed, 31 Dec 2026 23:59:59 GMT"
     response.headers["Link"] = '</api/props/repair-current-slate>; rel="successor-version"'
     response.headers["X-Legacy-Endpoint"] = "/api/recalculate"
-    return _queue_legacy_recalculate_job()
+    return _run_audited_mutation(request, "props.recalculate", lambda: _queue_legacy_recalculate_job(request))
 
 
 def _run_legacy_recalculate_job() -> dict[str, Any]:
@@ -3613,7 +4039,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
     }
 
 
-def _queue_legacy_recalculate_job() -> dict[str, Any]:
+def _queue_legacy_recalculate_job(request: Request | None = None) -> dict[str, Any]:
     with _PROP_SYNC_LOCK:
         if _PROP_SYNC_STATE["running"]:
             return {
@@ -3623,9 +4049,18 @@ def _queue_legacy_recalculate_job() -> dict[str, Any]:
                 "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
             }
     started_at = _begin_prop_sync_job("legacy_recalculate")
+    job_run_id = _create_job_run(
+        "legacy_recalculate",
+        request=request,
+        trigger_action="api.recalculate" if request is not None else "internal.legacy_recalculate",
+        source_path=request.url.path if request is not None else "/api/recalculate",
+        metadata={"started_at": started_at},
+    )
+    _append_job_run_event(job_run_id, "job.queued", "Legacy recalculate queued.")
 
     def _run() -> None:
         try:
+            _append_job_run_event(job_run_id, "job.running", "Legacy recalculate started.")
             result = _run_legacy_recalculate_job()
             _mutate_prop_sync_state(
                 running=False,
@@ -3635,6 +4070,7 @@ def _queue_legacy_recalculate_job() -> dict[str, Any]:
                 status="completed",
                 message="Legacy recalculate finished.",
             )
+            _finish_job_run(job_run_id, status="completed", result=result)
         except Exception as exc:
             _mutate_prop_sync_state(
                 running=False,
@@ -3643,6 +4079,8 @@ def _queue_legacy_recalculate_job() -> dict[str, Any]:
                 status="failed",
                 message=str(exc),
             )
+            _append_job_run_event(job_run_id, "job.failed", f"Legacy recalculate failed: {exc}", level="error")
+            _finish_job_run(job_run_id, status="failed", error_text=str(exc))
 
     threading.Thread(target=_run, daemon=True).start()
     return {
@@ -3712,7 +4150,11 @@ def _run_current_slate_repair_job(target_game_ids: list[int] | None = None) -> d
     return result
 
 
-def _queue_current_slate_repair_job(target_game_ids: list[int] | None = None) -> dict[str, Any]:
+def _queue_current_slate_repair_job(
+    target_game_ids: list[int] | None = None,
+    *,
+    request: Request | None = None,
+) -> dict[str, Any]:
     with _PROP_SYNC_LOCK:
         if _PROP_SYNC_STATE["running"]:
             return {
@@ -3723,9 +4165,19 @@ def _queue_current_slate_repair_job(target_game_ids: list[int] | None = None) ->
             }
     normalized_target_game_ids = sorted({int(game_id) for game_id in (target_game_ids or []) if int(game_id) > 0})
     started_at = _begin_prop_sync_job("injury_update" if normalized_target_game_ids else "current_slate")
+    job_run_id = _create_job_run(
+        "current_slate_repair",
+        request=request,
+        trigger_action="api.props.repair_current_slate" if request is not None else "internal.current_slate_repair",
+        source_path=request.url.path if request is not None else "/api/props/repair-current-slate",
+        metadata={"started_at": started_at, "scope": "injury_update" if normalized_target_game_ids else "current_slate"},
+        target={"game_ids": normalized_target_game_ids},
+    )
+    _append_job_run_event(job_run_id, "job.queued", "Current slate repair queued.", details={"target_game_ids": normalized_target_game_ids})
 
     def _run() -> None:
         try:
+            _append_job_run_event(job_run_id, "job.running", "Current slate repair started.", details={"target_game_ids": normalized_target_game_ids})
             result = (
                 _run_current_slate_repair_job(normalized_target_game_ids)
                 if normalized_target_game_ids
@@ -3741,6 +4193,7 @@ def _queue_current_slate_repair_job(target_game_ids: list[int] | None = None) ->
                 target_game_ids=list(result.get("target_game_ids") or []),
                 message="Current slate repair finished.",
             )
+            _finish_job_run(job_run_id, status="completed", result=result)
         except Exception as exc:
             _mutate_prop_sync_state(
                 running=False,
@@ -3749,6 +4202,8 @@ def _queue_current_slate_repair_job(target_game_ids: list[int] | None = None) ->
                 status="failed",
                 message=str(exc),
             )
+            _append_job_run_event(job_run_id, "job.failed", f"Current slate repair failed: {exc}", level="error")
+            _finish_job_run(job_run_id, status="failed", error_text=str(exc))
 
     threading.Thread(target=_run, daemon=True).start()
     return {
@@ -3862,7 +4317,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
     return result
 
 
-def _queue_odds_import_job(force_refresh: bool) -> dict[str, Any]:
+def _queue_odds_import_job(force_refresh: bool, request: Request | None = None) -> dict[str, Any]:
     with _PROP_SYNC_LOCK:
         if _PROP_SYNC_STATE["running"]:
             return {
@@ -3876,11 +4331,22 @@ def _queue_odds_import_job(force_refresh: bool) -> dict[str, Any]:
         stage="queued",
         message="Odds import queued for background processing.",
     )
+    job_run_id = _create_job_run(
+        "odds_import",
+        request=request,
+        trigger_action="api.odds.import" if request is not None else "internal.odds_import",
+        source_path=request.url.path if request is not None else "/api/odds/import",
+        metadata={"started_at": started_at, "force_refresh": force_refresh},
+    )
+    _append_job_run_event(job_run_id, "job.queued", "Odds import queued.", details={"force_refresh": force_refresh})
 
     def _run() -> None:
         try:
+            _append_job_run_event(job_run_id, "job.running", "Odds import started.", details={"force_refresh": force_refresh})
             result = _run_odds_import_job(force_refresh)
             if result.get("status") in {"missing_api_key", "provider_error"}:
+                _append_job_run_event(job_run_id, "job.provider_failed", str(result.get("message") or "Odds import failed."), level="warning", details=result)
+                _finish_job_run(job_run_id, status="failed", result=result, error_text=str(result.get("message") or "Odds import failed."))
                 return
             _mutate_prop_sync_state(
                 running=False,
@@ -3891,6 +4357,7 @@ def _queue_odds_import_job(force_refresh: bool) -> dict[str, Any]:
                 scope="odds_import",
                 message=str(result.get("message") or "Odds import finished."),
             )
+            _finish_job_run(job_run_id, status="completed", result=result)
         except Exception as exc:
             _mutate_prop_sync_state(
                 running=False,
@@ -3900,6 +4367,8 @@ def _queue_odds_import_job(force_refresh: bool) -> dict[str, Any]:
                 scope="odds_import",
                 message=str(exc),
             )
+            _append_job_run_event(job_run_id, "job.failed", f"Odds import failed: {exc}", level="error")
+            _finish_job_run(job_run_id, status="failed", error_text=str(exc))
 
     threading.Thread(target=_run, daemon=True).start()
     return {
@@ -3913,15 +4382,33 @@ def _queue_odds_import_job(force_refresh: bool) -> dict[str, Any]:
 
 
 @app.post("/api/props/repair-current-slate", dependencies=[Depends(_protect_mutation)])
-def repair_current_slate_props() -> dict[str, Any]:
-    return _queue_current_slate_repair_job()
+def repair_current_slate_props(request: Request) -> dict[str, Any]:
+    return _run_audited_mutation(
+        request,
+        "props.repair_current_slate",
+        lambda: _queue_current_slate_repair_job(request=request),
+    )
 
 
 @app.post("/api/settle-props", dependencies=[Depends(_protect_mutation)])
 def settle_props(
+    request: Request,
     selected_date: str | None = None,
     selected_dates: Annotated[list[str] | None, Query()] = None,
 ) -> dict:
+    return _run_audited_mutation(
+        request,
+        "props.settle",
+        lambda: _settle_props_impl(selected_date=selected_date, selected_dates=selected_dates),
+        details={"selected_date": selected_date, "selected_dates": selected_dates or []},
+    )
+
+
+def _settle_props_impl(
+    *,
+    selected_date: str | None = None,
+    selected_dates: list[str] | None = None,
+) -> dict[str, Any]:
     with connect() as conn:
         props = settle_completed_props(conn, selected_date=selected_date, selected_dates=selected_dates)
         games = settle_completed_game_predictions(conn, selected_date=selected_date, selected_dates=selected_dates)
@@ -4004,7 +4491,16 @@ def unsettled_props_audit() -> dict[str, Any]:
 
 
 @app.post("/api/admin/unsettled-props/void-dnp", dependencies=[Depends(_protect_mutation)])
-def void_dnp_props(game_id: int, player_id: int, confirmation: str) -> dict[str, Any]:
+def void_dnp_props(request: Request, game_id: int, player_id: int, confirmation: str) -> dict[str, Any]:
+    return _run_audited_mutation(
+        request,
+        "admin.unsettled_props.void_dnp",
+        lambda: _void_dnp_props_impl(game_id=game_id, player_id=player_id, confirmation=confirmation),
+        target={"game_id": game_id, "player_id": player_id},
+    )
+
+
+def _void_dnp_props_impl(*, game_id: int, player_id: int, confirmation: str) -> dict[str, Any]:
     if confirmation.strip() != "VOID DNP":
         raise HTTPException(status_code=400, detail="Confirmation must be VOID DNP.")
     with connect() as conn:
@@ -4966,26 +5462,44 @@ def model_loss_breakdown(model_version: str = MODEL_VERSION, top_n_players: int 
 
 
 @app.post("/api/models/train", dependencies=[Depends(_protect_mutation)])
-def train_model() -> dict:
-    return _queue_model_training_job()
+def train_model(request: Request) -> dict:
+    return _run_audited_mutation(request, "models.train", lambda: _queue_model_training_job(request))
 
 
 @app.post("/api/models/tune", dependencies=[Depends(_protect_mutation)])
-def tune_model() -> dict:
+def tune_model(request: Request) -> dict:
+    return _run_audited_mutation(request, "models.tune", _tune_model_impl)
+
+
+def _tune_model_impl() -> dict:
     with connect() as conn:
         return run_parameter_tuning(conn)
 
 
 @app.post("/api/odds/import", dependencies=[Depends(_protect_mutation)])
-def import_odds(force_refresh: bool = False) -> dict:
-    return _queue_odds_import_job(force_refresh)
+def import_odds(request: Request, force_refresh: bool = False) -> dict:
+    return _run_audited_mutation(
+        request,
+        "odds.import",
+        lambda: _queue_odds_import_job(force_refresh, request),
+        details={"force_refresh": force_refresh},
+    )
 
 
 @app.post("/api/covers/import", dependencies=[Depends(_protect_mutation)])
-def import_covers(selected_date: str | None = None, force_refresh: bool = False) -> dict:
+def import_covers(request: Request, selected_date: str | None = None, force_refresh: bool = False) -> dict:
+    return _run_audited_mutation(
+        request,
+        "covers.import",
+        lambda: _import_covers_impl(request=request, selected_date=selected_date, force_refresh=force_refresh),
+        details={"selected_date": selected_date, "force_refresh": force_refresh},
+    )
+
+
+def _import_covers_impl(*, request: Request | None, selected_date: str | None, force_refresh: bool) -> dict[str, Any]:
     with connect() as conn:
         result = import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh, sync_props=False)
-    sync_started = _start_prop_sync_if_needed("covers_import")
+    sync_started = _start_prop_sync_if_needed("covers_import", request=request)
     result["sync_started"] = sync_started
     if sync_started:
         base_message = str(result.get("message") or "").strip()
@@ -5001,7 +5515,16 @@ def import_covers(selected_date: str | None = None, force_refresh: bool = False)
 
 
 @app.post("/api/injuries/import/rotowire", dependencies=[Depends(_protect_mutation)])
-def import_rotowire_injuries(force_refresh: bool = False) -> dict:
+def import_rotowire_injuries(request: Request, force_refresh: bool = False) -> dict:
+    return _run_audited_mutation(
+        request,
+        "injuries.rotowire.import",
+        lambda: _import_rotowire_injuries_impl(request=request, force_refresh=force_refresh),
+        details={"force_refresh": force_refresh},
+    )
+
+
+def _import_rotowire_injuries_impl(*, request: Request | None, force_refresh: bool) -> dict[str, Any]:
     with connect() as conn:
         result = import_rotowire_lineups(conn, force_refresh=force_refresh)
         result["affected_game_ids"] = _scheduled_game_ids_for_teams(conn, result.get("affected_team_ids", []))
@@ -5015,7 +5538,7 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
     affected_game_ids = list(result.get("affected_game_ids") or [])
     roster_changed = bool(result.get("roster_changed"))
     result["repair"] = (
-        _queue_current_slate_repair_job(affected_game_ids)
+        _queue_current_slate_repair_job(affected_game_ids, request=request)
         if roster_changed and affected_game_ids
         else {
             "status": "not_needed",
@@ -5040,6 +5563,7 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
 
 @app.post("/api/history/import/espn", dependencies=[Depends(_protect_mutation)])
 def import_espn_history(
+    request: Request,
     season: int | None = None,
     force_refresh: bool = False,
     include_player_stats: bool = True,
@@ -5049,6 +5573,43 @@ def import_espn_history(
     selected_date: str | None = None,
     selected_dates: Annotated[list[str] | None, Query()] = None,
 ) -> dict:
+    return _run_audited_mutation(
+        request,
+        "history.espn.import",
+        lambda: _import_espn_history_impl(
+            season=season,
+            force_refresh=force_refresh,
+            include_player_stats=include_player_stats,
+            include_previous_season=include_previous_season,
+            missing_only=missing_only,
+            auto_backfill_gaps=auto_backfill_gaps,
+            selected_date=selected_date,
+            selected_dates=selected_dates,
+        ),
+        details={
+            "season": season,
+            "force_refresh": force_refresh,
+            "include_player_stats": include_player_stats,
+            "include_previous_season": include_previous_season,
+            "missing_only": missing_only,
+            "auto_backfill_gaps": auto_backfill_gaps,
+            "selected_date": selected_date,
+            "selected_dates": selected_dates or [],
+        },
+    )
+
+
+def _import_espn_history_impl(
+    *,
+    season: int | None = None,
+    force_refresh: bool = False,
+    include_player_stats: bool = True,
+    include_previous_season: bool = False,
+    missing_only: bool = False,
+    auto_backfill_gaps: bool = False,
+    selected_date: str | None = None,
+    selected_dates: list[str] | None = None,
+) -> dict[str, Any]:
     target_season = season or datetime.now().year
     seasons = [target_season - 1, target_season] if include_previous_season else [target_season]
     unique_seasons = sorted(set(seasons))
@@ -5209,11 +5770,37 @@ def missing_espn_history_dates(limit: int = 30) -> dict:
 
 @app.post("/api/history/import/espn-missing", dependencies=[Depends(_protect_mutation)])
 def import_missing_espn_history(
+    request: Request,
     force_refresh: bool = True,
     include_player_stats: bool = True,
     missing_only: bool = True,
     limit: int = 30,
 ) -> dict:
+    return _run_audited_mutation(
+        request,
+        "history.espn.import_missing",
+        lambda: _import_missing_espn_history_impl(
+            force_refresh=force_refresh,
+            include_player_stats=include_player_stats,
+            missing_only=missing_only,
+            limit=limit,
+        ),
+        details={
+            "force_refresh": force_refresh,
+            "include_player_stats": include_player_stats,
+            "missing_only": missing_only,
+            "limit": limit,
+        },
+    )
+
+
+def _import_missing_espn_history_impl(
+    *,
+    force_refresh: bool = True,
+    include_player_stats: bool = True,
+    missing_only: bool = True,
+    limit: int = 30,
+) -> dict[str, Any]:
     with connect() as conn:
         payload = _missing_espn_scores_payload(conn, limit=max(1, min(limit, 180)))
     selected_dates = payload.get("dates", [])
@@ -5225,7 +5812,7 @@ def import_missing_espn_history(
             "source": "espn",
             "message": "No missing completed ESPN scores found.",
         }
-    result = import_espn_history(
+    result = _import_espn_history_impl(
         force_refresh=force_refresh,
         include_player_stats=include_player_stats,
         include_previous_season=False,
@@ -5254,10 +5841,25 @@ def audit_espn_history_gaps(
 
 @app.post("/api/history/backfill/espn-gaps", dependencies=[Depends(_protect_mutation)])
 def backfill_espn_history_gaps(
+    request: Request,
     start_date: str | None = None,
     end_date: str | None = None,
     force_refresh: bool = True,
 ) -> dict:
+    return _run_audited_mutation(
+        request,
+        "history.espn.backfill_gaps",
+        lambda: _backfill_espn_history_gaps_impl(start_date=start_date, end_date=end_date, force_refresh=force_refresh),
+        details={"start_date": start_date, "end_date": end_date, "force_refresh": force_refresh},
+    )
+
+
+def _backfill_espn_history_gaps_impl(
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    force_refresh: bool = True,
+) -> dict[str, Any]:
     with connect() as conn:
         before = _espn_stats_gap_audit(conn, start_date=start_date, end_date=end_date, limit_missing_games=1000)
         result = _backfill_espn_stats_gaps(
@@ -5299,7 +5901,11 @@ def backfill_espn_history_gaps(
 
 
 @app.post("/api/history/recompute-ats", dependencies=[Depends(_protect_mutation)])
-def recompute_ats_from_game_lines() -> dict:
+def recompute_ats_from_game_lines(request: Request) -> dict:
+    return _run_audited_mutation(request, "history.recompute_ats", _recompute_ats_from_game_lines_impl)
+
+
+def _recompute_ats_from_game_lines_impl() -> dict[str, Any]:
     with connect() as conn:
         result = _recompute_team_results_from_game_lines(conn)
     _invalidate_read_caches()
@@ -5310,11 +5916,32 @@ def recompute_ats_from_game_lines() -> dict:
 
 @app.post("/api/history/backfill-covers-lines", dependencies=[Depends(_protect_mutation)])
 def backfill_covers_lines(
+    request: Request,
     start_date: str,
     end_date: str | None = None,
     force_refresh: bool = True,
     max_days: int = 45,
 ) -> dict:
+    return _run_audited_mutation(
+        request,
+        "history.backfill_covers_lines",
+        lambda: _backfill_covers_lines_impl(
+            start_date=start_date,
+            end_date=end_date,
+            force_refresh=force_refresh,
+            max_days=max_days,
+        ),
+        details={"start_date": start_date, "end_date": end_date, "force_refresh": force_refresh, "max_days": max_days},
+    )
+
+
+def _backfill_covers_lines_impl(
+    *,
+    start_date: str,
+    end_date: str | None = None,
+    force_refresh: bool = True,
+    max_days: int = 45,
+) -> dict[str, Any]:
     start = _parse_iso_date(start_date, "start_date")
     end = _parse_iso_date(end_date or start_date, "end_date")
     if end < start:
@@ -5359,12 +5986,41 @@ def backfill_covers_lines(
 
 @app.post("/api/history/backfill-odds-lines", dependencies=[Depends(_protect_mutation)])
 def backfill_historical_odds_lines(
+    request: Request,
     start_date: str,
     end_date: str | None = None,
     snapshot_time_utc: str = "16:00:00Z",
     force_refresh: bool = False,
     max_days: int = 14,
 ) -> dict:
+    return _run_audited_mutation(
+        request,
+        "history.backfill_odds_lines",
+        lambda: _backfill_historical_odds_lines_impl(
+            start_date=start_date,
+            end_date=end_date,
+            snapshot_time_utc=snapshot_time_utc,
+            force_refresh=force_refresh,
+            max_days=max_days,
+        ),
+        details={
+            "start_date": start_date,
+            "end_date": end_date,
+            "snapshot_time_utc": snapshot_time_utc,
+            "force_refresh": force_refresh,
+            "max_days": max_days,
+        },
+    )
+
+
+def _backfill_historical_odds_lines_impl(
+    *,
+    start_date: str,
+    end_date: str | None = None,
+    snapshot_time_utc: str = "16:00:00Z",
+    force_refresh: bool = False,
+    max_days: int = 14,
+) -> dict[str, Any]:
     start = _parse_iso_date(start_date, "start_date")
     end = _parse_iso_date(end_date or start_date, "end_date")
     if end < start:
@@ -5889,14 +6545,23 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
     return payload
 
 
-def _start_prop_sync_if_needed(source: str) -> bool:
+def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> bool:
     with _PROP_SYNC_LOCK:
         if _PROP_SYNC_STATE["running"]:
             return False
     _begin_prop_sync_job(source)
+    job_run_id = _create_job_run(
+        "background_prop_sync",
+        request=request,
+        trigger_action=f"internal.{source}" if request is None else f"api.{source}",
+        source_path=request.url.path if request is not None else None,
+        metadata={"source": source},
+    )
+    _append_job_run_event(job_run_id, "job.queued", "Background prop sync queued.", details={"source": source})
 
     def _run() -> None:
         try:
+            _append_job_run_event(job_run_id, "job.running", "Background prop sync started.", details={"source": source})
             with connect() as conn:
                 sync_result = sync_prop_lines_from_sportsbook(
                     conn,
@@ -5987,6 +6652,20 @@ def _start_prop_sync_if_needed(source: str) -> bool:
                 target_game_ids=touched_game_ids,
                 message="Background prop sync finished.",
             )
+            _finish_job_run(
+                job_run_id,
+                status="completed",
+                result={
+                    "source": source,
+                    "synced_props": int(sync_result.synced_props),
+                    "changed_props": int(sync_result.changed_props),
+                    "rebuilt_predictions": int(rebuild_result.written),
+                    "attempted_predictions": int(rebuild_result.attempted),
+                    "skipped_predictions": int(rebuild_result.skipped),
+                    "target_game_ids": touched_game_ids,
+                    "published_payloads": published_payloads,
+                },
+            )
         except Exception as exc:
             _mutate_prop_sync_state(
                 running=False,
@@ -5995,6 +6674,8 @@ def _start_prop_sync_if_needed(source: str) -> bool:
                 status="failed",
                 message=str(exc),
             )
+            _append_job_run_event(job_run_id, "job.failed", f"Background prop sync failed: {exc}", level="error", details={"source": source})
+            _finish_job_run(job_run_id, status="failed", error_text=str(exc))
 
     threading.Thread(target=_run, daemon=True).start()
     return True
