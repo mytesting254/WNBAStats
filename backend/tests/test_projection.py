@@ -559,6 +559,29 @@ def test_publish_post_mutation_read_payloads_includes_matchups(monkeypatch) -> N
     assert result[main_module.MATCHUPS_CACHE_NAME] == 1
 
 
+def test_publish_post_mutation_read_payloads_can_skip_performance_and_keep_roster(monkeypatch) -> None:
+    published: list[str] = []
+
+    monkeypatch.setattr(main_module, "_watchlist_payload", lambda conn: [3])
+    monkeypatch.setattr(main_module, "line_discrepancies", lambda conn, game_id=None: [4])
+    monkeypatch.setattr(main_module, "_roster_payload", lambda conn, refresh_lineups=True: [5])
+    monkeypatch.setattr(
+        main_module,
+        "_publish_matchup_snapshot_aggregates",
+        lambda conn, game_ids=None, full_refresh=True, injury_refresh=None: {main_module.MATCHUPS_CACHE_NAME: 1, main_module.VALUE_BOARD_CACHE_NAME: 2},
+    )
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: published.append(name))
+
+    result = main_module._publish_post_mutation_read_payloads(SimpleNamespace(), include_performance=False)
+
+    assert main_module.ROSTER_CACHE_NAME in published
+    assert main_module.MODEL_RUNS_CACHE_NAME not in published
+    assert main_module.MODEL_PERFORMANCE_CACHE_NAME not in published
+    assert main_module.GEM_PERFORMANCE_CACHE_NAME not in published
+    assert main_module.WATCHLIST_PERFORMANCE_CACHE_NAME not in published
+    assert result[main_module.ROSTER_CACHE_NAME] == 1
+
+
 def test_publish_matchup_snapshot_aggregates_uses_supplied_injury_refresh(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("WNBA_CACHE_DIR", str(tmp_path))
 

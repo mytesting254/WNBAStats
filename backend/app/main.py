@@ -3465,7 +3465,6 @@ def _run_current_slate_repair_job(target_game_ids: list[int] | None = None) -> d
             conn,
             matchup_game_ids=list(result.get("target_game_ids") or []),
             full_matchup_refresh=False,
-            include_roster=False,
             include_performance=False,
         )
     _set_prop_sync_progress(
@@ -5722,7 +5721,6 @@ def _start_prop_sync_if_needed(source: str) -> bool:
                     conn,
                     matchup_game_ids=touched_game_ids,
                     full_matchup_refresh=False,
-                    include_roster=False,
                     include_performance=False,
                 )
             _set_prop_sync_progress(
