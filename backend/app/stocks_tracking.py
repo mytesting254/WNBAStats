@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .db import connect
+from .espn_history import fetch_summary
 from .paths import get_db_path
 from .player_prop_model import (
     COMPONENT_MODEL_VERSION,
@@ -134,8 +135,17 @@ def ensure_tracking_schema() -> Path:
                     is_home INTEGER NOT NULL,
                     pace_factor REAL NOT NULL DEFAULT 1,
                     steals_allowed_factor REAL NOT NULL DEFAULT 1,
+                    steals_allowed_guard_factor REAL NOT NULL DEFAULT 1,
+                    steals_allowed_wing_factor REAL NOT NULL DEFAULT 1,
+                    steals_allowed_big_factor REAL NOT NULL DEFAULT 1,
                     blocks_allowed_factor REAL NOT NULL DEFAULT 1,
+                    blocks_allowed_guard_factor REAL NOT NULL DEFAULT 1,
+                    blocks_allowed_wing_factor REAL NOT NULL DEFAULT 1,
+                    blocks_allowed_big_factor REAL NOT NULL DEFAULT 1,
                     stocks_allowed_factor REAL NOT NULL DEFAULT 1,
+                    stocks_allowed_guard_factor REAL NOT NULL DEFAULT 1,
+                    stocks_allowed_wing_factor REAL NOT NULL DEFAULT 1,
+                    stocks_allowed_big_factor REAL NOT NULL DEFAULT 1,
                     turnover_pressure_factor REAL NOT NULL DEFAULT 1,
                     built_at TEXT NOT NULL,
                     PRIMARY KEY (game_id, team_id)
@@ -222,6 +232,29 @@ def ensure_tracking_schema() -> Path:
                 try:
                     conn.execute(
                         "ALTER TABLE game_board_summaries ADD COLUMN candidate_count_threshold INTEGER NOT NULL DEFAULT 0"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            team_context_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(team_prep_context)").fetchall()
+            }
+            for column_name in (
+                "steals_allowed_guard_factor",
+                "steals_allowed_wing_factor",
+                "steals_allowed_big_factor",
+                "blocks_allowed_guard_factor",
+                "blocks_allowed_wing_factor",
+                "blocks_allowed_big_factor",
+                "stocks_allowed_guard_factor",
+                "stocks_allowed_wing_factor",
+                "stocks_allowed_big_factor",
+            ):
+                if column_name in team_context_columns:
+                    continue
+                try:
+                    conn.execute(
+                        f"ALTER TABLE team_prep_context ADD COLUMN {column_name} REAL NOT NULL DEFAULT 1"
                     )
                 except sqlite3.OperationalError as exc:
                     if "duplicate column name" not in str(exc).lower():
@@ -424,8 +457,43 @@ def _stocks_pace_factor(conn: sqlite3.Connection, team_id: int, opponent_id: int
     return _clamp(((team_pace + opponent_pace) / 2.0) / league_pace, 0.94, 1.06)
 
 
-def _stocks_opponent_allowed_factor(conn: sqlite3.Connection, opponent_id: int, market: str) -> float:
+def _stocks_role_bucket(position: str | None) -> str:
+    text = str(position or "").strip().upper()
+    if not text:
+        return "wing"
+    if "G" in text:
+        return "guard"
+    if "C" in text:
+        return "big"
+    return "wing"
+
+
+def _player_stocks_role_bucket(conn: sqlite3.Connection, player_id: int) -> str:
+    try:
+        row = conn.execute("SELECT position FROM players WHERE id = ? LIMIT 1", (int(player_id),)).fetchone()
+    except sqlite3.OperationalError:
+        return "wing"
+    return _stocks_role_bucket(None if row is None else row[0])
+
+
+def _stocks_opponent_allowed_factor(
+    conn: sqlite3.Connection,
+    opponent_id: int,
+    market: str,
+    *,
+    role_bucket: str | None = None,
+) -> float:
     market_sql = _stocks_market_column(market)
+    role_filter_sql = ""
+    role_filter_params: tuple[object, ...] = ()
+    normalized_bucket = str(role_bucket or "").strip().lower()
+    if normalized_bucket in {"guard", "wing", "big"}:
+        if normalized_bucket == "guard":
+            role_filter_sql = " AND instr(upper(COALESCE(p.position, '')), 'G') > 0"
+        elif normalized_bucket == "big":
+            role_filter_sql = " AND instr(upper(COALESCE(p.position, '')), 'C') > 0 AND instr(upper(COALESCE(p.position, '')), 'G') = 0"
+        else:
+            role_filter_sql = " AND instr(upper(COALESCE(p.position, '')), 'G') = 0 AND instr(upper(COALESCE(p.position, '')), 'C') = 0"
     opponent_allowed = _stocks_avg_scalar(
         conn,
         f"""
@@ -437,8 +505,9 @@ def _stocks_opponent_allowed_factor(conn: sqlite3.Connection, opponent_id: int, 
             WHEN p.team_id = g.home_team_id THEN g.away_team_id
             ELSE g.home_team_id
         END = ?
+        {role_filter_sql}
         """,
-        (int(opponent_id),),
+        (int(opponent_id), *role_filter_params),
     )
     league_allowed = _stocks_avg_scalar(
         conn,
@@ -446,6 +515,9 @@ def _stocks_opponent_allowed_factor(conn: sqlite3.Connection, opponent_id: int, 
         SELECT AVG({market_sql})
         FROM player_game_stats s
         JOIN games g ON g.id = s.game_id
+        JOIN players p ON p.id = s.player_id
+        WHERE 1 = 1
+        {role_filter_sql}
         """
     )
     if opponent_allowed is None or league_allowed is None or league_allowed <= 0:
@@ -474,13 +546,37 @@ def _stocks_turnover_pressure_factor(conn: sqlite3.Connection, opponent_id: int)
     return _clamp(opponent_turnovers / league_turnovers, 0.90, 1.12)
 
 
-def _stocks_matchup_context_multiplier(context: sqlite3.Row | dict[str, object] | None, market: str) -> float:
+def _role_specific_context_factor(
+    context: sqlite3.Row | dict[str, object] | None,
+    *,
+    base_column: str,
+    role_bucket: str | None,
+) -> float:
+    if context is None:
+        return 1.0
+    normalized_bucket = str(role_bucket or "").strip().lower()
+    available_columns = set(context.keys()) if hasattr(context, "keys") else set(context)
+    if normalized_bucket in {"guard", "wing", "big"}:
+        role_column = f"{base_column}_{normalized_bucket}_factor"
+        if role_column in available_columns:
+            value = float(context[role_column] or 1.0)
+            if value > 0:
+                return value
+    return float(context[f"{base_column}_factor"] or 1.0)
+
+
+def _stocks_matchup_context_multiplier(
+    context: sqlite3.Row | dict[str, object] | None,
+    market: str,
+    *,
+    role_bucket: str | None = None,
+) -> float:
     if context is None:
         return 1.0
     pace_factor = float(context["pace_factor"] or 1.0)
-    steals_allowed_factor = float(context["steals_allowed_factor"] or 1.0)
-    blocks_allowed_factor = float(context["blocks_allowed_factor"] or 1.0)
-    stocks_allowed_factor = float(context["stocks_allowed_factor"] or 1.0)
+    steals_allowed_factor = _role_specific_context_factor(context, base_column="steals_allowed", role_bucket=role_bucket)
+    blocks_allowed_factor = _role_specific_context_factor(context, base_column="blocks_allowed", role_bucket=role_bucket)
+    stocks_allowed_factor = _role_specific_context_factor(context, base_column="stocks_allowed", role_bucket=role_bucket)
     turnover_pressure_factor = float(context["turnover_pressure_factor"] or 1.0)
     if market == "steals":
         return _clamp(
@@ -634,6 +730,7 @@ def _build_player_stocks_feature_bundle(
     matchup_context: sqlite3.Row | dict[str, object] | None = None,
 ) -> dict[str, float | int | None]:
     target_is_home, target_rest_days = _player_stocks_target_context(conn, player_id=player_id, game_id=game_id)
+    role_bucket = _player_stocks_role_bucket(conn, player_id)
     rows = _player_stocks_history_rows(conn, player_id=player_id, game_date=game_date, game_id=game_id)
     if target_is_home is None:
         return {
@@ -691,7 +788,7 @@ def _build_player_stocks_feature_bundle(
         contextual_anchor = all_anchor
     rest_adjusted_anchor = contextual_anchor * _rest_factor(target_rest_days)
     stabilized = (0.72 * float(base_projection)) + (0.28 * float(rest_adjusted_anchor))
-    matchup_multiplier = _stocks_matchup_context_multiplier(matchup_context, market)
+    matchup_multiplier = _stocks_matchup_context_multiplier(matchup_context, market, role_bucket=role_bucket)
     stabilized *= matchup_multiplier
     overall_hits = [1.0 if (_stocks_market_value(row, "blocks_steals")) >= 2.0 else 0.0 for row in rows]
     recent_hits = overall_hits[:_STOCKS_RECENT_WINDOW_GAMES]
@@ -1429,8 +1526,17 @@ def rebuild_team_prep_context(
                         is_home,
                         _stocks_pace_factor(conn, team_id, opponent_id),
                         _stocks_opponent_allowed_factor(conn, opponent_id, "steals"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "steals", role_bucket="guard"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "steals", role_bucket="wing"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "steals", role_bucket="big"),
                         _stocks_opponent_allowed_factor(conn, opponent_id, "blocks"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "blocks", role_bucket="guard"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "blocks", role_bucket="wing"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "blocks", role_bucket="big"),
                         _stocks_opponent_allowed_factor(conn, opponent_id, "blocks_steals"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "blocks_steals", role_bucket="guard"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "blocks_steals", role_bucket="wing"),
+                        _stocks_opponent_allowed_factor(conn, opponent_id, "blocks_steals", role_bucket="big"),
                         _stocks_turnover_pressure_factor(conn, opponent_id),
                         built_at,
                     )
@@ -1455,11 +1561,20 @@ def rebuild_team_prep_context(
                         is_home,
                         pace_factor,
                         steals_allowed_factor,
+                        steals_allowed_guard_factor,
+                        steals_allowed_wing_factor,
+                        steals_allowed_big_factor,
                         blocks_allowed_factor,
+                        blocks_allowed_guard_factor,
+                        blocks_allowed_wing_factor,
+                        blocks_allowed_big_factor,
                         stocks_allowed_factor,
+                        stocks_allowed_guard_factor,
+                        stocks_allowed_wing_factor,
+                        stocks_allowed_big_factor,
                         turnover_pressure_factor,
                         built_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     context_rows,
                 )
@@ -2275,6 +2390,176 @@ def prune_special_snapshots(
         return {
             "deleted_dnp": deleted_dnp,
             "deleted_stale": deleted_stale,
+        }
+    finally:
+        tracking.close()
+
+
+def _espn_boxscore_player_status_map(payload: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    player_status: dict[int, dict[str, Any]] = {}
+    teams = ((payload.get("boxscore") or {}).get("players") or [])
+    for team_box in teams:
+        for stat_group in team_box.get("statistics", []):
+            for row in stat_group.get("athletes", []):
+                athlete = row.get("athlete") or {}
+                try:
+                    player_id = int(str(athlete.get("id") or "").strip())
+                except ValueError:
+                    continue
+                player_status[player_id] = {
+                    "did_not_play": bool(row.get("didNotPlay")),
+                    "active": bool(row.get("active")) if row.get("active") is not None else None,
+                    "reason": str(row.get("reason") or "").strip() or None,
+                    "name": str(athlete.get("displayName") or "").strip() or None,
+                }
+    return player_status
+
+
+def delete_unavailable_special_snapshots_from_espn(
+    conn: sqlite3.Connection,
+    *,
+    game_ids: list[int] | None = None,
+    target_dates: list[str] | None = None,
+    force_refresh: bool = False,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    tracking = _open_tracking_connection()
+    try:
+        normalized_game_ids = tuple(sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0}))
+        normalized_dates = tuple(sorted({str(game_date).strip() for game_date in (target_dates or []) if str(game_date).strip()}))
+        filters: list[str] = []
+        params: list[object] = []
+        if normalized_game_ids:
+            placeholders = ",".join("?" for _ in normalized_game_ids)
+            filters.append(f"latest.game_id IN ({placeholders})")
+            params.extend(normalized_game_ids)
+        filter_sql = f" AND {' AND '.join(filters)}" if filters else ""
+        rows = tracking.execute(
+            """
+            WITH latest AS (
+                SELECT
+                    ps.id,
+                    ps.game_id,
+                    ps.player_id,
+                    ps.player_name,
+                    ps.captured_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ps.game_id, ps.player_id
+                        ORDER BY ps.captured_at DESC, ps.id DESC
+                    ) AS snapshot_rank
+                FROM projection_snapshots ps
+                LEFT JOIN settlements st ON st.snapshot_id = ps.id
+                WHERE st.snapshot_id IS NULL
+            )
+            SELECT
+                latest.id,
+                latest.game_id,
+                latest.player_id,
+                latest.player_name,
+                latest.captured_at
+            FROM latest
+            WHERE latest.snapshot_rank = 1
+            """
+            + filter_sql
+            + """
+            ORDER BY latest.game_id, latest.player_name
+            """,
+            tuple(params),
+        ).fetchall()
+        by_game: dict[int, list[sqlite3.Row]] = {}
+        for row in rows:
+            by_game.setdefault(int(row["game_id"]), []).append(row)
+        delete_ids: list[int] = []
+        deleted_missing_boxscore = 0
+        deleted_dnp = 0
+        checked_games = 0
+        skipped_games: list[dict[str, Any]] = []
+        decisions: list[dict[str, Any]] = []
+        for game_id, game_rows in by_game.items():
+            game_row = conn.execute(
+                """
+                SELECT id, game_date, status, COALESCE(espn_event_id, id) AS summary_event_id
+                FROM games
+                WHERE id = ?
+                LIMIT 1
+                """,
+                (game_id,),
+            ).fetchone()
+            if game_row is None:
+                skipped_games.append({"game_id": game_id, "reason": "missing_game"})
+                continue
+            if str(game_row["status"] or "").strip().lower() != "final":
+                skipped_games.append({"game_id": game_id, "reason": f"game_not_final:{game_row['status']}"})
+                continue
+            if normalized_dates and str(game_row["game_date"] or "").strip() not in normalized_dates:
+                continue
+            summary_event_id = int(game_row["summary_event_id"])
+            try:
+                payload = fetch_summary(summary_event_id, force_refresh=force_refresh)
+            except Exception as exc:
+                skipped_games.append({"game_id": game_id, "summary_event_id": summary_event_id, "reason": str(exc)})
+                continue
+            player_status = _espn_boxscore_player_status_map(payload)
+            if not player_status:
+                skipped_games.append({"game_id": game_id, "summary_event_id": summary_event_id, "reason": "empty_boxscore"})
+                continue
+            checked_games += 1
+            for row in game_rows:
+                player_id = int(row["player_id"])
+                status = player_status.get(player_id)
+                if status is None:
+                    delete_ids.append(int(row["id"]))
+                    deleted_missing_boxscore += 1
+                    decisions.append(
+                        {
+                            "snapshot_id": int(row["id"]),
+                            "game_id": game_id,
+                            "player_id": player_id,
+                            "player_name": str(row["player_name"]),
+                            "decision": "delete_missing_from_boxscore",
+                        }
+                    )
+                    continue
+                if bool(status.get("did_not_play")):
+                    delete_ids.append(int(row["id"]))
+                    deleted_dnp += 1
+                    decisions.append(
+                        {
+                            "snapshot_id": int(row["id"]),
+                            "game_id": game_id,
+                            "player_id": player_id,
+                            "player_name": str(row["player_name"]),
+                            "decision": "delete_did_not_play",
+                            "reason": status.get("reason"),
+                        }
+                    )
+                    continue
+                decisions.append(
+                    {
+                        "snapshot_id": int(row["id"]),
+                        "game_id": game_id,
+                        "player_id": player_id,
+                        "player_name": str(row["player_name"]),
+                        "decision": "keep_boxscore_present",
+                    }
+                )
+        if delete_ids and not dry_run:
+            placeholders = ",".join("?" for _ in delete_ids)
+            tracking.execute(f"DELETE FROM projection_snapshots WHERE id IN ({placeholders})", tuple(delete_ids))
+            tracking.commit()
+        return {
+            "eligible_snapshots": len(rows),
+            "eligible_games": len(by_game),
+            "checked_games": checked_games,
+            "deleted": len(delete_ids),
+            "deleted_missing_boxscore": deleted_missing_boxscore,
+            "deleted_did_not_play": deleted_dnp,
+            "dry_run": bool(dry_run),
+            "force_refresh": bool(force_refresh),
+            "game_ids": [int(value) for value in normalized_game_ids],
+            "target_dates": list(normalized_dates),
+            "skipped_games": skipped_games,
+            "decisions": decisions,
         }
     finally:
         tracking.close()

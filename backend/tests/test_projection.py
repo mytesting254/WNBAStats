@@ -4848,6 +4848,246 @@ def test_stocks_feature_bundle_prunes_extreme_blowout_rows(monkeypatch) -> None:
     assert float(bundle["stability_avg"]) == pytest.approx(2.0)
 
 
+def test_stocks_role_bucket_maps_common_positions() -> None:
+    assert stocks_tracking_module._stocks_role_bucket("G") == "guard"
+    assert stocks_tracking_module._stocks_role_bucket("PG") == "guard"
+    assert stocks_tracking_module._stocks_role_bucket("C") == "big"
+    assert stocks_tracking_module._stocks_role_bucket("FC") == "big"
+    assert stocks_tracking_module._stocks_role_bucket("F") == "wing"
+    assert stocks_tracking_module._stocks_role_bucket("") == "wing"
+
+
+def test_stocks_matchup_multiplier_uses_role_specific_allowed_factors() -> None:
+    context = {
+        "pace_factor": 1.00,
+        "steals_allowed_factor": 0.98,
+        "steals_allowed_guard_factor": 1.10,
+        "steals_allowed_wing_factor": 0.97,
+        "steals_allowed_big_factor": 0.93,
+        "blocks_allowed_factor": 1.01,
+        "blocks_allowed_guard_factor": 0.95,
+        "blocks_allowed_wing_factor": 1.02,
+        "blocks_allowed_big_factor": 1.08,
+        "stocks_allowed_factor": 1.00,
+        "stocks_allowed_guard_factor": 1.09,
+        "stocks_allowed_wing_factor": 0.99,
+        "stocks_allowed_big_factor": 1.04,
+        "turnover_pressure_factor": 1.04,
+    }
+
+    guard_steals = stocks_tracking_module._stocks_matchup_context_multiplier(
+        context,
+        "steals",
+        role_bucket="guard",
+    )
+    big_blocks = stocks_tracking_module._stocks_matchup_context_multiplier(
+        context,
+        "blocks",
+        role_bucket="big",
+    )
+    wing_stocks = stocks_tracking_module._stocks_matchup_context_multiplier(
+        context,
+        "blocks_steals",
+        role_bucket="wing",
+    )
+
+    assert guard_steals == pytest.approx((0.50 * 1.10) + (0.25 * 1.04) + (0.25 * 1.00))
+    assert big_blocks == pytest.approx((0.65 * 1.08) + (0.35 * 1.00))
+    assert wing_stocks == pytest.approx((0.45 * 0.99) + (0.20 * 0.97) + (0.20 * 1.02) + (0.15 * 1.00))
+
+
+def test_stocks_tracking_schema_adds_role_aware_context_columns(monkeypatch, tmp_path) -> None:
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with sqlite3.connect(tracking_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE team_prep_context (
+                game_id INTEGER NOT NULL,
+                game_date TEXT NOT NULL,
+                team_id INTEGER NOT NULL,
+                opponent_id INTEGER NOT NULL,
+                is_home INTEGER NOT NULL,
+                pace_factor REAL NOT NULL DEFAULT 1,
+                steals_allowed_factor REAL NOT NULL DEFAULT 1,
+                blocks_allowed_factor REAL NOT NULL DEFAULT 1,
+                stocks_allowed_factor REAL NOT NULL DEFAULT 1,
+                turnover_pressure_factor REAL NOT NULL DEFAULT 1,
+                built_at TEXT NOT NULL,
+                PRIMARY KEY (game_id, team_id)
+            )
+            """
+        )
+        conn.commit()
+
+    stocks_tracking_module.ensure_tracking_schema()
+
+    with sqlite3.connect(tracking_path) as conn:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(team_prep_context)").fetchall()}
+
+    assert "steals_allowed_guard_factor" in columns
+    assert "steals_allowed_wing_factor" in columns
+    assert "steals_allowed_big_factor" in columns
+    assert "blocks_allowed_guard_factor" in columns
+    assert "blocks_allowed_wing_factor" in columns
+    assert "blocks_allowed_big_factor" in columns
+    assert "stocks_allowed_guard_factor" in columns
+    assert "stocks_allowed_wing_factor" in columns
+    assert "stocks_allowed_big_factor" in columns
+
+
+def test_delete_unavailable_special_snapshots_from_espn_removes_missing_and_dnp(monkeypatch, tmp_path) -> None:
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+    stocks_tracking_module.ensure_tracking_schema()
+
+    def fake_fetch_summary(game_id: int, force_refresh: bool = False) -> dict:
+        assert game_id == 401857065
+        return {
+            "boxscore": {
+                "players": [
+                    {
+                        "team": {"abbreviation": "PHX"},
+                        "statistics": [
+                            {
+                                "athletes": [
+                                    {
+                                        "athlete": {"id": "1001", "displayName": "Keep Player"},
+                                        "didNotPlay": False,
+                                        "active": True,
+                                        "stats": ["21"],
+                                    },
+                                    {
+                                        "athlete": {"id": "1002", "displayName": "DNP Player"},
+                                        "didNotPlay": True,
+                                        "active": False,
+                                        "reason": "COACH'S DECISION",
+                                        "stats": [],
+                                    },
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
+        }
+
+    monkeypatch.setattr("backend.app.stocks_tracking.fetch_summary", fake_fetch_summary)
+
+    with connect() as conn:
+        conn.executemany(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            [
+                (1001, "Keep Player", 10, "G", "starter"),
+                (1002, "DNP Player", 10, "G", "rotation"),
+                (1003, "Missing Player", 10, "F", "rotation"),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (9001, '2026-07-13', '2026-07-13T23:30:00Z', 10, 3, 'final', 2, 2, -2.5, 162.5, 401857065)
+            """
+        )
+        with sqlite3.connect(tracking_path) as tracking:
+            tracking.execute(
+                """
+                INSERT INTO projection_snapshots (
+                    id, game_id, player_id, player_name, game_date, captured_at, model_version,
+                    projected_steals, projected_blocks, projected_stocks,
+                    steal_prob_1_plus, steal_prob_2_plus, block_prob_1_plus, block_prob_2_plus,
+                    stocks_prob_2_plus, stocks_prob_3_plus, data_quality
+                ) VALUES
+                    (1, 9001, 1001, 'Keep Player', '2026-07-14', '2026-07-14T01:00:00+00:00', 'model', 1, 0, 1, 0.5, 0.2, 0.3, 0.1, 0.4, 0.1, 'model_only'),
+                    (2, 9001, 1002, 'DNP Player', '2026-07-14', '2026-07-14T01:00:00+00:00', 'model', 1, 0, 1, 0.5, 0.2, 0.3, 0.1, 0.4, 0.1, 'model_only'),
+                    (3, 9001, 1003, 'Missing Player', '2026-07-14', '2026-07-14T01:00:00+00:00', 'model', 1, 0, 1, 0.5, 0.2, 0.3, 0.1, 0.4, 0.1, 'model_only')
+                """
+            )
+            tracking.commit()
+
+        result = stocks_tracking_module.delete_unavailable_special_snapshots_from_espn(conn, game_ids=[9001])
+
+    assert result["eligible_snapshots"] == 3
+    assert result["deleted"] == 2
+    assert result["deleted_did_not_play"] == 1
+    assert result["deleted_missing_boxscore"] == 1
+    with sqlite3.connect(tracking_path) as tracking:
+        remaining = tracking.execute(
+            "SELECT player_id FROM projection_snapshots ORDER BY player_id"
+        ).fetchall()
+    assert [int(row[0]) for row in remaining] == [1001]
+
+
+def test_delete_unavailable_special_snapshots_from_espn_supports_dry_run(monkeypatch, tmp_path) -> None:
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+    stocks_tracking_module.ensure_tracking_schema()
+
+    monkeypatch.setattr(
+        "backend.app.stocks_tracking.fetch_summary",
+        lambda game_id, force_refresh=False: {
+            "boxscore": {
+                "players": [
+                    {
+                        "team": {"abbreviation": "PHX"},
+                        "statistics": [
+                            {
+                                "athletes": [
+                                    {
+                                        "athlete": {"id": "9999", "displayName": "Other Player"},
+                                        "didNotPlay": False,
+                                        "active": True,
+                                        "stats": ["18"],
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+    )
+
+    with connect() as conn:
+        conn.execute("INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (1004, 'Dry Run Player', 10, 'G', 'starter')")
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (9002, '2026-07-13', '2026-07-13T23:30:00Z', 10, 3, 'final', 2, 2, -2.5, 162.5, 401857066)
+            """
+        )
+        with sqlite3.connect(tracking_path) as tracking:
+            tracking.execute(
+                """
+                INSERT INTO projection_snapshots (
+                    id, game_id, player_id, player_name, game_date, captured_at, model_version,
+                    projected_steals, projected_blocks, projected_stocks,
+                    steal_prob_1_plus, steal_prob_2_plus, block_prob_1_plus, block_prob_2_plus,
+                    stocks_prob_2_plus, stocks_prob_3_plus, data_quality
+                ) VALUES
+                    (4, 9002, 1004, 'Dry Run Player', '2026-07-14', '2026-07-14T01:00:00+00:00', 'model', 1, 0, 1, 0.5, 0.2, 0.3, 0.1, 0.4, 0.1, 'model_only')
+                """
+            )
+            tracking.commit()
+
+        result = stocks_tracking_module.delete_unavailable_special_snapshots_from_espn(
+            conn,
+            game_ids=[9002],
+            dry_run=True,
+        )
+
+    assert result["deleted"] == 1
+    assert result["dry_run"] is True
+    with sqlite3.connect(tracking_path) as tracking:
+        remaining_count = tracking.execute("SELECT COUNT(*) FROM projection_snapshots").fetchone()[0]
+    assert int(remaining_count) == 1
+
+
 def test_special_probability_calibration_is_market_specific(monkeypatch, tmp_path) -> None:
     tracking_path = tmp_path / "stocks-tracking.sqlite"
     monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))

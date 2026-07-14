@@ -142,10 +142,12 @@ active runtime root returned by `host-runtime-info` / `live_env.sh`.
 
 ### Daily Prop Settlement And Odds Refresh
 
-Use host cron for the daily prop workflow. The 2am Eastern job now settles
-completed props and waits for model training to finish. The Odds API refresh
-still runs at 3am Eastern only when `/api/matchups` has scheduled games, so the
-newly rebuilt props use the updated trained models.
+Use host cron for the daily prop workflow. The 2am Eastern job now refreshes
+recent ESPN finals and box scores, prunes unsettled Specials snapshots when the
+final-game box score shows the player missing or marked `didNotPlay`, settles
+completed props, and then waits for model training to finish. The Odds API
+refresh still runs at 3am Eastern only when `/api/matchups` has scheduled
+games, so the newly rebuilt props use the updated trained models.
 
 Install with `crontab -e` on the Docker/Coolify host:
 
@@ -161,7 +163,19 @@ Debian/Ubuntu cron does not support `CRON_TZ` for scheduling, so the hourly
 entries use `date` to run only when the current `America/New_York` hour is 2am
 or 3am. Keep the percent signs escaped when editing the crontab.
 
-`settle-and-train` polls `/api/ops/health` until the background
+`settle-and-train` now runs this sequence inside the live backend container:
+
+1. `refresh-results`
+2. `prune-specials`
+3. `settle`
+4. `train-model`
+
+The `prune-specials` step runs `scripts/prune_specials_from_espn_boxscore.py`
+against the live runtime and deletes only latest unsettled Specials rows for
+`final` games when ESPN's summary box score either omits the player entirely or
+marks that player `didNotPlay`.
+
+`settle-and-train` then polls `/api/ops/health` until the background
 `/api/models/train` job finishes or times out. Optional tuning:
 
 - `WNBA_TRAIN_POLL_TIMEOUT_SECONDS` defaults to `1200`

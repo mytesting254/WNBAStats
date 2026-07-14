@@ -7,7 +7,7 @@ Files:
 
 - `wnba-backend.service`: `systemd` unit for the FastAPI backend
 - `nginx-wnba-stats.conf`: nginx site config for the frontend and `/api` proxy
-- `wnba-daily-props.cron`: host-cron template for daily settlement/training and odds refresh
+- `wnba-daily-props.cron`: host-cron template for daily ESPN refresh, Specials prune, settlement/training, and odds refresh
 - `wnba-stocks-prep.cron`: host-cron template for 11pm ET Specials stocks prep
 
 Before installing them on a VM:

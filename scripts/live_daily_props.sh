@@ -9,7 +9,7 @@ USE_LIVE_CONTAINER="${WNBA_USE_LIVE_CONTAINER:-false}"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/live_daily_props.sh refresh-results|settle|train-model|settle-and-train|odds-if-matchups
+Usage: scripts/live_daily_props.sh refresh-results|prune-specials|settle|train-model|settle-and-train|odds-if-matchups
 
 Environment:
   WNBA_API_BASE  Backend base URL. Default: http://127.0.0.1:8010
@@ -131,6 +131,12 @@ run_refresh_completed_results() {
   echo
 }
 
+run_prune_specials() {
+  echo "[$(timestamp)] pruning unsettled Specials snapshots missing from ESPN box score or marked did not play"
+  python3 scripts/prune_specials_from_espn_boxscore.py
+  echo
+}
+
 run_train_model() {
   require_api_key_for_prod_hint
   echo "[$(timestamp)] queueing model training"
@@ -153,6 +159,7 @@ run_train_model() {
 
 run_settle_and_train() {
   run_refresh_completed_results
+  run_prune_specials
   run_settle
   run_train_model
 }
@@ -183,6 +190,9 @@ main() {
   case "${1:-}" in
     refresh-results)
       run_refresh_completed_results
+      ;;
+    prune-specials)
+      run_prune_specials
       ;;
     settle)
       run_settle

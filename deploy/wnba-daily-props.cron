@@ -5,8 +5,11 @@
 # CRON_TZ for scheduling, so these hourly entries guard on Eastern time with
 # date(1). Percent signs must stay escaped in crontab commands.
 #
-# This runs the HTTP calls inside the detected backend container, so API_KEY
-# and ODDS_API_KEY are read from the Coolify container environment.
+# This runs inside the detected backend container, so API_KEY, ODDS_API_KEY,
+# and the live runtime DB/cache paths come from the Coolify container
+# environment. The 2am ET flow refreshes ESPN finals/box scores, prunes
+# unsettled Specials rows that are missing from ESPN or marked DNP, settles
+# props, then waits for model training to finish.
 
 0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 02 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh settle-and-train >> /var/log/wnba-daily-props.log 2>&1
 0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 03 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh odds-if-matchups >> /var/log/wnba-daily-props.log 2>&1
