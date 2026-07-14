@@ -1612,12 +1612,10 @@ function DataView({
                 <p className="progress-caption">
                   {pipelineRunning
                     ? activePipeline?.waitingForBackground
-                      ? (propSync?.current != null && propSync?.total != null && propSync.total > 0
-                        ? `${propSync.current} of ${propSync.total} background steps complete`
-                        : "Waiting for background prop sync progress.")
+                      ? formatPropSyncProgressCaption(propSync ?? undefined)
                       : "Request is running on the backend."
-                    : propSync?.current != null && propSync?.total != null && propSync.total > 0
-                      ? `${propSync.current} of ${propSync.total} complete`
+                    : propSync?.running
+                      ? formatPropSyncProgressCaption(propSync)
                       : "No active ingest request."}
                 </p>
               </div>
@@ -1647,11 +1645,7 @@ function DataView({
                     <div className="progress-fill" style={{ width: `${progressPercent}%` }} />
                   </div>
                   <p className="progress-caption">
-                    {propSync.current != null && propSync.total != null && propSync.total > 0
-                      ? `${propSync.current} of ${propSync.total} complete`
-                      : propSync.running
-                        ? "Waiting for first completed step."
-                        : "No active background job."}
+                    {formatPropSyncProgressCaption(propSync)}
                   </p>
                 </div>
               ) : null}
@@ -4977,6 +4971,33 @@ function formatPipelineStage(value?: string | null) {
     return "Idle";
   }
   return labels[value] ?? formatPropSyncStage(value);
+}
+
+function formatPropSyncProgressCaption(sync?: {
+  running: boolean;
+  status?: string | null;
+  stage?: string | null;
+  stage_index?: number;
+  stage_total?: number;
+  current?: number;
+  total?: number;
+  message?: string | null;
+}) {
+  if (!sync) {
+    return "No active background job.";
+  }
+  if (!sync.running) {
+    return sync.message || "No active background job.";
+  }
+  const stageIndex = Math.max(0, Number(sync.stage_index ?? 0));
+  const stageTotal = Math.max(1, Number(sync.stage_total ?? 1));
+  const current = Math.max(0, Number(sync.current ?? 0));
+  const total = Math.max(0, Number(sync.total ?? 0));
+  const stageSummary = stageIndex > 0 ? `Stage ${stageIndex} of ${stageTotal}` : "Starting background job";
+  if (total > 0) {
+    return `${stageSummary}. ${current} of ${total} in this stage.`;
+  }
+  return sync.message || `${stageSummary}.`;
 }
 
 function formatRelativeAge(value?: string | null) {
