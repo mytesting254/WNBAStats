@@ -2986,6 +2986,28 @@ def _active_slate_game_ids(conn) -> list[int]:
 
 
 def _scheduled_game_ids(conn) -> list[int]:
+    today_iso = _local_today_iso()
+    next_date_row = conn.execute(
+        """
+        SELECT MIN(game_date) AS next_game_date
+        FROM games
+        WHERE status = 'scheduled'
+          AND game_date >= ?
+        """,
+        (today_iso,),
+    ).fetchone()
+    target_date = str(next_date_row["next_game_date"] or "").strip() if next_date_row is not None else ""
+    if not target_date:
+        fallback_row = conn.execute(
+            """
+            SELECT MIN(game_date) AS next_game_date
+            FROM games
+            WHERE status = 'scheduled'
+            """
+        ).fetchone()
+        target_date = str(fallback_row["next_game_date"] or "").strip() if fallback_row is not None else ""
+    if not target_date:
+        return []
     return [
         int(row["id"])
         for row in conn.execute(
@@ -2993,8 +3015,10 @@ def _scheduled_game_ids(conn) -> list[int]:
             SELECT id
             FROM games
             WHERE status = 'scheduled'
-            ORDER BY start_time
-            """
+              AND game_date = ?
+            ORDER BY start_time, id
+            """,
+            (target_date,),
         ).fetchall()
         if int(row["id"]) > 0
     ]

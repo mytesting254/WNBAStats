@@ -5565,6 +5565,30 @@ def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -
     assert result["rebuilt_game_predictions"] == 2
 
 
+def test_scheduled_game_ids_limits_fallback_to_next_scheduled_slate(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_local_today_iso", lambda: "2026-07-14")
+
+    with connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)
+            """,
+            [
+                (9910, "2026-07-12", "2026-07-12T17:00:00Z", 10, 3, -4.5, 160.5),
+                (9920, "2026-07-14", "2026-07-14T17:00:00Z", 6, 8, -1.5, 162.5),
+                (9930, "2026-07-14", "2026-07-14T20:00:00Z", 4, 11, -2.5, 158.5),
+                (9940, "2026-07-16", "2026-07-16T18:00:00Z", 9, 12, -3.5, 159.5),
+            ],
+        )
+
+        scheduled_game_ids = main_module._scheduled_game_ids(conn)
+
+    assert scheduled_game_ids == [9920, 9930]
+
+
 def test_settle_auto_repairs_missing_current_slate_predictions(monkeypatch) -> None:
     repair_calls = 0
 
