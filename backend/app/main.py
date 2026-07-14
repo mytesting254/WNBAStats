@@ -48,7 +48,7 @@ from .odds_import import (
     _player_name_match_clause,
     sync_prop_lines_from_sportsbook,
 )
-from .player_identity import player_is_skeletal, resolve_player_identity
+from .player_identity import player_is_skeletal, player_lookup_parts, resolve_player_identity
 from .projections import LiveRebuildResult, rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
@@ -1374,13 +1374,110 @@ def _resolve_roster_player(conn: Any, team_abbreviation: str, player_name: str) 
     return resolve_player_identity(conn, team_abbreviation, player_name, prefer_rich=True)
 
 
+def _best_roster_candidate(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    rich = [candidate for candidate in candidates if not player_is_skeletal(candidate)]
+    return rich[0] if rich else candidates[0]
+
+
+def _dedupe_roster_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[int] = set()
+    deduped: list[dict[str, Any]] = []
+    for candidate in candidates:
+        player_id = int(candidate["player_id"])
+        if player_id in seen:
+            continue
+        seen.add(player_id)
+        deduped.append(candidate)
+    return deduped
+
+
+def _build_roster_player_index(player_rows: list[Any]) -> dict[str, dict[Any, list[dict[str, Any]]]]:
+    exact_team_name: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    team_normalized: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    team_initial_last: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    team_last: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    global_normalized: dict[str, list[dict[str, Any]]] = {}
+    global_initial_last: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
+    for row in player_rows:
+        candidate = dict(row)
+        team = str(candidate.get("team_abbreviation") or "").strip().upper()
+        full_name = str(candidate.get("full_name") or "").strip()
+        if not team or not full_name:
+            continue
+        lowered_name = full_name.lower()
+        normalized_name, first_initial, last_name = player_lookup_parts(full_name)
+
+        exact_team_name.setdefault((team, lowered_name), []).append(candidate)
+        if normalized_name:
+            team_normalized.setdefault((team, normalized_name), []).append(candidate)
+            global_normalized.setdefault(normalized_name, []).append(candidate)
+        if first_initial and last_name:
+            team_initial_last.setdefault((team, first_initial, last_name), []).append(candidate)
+            global_initial_last.setdefault((first_initial, last_name), []).append(candidate)
+        if last_name:
+            team_last.setdefault((team, last_name), []).append(candidate)
+
+    return {
+        "exact_team_name": exact_team_name,
+        "team_normalized": team_normalized,
+        "team_initial_last": team_initial_last,
+        "team_last": team_last,
+        "global_normalized": global_normalized,
+        "global_initial_last": global_initial_last,
+    }
+
+
+def _resolve_roster_player_display_fast(
+    team_abbreviation: str,
+    player_name: str,
+    player_index: dict[str, dict[Any, list[dict[str, Any]]]],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    normalized_team = normalize_team_abbreviation(team_abbreviation) or team_abbreviation.upper()
+    normalized_name, first_initial, last_name = player_lookup_parts(player_name)
+    lowered_name = str(player_name or "").strip().lower()
+
+    exact_matches = _dedupe_roster_candidates(
+        player_index["exact_team_name"].get((normalized_team, lowered_name), [])
+    )
+    player = _best_roster_candidate(exact_matches)
+
+    if player is None:
+        team_candidates: list[dict[str, Any]] = []
+        if normalized_name:
+            team_candidates.extend(player_index["team_normalized"].get((normalized_team, normalized_name), []))
+        if first_initial and last_name:
+            team_candidates.extend(player_index["team_initial_last"].get((normalized_team, first_initial, last_name), []))
+        if last_name:
+            team_candidates.extend(player_index["team_last"].get((normalized_team, last_name), []))
+        player = _best_roster_candidate(_dedupe_roster_candidates(team_candidates))
+
+    if not player or not player_is_skeletal(player):
+        return player, None
+
+    fallback_candidates: list[dict[str, Any]] = []
+    if normalized_name:
+        fallback_candidates.extend(player_index["global_normalized"].get(normalized_name, []))
+    if first_initial and last_name:
+        fallback_candidates.extend(player_index["global_initial_last"].get((first_initial, last_name), []))
+    fallback = _best_roster_candidate(_dedupe_roster_candidates(fallback_candidates))
+    if not fallback or int(fallback["player_id"]) == int(player["player_id"]) or player_is_skeletal(fallback):
+        return player, None
+    return player, fallback
+
+
 def _resolve_roster_player_display(
     conn: Any,
     team_abbreviation: str,
     player_name: str,
     *,
     player_rows: list[Any] | None = None,
+    player_index: dict[str, dict[Any, list[dict[str, Any]]]] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if player_index is not None:
+        return _resolve_roster_player_display_fast(team_abbreviation, player_name, player_index)
     player = resolve_player_identity(
         conn,
         team_abbreviation,
@@ -1586,6 +1683,7 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
         LEFT JOIN teams t ON t.id = p.team_id
         """
     ).fetchall()
+    player_index = _build_roster_player_index(player_rows)
 
     resolved_rows: list[tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None]] = []
     profile_player_ids: set[int] = set()
@@ -1596,6 +1694,7 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
             str(row["team"]),
             str(row["player_name"]),
             player_rows=player_rows,
+            player_index=player_index,
         )
         resolved_rows.append((row, player, display_fallback))
         if player:
