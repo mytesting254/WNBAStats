@@ -5750,7 +5750,7 @@ def test_repair_current_slate_endpoint_queues_background_job(monkeypatch) -> Non
             }
         ),
     )
-    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"watchlist.json": 1})
+    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn, **kwargs: {"watchlist.json": 1})
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
     monkeypatch.setitem(main_module._PROP_SYNC_STATE, "running", False)
     monkeypatch.setitem(main_module._PROP_SYNC_STATE, "started_at", None)
@@ -5836,7 +5836,7 @@ def test_start_prop_sync_if_needed_tracks_progress(monkeypatch) -> None:
     monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fake_sync)
     monkeypatch.setattr(main_module, "rebuild_predictions_live", fake_rebuild)
-    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"watchlist.json": 1})
+    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn, **kwargs: {"watchlist.json": 1})
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
 
     started = main_module._start_prop_sync_if_needed("odds_import")

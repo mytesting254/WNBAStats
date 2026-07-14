@@ -470,10 +470,9 @@ def rebuild_predictions_live(
     safe_chunk_size = max(1, int(chunk_size))
     for start in range(0, len(prop_ids), safe_chunk_size):
         batch_ids = prop_ids[start : start + safe_chunk_size]
-        batch_projections: list[PropProjection] = []
         for prop_line_id in batch_ids:
             try:
-                batch_projections.append(
+                projections.append(
                     build_prop_projection(
                         conn,
                         int(prop_line_id),
@@ -483,10 +482,13 @@ def rebuild_predictions_live(
                 )
             except Exception as exc:
                 errors.append(f"{prop_line_id}: {exc}")
-        if not batch_projections:
-            continue
+        if progress_callback is not None:
+            processed = min(start + len(batch_ids), total_props)
+            progress_callback(processed, total_props, f"Built {len(projections)} of {total_props} projections.")
+
+    if projections:
         with sqlite_write_lock():
-            _delete_predictions_for_prop_line_ids(conn, [projection.prop_line_id for projection in batch_projections])
+            _delete_predictions_for_prop_line_ids(conn, [projection.prop_line_id for projection in projections])
             conn.executemany(
                 """
                 INSERT INTO prop_predictions (
@@ -508,14 +510,10 @@ def rebuild_predictions_live(
                         projection.confidence,
                         projection.reason,
                     )
-                    for projection in batch_projections
+                    for projection in projections
                 ],
             )
             conn.commit()
-        projections.extend(batch_projections)
-        if progress_callback is not None:
-            processed = min(start + len(batch_ids), total_props)
-            progress_callback(processed, total_props, f"Built {len(projections)} of {total_props} projections.")
 
     return LiveRebuildResult(
         projections=projections,

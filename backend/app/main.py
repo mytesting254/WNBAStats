@@ -2787,6 +2787,8 @@ def _publish_current_read_payloads(
     conn,
     *,
     include_matchups: bool = True,
+    include_roster: bool = True,
+    include_performance: bool = True,
     matchup_game_ids: list[int] | None = None,
     full_matchup_refresh: bool = True,
 ) -> dict[str, int]:
@@ -2800,12 +2802,18 @@ def _publish_current_read_payloads(
     payload_builders = [
         (WATCHLIST_CACHE_NAME, WATCHLIST_TTL_SECONDS, lambda: _watchlist_payload(conn)),
         (LINE_DISCREPANCIES_CACHE_NAME, LINE_DISCREPANCIES_TTL_SECONDS, lambda: line_discrepancies(conn, None)),
-        (ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn, refresh_lineups=False)),
-        (MODEL_RUNS_CACHE_NAME, MODEL_RUNS_TTL_SECONDS, lambda: _model_runs_payload(conn)),
-        (MODEL_PERFORMANCE_CACHE_NAME, MODEL_PERFORMANCE_TTL_SECONDS, lambda: _model_performance_payload(conn)),
-        (GEM_PERFORMANCE_CACHE_NAME, GEM_PERFORMANCE_TTL_SECONDS, lambda: _gem_performance_payload(conn)),
-        (WATCHLIST_PERFORMANCE_CACHE_NAME, WATCHLIST_PERFORMANCE_TTL_SECONDS, lambda: _watchlist_performance_payload(conn)),
     ]
+    if include_roster:
+        payload_builders.append((ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn, refresh_lineups=False)))
+    if include_performance:
+        payload_builders.extend(
+            [
+                (MODEL_RUNS_CACHE_NAME, MODEL_RUNS_TTL_SECONDS, lambda: _model_runs_payload(conn)),
+                (MODEL_PERFORMANCE_CACHE_NAME, MODEL_PERFORMANCE_TTL_SECONDS, lambda: _model_performance_payload(conn)),
+                (GEM_PERFORMANCE_CACHE_NAME, GEM_PERFORMANCE_TTL_SECONDS, lambda: _gem_performance_payload(conn)),
+                (WATCHLIST_PERFORMANCE_CACHE_NAME, WATCHLIST_PERFORMANCE_TTL_SECONDS, lambda: _watchlist_performance_payload(conn)),
+            ]
+        )
 
     for name, ttl_seconds, compute in payload_builders:
         try:
@@ -2869,9 +2877,13 @@ def _publish_post_mutation_read_payloads(
     *,
     matchup_game_ids: list[int] | None = None,
     full_matchup_refresh: bool = True,
+    include_roster: bool = True,
+    include_performance: bool = True,
 ) -> dict[str, int]:
     return _publish_current_read_payloads(
         conn,
+        include_roster=include_roster,
+        include_performance=include_performance,
         matchup_game_ids=matchup_game_ids,
         full_matchup_refresh=full_matchup_refresh,
     )
@@ -3449,7 +3461,13 @@ def _run_current_slate_repair_job(target_game_ids: list[int] | None = None) -> d
             total=1,
             message="Publishing repaired payloads.",
         )
-        result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+        result["published_payloads"] = _publish_post_mutation_read_payloads(
+            conn,
+            matchup_game_ids=list(result.get("target_game_ids") or []),
+            full_matchup_refresh=False,
+            include_roster=False,
+            include_performance=False,
+        )
     _set_prop_sync_progress(
         stage="publishing_payloads",
         stage_index=5,
@@ -5700,7 +5718,13 @@ def _start_prop_sync_if_needed(source: str) -> bool:
                     total=1,
                     message="Publishing synced payloads.",
                 )
-                published_payloads = _publish_post_mutation_read_payloads(conn)
+                published_payloads = _publish_post_mutation_read_payloads(
+                    conn,
+                    matchup_game_ids=touched_game_ids,
+                    full_matchup_refresh=False,
+                    include_roster=False,
+                    include_performance=False,
+                )
             _set_prop_sync_progress(
                 stage="publishing_payloads",
                 stage_index=3,
