@@ -2879,7 +2879,9 @@ def _publish_post_mutation_read_payloads(
 def _refresh_roster_read_payloads(conn) -> dict[str, int]:
     published: dict[str, int] = {}
     payloads = [
-        (ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn)),
+        # The roster refresh route has already imported Rotowire data for this request.
+        # Reuse that state here instead of triggering another lineup fetch while publishing.
+        (ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn, refresh_lineups=False)),
     ]
     for name, ttl_seconds, compute in payloads:
         payload = compute()

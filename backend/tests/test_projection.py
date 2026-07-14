@@ -516,6 +516,24 @@ def test_publish_current_read_payloads_uses_cached_rotowire_state(monkeypatch) -
     assert main_module.ROSTER_CACHE_NAME in published
 
 
+def test_refresh_roster_read_payloads_reuses_current_rotowire_state(monkeypatch) -> None:
+    published: list[str] = []
+    roster_refresh_flags: list[bool] = []
+
+    monkeypatch.setattr(
+        main_module,
+        "_roster_payload",
+        lambda conn, refresh_lineups=True: roster_refresh_flags.append(bool(refresh_lineups)) or [5],
+    )
+    monkeypatch.setattr(main_module, "write_json_cache", lambda name, payload: published.append(name))
+
+    result = main_module._refresh_roster_read_payloads(SimpleNamespace())
+
+    assert roster_refresh_flags == [False]
+    assert result == {main_module.ROSTER_CACHE_NAME: 1}
+    assert published == [main_module.ROSTER_CACHE_NAME]
+
+
 def test_publish_post_mutation_read_payloads_includes_matchups(monkeypatch) -> None:
     published: list[str] = []
 
