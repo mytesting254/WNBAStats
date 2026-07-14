@@ -1450,6 +1450,105 @@ def _roster_role_weight(role: str | None) -> float:
     }.get(str(role or "starter").strip().lower(), 0.9)
 
 
+def _roster_team_injury_impacts(conn: Any, team_ids: dict[str, int]) -> dict[str, dict[str, float | int]]:
+    default_team_impact = {"factor": 1.0, "missing_key_players": 0, "penalty_points": 0.0}
+    if not team_ids:
+        return {}
+
+    ordered = sorted({int(team_id) for team_id in team_ids.values() if int(team_id) > 0})
+    if not ordered:
+        return {}
+
+    placeholders = ",".join("?" for _ in ordered)
+    rows = conn.execute(
+        f"""
+        WITH latest_injuries AS (
+            SELECT
+                p.team_id,
+                p.id AS player_id,
+                lower(trim(i.status)) AS status,
+                p.rotation_role
+            FROM injuries i
+            JOIN players p ON p.id = i.player_id
+            WHERE p.team_id IN ({placeholders})
+              AND i.captured_at = (
+                  SELECT MAX(i2.captured_at)
+                  FROM injuries i2
+                  WHERE i2.player_id = i.player_id
+              )
+        ),
+        ranked_contrib AS (
+            SELECT
+                s.player_id,
+                (s.points + (0.70 * s.rebounds) + (0.70 * s.assists)) AS contrib,
+                ROW_NUMBER() OVER (
+                    PARTITION BY s.player_id
+                    ORDER BY g.game_date DESC, s.game_id DESC
+                ) AS rn
+            FROM player_game_stats s
+            JOIN games g ON g.id = s.game_id
+            JOIN latest_injuries li ON li.player_id = s.player_id
+        ),
+        recent_contrib AS (
+            SELECT player_id, AVG(contrib) AS contribution
+            FROM ranked_contrib
+            WHERE rn <= 10
+            GROUP BY player_id
+        )
+        SELECT
+            li.team_id,
+            li.status,
+            li.rotation_role,
+            COALESCE(rc.contribution, 0.0) AS contribution
+        FROM latest_injuries li
+        LEFT JOIN recent_contrib rc ON rc.player_id = li.player_id
+        """,
+        tuple(ordered),
+    ).fetchall()
+
+    status_weight = {
+        "out": 1.0,
+        "inactive": 1.0,
+        "suspended": 1.0,
+        "unavailable": 1.0,
+        "doubtful": 0.75,
+        "questionable": 0.35,
+        "probable": 0.10,
+    }
+
+    impacts_by_team_id: dict[int, dict[str, float | int]] = {
+        team_id: dict(default_team_impact) for team_id in ordered
+    }
+    for row in rows:
+        team_id = int(row["team_id"])
+        status = str(row["status"] or "").strip()
+        status_factor = status_weight.get(status)
+        if status_factor is None:
+            continue
+        contribution = float(row["contribution"] or 0.0)
+        if contribution <= 0:
+            continue
+        role_factor = _roster_role_weight(row["rotation_role"])
+        weighted_impact = contribution * status_factor * role_factor
+        current = impacts_by_team_id.setdefault(team_id, dict(default_team_impact))
+        current["penalty_points"] = float(current["penalty_points"]) + weighted_impact
+        if status_factor >= 0.75 and role_factor >= 1.0:
+            current["missing_key_players"] = int(current["missing_key_players"]) + 1
+
+    for team_id, impact in impacts_by_team_id.items():
+        penalty_points = float(impact["penalty_points"])
+        penalty_ratio = max(0.0, min((penalty_points / 18.0) * 0.08, 0.18))
+        impact["factor"] = max(0.82, min(1.0 - penalty_ratio, 1.0))
+        impact["penalty_points"] = round(penalty_points, 2)
+
+    team_by_id = {team_id: team for team, team_id in team_ids.items()}
+    return {
+        team_by_id[team_id]: impacts_by_team_id.get(team_id, dict(default_team_impact))
+        for team_id in ordered
+        if team_id in team_by_id
+    }
+
+
 def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not hasattr(conn, "execute"):
         return rows
@@ -1472,10 +1571,7 @@ def _build_roster_enrichment(conn: Any, rows: list[dict[str, Any]]) -> list[dict
             for team_row in team_rows
             if team_row["id"] is not None and team_row["abbreviation"] is not None
         }
-    team_impact_cache = {
-        team: (_team_injury_impact(conn, team_ids[team]) if team in team_ids else dict(default_team_impact))
-        for team in teams
-    }
+    team_impact_cache = _roster_team_injury_impacts(conn, team_ids)
 
     player_rows = conn.execute(
         """
