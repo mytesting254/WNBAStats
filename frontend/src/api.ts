@@ -918,6 +918,10 @@ export async function importRotowireInjuries(forceRefresh = false): Promise<{
   used_fallback_cache?: boolean;
   fetch_error?: string | null;
   roster?: RosterPlayer[];
+  roster_cache_refresh?: {
+    status?: string;
+    started_at?: string;
+  };
 }> {
   const response = await apiFetch(`/api/injuries/import/rotowire?force_refresh=${forceRefresh ? "true" : "false"}`, {
     method: "POST",

@@ -2387,6 +2387,47 @@ def _roster_payload(conn, *, refresh_lineups: bool = True) -> list[dict]:
     return _build_roster_enrichment(conn, normalized)
 
 
+def _roster_payload_lightweight() -> list[dict[str, Any]]:
+    payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
+    rows = payload.get("rows", []) if isinstance(payload, dict) else []
+    captured_at = payload.get("captured_at") if isinstance(payload, dict) else None
+    normalized: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        raw_team = str(row.get("team") or "").strip()
+        team = normalize_team_abbreviation(raw_team) or raw_team.upper()
+        player_name = str(row.get("player_name") or "").strip()
+        status = str(row.get("status") or "").strip().upper()
+        if not team or not player_name or not status:
+            continue
+        normalized.append(
+            {
+                "team": team,
+                "player_name": player_name,
+                "status": status,
+                "captured_at": captured_at,
+            }
+        )
+    normalized.sort(key=lambda item: (item["team"], item["player_name"]))
+    return normalized
+
+
+def _publish_roster_cache_async() -> dict[str, Any]:
+    started_at = datetime.now(timezone.utc).isoformat()
+
+    def _run() -> None:
+        try:
+            with connect() as conn:
+                roster_payload = _roster_payload(conn, refresh_lineups=False)
+                write_json_cache(ROSTER_CACHE_NAME, _cache_envelope(roster_payload, ROSTER_TTL_SECONDS))
+        except Exception:
+            pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "queued", "started_at": started_at}
+
+
 def _model_runs_payload(conn) -> dict:
     return {
         "latest": latest_model_run(conn),
@@ -4966,10 +5007,11 @@ def import_rotowire_injuries(force_refresh: bool = False) -> dict:
         result["affected_game_ids"] = _scheduled_game_ids_for_teams(conn, result.get("affected_team_ids", []))
         delete_json_cache(ROSTER_CACHE_NAME)
         delete_json_cache(MATCHUPS_CACHE_NAME)
-        roster_payload = _roster_payload(conn, refresh_lineups=False)
+        roster_payload = _roster_payload_lightweight()
         write_json_cache(ROSTER_CACHE_NAME, _cache_envelope(roster_payload, ROSTER_TTL_SECONDS))
         result["published_payloads"] = {ROSTER_CACHE_NAME: len(roster_payload)}
         result["roster"] = roster_payload
+        result["roster_cache_refresh"] = _publish_roster_cache_async()
     affected_game_ids = list(result.get("affected_game_ids") or [])
     roster_changed = bool(result.get("roster_changed"))
     result["repair"] = (

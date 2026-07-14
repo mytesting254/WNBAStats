@@ -1021,6 +1021,11 @@ export function App() {
         const refreshedRoster = Array.isArray(result.roster) ? result.roster : await fetchRoster();
         setRosterPullSummary(buildRosterPullSummary(roster, refreshedRoster, result.captured_at ?? null));
         setRoster(refreshedRoster);
+        if (Array.isArray(result.roster) && result.roster_cache_refresh?.status === "queued") {
+          window.setTimeout(() => {
+            void loadTab("roster", { force: true });
+          }, 2500);
+        }
       } catch (err) {
         const detail = err instanceof Error ? err.message : "Unable to reload roster after Rotowire refresh";
         setOperationStatus(
@@ -1031,7 +1036,7 @@ export function App() {
       setOperationStatus(
         result.used_fallback_cache
           ? `Rotowire refresh fell back to saved roster data. Parsed ${result.parsed_rows ?? 0} rows${result.captured_at ? ` (${result.captured_at})` : ""}.`
-          : `${forceRefresh ? "Fresh" : "Cached"} Rotowire lineup pull complete. Parsed ${result.parsed_rows ?? 0} rows${result.captured_at ? ` (${result.captured_at})` : ""}.`
+          : `${forceRefresh ? "Fresh" : "Cached"} Rotowire lineup pull complete. Parsed ${result.parsed_rows ?? 0} rows${result.captured_at ? ` (${result.captured_at})` : ""}${result.roster_cache_refresh?.status === "queued" ? ". Detailed roster metrics are updating in the background." : ""}.`
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to refresh Rotowire lineup status");
