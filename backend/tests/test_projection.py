@@ -1843,6 +1843,52 @@ def test_train_minutes_model_uses_materialized_training_db() -> None:
     assert model.rows > 0
 
 
+def test_minutes_training_db_excludes_dnp_and_persists_quality_flags() -> None:
+    load_test_history()
+    clear_model_cache()
+    observed_at = datetime.now(timezone.utc).isoformat()
+
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO player_game_availability (
+                player_id, game_id, team_id, source, is_active, did_not_play, status_reason, minutes_text, observed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (1001, 110, 10, "espn_boxscore", 0, 1, "COACH'S DECISION", "DNP-CD", observed_at),
+        )
+        info = ensure_minutes_training_db(conn, force=True)
+
+    training_db_path = paths_module.get_training_db_path()
+    with sqlite3.connect(training_db_path) as training_conn:
+        training_conn.row_factory = sqlite3.Row
+        row = training_conn.execute(
+            """
+            SELECT did_not_play, exclusion_reason, quality_flags_json, status_reason, minutes_text
+            FROM minutes_training_examples
+            WHERE source_player_id = ? AND source_game_id = ?
+            """,
+            (1001, 110),
+        ).fetchone()
+        metadata_rows = training_conn.execute(
+            "SELECT key, value FROM minutes_training_metadata WHERE key = 'exclusion_counts'"
+        ).fetchall()
+
+    assert info["excluded_rows"] >= 1
+    assert row is not None
+    assert int(row["did_not_play"]) == 1
+    assert row["exclusion_reason"] == "did_not_play"
+    flags = json.loads(str(row["quality_flags_json"]))
+    assert int(flags["has_availability_row"]) == 1
+    assert int(flags["did_not_play"]) == 1
+    assert int(flags["coach_decision_dnp"]) == 1
+    assert str(row["status_reason"]) == "COACH'S DECISION"
+    assert str(row["minutes_text"]) == "DNP-CD"
+    assert metadata_rows
+    exclusion_counts = json.loads(str(metadata_rows[0]["value"]))
+    assert int(exclusion_counts["did_not_play"]) >= 1
+
+
 def test_player_archetype_profile_classifies_usage_scorer_and_assist_guard() -> None:
     load_test_history()
     with connect() as conn:

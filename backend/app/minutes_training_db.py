@@ -112,6 +112,15 @@ def _init_training_db(conn: sqlite3.Connection) -> None:
             rotation_role TEXT NOT NULL,
             role_bucket TEXT,
             position TEXT,
+            availability_status TEXT,
+            did_not_play INTEGER NOT NULL DEFAULT 0,
+            status_reason TEXT,
+            minutes_text TEXT,
+            team_margin REAL,
+            blowout_margin_flag INTEGER NOT NULL DEFAULT 0,
+            low_minutes_outlier_flag INTEGER NOT NULL DEFAULT 0,
+            high_minutes_outlier_flag INTEGER NOT NULL DEFAULT 0,
+            returner_risk_flag INTEGER NOT NULL DEFAULT 0,
             target_minutes REAL,
             recent_blend REAL,
             target_delta REAL,
@@ -127,6 +136,7 @@ def _init_training_db(conn: sqlite3.Connection) -> None:
             teammate_minutes_redistribution REAL,
             rotation_stability REAL,
             features_json TEXT,
+            quality_flags_json TEXT,
             is_clean INTEGER NOT NULL DEFAULT 1,
             exclusion_reason TEXT,
             created_at TEXT NOT NULL,
@@ -137,6 +147,7 @@ def _init_training_db(conn: sqlite3.Connection) -> None:
         ON minutes_training_examples(is_clean, role_bucket, game_date);
         """
     )
+    _ensure_training_example_columns(conn)
     conn.commit()
 
 
@@ -170,6 +181,7 @@ def _rebuild_minutes_training_examples(
     candidate_rows = 0
     included_rows = 0
     excluded_rows = 0
+    exclusion_counts: dict[str, int] = {}
     training_conn.execute("DELETE FROM minutes_training_examples")
 
     players = source_conn.execute("SELECT id FROM players ORDER BY id").fetchall()
@@ -184,10 +196,24 @@ def _rebuild_minutes_training_examples(
             target_minutes = float(current["minutes"] or 0.0)
             game_date = str(current["game_date"] or "")
             season = game_date[:4]
+            availability = _availability_row(source_conn, player_id=player_id, game_id=int(current["game_id"]))
+            team_margin = _team_margin_value(current)
+            quality_flags: dict[str, object] = {
+                "has_availability_row": availability is not None,
+                "did_not_play": int(availability["did_not_play"] or 0) if availability is not None else 0,
+                "coach_decision_dnp": _coach_decision_dnp_flag(availability),
+                "blowout_margin_flag": int(team_margin is not None and abs(team_margin) >= 20.0),
+                "extreme_blowout_margin_flag": int(team_margin is not None and abs(team_margin) >= 25.0),
+                "low_minutes_outlier_flag": 0,
+                "high_minutes_outlier_flag": 0,
+                "returner_risk_flag": 0,
+            }
             if ppm._before_training_start(game_date, training_start):
                 exclusion_reason = "before_training_start"
             elif idx < 5:
                 exclusion_reason = "missing_history_window"
+            elif availability is not None and int(availability["did_not_play"] or 0) == 1:
+                exclusion_reason = "did_not_play"
             elif target_minutes <= 0.0:
                 exclusion_reason = "non_positive_minutes"
             elif target_minutes > 45.0:
@@ -222,6 +248,7 @@ def _rebuild_minutes_training_examples(
                     recent_minutes_avg = sum(newest_minutes[:5]) / min(len(newest_minutes), 5)
                     last_10_minutes_avg = sum(newest_minutes) / len(newest_minutes)
                     recent_absence_days = ppm._days_between_game_dates(previous_game_date, game_date)
+                    quality_flags["returner_risk_flag"] = int(recent_absence_days is not None and recent_absence_days >= 10.0)
                     lineup_context = ppm._minutes_lineup_context_from_player_rows(
                         source_conn,
                         player_id=player_id,
@@ -268,6 +295,24 @@ def _rebuild_minutes_training_examples(
                         recent_minutes_avg=recent_minutes_avg,
                         last_10_minutes_avg=last_10_minutes_avg,
                     )
+                    quality_flags["low_minutes_outlier_flag"] = int(
+                        recent_blend is not None
+                        and target_minutes <= 6.0
+                        and recent_blend >= 14.0
+                    )
+                    quality_flags["high_minutes_outlier_flag"] = int(
+                        recent_blend is not None
+                        and target_minutes >= recent_blend + 10.0
+                    )
+                    exclusion_reason = _derive_cleanup_exclusion_reason(
+                        availability=availability,
+                        target_minutes=target_minutes,
+                        recent_blend=recent_blend,
+                        recent_absence_days=recent_absence_days,
+                        team_margin=team_margin,
+                        quality_flags=quality_flags,
+                        existing_reason=exclusion_reason,
+                    )
                     feature_values_json = json.dumps(feature_values, separators=(",", ":"))
 
             is_clean = 0 if exclusion_reason else 1
@@ -275,6 +320,7 @@ def _rebuild_minutes_training_examples(
                 included_rows += 1
             else:
                 excluded_rows += 1
+                exclusion_counts[exclusion_reason] = exclusion_counts.get(exclusion_reason, 0) + 1
 
             rows_to_insert.append(
                 (
@@ -287,6 +333,15 @@ def _rebuild_minutes_training_examples(
                     str(current["rotation_role"] or "starter"),
                     role_bucket,
                     str(current["position"] or ""),
+                    str(availability["source"] or "available") if availability is not None else "available",
+                    int(availability["did_not_play"] or 0) if availability is not None else 0,
+                    str(availability["status_reason"] or "") if availability is not None else "",
+                    str(availability["minutes_text"] or "") if availability is not None else "",
+                    float(team_margin) if team_margin is not None else None,
+                    int(quality_flags["blowout_margin_flag"]),
+                    int(quality_flags["low_minutes_outlier_flag"]),
+                    int(quality_flags["high_minutes_outlier_flag"]),
+                    int(quality_flags["returner_risk_flag"]),
                     target_minutes if target_minutes > 0.0 else None,
                     recent_blend,
                     (target_minutes - recent_blend) if recent_blend is not None else None,
@@ -302,6 +357,7 @@ def _rebuild_minutes_training_examples(
                     float(team_transition[2]),
                     float(team_transition[3]),
                     feature_values_json,
+                    json.dumps(quality_flags, separators=(",", ":")),
                     is_clean,
                     exclusion_reason,
                     built_at,
@@ -312,12 +368,14 @@ def _rebuild_minutes_training_examples(
         """
         INSERT INTO minutes_training_examples (
             source_player_id, source_game_id, team_id, opponent_id, game_date, season,
-            rotation_role, role_bucket, position, target_minutes, recent_blend, target_delta,
+            rotation_role, role_bucket, position, availability_status, did_not_play, status_reason, minutes_text,
+            team_margin, blowout_margin_flag, low_minutes_outlier_flag, high_minutes_outlier_flag, returner_risk_flag,
+            target_minutes, recent_blend, target_delta,
             minute_volatility, recent_minutes_avg, last_10_minutes_avg, recent_absence_days,
             recent_team_minute_share, recent_minute_rank, recent_position_minute_share,
             games_since_joining_team, new_team_minutes_trend, teammate_minutes_redistribution,
-            rotation_stability, features_json, is_clean, exclusion_reason, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            rotation_stability, features_json, quality_flags_json, is_clean, exclusion_reason, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         rows_to_insert,
     )
@@ -331,6 +389,7 @@ def _rebuild_minutes_training_examples(
             "candidate_rows": candidate_rows,
             "included_rows": included_rows,
             "excluded_rows": excluded_rows,
+            "exclusion_counts": exclusion_counts,
             "local_date": datetime.now(APP_TIMEZONE).date().isoformat(),
         },
     )
@@ -353,3 +412,94 @@ def _source_signature(conn: sqlite3.Connection) -> str:
         ).fetchone()
         parts.append(f"{table}:{int(row['row_count'] or 0)}:{int(row['max_id'] or 0)}")
     return "|".join(parts)
+
+
+def _ensure_training_example_columns(conn: sqlite3.Connection) -> None:
+    columns = {
+        row["name"]: str(row["type"] or "")
+        for row in conn.execute("PRAGMA table_info(minutes_training_examples)").fetchall()
+    }
+    additions = [
+        ("availability_status", "TEXT"),
+        ("did_not_play", "INTEGER NOT NULL DEFAULT 0"),
+        ("status_reason", "TEXT"),
+        ("minutes_text", "TEXT"),
+        ("team_margin", "REAL"),
+        ("blowout_margin_flag", "INTEGER NOT NULL DEFAULT 0"),
+        ("low_minutes_outlier_flag", "INTEGER NOT NULL DEFAULT 0"),
+        ("high_minutes_outlier_flag", "INTEGER NOT NULL DEFAULT 0"),
+        ("returner_risk_flag", "INTEGER NOT NULL DEFAULT 0"),
+        ("quality_flags_json", "TEXT"),
+    ]
+    for name, ddl in additions:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE minutes_training_examples ADD COLUMN {name} {ddl}")
+
+
+def _availability_row(conn: sqlite3.Connection, *, player_id: int, game_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT source, did_not_play, status_reason, minutes_text
+        FROM player_game_availability
+        WHERE player_id = ? AND game_id = ?
+        ORDER BY observed_at DESC, id DESC
+        LIMIT 1
+        """,
+        (player_id, game_id),
+    ).fetchone()
+
+
+def _team_margin_value(row: sqlite3.Row) -> float | None:
+    value = row["team_margin"] if "team_margin" in row.keys() else None
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _coach_decision_dnp_flag(availability: sqlite3.Row | None) -> int:
+    if availability is None:
+        return 0
+    reason = str(availability["status_reason"] or "").strip().lower()
+    if not reason:
+        return 0
+    return int("coach" in reason or "decision" in reason)
+
+
+def _derive_cleanup_exclusion_reason(
+    *,
+    availability: sqlite3.Row | None,
+    target_minutes: float,
+    recent_blend: float | None,
+    recent_absence_days: float | None,
+    team_margin: float | None,
+    quality_flags: dict[str, object],
+    existing_reason: str | None,
+) -> str | None:
+    if existing_reason:
+        return existing_reason
+    if availability is not None and int(availability["did_not_play"] or 0) == 1:
+        return "did_not_play"
+    if recent_blend is None:
+        return "missing_recent_blend"
+    if (
+        int(quality_flags.get("low_minutes_outlier_flag") or 0) == 1
+        and recent_absence_days is None
+        and (team_margin is None or abs(team_margin) < 20.0)
+    ):
+        return "low_minutes_rotation_anomaly"
+    if (
+        int(quality_flags.get("high_minutes_outlier_flag") or 0) == 1
+        and team_margin is not None
+        and abs(team_margin) >= 25.0
+    ):
+        return "blowout_spike_outlier"
+    if (
+        recent_absence_days is not None
+        and recent_absence_days >= 21.0
+        and target_minutes <= 8.0
+    ):
+        return "deep_return_ramp_game"
+    return None
