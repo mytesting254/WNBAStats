@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import runpy
 from types import SimpleNamespace
+from urllib.error import URLError
 
 import pytest
 from fastapi import Response
@@ -8206,6 +8207,23 @@ def test_covers_import_force_refresh_uses_cache_when_fresh_scrape_returns_no_row
     assert result["status"] == "loaded_from_cache"
     assert result["source"] == "cache"
     assert result["imported"] == 1
+
+
+def test_covers_fetch_text_uses_requests_fallback(monkeypatch) -> None:
+    class FakeResponse:
+        encoding = "utf-8"
+        text = "fallback body"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def raise_urlopen(*args, **kwargs):
+        raise URLError("temporary failure")
+
+    monkeypatch.setattr(covers_import_module, "urlopen", raise_urlopen)
+    monkeypatch.setattr(covers_import_module.requests, "get", lambda *args, **kwargs: FakeResponse())
+
+    assert covers_import_module._fetch_text("https://example.com/test") == "fallback body"
 
 
 def test_rotowire_lineup_parser_extracts_may_not_play_by_team() -> None:

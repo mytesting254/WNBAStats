@@ -3,12 +3,13 @@ from __future__ import annotations
 import html
 import re
 import sqlite3
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
 from urllib.error import URLError
 from urllib.request import Request, urlopen
+
+import requests
 
 from .bootstrap import ensure_team, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
@@ -1187,31 +1188,19 @@ def _fetch_text(url: str) -> str:
         with urlopen(request, timeout=FETCH_TIMEOUT_SECONDS) as response:
             return response.read().decode("utf-8", errors="replace")
     except (TimeoutError, URLError, OSError) as exc:
-        return _fetch_text_with_curl(url, exc)
+        return _fetch_text_with_requests(url, exc)
 
 
-def _fetch_text_with_curl(url: str, original_error: Exception) -> str:
-    command = [
-        "curl",
-        "-L",
-        "--fail",
-        "--silent",
-        "--show-error",
-        "--max-time",
-        str(FETCH_TIMEOUT_SECONDS),
-        "-H",
-        f"User-Agent: {REQUEST_HEADERS['User-Agent']}",
-        "-H",
-        f"Accept: {REQUEST_HEADERS['Accept']}",
-        "-H",
-        f"Accept-Language: {REQUEST_HEADERS['Accept-Language']}",
-        url,
-    ]
+def _fetch_text_with_requests(url: str, original_error: Exception) -> str:
     try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=FETCH_TIMEOUT_SECONDS + 2)
-        return result.stdout
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as curl_error:
-        raise RuntimeError(f"Unable to fetch {url}: {original_error}; curl fallback failed: {curl_error}") from curl_error
+        response = requests.get(url, headers=REQUEST_HEADERS, timeout=FETCH_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        response.encoding = response.encoding or "utf-8"
+        return response.text
+    except requests.RequestException as requests_error:
+        raise RuntimeError(
+            f"Unable to fetch {url}: {original_error}; requests fallback failed: {requests_error}"
+        ) from requests_error
 
 
 def _clean_text(value: str) -> str:
