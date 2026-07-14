@@ -48,7 +48,7 @@ from .odds_import import (
     _player_name_match_clause,
     sync_prop_lines_from_sportsbook,
 )
-from .player_identity import player_is_skeletal, repair_shadow_player_identities, resolve_player_identity
+from .player_identity import player_is_skeletal, resolve_player_identity
 from .projections import LiveRebuildResult, rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
@@ -2167,8 +2167,6 @@ def _roster_payload(conn, *, refresh_lineups: bool = True) -> list[dict]:
         except Exception:
             # Keep roster payload non-fatal so cache publication can proceed even if live fetch fails.
             pass
-    if hasattr(conn, "execute"):
-        repair_shadow_player_identities(conn)
     payload = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
     rows = payload.get("rows", []) if isinstance(payload, dict) else []
     captured_at = payload.get("captured_at") if isinstance(payload, dict) else None

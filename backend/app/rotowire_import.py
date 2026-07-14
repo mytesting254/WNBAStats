@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 from .bootstrap import normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
 from .db import sqlite_write_lock
-from .player_identity import repair_shadow_player_identities, resolve_player_identity
+from .player_identity import resolve_player_identity
 from .timezone_utils import local_today_iso
 
 
@@ -78,7 +78,6 @@ def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = Fals
     lineup_team_ids: set[int] = set()
     try:
         with sqlite_write_lock():
-            repair_shadow_player_identities(conn)
             if source == "rotowire":
                 lineup_team_ids = _lineup_team_ids(conn, page)
             for row in rows:
