@@ -8,26 +8,41 @@
   box-sizing: border-box;
 }
 
+:root {
+  --surface: rgba(255, 255, 255, 0.94);
+  --surface-strong: rgba(255, 255, 255, 0.98);
+  --line-soft: rgba(126, 154, 184, 0.24);
+  --text-muted: #5e7188;
+  --shadow-soft: 0 24px 70px rgba(4, 20, 38, 0.18);
+  --shadow-strong: 0 30px 80px rgba(3, 16, 31, 0.28);
+}
+
 body {
   margin: 0;
   min-height: 100vh;
   background:
-    linear-gradient(90deg, rgba(11, 18, 32, 0.88), rgba(11, 18, 32, 0.64) 46%, rgba(11, 18, 32, 0.78)),
-    linear-gradient(180deg, rgba(11, 18, 32, 0.42), rgba(11, 18, 32, 0.88));
+    radial-gradient(circle at top left, rgba(15, 157, 138, 0.22), transparent 28%),
+    radial-gradient(circle at top right, rgba(255, 183, 77, 0.2), transparent 24%),
+    linear-gradient(120deg, rgba(4, 15, 30, 0.96), rgba(11, 29, 48, 0.9) 44%, rgba(6, 24, 42, 0.97)),
+    linear-gradient(180deg, rgba(10, 25, 42, 0.42), rgba(8, 20, 35, 0.92));
 }
 
 body.arena-background {
   background:
-    linear-gradient(90deg, rgba(11, 18, 32, 0.88), rgba(11, 18, 32, 0.64) 46%, rgba(11, 18, 32, 0.78)),
-    linear-gradient(180deg, rgba(11, 18, 32, 0.42), rgba(11, 18, 32, 0.88)),
+    radial-gradient(circle at top left, rgba(15, 157, 138, 0.22), transparent 28%),
+    radial-gradient(circle at top right, rgba(255, 183, 77, 0.2), transparent 24%),
+    linear-gradient(120deg, rgba(4, 15, 30, 0.96), rgba(11, 29, 48, 0.88) 44%, rgba(6, 24, 42, 0.97)),
+    linear-gradient(180deg, rgba(10, 25, 42, 0.42), rgba(8, 20, 35, 0.92)),
     url("./assets/basketball-arena-bg-1672.avif") center / cover fixed;
 }
 
 @media (max-width: 960px) {
   body.arena-background {
     background-image:
-      linear-gradient(90deg, rgba(11, 18, 32, 0.88), rgba(11, 18, 32, 0.64) 46%, rgba(11, 18, 32, 0.78)),
-      linear-gradient(180deg, rgba(11, 18, 32, 0.42), rgba(11, 18, 32, 0.88)),
+      radial-gradient(circle at top left, rgba(15, 157, 138, 0.22), transparent 28%),
+      radial-gradient(circle at top right, rgba(255, 183, 77, 0.2), transparent 24%),
+      linear-gradient(120deg, rgba(4, 15, 30, 0.96), rgba(11, 29, 48, 0.88) 44%, rgba(6, 24, 42, 0.97)),
+      linear-gradient(180deg, rgba(10, 25, 42, 0.42), rgba(8, 20, 35, 0.92)),
       url("./assets/basketball-arena-bg-960.avif");
   }
 }
@@ -66,10 +81,10 @@ select {
 
 .eyebrow {
   margin: 0 0 4px;
-  color: #80d6c6;
+  color: #8de6db;
   font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
 }
 
@@ -83,6 +98,7 @@ p {
 h1 {
   margin-bottom: 0;
   font-size: 34px;
+  letter-spacing: -0.04em;
 }
 
 h2 {
@@ -97,12 +113,20 @@ h3 {
 
 .icon-button {
   min-height: 42px;
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(148, 208, 233, 0.28);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(117, 160, 197, 0.12));
   color: #ffffff;
   cursor: pointer;
-  backdrop-filter: blur(12px);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.14);
+  backdrop-filter: blur(18px);
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.icon-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(255, 183, 77, 0.44);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(148, 190, 223, 0.16));
 }
 
 .text-button {
@@ -119,18 +143,18 @@ h3 {
 }
 
 .dark-button {
-  border-color: #184f86;
-  background: #2364aa;
+  border-color: rgba(15, 157, 138, 0.36);
+  background: linear-gradient(135deg, #0f9d8a, #0b6f83);
   color: #ffffff;
 }
 
 .secondary-button {
   min-height: 42px;
   padding: 0 14px;
-  border: 1px solid #d0d5dd;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #184f86;
+  border: 1px solid rgba(15, 157, 138, 0.24);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(237, 249, 248, 0.94));
+  color: #0b6f83;
   cursor: pointer;
   font-weight: 800;
 }
@@ -151,50 +175,74 @@ h3 {
   display: inline-flex;
   gap: 8px;
   margin-bottom: 18px;
-  padding: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.12);
-  backdrop-filter: blur(12px);
+  padding: 8px;
+  border: 1px solid rgba(152, 199, 231, 0.2);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(117, 160, 197, 0.1)),
+    rgba(8, 20, 35, 0.28);
+  box-shadow: 0 22px 44px rgba(3, 16, 31, 0.2);
+  backdrop-filter: blur(18px);
 }
 
 .tabs button {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 38px;
-  padding: 0 14px;
+  min-height: 42px;
+  padding: 0 16px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 14px;
   background: transparent;
-  color: rgba(255, 255, 255, 0.82);
+  color: rgba(243, 247, 251, 0.88);
   cursor: pointer;
   font-weight: 800;
+  letter-spacing: 0.01em;
+  transition: transform 160ms ease, background 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.tabs button:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.tabs button svg {
+  color: #8de6db;
 }
 
 .tabs button.active {
-  background: #ffffff;
-  color: #184f86;
+  background: linear-gradient(135deg, rgba(255, 183, 77, 0.96), rgba(255, 214, 102, 0.94));
+  color: #5f2d00;
+  box-shadow: 0 14px 28px rgba(99, 54, 5, 0.24);
+}
+
+.tabs button.active svg {
+  color: #8a4300;
 }
 
 .metric {
   min-height: 82px;
   padding: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.9);
-  box-shadow: 0 16px 40px rgba(7, 13, 26, 0.16);
+  border: 1px solid rgba(109, 164, 199, 0.2);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at top right, rgba(255, 183, 77, 0.12), transparent 36%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(239, 247, 253, 0.94));
+  box-shadow: 0 18px 44px rgba(7, 20, 37, 0.16);
 }
 
 .metric span {
   display: block;
   margin-bottom: 8px;
-  color: #667085;
+  color: var(--text-muted);
   font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .metric strong {
   font-size: 24px;
+  color: #10324d;
 }
 
 .player-label {
@@ -262,10 +310,12 @@ h3 {
 
 .board-panel,
 .detail-panel {
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.92);
-  box-shadow: 0 24px 70px rgba(7, 13, 26, 0.28);
+  border: 1px solid var(--line-soft);
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at top right, rgba(15, 157, 138, 0.08), transparent 34%),
+    linear-gradient(180deg, var(--surface-strong), var(--surface));
+  box-shadow: var(--shadow-strong);
   backdrop-filter: blur(18px);
 }
 
@@ -282,12 +332,15 @@ h3 {
   justify-content: space-between;
   gap: 12px;
   padding: 18px;
-  border-bottom: 1px solid #eaecf0;
+  border-bottom: 1px solid rgba(130, 157, 183, 0.18);
+  background:
+    linear-gradient(180deg, rgba(239, 248, 255, 0.96), rgba(255, 255, 255, 0.82)),
+    #ffffff;
 }
 
 .panel-header p {
   margin-bottom: 0;
-  color: #667085;
+  color: var(--text-muted);
   font-size: 14px;
 }
 
@@ -469,7 +522,8 @@ h3 {
   justify-content: space-between;
   gap: 12px;
   padding: 14px 18px;
-  border-bottom: 1px solid #eaecf0;
+  border-bottom: 1px solid rgba(130, 157, 183, 0.18);
+  background: linear-gradient(180deg, rgba(230, 244, 250, 0.62), rgba(255, 255, 255, 0.68));
 }
 
 .segmented {
@@ -481,22 +535,31 @@ h3 {
 .segmented button,
 select {
   min-height: 36px;
-  border: 1px solid #d0d5dd;
-  border-radius: 8px;
-  background: #ffffff;
-  color: #344054;
+  border: 1px solid rgba(96, 140, 178, 0.24);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(240, 248, 252, 0.94));
+  color: #28435e;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
 }
 
 .segmented button {
   min-width: 54px;
   padding: 0 12px;
   cursor: pointer;
+  font-weight: 800;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.segmented button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(15, 157, 138, 0.34);
 }
 
 .segmented button.active {
-  border-color: #2364aa;
-  background: #e8f1fb;
-  color: #184f86;
+  border-color: rgba(15, 157, 138, 0.4);
+  background: linear-gradient(135deg, rgba(15, 157, 138, 0.16), rgba(17, 118, 137, 0.1));
+  color: #0b6f83;
+  box-shadow: 0 10px 22px rgba(12, 91, 104, 0.12);
 }
 
 select {
@@ -521,15 +584,17 @@ td {
 }
 
 th {
-  color: #667085;
+  color: #587087;
   font-size: 12px;
   text-transform: uppercase;
+  letter-spacing: 0.08em;
+  background: rgba(236, 246, 251, 0.72);
 }
 
 td span {
   display: block;
   margin-top: 3px;
-  color: #667085;
+  color: var(--text-muted);
   font-size: 13px;
 }
 
@@ -612,9 +677,9 @@ td span {
 }
 
 .team-logo.fallback {
-  border: 1px solid #d0d5dd;
-  border-radius: 8px;
-  background: #f2f4f7;
+  border: 1px solid rgba(104, 143, 178, 0.2);
+  border-radius: 10px;
+  background: linear-gradient(180deg, #f5fbff, #eaf4fb);
 }
 
 tbody tr {
@@ -623,7 +688,7 @@ tbody tr {
 
 tbody tr:hover,
 tbody tr.selected {
-  background: #f2f7fc;
+  background: linear-gradient(90deg, rgba(232, 247, 250, 0.92), rgba(255, 244, 221, 0.72));
 }
 
 .side {
@@ -654,7 +719,7 @@ tbody tr.selected {
 
 .recommendation {
   margin-bottom: 18px;
-  color: #2364aa;
+  color: #0b6f83;
   font-weight: 800;
 }
 
@@ -729,24 +794,36 @@ tbody tr.selected {
   display: flex;
   gap: 8px;
   padding: 14px 18px;
-  border-bottom: 1px solid #eaecf0;
+  border-bottom: 1px solid rgba(130, 157, 183, 0.18);
+  background: linear-gradient(180deg, rgba(233, 246, 251, 0.82), rgba(255, 255, 255, 0.32));
   overflow-x: auto;
 }
 
 .game-tabs button {
   min-width: 190px;
-  padding: 10px 12px;
-  border: 1px solid #d0d5dd;
-  border-radius: 8px;
-  background: #ffffff;
+  padding: 12px 14px;
+  border: 1px solid rgba(100, 140, 176, 0.22);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(236, 246, 252, 0.94));
   color: #344054;
   cursor: pointer;
   text-align: left;
+  box-shadow: 0 10px 26px rgba(10, 31, 54, 0.08);
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.game-tabs button:hover {
+  transform: translateY(-2px);
+  border-color: rgba(15, 157, 138, 0.3);
+  box-shadow: 0 16px 36px rgba(10, 31, 54, 0.12);
 }
 
 .game-tabs button.active {
-  border-color: #2364aa;
-  background: #e8f1fb;
+  border-color: rgba(15, 157, 138, 0.42);
+  background:
+    radial-gradient(circle at top right, rgba(255, 183, 77, 0.18), transparent 42%),
+    linear-gradient(180deg, rgba(236, 253, 245, 0.98), rgba(224, 242, 254, 0.96));
+  box-shadow: 0 18px 38px rgba(9, 67, 79, 0.16);
 }
 
 .roster-panel {
@@ -902,23 +979,23 @@ tbody tr.selected {
 }
 
 .matchup-game-tabs button.winner-home {
-  border-color: #8dd3b3;
-  background: #effcf6;
+  border-color: rgba(15, 157, 138, 0.28);
+  background: linear-gradient(180deg, rgba(239, 252, 246, 0.98), rgba(227, 250, 243, 0.94));
 }
 
 .matchup-game-tabs button.winner-away {
-  border-color: #f0c587;
-  background: #fff8ed;
+  border-color: rgba(255, 183, 77, 0.34);
+  background: linear-gradient(180deg, rgba(255, 248, 237, 0.98), rgba(255, 242, 218, 0.94));
 }
 
 .matchup-game-tabs button.winner-home.active {
-  border-color: #1f9d6a;
-  background: #ddf7eb;
+  border-color: rgba(11, 111, 131, 0.44);
+  background: linear-gradient(180deg, rgba(223, 247, 235, 0.98), rgba(214, 245, 238, 0.96));
 }
 
 .matchup-game-tabs button.winner-away.active {
-  border-color: #d08826;
-  background: #fff0da;
+  border-color: rgba(219, 124, 25, 0.4);
+  background: linear-gradient(180deg, rgba(255, 240, 218, 0.98), rgba(255, 232, 203, 0.96));
 }
 
 .game-tabs span,
@@ -929,31 +1006,34 @@ tbody tr.selected {
 
 .game-tabs span {
   margin-bottom: 4px;
-  color: #667085;
+  color: #62788e;
   font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .game-tabs strong {
-  color: #1b1f29;
+  color: #12324f;
   font-size: 15px;
 }
 
 .game-tabs em {
   margin-top: 5px;
-  color: #2364aa;
+  color: #0b6f83;
   font-size: 12px;
   font-style: normal;
   font-weight: 800;
 }
 
 .matchup-card {
-  border: 1px solid rgba(109, 40, 217, 0.22);
-  border-radius: 8px;
+  border: 1px solid rgba(15, 157, 138, 0.2);
+  border-radius: 18px;
   background:
-    linear-gradient(180deg, rgba(245, 243, 255, 0.98), rgba(255, 255, 255, 0.96)),
+    radial-gradient(circle at top right, rgba(255, 183, 77, 0.12), transparent 38%),
+    linear-gradient(180deg, rgba(244, 251, 255, 0.98), rgba(255, 255, 255, 0.96)),
     #ffffff;
   overflow: hidden;
-  box-shadow: 0 18px 48px rgba(76, 29, 149, 0.12);
+  box-shadow: 0 20px 48px rgba(7, 27, 49, 0.12);
 }
 
 .matchup-card-header {
@@ -963,8 +1043,8 @@ tbody tr.selected {
   align-items: flex-start;
   gap: 14px;
   padding: 16px;
-  border-bottom: 1px solid rgba(109, 40, 217, 0.12);
-  background: linear-gradient(180deg, rgba(237, 233, 254, 0.78), rgba(250, 245, 255, 0.32));
+  border-bottom: 1px solid rgba(15, 157, 138, 0.12);
+  background: linear-gradient(180deg, rgba(231, 248, 247, 0.84), rgba(250, 252, 255, 0.42));
 }
 
 .matchup-header-top {
@@ -976,7 +1056,7 @@ tbody tr.selected {
 .matchup-card-header h3 {
   margin-bottom: 0;
   font-size: 24px;
-  color: #4c1d95;
+  color: #10324d;
 }
 
 .matchup-header-main {
@@ -1404,9 +1484,9 @@ tbody tr.selected {
 .candidate-card {
   min-width: 0;
   padding: 10px;
-  border: 1px solid #d8eee7;
-  border-radius: 8px;
-  background: #f2fbf7;
+  border: 1px solid rgba(15, 157, 138, 0.18);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(242, 251, 247, 0.98), rgba(232, 247, 250, 0.96));
 }
 
 .discrepancy-grid {
@@ -1419,9 +1499,9 @@ tbody tr.selected {
 .discrepancy-card {
   min-width: 0;
   padding: 10px;
-  border: 1px solid #f6d7a8;
-  border-radius: 8px;
-  background: #fff8ed;
+  border: 1px solid rgba(255, 183, 77, 0.28);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 248, 237, 0.98), rgba(255, 242, 218, 0.96));
 }
 
 .discrepancy-card span,
