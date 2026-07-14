@@ -1711,6 +1711,64 @@ def test_minutes_projection_caps_stable_context_near_recent_blend(monkeypatch) -
     assert "stable-context recent blend cap" in note
 
 
+def test_minutes_projection_rebound_guard_protects_strong_role_drop() -> None:
+    recent_minutes_avg = 25.0
+    last_10_minutes_avg = 29.0
+    recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
+
+    projected, note = _project_minutes(
+        None,
+        player_id=1007,
+        game_id=2070,
+        rotation_role="starter",
+        ewma_minutes=23.0,
+        minutes_trend=-8.0,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minute_volatility=6.1,
+        context={"is_home": True},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=3.0,
+        team_transition=[20.0, -6.2, -0.25, 0.46],
+        lineup_context=[0.15, 0.84, 0.30],
+        before_game_date=None,
+    )
+
+    assert projected >= recent_blend - 1.9
+    assert "rebound guard strong-role drop" in note
+
+
+def test_minutes_projection_rebound_guard_skips_weak_lineup_context() -> None:
+    recent_minutes_avg = 25.0
+    last_10_minutes_avg = 29.0
+    recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
+
+    projected, note = _project_minutes(
+        None,
+        player_id=1008,
+        game_id=2080,
+        rotation_role="starter",
+        ewma_minutes=23.0,
+        minutes_trend=-8.0,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minute_volatility=6.1,
+        context={"is_home": True},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=3.0,
+        team_transition=[20.0, -6.2, -0.25, 0.46],
+        lineup_context=[0.09, 0.56, 0.18],
+        before_game_date=None,
+    )
+
+    assert projected < recent_blend - 2.0
+    assert "rebound guard strong-role drop" not in note
+
+
 def test_minutes_metric_summary_exposes_production_alias() -> None:
     summary = main_module._minutes_metric_summary(
         [

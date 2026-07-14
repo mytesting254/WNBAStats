@@ -2757,6 +2757,19 @@ def _project_minutes(
         last_10_minutes_avg=last_10_minutes_avg,
         opportunity_context=opportunity_context,
     )
+    projected, rebound_guard_notes = _apply_minutes_rebound_guard(
+        projected=projected,
+        role_state=role_state,
+        recent_blend=recent_blend,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minutes_trend=minutes_trend,
+        minute_volatility=minute_volatility,
+        injury_status=injury_status,
+        recent_absence_days=recent_absence_days,
+        lineup_context=lineup_context,
+        team_transition=team_transition,
+        blowout_delta=blowout_delta,
+    )
     projected, stable_context_notes = _apply_minutes_stable_context_cap(
         projected=projected,
         role_state=role_state,
@@ -2778,7 +2791,7 @@ def _project_minutes(
     learned_note = f", learned {learned_minutes:.1f}" if learned_minutes is not None else ""
     anchor_note = f", recency anchor {recency_anchor:.1f} @ {anchor_weight:.0%}"
     baseline_note = f", baseline {reference_baseline:.1f} @ {baseline_guard_weight:.0%}"
-    all_rule_notes = [*hard_rule_notes, *stable_context_notes]
+    all_rule_notes = [*hard_rule_notes, *rebound_guard_notes, *stable_context_notes]
     hard_rule_suffix = f", {'; '.join(all_rule_notes)}" if all_rule_notes else ""
     return projected, f"{role_state.bucket} bounds {lower_bound:.1f}-{upper_bound:.1f}{venue_note}, {blend_note}{learned_note}{anchor_note}{baseline_note}{hard_rule_suffix}"
 
@@ -2975,6 +2988,62 @@ def _apply_minutes_stable_context_cap(
     if abs(capped - projected) >= 0.05:
         notes.append("stable-context recent blend cap")
     return capped, notes
+
+
+def _apply_minutes_rebound_guard(
+    *,
+    projected: float,
+    role_state: MinutesRoleState,
+    recent_blend: float,
+    last_10_minutes_avg: float,
+    minutes_trend: float,
+    minute_volatility: float,
+    injury_status: str,
+    recent_absence_days: float | None,
+    lineup_context: list[float] | None,
+    team_transition: list[float] | None,
+    blowout_delta: float,
+) -> tuple[float, list[str]]:
+    notes: list[str] = []
+    status = str(injury_status or "").strip().lower()
+    if status in {"questionable", "gtd", "doubtful"}:
+        return projected, notes
+    if role_state.bucket not in {"starter_volatile", "rotation"}:
+        return projected, notes
+    if minutes_trend > -5.0:
+        return projected, notes
+    normalized_lineup_context = list(lineup_context or [0.0, 0.5, 0.0])
+    if len(normalized_lineup_context) < 3:
+        normalized_lineup_context = (normalized_lineup_context + [0.0, 0.5, 0.0])[:3]
+    recent_team_minute_share = float(normalized_lineup_context[0])
+    recent_minute_rank = float(normalized_lineup_context[1])
+    recent_position_minute_share = float(normalized_lineup_context[2])
+    if recent_team_minute_share < 0.12 or recent_minute_rank < 0.72:
+        return projected, notes
+    if recent_position_minute_share < 0.22:
+        return projected, notes
+    if blowout_delta <= -1.75:
+        return projected, notes
+    games_since_joining_team = float((team_transition or [0.0])[0] if team_transition else 0.0)
+    if 0.0 < games_since_joining_team <= 2.0:
+        return projected, notes
+    if recent_absence_days is not None and recent_absence_days >= 28.0:
+        return projected, notes
+    if recent_blend - projected < 2.25:
+        return projected, notes
+
+    allowance = 1.6
+    if role_state.bucket == "rotation":
+        allowance = 1.9
+    if minute_volatility >= 8.0:
+        allowance += 0.5
+    if recent_absence_days is not None and recent_absence_days >= 7.0:
+        allowance += 0.5
+    rebound_floor = max(role_state.lower_bound, max(last_10_minutes_avg - 3.0, recent_blend - allowance))
+    floored = max(projected, rebound_floor)
+    if floored - projected >= 0.05:
+        notes.append("rebound guard strong-role drop")
+    return floored, notes
 
 
 def _venue_minutes_adjustment(
