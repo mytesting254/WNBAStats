@@ -33,19 +33,44 @@ timestamp() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-curl_args=(-fsS)
-if [ -n "$API_KEY" ]; then
-  curl_args+=(-H "X-API-Key: $API_KEY")
-fi
+api_request() {
+  local method="$1"
+  local path="$2"
+  python3 - "$method" "${API_BASE}${path}" "$API_KEY" <<'PY'
+import json
+import sys
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+
+method, url, api_key = sys.argv[1:4]
+headers = {}
+if api_key:
+    headers["X-API-Key"] = api_key
+request = Request(url, method=method, headers=headers)
+try:
+    with urlopen(request, timeout=600) as response:
+        sys.stdout.write(response.read().decode("utf-8"))
+except HTTPError as exc:
+    body = exc.read().decode("utf-8", errors="replace")
+    if body:
+        sys.stderr.write(body)
+        if not body.endswith("\n"):
+            sys.stderr.write("\n")
+    raise SystemExit(1)
+except URLError as exc:
+    sys.stderr.write(f"{exc}\n")
+    raise SystemExit(1)
+PY
+}
 
 api_get() {
   local path="$1"
-  curl "${curl_args[@]}" "${API_BASE}${path}"
+  api_request GET "$path"
 }
 
 api_post() {
   local path="$1"
-  curl "${curl_args[@]}" -X POST "${API_BASE}${path}"
+  api_request POST "$path"
 }
 
 train_started_at() {

@@ -5089,6 +5089,104 @@ def test_delete_unavailable_special_snapshots_from_espn_supports_dry_run(monkeyp
     assert int(remaining_count) == 1
 
 
+def test_delete_unavailable_special_snapshots_uses_eastern_local_game_date_filter(monkeypatch, tmp_path) -> None:
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+    stocks_tracking_module.ensure_tracking_schema()
+
+    monkeypatch.setattr(
+        "backend.app.stocks_tracking.fetch_summary",
+        lambda game_id, force_refresh=False: {
+            "boxscore": {
+                "players": [
+                    {
+                        "team": {"abbreviation": "PHX"},
+                        "statistics": [
+                            {
+                                "athletes": [
+                                    {
+                                        "athlete": {"id": "9999", "displayName": "Other Player"},
+                                        "didNotPlay": False,
+                                        "active": True,
+                                        "stats": ["18"],
+                                    }
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
+        },
+    )
+
+    with connect() as conn:
+        conn.execute("INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (1005, 'Local Date Player', 10, 'G', 'starter')")
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (9003, '2026-07-14', '2026-07-14T02:30:00Z', 10, 3, 'final', 2, 2, -2.5, 162.5, 401857067)
+            """
+        )
+        with sqlite3.connect(tracking_path) as tracking:
+            tracking.execute(
+                """
+                INSERT INTO projection_snapshots (
+                    id, game_id, player_id, player_name, game_date, captured_at, model_version,
+                    projected_steals, projected_blocks, projected_stocks,
+                    steal_prob_1_plus, steal_prob_2_plus, block_prob_1_plus, block_prob_2_plus,
+                    stocks_prob_2_plus, stocks_prob_3_plus, data_quality
+                ) VALUES
+                    (5, 9003, 1005, 'Local Date Player', '2026-07-14', '2026-07-14T01:00:00+00:00', 'model', 1, 0, 1, 0.5, 0.2, 0.3, 0.1, 0.4, 0.1, 'model_only')
+                """
+            )
+            tracking.commit()
+
+        result = stocks_tracking_module.delete_unavailable_special_snapshots_from_espn(
+            conn,
+            target_dates=["2026-07-13"],
+        )
+
+    assert result["eligible_snapshots"] == 1
+    assert result["deleted"] == 1
+
+
+def test_prune_special_snapshots_uses_eastern_today_boundary(monkeypatch, tmp_path) -> None:
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+    stocks_tracking_module.ensure_tracking_schema()
+    monkeypatch.setattr(stocks_tracking_module, "local_today_iso", lambda: "2026-07-14")
+
+    with connect() as conn:
+        conn.execute("INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (1006, 'Boundary Player', 10, 'G', 'starter')")
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (9004, '2026-07-15', '2026-07-15T02:30:00Z', 10, 3, 'scheduled', 2, 2, -2.5, 162.5, 401857068)
+            """
+        )
+        with sqlite3.connect(tracking_path) as tracking:
+            tracking.execute(
+                """
+                INSERT INTO projection_snapshots (
+                    id, game_id, player_id, player_name, game_date, captured_at, model_version,
+                    projected_steals, projected_blocks, projected_stocks,
+                    steal_prob_1_plus, steal_prob_2_plus, block_prob_1_plus, block_prob_2_plus,
+                    stocks_prob_2_plus, stocks_prob_3_plus, data_quality
+                ) VALUES
+                    (6, 9004, 1006, 'Boundary Player', '2026-07-15', '2026-07-14T23:00:00+00:00', 'model', 1, 0, 1, 0.5, 0.2, 0.3, 0.1, 0.4, 0.1, 'model_only')
+                """
+            )
+            tracking.commit()
+
+        result = stocks_tracking_module.prune_special_snapshots(conn)
+
+    assert result["deleted_stale"] == 0
+
+
 def test_special_probability_calibration_is_market_specific(monkeypatch, tmp_path) -> None:
     tracking_path = tmp_path / "stocks-tracking.sqlite"
     monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))

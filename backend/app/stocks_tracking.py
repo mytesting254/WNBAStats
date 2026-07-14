@@ -20,7 +20,7 @@ from .player_prop_model import (
     _winsorize_history_values,
     feature_snapshot,
 )
-from .timezone_utils import APP_TIMEZONE, local_today_iso
+from .timezone_utils import APP_TIMEZONE, local_game_date, local_today_iso
 
 
 _SNAPSHOT_JOB_LOCK = threading.Lock()
@@ -2325,15 +2325,18 @@ def _delete_stale_pending_snapshots(
         + filter_sql,
         tuple(params),
     ).fetchall()
-    today_iso = datetime.now(timezone.utc).date().isoformat()
+    today_iso = local_today_iso()
     snapshot_ids: list[int] = []
     for row in rows:
-        game_date = str(row["game_date"] or "").strip()
-        if not game_date or game_date >= today_iso:
-            continue
         game_id = int(row["game_id"])
         player_id = int(row["player_id"])
-        game_row = conn.execute("SELECT status FROM games WHERE id = ?", (game_id,)).fetchone()
+        game_row = conn.execute("SELECT game_date, start_time, status FROM games WHERE id = ?", (game_id,)).fetchone()
+        local_date = local_game_date(
+            game_row["game_date"] if game_row is not None else row["game_date"],
+            game_row["start_time"] if game_row is not None else None,
+        )
+        if not local_date or local_date >= today_iso:
+            continue
         game_status = str(game_row["status"] or "").lower() if game_row is not None else ""
         active_prop_row = conn.execute(
             """
@@ -2478,7 +2481,7 @@ def delete_unavailable_special_snapshots_from_espn(
         for game_id, game_rows in by_game.items():
             game_row = conn.execute(
                 """
-                SELECT id, game_date, status, COALESCE(espn_event_id, id) AS summary_event_id
+                SELECT id, game_date, start_time, status, COALESCE(espn_event_id, id) AS summary_event_id
                 FROM games
                 WHERE id = ?
                 LIMIT 1
@@ -2488,10 +2491,11 @@ def delete_unavailable_special_snapshots_from_espn(
             if game_row is None:
                 skipped_games.append({"game_id": game_id, "reason": "missing_game"})
                 continue
+            game_local_date = local_game_date(game_row["game_date"], game_row["start_time"])
+            if normalized_dates and game_local_date not in normalized_dates:
+                continue
             if str(game_row["status"] or "").strip().lower() != "final":
                 skipped_games.append({"game_id": game_id, "reason": f"game_not_final:{game_row['status']}"})
-                continue
-            if normalized_dates and str(game_row["game_date"] or "").strip() not in normalized_dates:
                 continue
             summary_event_id = int(game_row["summary_event_id"])
             try:
