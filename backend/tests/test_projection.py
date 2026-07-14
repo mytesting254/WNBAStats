@@ -17,6 +17,7 @@ from starlette.requests import Request
 from backend.app import covers_import as covers_import_module
 from backend.app import cache as cache_module
 from backend.app import espn_history as espn_history_module
+from backend.app import minutes_training_db as minutes_training_db_module
 from backend.app import odds_import as odds_import_module
 from backend.app import paths as paths_module
 from backend.app import player_prop_model as player_prop_model_module
@@ -76,6 +77,7 @@ from backend.app.player_prop_model import (
     _player_market_weight,
     _residual_market_weight,
     _classify_minutes_role,
+    _historical_minutes_opportunity_context,
     _historical_training_features,
     _injury_adjustment_for_prop,
     _player_archetype_profile,
@@ -1909,6 +1911,7 @@ def test_minutes_feature_values_include_role_shift_signals() -> None:
         injury_delta=1.5,
         recent_absence_days=8.0,
         lineup_context=[0.19, 0.82, 0.61],
+        opportunity_context=[22.0, 1.0, 11.5, 34.0, -2.0, 3.5, 5.5],
     )
     feature_map = dict(zip(MINUTES_FEATURE_NAMES, features))
 
@@ -1918,6 +1921,13 @@ def test_minutes_feature_values_include_role_shift_signals() -> None:
     assert feature_map["recent_team_minute_share"] == pytest.approx(0.19)
     assert feature_map["recent_minute_rank"] == pytest.approx(0.82)
     assert feature_map["recent_position_minute_share"] == pytest.approx(0.61)
+    assert feature_map["same_position_unavailable_minutes"] == pytest.approx(22.0)
+    assert feature_map["same_position_key_out_count"] == pytest.approx(1.0)
+    assert feature_map["same_position_opportunity_persistence"] == pytest.approx(11.5)
+    assert feature_map["same_position_competition_minutes"] == pytest.approx(34.0)
+    assert feature_map["same_position_opportunity_trend"] == pytest.approx(-2.0)
+    assert feature_map["same_position_competition_trend"] == pytest.approx(3.5)
+    assert feature_map["same_position_returner_pressure"] == pytest.approx(5.5)
 
 
 def test_minutes_role_classification_uses_lineup_and_vacancy_context() -> None:
@@ -1943,11 +1953,101 @@ def test_minutes_role_classification_uses_lineup_and_vacancy_context() -> None:
         injury_delta=0.0,
         recent_absence_days=None,
         lineup_context=[0.18, 0.85, 0.60],
-        opportunity_context=[22.0, 1.0],
+        opportunity_context=[22.0, 1.0, 11.5, 34.0, -2.0, 3.5, 5.5],
     )
 
     assert promoted.anchor_minutes > baseline.anchor_minutes
     assert promoted.bucket in {"starter_volatile", "core_starter"}
+
+
+def test_historical_minutes_opportunity_context_uses_same_position_dnp_teammates() -> None:
+    load_test_history()
+    clear_model_cache()
+    observed_at = datetime.now(timezone.utc).isoformat()
+
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO teams (id, abbreviation, name) VALUES (?, ?, ?)",
+            (99, "TMP", "Temp Team"),
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (9101, "Target Guard", 99, "G", "rotation"),
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (9102, "Unavailable Guard", 99, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (9103, "Unavailable Forward", 99, "F", "starter"),
+        )
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (9901, "2026-06-10", "2026-06-10T19:00:00+00:00", 99, 10, "final", 2, 2, -3.5, 164.5),
+        )
+        for game_id, game_date, minutes in (
+            (9891, "2026-05-20", 30.0),
+            (9892, "2026-05-24", 28.0),
+            (9893, "2026-05-28", 26.0),
+            (9894, "2026-06-01", 24.0),
+        ):
+            conn.execute(
+                """
+                INSERT INTO games (
+                    id, game_date, start_time, home_team_id, away_team_id, status,
+                    rest_days_home, rest_days_away, spread_home, game_total
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (game_id, game_date, f"{game_date}T19:00:00+00:00", 99, 10, "final", 2, 2, -2.5, 163.0),
+            )
+            conn.execute(
+                """
+                INSERT INTO player_game_stats (
+                    player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (9102, game_id, minutes, 10, 3, 2, 1, 1, 0, 1),
+            )
+        conn.execute(
+            """
+            INSERT INTO player_game_availability (
+                player_id, game_id, team_id, source, is_active, did_not_play, status_reason, minutes_text, observed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (9102, 9901, 99, "espn_boxscore", 0, 1, "COACH'S DECISION", "DNP-CD", observed_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO player_game_availability (
+                player_id, game_id, team_id, source, is_active, did_not_play, status_reason, minutes_text, observed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (9103, 9901, 99, "espn_boxscore", 0, 1, "COACH'S DECISION", "DNP-CD", observed_at),
+        )
+        conn.commit()
+
+        result = _historical_minutes_opportunity_context(
+            conn,
+            player_id=9101,
+            game_id=9901,
+            team_id=99,
+            position="G",
+            before_game_date="2026-06-10",
+        )
+
+    assert result[0] == pytest.approx((30.0 + 28.0 + 26.0 + 24.0) / 4.0)
+    assert result[1] == pytest.approx(1.0)
+    assert result[2] == pytest.approx(0.0)
+    assert result[3] == pytest.approx((30.0 + 28.0 + 26.0 + 24.0) / 4.0)
+    assert result[4] == pytest.approx(0.0)
+    assert result[5] == pytest.approx(((24.0 + 26.0) / 2.0) - ((28.0 + 30.0) / 2.0))
+    assert result[6] == pytest.approx(0.0)
 
 
 def test_train_minutes_model_returns_model_with_history() -> None:
@@ -2035,6 +2135,73 @@ def test_minutes_training_db_excludes_dnp_and_persists_quality_flags() -> None:
     assert metadata_rows
     exclusion_counts = json.loads(str(metadata_rows[0]["value"]))
     assert int(exclusion_counts["did_not_play"]) >= 1
+
+
+def test_minutes_training_db_flags_injury_exit_low_minutes() -> None:
+    availability = {
+        "status_reason": "Left game with ankle injury",
+        "minutes_text": "8",
+        "did_not_play": 0,
+    }
+
+    assert minutes_training_db_module._injury_exit_risk_flag(
+        availability=availability,  # type: ignore[arg-type]
+        target_minutes=8.0,
+        recent_blend=24.0,
+    )
+    assert (
+        minutes_training_db_module._derive_cleanup_exclusion_reason(
+            availability=availability,  # type: ignore[arg-type]
+            target_minutes=8.0,
+            recent_blend=24.0,
+            recent_absence_days=None,
+            team_margin=4.0,
+            quality_flags={"injury_exit_risk_flag": 1},
+            existing_reason=None,
+        )
+        == "injury_exit_low_minutes"
+    )
+
+
+def test_minutes_training_db_flags_overtime_like_spike() -> None:
+    assert minutes_training_db_module._overtime_like_spike_flag(
+        target_minutes=41.0,
+        recent_blend=31.0,
+        team_margin=3.0,
+    )
+    assert (
+        minutes_training_db_module._derive_cleanup_exclusion_reason(
+            availability=None,
+            target_minutes=41.0,
+            recent_blend=31.0,
+            recent_absence_days=None,
+            team_margin=3.0,
+            quality_flags={"overtime_like_spike_flag": 1},
+            existing_reason=None,
+        )
+        == "overtime_like_spike"
+    )
+
+
+def test_minutes_training_db_flags_low_minutes_role_collapse() -> None:
+    assert minutes_training_db_module._low_minutes_collapse_flag(
+        target_minutes=7.0,
+        recent_blend=22.0,
+        recent_absence_days=None,
+        team_margin=6.0,
+    )
+    assert (
+        minutes_training_db_module._derive_cleanup_exclusion_reason(
+            availability=None,
+            target_minutes=7.0,
+            recent_blend=22.0,
+            recent_absence_days=None,
+            team_margin=6.0,
+            quality_flags={"low_minutes_collapse_flag": 1},
+            existing_reason=None,
+        )
+        == "low_minutes_role_collapse"
+    )
 
 
 def test_training_data_signature_includes_minutes_training_db_signature() -> None:

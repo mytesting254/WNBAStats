@@ -207,6 +207,9 @@ def _rebuild_minutes_training_examples(
                 "low_minutes_outlier_flag": 0,
                 "high_minutes_outlier_flag": 0,
                 "returner_risk_flag": 0,
+                "injury_exit_risk_flag": 0,
+                "overtime_like_spike_flag": 0,
+                "low_minutes_collapse_flag": 0,
             }
             if ppm._before_training_start(game_date, training_start):
                 exclusion_reason = "before_training_start"
@@ -227,6 +230,7 @@ def _rebuild_minutes_training_examples(
             last_10_minutes_avg = None
             recent_absence_days = None
             lineup_context = [0.0, 0.5, 0.0]
+            opportunity_context = [0.0, 0.0]
             team_transition = [0.0, 0.0, 0.0, 0.5]
             recent_blend = None
 
@@ -256,6 +260,14 @@ def _rebuild_minutes_training_examples(
                         player_rows=player_rows,
                         row_index=idx,
                     )
+                    opportunity_context = ppm._historical_minutes_opportunity_context(
+                        source_conn,
+                        player_id=player_id,
+                        game_id=int(current["game_id"]),
+                        team_id=int(context["team_id"]),
+                        position=str(current["position"] or ""),
+                        before_game_date=game_date,
+                    )
                     role_state = ppm._classify_minutes_role(
                         rotation_role=str(current["rotation_role"] or "starter"),
                         recent_minutes_avg=recent_minutes_avg,
@@ -267,6 +279,7 @@ def _rebuild_minutes_training_examples(
                         injury_delta=0.0,
                         recent_absence_days=recent_absence_days,
                         lineup_context=lineup_context,
+                        opportunity_context=opportunity_context,
                     )
                     role_bucket = role_state.bucket
                     team_transition = ppm._team_transition_features_from_player_rows(
@@ -290,6 +303,7 @@ def _rebuild_minutes_training_examples(
                         recent_absence_days=recent_absence_days,
                         team_transition=team_transition,
                         lineup_context=lineup_context,
+                        opportunity_context=opportunity_context,
                     )
                     recent_blend = ppm._minutes_recent_blend(
                         recent_minutes_avg=recent_minutes_avg,
@@ -303,6 +317,28 @@ def _rebuild_minutes_training_examples(
                     quality_flags["high_minutes_outlier_flag"] = int(
                         recent_blend is not None
                         and target_minutes >= recent_blend + 10.0
+                    )
+                    quality_flags["injury_exit_risk_flag"] = int(
+                        _injury_exit_risk_flag(
+                            availability=availability,
+                            target_minutes=target_minutes,
+                            recent_blend=recent_blend,
+                        )
+                    )
+                    quality_flags["overtime_like_spike_flag"] = int(
+                        _overtime_like_spike_flag(
+                            target_minutes=target_minutes,
+                            recent_blend=recent_blend,
+                            team_margin=team_margin,
+                        )
+                    )
+                    quality_flags["low_minutes_collapse_flag"] = int(
+                        _low_minutes_collapse_flag(
+                            target_minutes=target_minutes,
+                            recent_blend=recent_blend,
+                            recent_absence_days=recent_absence_days,
+                            team_margin=team_margin,
+                        )
                     )
                     exclusion_reason = _derive_cleanup_exclusion_reason(
                         availability=availability,
@@ -468,6 +504,64 @@ def _coach_decision_dnp_flag(availability: sqlite3.Row | None) -> int:
     return int("coach" in reason or "decision" in reason)
 
 
+def _injury_exit_risk_flag(
+    *,
+    availability: sqlite3.Row | None,
+    target_minutes: float,
+    recent_blend: float | None,
+) -> bool:
+    if availability is None or recent_blend is None:
+        return False
+    if target_minutes > max(12.0, recent_blend - 8.0):
+        return False
+    status_reason = str(availability["status_reason"] or "").strip().lower()
+    minutes_text = str(availability["minutes_text"] or "").strip().lower()
+    injury_terms = (
+        "inj",
+        "ankle",
+        "knee",
+        "hamstring",
+        "groin",
+        "back",
+        "shoulder",
+        "wrist",
+        "foot",
+        "leg",
+        "illness",
+        "concussion",
+    )
+    return any(term in status_reason or term in minutes_text for term in injury_terms)
+
+
+def _overtime_like_spike_flag(
+    *,
+    target_minutes: float,
+    recent_blend: float | None,
+    team_margin: float | None,
+) -> bool:
+    if recent_blend is None:
+        return False
+    if team_margin is not None and abs(team_margin) >= 15.0:
+        return False
+    return target_minutes >= 40.0 and target_minutes >= recent_blend + 7.0
+
+
+def _low_minutes_collapse_flag(
+    *,
+    target_minutes: float,
+    recent_blend: float | None,
+    recent_absence_days: float | None,
+    team_margin: float | None,
+) -> bool:
+    if recent_blend is None:
+        return False
+    if recent_absence_days is not None and recent_absence_days >= 7.0:
+        return False
+    if team_margin is not None and abs(team_margin) >= 20.0:
+        return False
+    return recent_blend >= 18.0 and target_minutes <= 8.0 and (recent_blend - target_minutes) >= 10.0
+
+
 def _derive_cleanup_exclusion_reason(
     *,
     availability: sqlite3.Row | None,
@@ -490,6 +584,12 @@ def _derive_cleanup_exclusion_reason(
         and (team_margin is None or abs(team_margin) < 20.0)
     ):
         return "low_minutes_rotation_anomaly"
+    if int(quality_flags.get("injury_exit_risk_flag") or 0) == 1:
+        return "injury_exit_low_minutes"
+    if int(quality_flags.get("overtime_like_spike_flag") or 0) == 1:
+        return "overtime_like_spike"
+    if int(quality_flags.get("low_minutes_collapse_flag") or 0) == 1:
+        return "low_minutes_role_collapse"
     if (
         int(quality_flags.get("high_minutes_outlier_flag") or 0) == 1
         and team_margin is not None

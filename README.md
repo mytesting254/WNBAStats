@@ -277,11 +277,21 @@ The learned minutes path is role-aware and trains separate models for:
 
 Prediction uses the matching role model first and falls back to the global minutes model if a role model is unavailable.
 
-Recent holdout comparison (global-only minutes model vs role-aware minutes model):
+Recent minutes-model work also added:
 
-- MAE: `5.107 -> 5.033` (`-0.074`)
-- RMSE: `6.499 -> 6.393` (`-0.106`)
-- Bias: `0.329 -> 0.295` (`-0.034`)
+- lineup-role context (`recent_team_minute_share`, `recent_minute_rank`, `recent_position_minute_share`)
+- same-position opportunity and competition context
+- opportunity persistence / trend and returner-pressure features
+- curated minutes training data cleanup for injury-exit lows, overtime-like spikes, and extreme one-off role collapses
+
+Recent measured live diagnostics for the minutes path (`adaptive-context-v7-minutes-opportunity-context`, evaluation start `2025-01-01`):
+
+- overall MAE: `5.027`
+- `recent_blend` MAE: `5.038`
+- heuristic MAE: `5.215`
+- recent-transfer MAE: `4.803` vs `recent_blend` `5.006`
+
+The minutes layer is now slightly ahead of the simple `recent_blend` baseline overall and materially better than the old heuristic, but it still underperforms `recent_blend` in the hardest buckets (`rotation`, `starter_volatile`, `core_starter`, and the `2026` slice). Treat it as a production-safe context layer that is still under active improvement, not a finished edge source.
 
 Recent accuracy hardening also includes:
 

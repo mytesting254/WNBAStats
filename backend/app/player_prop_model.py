@@ -19,7 +19,7 @@ from .odds import american_to_implied_probability
 from .timezone_utils import APP_TIMEZONE
 
 
-MODEL_VERSION = "adaptive-context-v6-minutes-live-context"
+MODEL_VERSION = "adaptive-context-v8-minutes-competition-context"
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
 MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
@@ -92,6 +92,13 @@ MINUTES_FEATURE_NAMES = [
     "recent_team_minute_share",
     "recent_minute_rank",
     "recent_position_minute_share",
+    "same_position_unavailable_minutes",
+    "same_position_key_out_count",
+    "same_position_opportunity_persistence",
+    "same_position_competition_minutes",
+    "same_position_opportunity_trend",
+    "same_position_competition_trend",
+    "same_position_returner_pressure",
 ]
 
 MARKET_VOLATILITY_FLOORS = {
@@ -2312,6 +2319,14 @@ def _historical_training_features(
             history_rows=recent_rows,
         ) if recent_rows else None
     )
+    opportunity_context = _historical_minutes_opportunity_context(
+        conn,
+        player_id=int(row["player_id"]),
+        game_id=int(row["game_id"]),
+        team_id=int(context["team_id"]),
+        position=str(row["position"] or ""),
+        before_game_date=current_game_date,
+    )
     projected_minutes, _minutes_note = _project_minutes(
         None,
         player_id=int(row["player_id"]),
@@ -2328,6 +2343,7 @@ def _historical_training_features(
         injury_status="available",
         recent_absence_days=_days_between_game_dates(previous_game_date, current_game_date),
         lineup_context=lineup_context,
+        opportunity_context=opportunity_context,
         before_game_date=current_game_date,
     )
     rate_projection = weighted_rate * projected_minutes
@@ -2528,6 +2544,14 @@ def _minutes_training_rows(
                 player_rows=rows,
                 row_index=idx,
             )
+            opportunity_context = _historical_minutes_opportunity_context(
+                conn,
+                player_id=int(player["id"]),
+                game_id=int(current["game_id"]),
+                team_id=int(context["team_id"]),
+                position=str(current["position"] or ""),
+                before_game_date=str(current["game_date"]),
+            )
             role_state = _classify_minutes_role(
                 rotation_role=str(current["rotation_role"] or "starter"),
                 recent_minutes_avg=recent_minutes_avg,
@@ -2539,6 +2563,7 @@ def _minutes_training_rows(
                 injury_delta=float(injury["minutes_delta"]),
                 recent_absence_days=recent_absence_days,
                 lineup_context=lineup_context,
+                opportunity_context=opportunity_context,
             )
             if bucket_filter is not None and role_state.bucket != bucket_filter:
                 continue
@@ -2563,6 +2588,7 @@ def _minutes_training_rows(
                 recent_absence_days=recent_absence_days,
                 team_transition=team_transition,
                 lineup_context=lineup_context,
+                opportunity_context=opportunity_context,
             )
             recent_blend = _minutes_recent_blend(
                 recent_minutes_avg=recent_minutes_avg,
@@ -2670,6 +2696,7 @@ def _project_minutes(
                 recent_absence_days=recent_absence_days,
                 team_transition=team_transition,
                 lineup_context=lineup_context,
+                opportunity_context=opportunity_context,
             )
             learned_delta = _predict(minutes_model, minutes_features)
             learned_minutes = max(0.0, recent_blend + learned_delta)
@@ -3366,6 +3393,7 @@ def _minutes_feature_values(
     recent_absence_days: float | None,
     team_transition: list[float] | None = None,
     lineup_context: list[float] | None = None,
+    opportunity_context: list[float] | None = None,
 ) -> list[float]:
     role_flags = {
         "core_starter": 0.0,
@@ -3384,6 +3412,9 @@ def _minutes_feature_values(
     normalized_lineup_context = list(lineup_context or [0.0, 0.5, 0.0])
     if len(normalized_lineup_context) < 3:
         normalized_lineup_context = (normalized_lineup_context + [0.0, 0.5, 0.0])[:3]
+    normalized_opportunity_context = list(opportunity_context or [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    if len(normalized_opportunity_context) < 7:
+        normalized_opportunity_context = (normalized_opportunity_context + [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])[:7]
     return [
         ewma_minutes,
         recent_minutes_avg,
@@ -3410,6 +3441,13 @@ def _minutes_feature_values(
         float(normalized_lineup_context[0]),
         float(normalized_lineup_context[1]),
         float(normalized_lineup_context[2]),
+        float(normalized_opportunity_context[0]),
+        float(normalized_opportunity_context[1]),
+        float(normalized_opportunity_context[2]),
+        float(normalized_opportunity_context[3]),
+        float(normalized_opportunity_context[4]),
+        float(normalized_opportunity_context[5]),
+        float(normalized_opportunity_context[6]),
     ]
 
 
@@ -4359,9 +4397,258 @@ def _live_minutes_opportunity_context(
         same_position_unavailable_minutes += weighted_minutes
         if weighted_minutes >= 14.0 or str(row["rotation_role"] or "").strip().lower() in {"star", "starter"}:
             same_position_key_out_count += 1.0
-    result = [float(same_position_unavailable_minutes), float(same_position_key_out_count)]
+    opportunity_persistence, competition_minutes, opportunity_trend, competition_trend, returner_pressure = _same_position_context_history_features(
+        conn,
+        player_id=player_id,
+        team_id=team_id,
+        position=position,
+        before_game_date=as_of_date,
+    )
+    result = [
+        float(same_position_unavailable_minutes),
+        float(same_position_key_out_count),
+        float(opportunity_persistence),
+        float(competition_minutes),
+        float(opportunity_trend),
+        float(competition_trend),
+        float(returner_pressure),
+    ]
     cache[cache_key] = tuple(result)
     return result
+
+
+def _historical_minutes_opportunity_context(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    game_id: int,
+    team_id: int,
+    position: str | None,
+    before_game_date: str | None,
+) -> list[float]:
+    position_prefix = str(position or "").strip().upper()[:1]
+    cache = _connection_training_cache_bucket(conn, "historical_minutes_opportunity_context")
+    cache_key = (int(player_id), int(game_id), int(team_id), position_prefix, str(before_game_date or ""))
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return list(cached)  # type: ignore[arg-type]
+
+    teammate_rows = conn.execute(
+        """
+        SELECT
+            pga.player_id,
+            p.position,
+            p.rotation_role,
+            pga.did_not_play,
+            COALESCE(
+                (
+                    SELECT AVG(sample.minutes)
+                    FROM (
+                        SELECT s.minutes
+                        FROM player_game_stats s
+                        JOIN games g ON g.id = s.game_id
+                        WHERE s.player_id = pga.player_id
+                          AND DATE(g.game_date) < DATE(?)
+                        ORDER BY g.game_date DESC, s.game_id DESC
+                        LIMIT 8
+                    ) sample
+                ),
+                0.0
+            ) AS recent_minutes
+        FROM player_game_availability pga
+        JOIN players p ON p.id = pga.player_id
+        WHERE pga.game_id = ?
+          AND pga.team_id = ?
+          AND pga.did_not_play = 1
+        """,
+        (before_game_date, int(game_id), int(team_id)),
+    ).fetchall()
+
+    same_position_unavailable_minutes = 0.0
+    same_position_key_out_count = 0.0
+    for row in teammate_rows:
+        teammate_id = int(row["player_id"])
+        if teammate_id == int(player_id):
+            continue
+        teammate_position = str(row["position"] or "").strip().upper()[:1]
+        if position_prefix and teammate_position and teammate_position != position_prefix:
+            continue
+        recent_minutes = float(row["recent_minutes"] or 0.0)
+        if recent_minutes <= 0.0:
+            continue
+        same_position_unavailable_minutes += recent_minutes
+        if recent_minutes >= 14.0 or str(row["rotation_role"] or "").strip().lower() in {"star", "starter"}:
+            same_position_key_out_count += 1.0
+    opportunity_persistence, competition_minutes, opportunity_trend, competition_trend, returner_pressure = _same_position_context_history_features(
+        conn,
+        player_id=player_id,
+        team_id=team_id,
+        position=position,
+        before_game_date=before_game_date,
+    )
+    result = [
+        float(same_position_unavailable_minutes),
+        float(same_position_key_out_count),
+        float(opportunity_persistence),
+        float(competition_minutes),
+        float(opportunity_trend),
+        float(competition_trend),
+        float(returner_pressure),
+    ]
+    cache[cache_key] = tuple(result)
+    return result
+
+
+def _same_position_context_history_features(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    team_id: int,
+    position: str | None,
+    before_game_date: str | None,
+) -> tuple[float, float, float, float, float]:
+    position_prefix = str(position or "").strip().upper()[:1]
+    cache = _connection_training_cache_bucket(conn, "same_position_context_history_features")
+    cache_key = (int(player_id), int(team_id), position_prefix, str(before_game_date or ""))
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return tuple(cached)  # type: ignore[return-value]
+
+    if not before_game_date:
+        cache[cache_key] = (0.0, 0.0, 0.0, 0.0, 0.0)
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+    recent_games = conn.execute(
+        """
+        SELECT id, game_date
+        FROM games
+        WHERE DATE(game_date) < DATE(?)
+          AND (home_team_id = ? OR away_team_id = ?)
+        ORDER BY game_date DESC, id DESC
+        LIMIT 4
+        """,
+        (before_game_date, int(team_id), int(team_id)),
+    ).fetchall()
+    if not recent_games:
+        cache[cache_key] = (0.0, 0.0, 0.0, 0.0, 0.0)
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+    opportunity_totals: list[float] = []
+    competition_totals: list[float] = []
+    for game in recent_games:
+        historical_context = _historical_minutes_opportunity_context_for_game(
+            conn,
+            player_id=player_id,
+            game_id=int(game["id"]),
+            team_id=team_id,
+            position=position_prefix,
+            game_date=str(game["game_date"] or ""),
+        )
+        opportunity_totals.append(float(historical_context[0]))
+        competition_totals.append(float(historical_context[1]))
+
+    opportunity_persistence = sum(opportunity_totals) / len(opportunity_totals) if opportunity_totals else 0.0
+    competition_minutes = sum(competition_totals) / len(competition_totals) if competition_totals else 0.0
+    recent_opportunity = sum(opportunity_totals[:2]) / min(len(opportunity_totals), 2) if opportunity_totals else 0.0
+    prior_opportunity_values = opportunity_totals[2:4]
+    prior_opportunity = (
+        sum(prior_opportunity_values) / len(prior_opportunity_values)
+        if prior_opportunity_values
+        else recent_opportunity
+    )
+    recent_competition = sum(competition_totals[:2]) / min(len(competition_totals), 2) if competition_totals else 0.0
+    prior_competition_values = competition_totals[2:4]
+    prior_competition = (
+        sum(prior_competition_values) / len(prior_competition_values)
+        if prior_competition_values
+        else recent_competition
+    )
+    opportunity_trend = recent_opportunity - prior_opportunity
+    competition_trend = recent_competition - prior_competition
+    returner_pressure = max(competition_trend - opportunity_trend, 0.0)
+    result = (
+        float(opportunity_persistence),
+        float(competition_minutes),
+        float(opportunity_trend),
+        float(competition_trend),
+        float(returner_pressure),
+    )
+    cache[cache_key] = result
+    return result
+
+
+def _historical_minutes_opportunity_context_for_game(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    game_id: int,
+    team_id: int,
+    position: str,
+    game_date: str,
+) -> tuple[float, float]:
+    opportunity_total = 0.0
+    competition_total = 0.0
+
+    unavailable_rows = conn.execute(
+        """
+        SELECT
+            pga.player_id,
+            p.position,
+            p.rotation_role,
+            COALESCE(
+                (
+                    SELECT AVG(sample.minutes)
+                    FROM (
+                        SELECT s.minutes
+                        FROM player_game_stats s
+                        JOIN games g ON g.id = s.game_id
+                        WHERE s.player_id = pga.player_id
+                          AND DATE(g.game_date) < DATE(?)
+                        ORDER BY g.game_date DESC, s.game_id DESC
+                        LIMIT 8
+                    ) sample
+                ),
+                0.0
+            ) AS recent_minutes
+        FROM player_game_availability pga
+        JOIN players p ON p.id = pga.player_id
+        WHERE pga.game_id = ?
+          AND pga.team_id = ?
+          AND pga.did_not_play = 1
+        """,
+        (game_date, int(game_id), int(team_id)),
+    ).fetchall()
+    for row in unavailable_rows:
+        teammate_id = int(row["player_id"])
+        if teammate_id == int(player_id):
+            continue
+        teammate_position = str(row["position"] or "").strip().upper()[:1]
+        if position and teammate_position and teammate_position != position:
+            continue
+        recent_minutes = float(row["recent_minutes"] or 0.0)
+        if recent_minutes > 0.0:
+            opportunity_total += recent_minutes
+
+    competition_rows = conn.execute(
+        """
+        SELECT s.player_id, p.position, s.minutes
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        WHERE s.game_id = ?
+          AND p.team_id = ?
+        """,
+        (int(game_id), int(team_id)),
+    ).fetchall()
+    for row in competition_rows:
+        teammate_id = int(row["player_id"])
+        if teammate_id == int(player_id):
+            continue
+        teammate_position = str(row["position"] or "").strip().upper()[:1]
+        if position and teammate_position and teammate_position != position:
+            continue
+        competition_total += float(row["minutes"] or 0.0)
+
+    return float(opportunity_total), float(competition_total)
 
 
 def _market_value(row: sqlite3.Row, market: str) -> float:
