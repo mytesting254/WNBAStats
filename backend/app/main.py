@@ -6721,7 +6721,7 @@ def discrepancies(response: Response, game_id: int | None = None, force_refresh:
 def roster(response: Response) -> list[dict]:
     def compute() -> list[dict]:
         with connect() as conn:
-            return _roster_payload(conn)
+            return _roster_payload(conn, refresh_lineups=False)
 
     payload, status, compute_ms = _read_through_cache_with_meta(
         ROSTER_CACHE_NAME,
