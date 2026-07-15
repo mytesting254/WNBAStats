@@ -5750,11 +5750,11 @@ def _import_rotowire_injuries_impl(*, request: Request | None, force_refresh: bo
         result["affected_game_ids"] = _scheduled_game_ids_for_teams(conn, result.get("affected_team_ids", []))
         delete_json_cache(ROSTER_CACHE_NAME)
         delete_json_cache(MATCHUPS_CACHE_NAME)
-        roster_payload = _roster_payload_lightweight()
+        roster_payload = _roster_payload(conn, refresh_lineups=False)
         write_json_cache(ROSTER_CACHE_NAME, _cache_envelope(roster_payload, ROSTER_TTL_SECONDS))
         result["published_payloads"] = {ROSTER_CACHE_NAME: len(roster_payload)}
         result["roster"] = roster_payload
-        result["roster_cache_refresh"] = _publish_roster_cache_async()
+        result["roster_cache_refresh"] = {"status": "ready"}
     affected_game_ids = list(result.get("affected_game_ids") or [])
     roster_changed = bool(result.get("roster_changed"))
     repair_ingestion = build_no_provider_ingestion(
