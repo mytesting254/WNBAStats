@@ -4205,7 +4205,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             ),
         )
     ingestion = build_odds_provider_ingestion(result)
-    if ingestion.status in {"missing_api_key", "provider_error"}:
+    if ingestion.status in {"missing_api_key", "missing_cache", "stale_cache", "provider_error"}:
         message = str(ingestion.message or "Odds import failed.")
         _mutate_prop_sync_state(
             running=False,
@@ -4314,7 +4314,7 @@ def _queue_odds_import_job(force_refresh: bool, request: Request | None = None) 
         try:
             _append_job_run_event(job_run_id, "job.running", "Odds import started.", details={"force_refresh": force_refresh})
             result = _run_odds_import_job(force_refresh)
-            if result.get("status") in {"missing_api_key", "provider_error"}:
+            if result.get("status") in {"missing_api_key", "missing_cache", "stale_cache", "provider_error"}:
                 _append_job_run_event(job_run_id, "job.provider_failed", str(result.get("message") or "Odds import failed."), level="warning", details=result)
                 _finish_job_run(job_run_id, status="failed", result=result, error_text=str(result.get("message") or "Odds import failed."))
                 return

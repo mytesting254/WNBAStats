@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import threading
+import time
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 import json
@@ -18,6 +20,7 @@ from starlette.requests import Request
 from backend.app import covers_import as covers_import_module
 from backend.app import cache as cache_module
 from backend.app import espn_history as espn_history_module
+from backend.app import game_training_db as game_training_db_module
 from backend.app import minutes_training_db as minutes_training_db_module
 from backend.app import odds_import as odds_import_module
 from backend.app import paths as paths_module
@@ -195,6 +198,44 @@ def test_parallel_worker_count_caps_env_override_to_task_count(monkeypatch) -> N
     monkeypatch.setenv("WNBA_TRAINING_MAX_WORKERS", "4")
 
     assert training_module._parallel_worker_count(2) == 2
+
+
+def test_game_training_db_ensure_serializes_concurrent_rebuilds(monkeypatch) -> None:
+    load_test_history()
+    rebuild_calls = 0
+    rebuild_lock = threading.Lock()
+    barrier = threading.Barrier(2)
+    original_rebuild = game_training_db_module._rebuild_game_training_examples
+    results: list[dict[str, object]] = []
+    errors: list[Exception] = []
+
+    def wrapped_rebuild(*args, **kwargs):
+        nonlocal rebuild_calls
+        with rebuild_lock:
+            rebuild_calls += 1
+        time.sleep(0.1)
+        return original_rebuild(*args, **kwargs)
+
+    monkeypatch.setattr(game_training_db_module, "_rebuild_game_training_examples", wrapped_rebuild)
+
+    def worker() -> None:
+        try:
+            barrier.wait(timeout=2)
+            with connect() as conn:
+                results.append(game_training_db_module.ensure_game_training_db(conn))
+        except Exception as exc:  # pragma: no cover - failure path surfaced by assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not errors
+    assert len(results) == 2
+    assert rebuild_calls == 1
+    assert sorted(bool(result["rebuilt"]) for result in results) == [False, True]
 
 
 def load_test_history() -> None:
@@ -2185,9 +2226,179 @@ def test_minutes_stable_context_cap_limits_soft_vacancy_starter_rise() -> None:
         opportunity_context=[12.0, 0.0],
     )
 
-    assert role_state.bucket == "starter_volatile"
+    assert role_state.bucket == "rotation"
     assert "soft-vacancy rise cap" in notes
     assert capped == pytest.approx(25.85)
+
+
+def test_minutes_stable_context_cap_limits_stable_starter_rise() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=28.0,
+        last_10_minutes_avg=24.0,
+        ewma_minutes=25.0,
+        minutes_trend=3.6,
+        minute_volatility=5.1,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        lineup_context=[0.17, 0.82, 0.41],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=32.6,
+        role_state=role_state,
+        recent_blend=26.6,
+        recency_anchor=26.7,
+        last_10_minutes_avg=24.0,
+        minutes_trend=3.6,
+        minute_volatility=5.1,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "stable-context starter rise cap" in notes
+    assert capped == pytest.approx(28.5)
+
+
+def test_minutes_projection_keeps_starter_vacancy_floor_close_to_recent_blend() -> None:
+    recent_minutes_avg = 24.0
+    last_10_minutes_avg = 26.0
+    recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
+
+    projected, note = _project_minutes(
+        None,
+        player_id=10066,
+        game_id=2066,
+        rotation_role="starter",
+        ewma_minutes=23.0,
+        minutes_trend=0.1,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minute_volatility=5.8,
+        context={"is_home": True},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=None,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        lineup_context=[0.17, 0.82, 0.41],
+        opportunity_context=[30.0, 1.0, 0.0, 20.0, 0.0, 0.0, 0.0],
+        before_game_date=None,
+    )
+
+    assert projected <= recent_blend + 1.6
+    assert "hard rule same-position vacancy floor" in note
+
+
+def test_minutes_stable_context_cap_lifts_soft_vacancy_rotation_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=21.0,
+        last_10_minutes_avg=23.0,
+        ewma_minutes=20.5,
+        minutes_trend=-0.4,
+        minute_volatility=4.8,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        lineup_context=[0.15, 0.79, 0.28],
+        opportunity_context=[13.2, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=20.2,
+        role_state=role_state,
+        recent_blend=21.7,
+        recency_anchor=21.6,
+        last_10_minutes_avg=23.0,
+        minutes_trend=-0.4,
+        minute_volatility=4.8,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[13.2, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "soft-vacancy rotation floor" in notes
+    assert floored == pytest.approx(21.8)
+
+
+def test_minutes_stable_context_cap_lifts_stable_rotation_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=22.0,
+        last_10_minutes_avg=22.7,
+        ewma_minutes=21.5,
+        minutes_trend=-1.2,
+        minute_volatility=4.4,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        lineup_context=[0.14, 0.76, 0.25],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=20.4,
+        role_state=role_state,
+        recent_blend=22.245,
+        recency_anchor=22.075,
+        last_10_minutes_avg=22.7,
+        minutes_trend=-1.2,
+        minute_volatility=4.4,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "stable-context rotation floor" in notes
+    assert floored == pytest.approx(20.675)
+
+
+def test_minutes_stable_context_cap_lifts_short_absence_return_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=24.0,
+        last_10_minutes_avg=23.0,
+        ewma_minutes=22.5,
+        minutes_trend=-2.0,
+        minute_volatility=4.9,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=8.0,
+        lineup_context=[0.17, 0.82, 0.41],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=20.6,
+        role_state=role_state,
+        recent_blend=23.65,
+        recency_anchor=23.475,
+        last_10_minutes_avg=23.0,
+        minutes_trend=-2.0,
+        minute_volatility=4.9,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=8.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "absence-return floor" in notes
+    assert floored == pytest.approx(22.375)
 
 
 def test_minutes_projection_rebound_guard_protects_strong_role_drop() -> None:
@@ -7575,7 +7786,100 @@ def test_odds_import_returns_provider_error_when_all_event_requests_fail(monkeyp
     assert result["imported"] == 0
     assert len(rows) == 0
     assert len(result["errors"]) == 5
-    assert "failed" in str(result["message"]).lower()
+    assert "invalid api key" in str(result["message"]).lower()
+
+
+def test_odds_import_preserves_cached_payload_when_refresh_fails_before_any_event_payloads(monkeypatch) -> None:
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setattr("backend.app.odds_import.load_dotenv", lambda: None)
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-07-15")
+    cached_payload = [
+        {
+            "id": "cached-event",
+            "commence_time": "2026-07-15T23:30:00Z",
+            "home_team": "Washington Mystics",
+            "away_team": "Portland Fire",
+            "bookmakers": [],
+        }
+    ]
+    writes: list[object] = []
+    monkeypatch.setattr("backend.app.odds_import.read_json_cache", lambda _: cached_payload)
+    monkeypatch.setattr("backend.app.odds_import.write_json_cache", lambda *args, **kwargs: writes.append(args[1]))
+    monkeypatch.setattr("backend.app.odds_import.sync_prop_lines_from_sportsbook", lambda conn: 0)
+
+    def fake_fetch(url: str):
+        if url.endswith("/events?apiKey=test-key"):
+            return [
+                {
+                    "id": "today-event",
+                    "commence_time": "2026-07-15T23:30:00Z",
+                }
+            ]
+        raise RuntimeError("Odds API HTTP 401: Usage quota has been reached. See usage plans at https://the-odds-api.com")
+
+    monkeypatch.setattr("backend.app.odds_import._fetch_json", fake_fetch)
+
+    with connect() as conn:
+        result = import_the_odds_api_props(conn, force_refresh=True)
+
+    assert result["status"] == "provider_error"
+    assert result["cached_events"] == 1
+    assert result["events"] == 1
+    assert writes == []
+
+
+def test_odds_import_load_saved_returns_missing_cache_without_provider_request(monkeypatch) -> None:
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
+    monkeypatch.setattr("backend.app.odds_import.read_json_cache", lambda _: None)
+
+    def fail_fetch(url: str):
+        raise AssertionError(f"provider request should not run for saved-cache import: {url}")
+
+    monkeypatch.setattr("backend.app.odds_import._fetch_json", fail_fetch)
+
+    with connect() as conn:
+        result = import_the_odds_api_props(conn, force_refresh=False)
+
+    assert result["status"] == "missing_cache"
+    assert result["source"] == "cache"
+    assert result["imported"] == 0
+    assert result["prop_sync_eligible"] is False
+    assert "refresh odds" in str(result["message"]).lower()
+
+
+def test_odds_import_load_saved_returns_stale_cache_for_old_payload(monkeypatch) -> None:
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
+    monkeypatch.setattr("backend.app.odds_import.local_today_iso", lambda: "2026-07-15")
+    monkeypatch.setattr(
+        "backend.app.odds_import.read_json_cache",
+        lambda _: [
+            {
+                "id": "cached-event",
+                "commence_time": "2026-06-25T23:00:00Z",
+                "home_team": "Toronto Tempo",
+                "away_team": "Los Angeles Sparks",
+                "bookmakers": [],
+            }
+        ],
+    )
+
+    def fail_fetch(url: str):
+        raise AssertionError(f"provider request should not run for stale saved-cache import: {url}")
+
+    monkeypatch.setattr("backend.app.odds_import._fetch_json", fail_fetch)
+
+    with connect() as conn:
+        result = import_the_odds_api_props(conn, force_refresh=False)
+
+    assert result["status"] == "stale_cache"
+    assert result["source"] == "cache"
+    assert result["imported"] == 0
+    assert result["cached_events"] == 1
+    assert result["prop_sync_eligible"] is False
+    assert "latest cached commence_time" in str(result["message"]).lower()
+    assert "2026-06-25t23:00:00z" in str(result["message"]).lower()
 
 
 def test_odds_cache_summary_reports_active_cache_path(monkeypatch, tmp_path) -> None:

@@ -256,7 +256,25 @@ def _import_the_odds_api_provider_rows(
     progress_callback: Callable[[str, int, int, str | None], None] | None = None,
 ) -> dict:
     cached_payload = read_json_cache(RAW_CACHE_NAME)
-    if cached_payload and not force_refresh:
+    if not force_refresh:
+        if cached_payload is None:
+            return {
+                "status": "missing_cache",
+                "source": "cache",
+                "message": "No saved Odds API cache found. Use Refresh Odds to fetch a new payload first.",
+                "imported": 0,
+                "prop_sync_eligible": False,
+            }
+        active_cached_events = _active_cached_events(cached_payload)
+        if not active_cached_events:
+            return {
+                "status": "stale_cache",
+                "source": "cache",
+                "message": _stale_cache_message(cached_payload),
+                "imported": 0,
+                "cached_events": len(cached_payload) if isinstance(cached_payload, list) else 0,
+                "prop_sync_eligible": False,
+            }
         if progress_callback is not None:
             progress_callback("loading_saved_cache", 0, 1, "Loading saved Odds API cache.")
         result = _replace_sportsbook_rows(conn, cached_payload, datetime.now(timezone.utc).isoformat())
@@ -310,14 +328,22 @@ def _import_the_odds_api_provider_rows(
             )
 
     merged_payload = _merge_event_cache(cached_payload, fetched_payload)
-    write_json_cache(RAW_CACHE_NAME, merged_payload)
-    persisted_payload = read_json_cache(RAW_CACHE_NAME)
+    should_persist_payload = bool(fetched_payload) or not errors
+    if should_persist_payload:
+        write_json_cache(RAW_CACHE_NAME, merged_payload)
+        persisted_payload = read_json_cache(RAW_CACHE_NAME)
+    else:
+        persisted_payload = cached_payload
     if progress_callback is not None:
         progress_callback(
             "requesting_provider",
             max(total_events, 1),
             max(total_events, 1),
-            "Saved raw Odds API payload to cache. Syncing sportsbook rows.",
+            (
+                "Saved raw Odds API payload to cache. Syncing sportsbook rows."
+                if should_persist_payload
+                else "Provider requests failed before any event payloads were saved. Keeping the previous raw cache."
+            ),
         )
     result = _replace_sportsbook_rows(
         conn,
@@ -329,10 +355,13 @@ def _import_the_odds_api_provider_rows(
     prop_sync_eligible = True
     if errors and fetched_payload:
         status = "partial_import"
-        message = f"Imported {len(fetched_payload)} event(s) with {len(errors)} provider error(s)."
+        message = (
+            f"Imported {len(fetched_payload)} event(s) with {len(errors)} provider error(s): "
+            f"{_summarize_provider_errors(errors)}"
+        )
     elif errors:
         status = "provider_error"
-        message = f"Odds API import failed for {len(errors)} request(s)."
+        message = f"Odds API import failed for {len(errors)} request(s): {_summarize_provider_errors(errors)}"
         prop_sync_eligible = False
     return {
         **result,
@@ -762,6 +791,42 @@ def _merge_event_cache(cached_payload: object, fetched_payload: list[dict]) -> l
         if event.get("id"):
             merged[str(event["id"])] = event
     return sorted(merged.values(), key=lambda event: str(event.get("commence_time", "")))
+
+
+def _summarize_provider_errors(errors: list[dict[str, str]], *, limit: int = 2) -> str:
+    snippets: list[str] = []
+    for item in errors[:limit]:
+        event_id = str(item.get("event_id") or "").strip()
+        error = str(item.get("error") or "").strip()
+        if event_id:
+            snippets.append(f"{event_id}: {error}")
+        else:
+            snippets.append(error)
+    if not snippets:
+        return "unknown provider error"
+    remaining = len(errors) - len(snippets)
+    if remaining > 0:
+        snippets.append(f"+{remaining} more")
+    return "; ".join(snippets)
+
+
+def _stale_cache_message(cached_payload: object) -> str:
+    latest_commence_time = None
+    if isinstance(cached_payload, list):
+        latest_commence_time = max(
+            (
+                str(event.get("commence_time"))
+                for event in cached_payload
+                if isinstance(event, dict) and event.get("commence_time")
+            ),
+            default=None,
+        )
+    if latest_commence_time:
+        return (
+            "Saved Odds API cache exists, but it does not contain any events for today's slate. "
+            f"Latest cached commence_time: {latest_commence_time}. Use Refresh Odds to fetch current events."
+        )
+    return "Saved Odds API cache exists, but it does not contain any events for today's slate. Use Refresh Odds to fetch current events."
 
 
 def _replace_sportsbook_rows(conn: sqlite3.Connection, raw_payload: list[dict], captured_at: str) -> dict:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from .paths import get_training_db_path
 
 
 GAME_TRAINING_DB_VERSION = "v2"
+_GAME_TRAINING_DB_LOCK = threading.RLock()
 
 
 def ensure_game_training_db(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, object]:
@@ -17,42 +19,42 @@ def ensure_game_training_db(conn: sqlite3.Connection, *, force: bool = False) ->
     training_db_path.parent.mkdir(parents=True, exist_ok=True)
     expected_signature = _source_signature(conn)
 
-    with sqlite3.connect(training_db_path) as training_conn:
-        training_conn.row_factory = sqlite3.Row
-        _init_training_db(training_conn)
-        metadata = _read_metadata(training_conn)
-        current_row_count = int(metadata.get("included_rows") or 0)
-        if (
-            not force
-            and metadata.get("source_signature") == expected_signature
-            and metadata.get("db_version") == GAME_TRAINING_DB_VERSION
-            and current_row_count > 0
-        ):
+    with _GAME_TRAINING_DB_LOCK:
+        with _connect_training_db(training_db_path) as training_conn:
+            _init_training_db(training_conn)
+            metadata = _read_metadata(training_conn)
+            current_row_count = int(metadata.get("included_rows") or 0)
+            if (
+                not force
+                and metadata.get("source_signature") == expected_signature
+                and metadata.get("db_version") == GAME_TRAINING_DB_VERSION
+                and current_row_count > 0
+            ):
+                return {
+                    "path": str(training_db_path),
+                    "rebuilt": False,
+                    "included_rows": current_row_count,
+                    "candidate_rows": int(metadata.get("candidate_rows") or 0),
+                    "excluded_rows": int(metadata.get("excluded_rows") or 0),
+                    "built_at": metadata.get("built_at"),
+                    "source_signature": expected_signature,
+                }
+
+            _rebuild_game_training_examples(
+                source_conn=conn,
+                training_conn=training_conn,
+                source_signature=expected_signature,
+            )
+            metadata = _read_metadata(training_conn)
             return {
                 "path": str(training_db_path),
-                "rebuilt": False,
-                "included_rows": current_row_count,
+                "rebuilt": True,
+                "included_rows": int(metadata.get("included_rows") or 0),
                 "candidate_rows": int(metadata.get("candidate_rows") or 0),
                 "excluded_rows": int(metadata.get("excluded_rows") or 0),
                 "built_at": metadata.get("built_at"),
                 "source_signature": expected_signature,
             }
-
-        _rebuild_game_training_examples(
-            source_conn=conn,
-            training_conn=training_conn,
-            source_signature=expected_signature,
-        )
-        metadata = _read_metadata(training_conn)
-        return {
-            "path": str(training_db_path),
-            "rebuilt": True,
-            "included_rows": int(metadata.get("included_rows") or 0),
-            "candidate_rows": int(metadata.get("candidate_rows") or 0),
-            "excluded_rows": int(metadata.get("excluded_rows") or 0),
-            "built_at": metadata.get("built_at"),
-            "source_signature": expected_signature,
-        }
 
 
 def load_game_training_rows(
@@ -94,8 +96,7 @@ def load_game_training_rows(
         raise ValueError(f"Unsupported game training target: {target}")
     query += " ORDER BY game_date ASC, source_game_id ASC"
 
-    with sqlite3.connect(training_db_path) as training_conn:
-        training_conn.row_factory = sqlite3.Row
+    with _connect_training_db(training_db_path) as training_conn:
         rows = training_conn.execute(query, params).fetchall()
 
     samples: list[tuple[list[float], float]] = []
@@ -126,6 +127,17 @@ def load_game_training_rows(
 def game_training_db_signature(conn: sqlite3.Connection) -> str:
     info = ensure_game_training_db(conn, force=False)
     return str(info["source_signature"])
+
+
+def _connect_training_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA cache_size = -8000")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    return conn
 
 
 def _init_training_db(conn: sqlite3.Connection) -> None:
