@@ -1056,10 +1056,10 @@ export function App() {
         return;
       }
       try {
-        const refreshedRoster = Array.isArray(result.roster) ? result.roster : await fetchRoster();
+        const refreshedRoster = await fetchRoster();
         setRosterPullSummary(buildRosterPullSummary(roster, refreshedRoster, result.captured_at ?? null));
         setRoster(refreshedRoster);
-        if (Array.isArray(result.roster) && result.roster_cache_refresh?.status === "queued") {
+        if (result.roster_cache_refresh?.status === "queued") {
           window.setTimeout(() => {
             void loadTab("roster", { force: true });
           }, 2500);
