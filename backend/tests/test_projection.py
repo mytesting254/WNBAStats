@@ -5881,6 +5881,52 @@ def test_start_prop_sync_if_needed_tracks_progress(monkeypatch) -> None:
     }
 
 
+def test_run_legacy_recalculate_job_tracks_repair_substages_separately(monkeypatch) -> None:
+    progress_updates: list[tuple[str | None, int | None, int | None, int | None, str | None]] = []
+
+    def fake_repair(conn, progress_callback=None):
+        if progress_callback is not None:
+            progress_callback("syncing_props", 40, 176, "Matched props.")
+            progress_callback("rebuilding_predictions", 20, 146, "Built 20 projections.")
+            progress_callback("rebuilding_games", 3, 6, "Built 3 game projections.")
+        return {"rebuilt_predictions": 20}
+
+    monkeypatch.setattr(main_module, "_repair_current_slate_props", fake_repair)
+    monkeypatch.setattr(main_module, "settle_completed_props", lambda conn: {"settled": 4})
+    monkeypatch.setattr(main_module, "settle_stocks", lambda conn: {"settled": 1})
+    monkeypatch.setattr(main_module, "settle_completed_game_predictions", lambda conn: {"settled": 2})
+    monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
+    monkeypatch.setattr(main_module, "_publish_current_read_payloads", lambda conn: None)
+    monkeypatch.setattr(
+        main_module,
+        "_set_prop_sync_progress",
+        lambda *args, **kwargs: progress_updates.append(
+            (
+                kwargs.get("stage"),
+                kwargs.get("stage_index"),
+                kwargs.get("stage_total"),
+                kwargs.get("current"),
+                kwargs.get("message"),
+            )
+        ),
+    )
+
+    result = main_module._run_legacy_recalculate_job()
+
+    assert result == {
+        "predictions": 20,
+        "settled": 4,
+        "special_settled": 1,
+        "game_settled": 2,
+    }
+    assert ("syncing_props", 1, 6, 40, "Matched props.") in progress_updates
+    assert ("rebuilding_predictions", 2, 6, 20, "Built 20 projections.") in progress_updates
+    assert ("rebuilding_games", 3, 6, 3, "Built 3 game projections.") in progress_updates
+    assert ("settling_props", 4, 6, 0, "Settling completed player props.") in progress_updates
+    assert ("settling_games", 5, 6, 0, "Settling completed game predictions.") in progress_updates
+    assert ("publishing_payloads", 6, 6, 1, "Legacy recalculate finished.") in progress_updates
+
+
 def test_row_to_prop_sync_state_marks_stale_jobs() -> None:
     stale_started_at = "2026-07-01T00:00:00+00:00"
     stale_updated_at = "2026-07-01T00:05:00+00:00"
@@ -6670,6 +6716,34 @@ def test_odds_import_syncs_model_prop_lines_from_sportsbook(monkeypatch) -> None
     assert row["under_odds"] == 114
 
 
+def test_odds_import_reports_rebuild_progress_as_separate_stage(monkeypatch) -> None:
+    progress_updates: list[tuple[str, int, int, str | None]] = []
+
+    def fake_sync(conn, **kwargs):
+        callback = kwargs.get("progress_callback")
+        rebuild_callback = kwargs.get("rebuild_progress_callback")
+        if callback is not None:
+            callback(40, 176, "Matched props.")
+        if rebuild_callback is not None:
+            rebuild_callback(20, 146, "Built 20 projections.")
+        return 3
+
+    monkeypatch.setattr(odds_import_module, "sync_prop_lines_from_sportsbook", fake_sync)
+
+    with connect() as conn:
+        result = odds_import_module._sync_props_after_import(
+            conn,
+            progress_callback=lambda stage, current, total, message: progress_updates.append((stage, current, total, message)),
+        )
+
+    assert result == 3
+    assert any(stage == "syncing_props" for stage, *_ in progress_updates)
+    assert any(stage == "rebuilding_predictions" for stage, *_ in progress_updates)
+    assert progress_updates.index(next(update for update in progress_updates if update[0] == "syncing_props")) < progress_updates.index(
+        next(update for update in progress_updates if update[0] == "rebuilding_predictions")
+    )
+
+
 def test_odds_import_updates_game_markets_from_saved_payload(monkeypatch) -> None:
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
     monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
@@ -6996,11 +7070,24 @@ def test_odds_cache_summary_reports_active_cache_path(monkeypatch, tmp_path) -> 
 
 def test_run_odds_import_job_refreshes_covers_without_overwriting_game_markets(monkeypatch) -> None:
     captured: dict[str, object] = {}
+    progress_updates: list[tuple[str | None, int | None, int | None, int | None, str | None]] = []
 
     monkeypatch.setattr(
         main_module,
         "import_the_odds_api_props",
-        lambda conn, force_refresh=False, progress_callback=None: {"status": "imported", "message": "ok"},
+        lambda conn, force_refresh=False, progress_callback=None: (
+            progress_callback("requesting_provider", 1, 1, "Fetched provider payload.")
+            if progress_callback is not None
+            else None
+        ) or (
+            progress_callback("syncing_props", 40, 176, "Matched props.")
+            if progress_callback is not None
+            else None
+        ) or (
+            progress_callback("rebuilding_predictions", 20, 146, "Built 20 projections.")
+            if progress_callback is not None
+            else None
+        ) or {"status": "imported", "message": "ok"},
     )
 
     def fake_import_covers_props(conn, selected_date=None, force_refresh=False, sync_props=True, update_game_markets=True):
@@ -7013,7 +7100,19 @@ def test_run_odds_import_job_refreshes_covers_without_overwriting_game_markets(m
     monkeypatch.setattr(main_module, "import_covers_props", fake_import_covers_props)
     monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"matchups": 1})
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
-    monkeypatch.setattr(main_module, "_set_prop_sync_progress", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        main_module,
+        "_set_prop_sync_progress",
+        lambda *args, **kwargs: progress_updates.append(
+            (
+                kwargs.get("stage"),
+                kwargs.get("stage_index"),
+                kwargs.get("stage_total"),
+                kwargs.get("current"),
+                kwargs.get("message"),
+            )
+        ),
+    )
 
     result = main_module._run_odds_import_job(True)
 
@@ -7024,6 +7123,9 @@ def test_run_odds_import_job_refreshes_covers_without_overwriting_game_markets(m
         "update_game_markets": False,
     }
     assert result["covers_context"]["status"] == "imported"
+    assert ("requesting_provider", 1, 6, 1, "Fetched provider payload.") in progress_updates
+    assert ("syncing_props", 2, 6, 40, "Matched props.") in progress_updates
+    assert ("rebuilding_predictions", 3, 6, 20, "Built 20 projections.") in progress_updates
 
 
 def test_odds_sync_prefers_covers_lines_when_available() -> None:

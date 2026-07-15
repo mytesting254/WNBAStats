@@ -359,6 +359,12 @@ def _sync_props_after_import(
                 total,
                 message,
             ),
+            rebuild_progress_callback=lambda current, total, message: progress_callback(
+                "rebuilding_predictions",
+                current,
+                total,
+                message,
+            ),
         )
     )
 
@@ -371,6 +377,7 @@ def sync_prop_lines_from_sportsbook(
     rebuild_predictions_after: bool = True,
     include_change_details: bool = False,
     progress_callback: Callable[[int, int, str | None], None] | None = None,
+    rebuild_progress_callback: Callable[[int, int, str | None], None] | None = None,
 ) -> int | SyncPropLinesResult:
     if progress_callback is not None:
         progress_callback(0, 1, "Collecting sportsbook props.")
@@ -632,11 +639,12 @@ def sync_prop_lines_from_sportsbook(
                         insert_rows,
                     )
             changed_prop_line_ids = sorted({int(prop_line_id) for prop_line_id in changed_prop_line_ids})
+            active_rebuild_progress_callback = rebuild_progress_callback or progress_callback
             if rebuild_predictions_after and changed_prop_line_ids:
                 rebuild_predictions_live(
                     conn,
                     prop_line_ids=changed_prop_line_ids,
-                    progress_callback=progress_callback,
+                    progress_callback=active_rebuild_progress_callback,
                 )
             conn.commit()
             if progress_callback is not None:

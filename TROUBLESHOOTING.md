@@ -192,6 +192,7 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 
 - `Refresh Odds` fails or reports missing API key
 - `Refresh Odds` stays queued or previously ended in a `504 Gateway Time-out`
+- `Refresh Odds`, `Refresh Covers`, `Recalculate`, or roster-change repair appears to jump backward in the progress card
 
 ### Likely Cause
 
@@ -199,18 +200,21 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - old deployment bundle still used the pre-queue synchronous import path
 - reverse proxy timed out before the old synchronous import finished
 - the raw payload was saved, but it belonged to a previous local date so `Load Saved Odds` does not replay it today
+- the deployed backend is older than the stage-splitting fix and is still collapsing prop sync plus projection rebuild into the same progress stage
 
 ### What To Check
 
 - backend env var exists
 - provider key is attached to the active backend resource
 - the deployed backend includes the queued `/api/odds/import` implementation and the `Data` tab shows the `Live Pipeline` card
+- the deployed backend includes the progress-stage split for odds sync, covers sync, recalculate, and roster-triggered repair
 - the active runtime cache path contains `sportsbook_props_raw.json`
   the correct path is the backend runtime cache, not necessarily repo-local `data/cache/`
 - `/api/odds/cache` reports the expected runtime `path`
 - the cached event dates inside `sportsbook_props_raw.json` match the app's current local date if you expect `Load Saved Odds` to replay them
 - if player props load but matchup spread/total/moneyline do not, confirm the saved payload includes `h2h`, `spreads`, and `totals` markets and that those values were written onto `games`
 - if same-day Covers cache exists, verify matchup payloads are using Covers game markets only as fallback, not overwriting already-populated Odds API game fields
+- during an active sync, stage-local counts should only move forward inside the current stage; a pattern like `40/176 -> 20/146 -> 40/176` indicates the old backend code is still running
 
 ## SQLite And Persistence Problems
 

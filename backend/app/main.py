@@ -3984,14 +3984,20 @@ def recalculate(request: Request, response: Response) -> dict[str, int]:
 
 
 def _run_legacy_recalculate_job() -> dict[str, Any]:
-    total_stages = 4
+    total_stages = 6
     with connect() as conn:
         rebuild_result = _repair_current_slate_props(
             conn,
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
                 conn=conn,
                 stage=stage,
-                stage_index=1,
+                stage_index=(
+                    1
+                    if stage == "syncing_props"
+                    else 2
+                    if stage == "rebuilding_predictions"
+                    else 3
+                ),
                 stage_total=total_stages,
                 current=current,
                 total=total,
@@ -4001,7 +4007,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
     with connect() as conn:
         _set_prop_sync_progress(
             stage="settling_props",
-            stage_index=2,
+            stage_index=4,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -4016,7 +4022,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
         )
         _set_prop_sync_progress(
             stage="settling_games",
-            stage_index=3,
+            stage_index=5,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -4032,7 +4038,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
     with connect() as conn:
         _set_prop_sync_progress(
             stage="publishing_payloads",
-            stage_index=4,
+            stage_index=6,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -4041,7 +4047,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
         _publish_current_read_payloads(conn)
     _set_prop_sync_progress(
         stage="publishing_payloads",
-        stage_index=4,
+        stage_index=6,
         stage_total=total_stages,
         current=1,
         total=1,
@@ -4231,7 +4237,7 @@ def _queue_current_slate_repair_job(
 
 
 def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
-    total_stages = 5
+    total_stages = 6
     with connect() as conn:
         result = import_the_odds_api_props(
             conn,
@@ -4239,7 +4245,13 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
                 conn=conn,
                 stage=stage,
-                stage_index=1 if stage in {"loading_saved_cache", "requesting_provider"} else 2,
+                stage_index=(
+                    1
+                    if stage in {"loading_saved_cache", "requesting_provider"}
+                    else 2
+                    if stage == "syncing_props"
+                    else 3
+                ),
                 stage_total=total_stages,
                 current=current,
                 total=total,
@@ -4249,7 +4261,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
         _set_prop_sync_progress(
             conn=conn,
             stage="settling_recent_finals",
-            stage_index=3,
+            stage_index=4,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -4273,7 +4285,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
     try:
         _set_prop_sync_progress(
             stage="refreshing_covers_context",
-            stage_index=4,
+            stage_index=5,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -4289,7 +4301,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             )
         _set_prop_sync_progress(
             stage="refreshing_covers_context",
-            stage_index=4,
+            stage_index=5,
             stage_total=total_stages,
             current=1,
             total=1,
@@ -4299,7 +4311,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
         covers_error = str(exc)
         _set_prop_sync_progress(
             stage="refreshing_covers_context",
-            stage_index=4,
+            stage_index=5,
             stage_total=total_stages,
             current=1,
             total=1,
@@ -4309,7 +4321,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
     with connect() as conn:
         _set_prop_sync_progress(
             stage="publishing_payloads",
-            stage_index=5,
+            stage_index=6,
             stage_total=total_stages,
             current=0,
             total=1,
@@ -4324,7 +4336,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
         result["covers_context_error"] = covers_error
     _set_prop_sync_progress(
         stage="publishing_payloads",
-        stage_index=5,
+        stage_index=6,
         stage_total=total_stages,
         current=1,
         total=1,

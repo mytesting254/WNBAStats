@@ -376,6 +376,8 @@ Click `Load Saved Odds` in the app to reload the most recent `sportsbook_props_r
 
 Click `Refresh Odds` only when you want a fresh provider call. The request now queues immediately in the backend, writes successful raw provider responses into `sportsbook_props_raw.json`, then continues import/sync/publish work in the background. Odds API game markets (`h2h`, `spreads`, `totals`) are saved in that raw payload and update `games` market fields such as spread, total, and moneyline during import. Watch the `Live Pipeline` card in the `Data` tab for request, sync, and publish progress.
 
+`Refresh Odds`, `Refresh Covers`, `Recalculate`, and roster-triggered current-slate repairs all publish their work into the same background prop-sync status card. Those jobs now report monotonic stage progress: provider/cache load, prop sync, projection rebuild, game rebuild or settlement, optional Covers context refresh, then payload publish. Within one stage the `current/total` values may advance in chunks, but they should not jump backward because one substep reused another substep's totals.
+
 Fresh calls merge by provider event id, so future events already saved in `sportsbook_props_raw.json` remain cached instead of being discarded.
 
 The raw Odds API cache is a single rolling file, not a dated archive. `Load Saved Odds` only replays cached events whose game date matches the app's current local date, so yesterday's payload can still exist in the JSON file but will be ignored on today's replay path.
