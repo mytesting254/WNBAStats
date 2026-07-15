@@ -1060,6 +1060,31 @@ def _latest_prop_sync_job_state() -> dict[str, Any] | None:
     return _row_to_prop_sync_state(row)
 
 
+def _resolved_prop_sync_state() -> tuple[dict[str, Any], dict[str, Any] | None]:
+    with _PROP_SYNC_LOCK:
+        sync_state = dict(_PROP_SYNC_STATE)
+    latest_job = _latest_prop_sync_job_state()
+    if not latest_job:
+        return sync_state, None
+
+    sync_updated_at = _parse_cache_timestamp(sync_state.get("updated_at"))
+    latest_updated_at = _parse_cache_timestamp(latest_job.get("updated_at"))
+    sync_job_id = sync_state.get("job_id")
+    latest_job_id = latest_job.get("job_id")
+
+    if sync_job_id is None:
+        return latest_job, latest_job
+    if latest_job_id is not None and sync_job_id != latest_job_id:
+        if latest_updated_at and (not sync_updated_at or latest_updated_at >= sync_updated_at):
+            return latest_job, latest_job
+        return sync_state, latest_job
+    if latest_updated_at and (not sync_updated_at or latest_updated_at > sync_updated_at):
+        return latest_job, latest_job
+    if not sync_state.get("started_at"):
+        return latest_job, latest_job
+    return sync_state, latest_job
+
+
 def _sqlite_sidecar_info(path: Path) -> dict[str, Any]:
     return {
         "path": str(path),
@@ -1587,18 +1612,9 @@ def special_stocks_stats() -> dict[str, Any]:
 @app.get("/api/ops/health")
 @app.get("/api/operations/health")
 def ops_health() -> dict[str, Any]:
-    with _PROP_SYNC_LOCK:
-        sync_state = dict(_PROP_SYNC_STATE)
+    sync_state, latest_job = _resolved_prop_sync_state()
     with _MODEL_TRAIN_LOCK:
         model_training_state = dict(_MODEL_TRAIN_STATE)
-    latest_job = _latest_prop_sync_job_state()
-    sync_updated_at = sync_state.get("updated_at")
-    latest_updated_at = latest_job.get("updated_at") if latest_job else None
-    if latest_job and (
-        not sync_state.get("started_at")
-        or (not sync_state.get("running") and latest_updated_at and latest_updated_at != sync_updated_at)
-    ):
-        sync_state = latest_job
     return {
         "status": "ok",
         "prop_sync": sync_state,
@@ -4073,8 +4089,8 @@ def _queue_legacy_recalculate_job(request: Request | None = None) -> dict[str, A
 
 @app.get("/api/props/sync-status")
 def props_sync_status() -> dict:
-    with _PROP_SYNC_LOCK:
-        return dict(_PROP_SYNC_STATE)
+    sync_state, _latest_job = _resolved_prop_sync_state()
+    return sync_state
 
 
 def _run_current_slate_repair_job(target_game_ids: list[int] | None = None) -> dict[str, Any]:
@@ -5243,12 +5259,12 @@ def _minutes_volatility_bucket(value: float) -> str:
 
 
 def _minutes_context_bucket(row: dict[str, float | str | int | None]) -> str:
-    if int(row.get("recent_transfer") or 0) == 1:
+    if int(_row_value(row, "recent_transfer", 0) or 0) == 1:
         return "recent_transfer"
-    if float(row.get("recent_absence_days") or 0.0) >= 7.0:
+    if float(_row_value(row, "recent_absence_days", 0.0) or 0.0) >= 7.0:
         return "absence_return"
-    unavailable_minutes = float(row.get("same_position_unavailable_minutes") or 0.0)
-    key_out_count = float(row.get("same_position_key_out_count") or 0.0)
+    unavailable_minutes = float(_row_value(row, "same_position_unavailable_minutes", 0.0) or 0.0)
+    key_out_count = float(_row_value(row, "same_position_key_out_count", 0.0) or 0.0)
     if unavailable_minutes >= 18.0 and key_out_count >= 1.0:
         return "vacancy"
     if unavailable_minutes >= 10.0 or key_out_count >= 1.0:
@@ -6309,16 +6325,60 @@ def _scheduled_game_ids_for_teams(conn, team_ids: list[int] | tuple[int, ...]) -
     normalized = sorted({int(team_id) for team_id in team_ids if int(team_id) > 0})
     if not normalized:
         return []
+    active_game_ids = set(_active_slate_game_ids(conn))
+    if active_game_ids:
+        placeholders = ",".join("?" for _ in normalized)
+        rows = conn.execute(
+            f"""
+            SELECT id
+            FROM games
+            WHERE status = 'scheduled'
+              AND id IN ({",".join("?" for _ in active_game_ids)})
+              AND (home_team_id IN ({placeholders}) OR away_team_id IN ({placeholders}))
+            ORDER BY game_date, start_time, id
+            """,
+            tuple(sorted(active_game_ids)) + tuple(normalized) + tuple(normalized),
+        ).fetchall()
+        filtered_active = [int(row["id"]) for row in rows]
+        if filtered_active:
+            return filtered_active
+
+    today_iso = _local_today_iso()
     placeholders = ",".join("?" for _ in normalized)
+    next_date_row = conn.execute(
+        f"""
+        SELECT MIN(game_date) AS next_game_date
+        FROM games
+        WHERE status = 'scheduled'
+          AND game_date >= ?
+          AND (home_team_id IN ({placeholders}) OR away_team_id IN ({placeholders}))
+        """,
+        (today_iso, *normalized, *normalized),
+    ).fetchone()
+    target_date = str(next_date_row["next_game_date"] or "").strip() if next_date_row is not None else ""
+    if not target_date:
+        fallback_row = conn.execute(
+            f"""
+            SELECT MIN(game_date) AS next_game_date
+            FROM games
+            WHERE status = 'scheduled'
+              AND (home_team_id IN ({placeholders}) OR away_team_id IN ({placeholders}))
+            """,
+            tuple(normalized) + tuple(normalized),
+        ).fetchone()
+        target_date = str(fallback_row["next_game_date"] or "").strip() if fallback_row is not None else ""
+    if not target_date:
+        return []
     rows = conn.execute(
         f"""
         SELECT id
         FROM games
         WHERE status = 'scheduled'
+          AND game_date = ?
           AND (home_team_id IN ({placeholders}) OR away_team_id IN ({placeholders}))
         ORDER BY game_date, start_time, id
         """,
-        tuple(normalized) + tuple(normalized),
+        (target_date, *normalized, *normalized),
     ).fetchall()
     return [int(row["id"]) for row in rows]
 
