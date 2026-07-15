@@ -120,6 +120,34 @@ def import_covers_props(
     sync_props: bool = True,
     update_game_markets: bool = True,
 ) -> dict:
+    result = _import_covers_provider_rows(
+        conn,
+        selected_date=selected_date,
+        force_refresh=force_refresh,
+        update_game_markets=update_game_markets,
+    )
+    if not sync_props or not bool(result.get("prop_sync_eligible")):
+        result.setdefault("synced_props", 0)
+        return result
+    synced = 0
+    sync_error = None
+    try:
+        synced = sync_prop_lines_from_sportsbook(conn)
+    except sqlite3.OperationalError as exc:
+        sync_error = str(exc)
+    return {
+        **result,
+        "synced_props": synced,
+        "sync_error": sync_error,
+    }
+
+
+def _import_covers_provider_rows(
+    conn: sqlite3.Connection,
+    selected_date: str | None = None,
+    force_refresh: bool = False,
+    update_game_markets: bool = True,
+) -> dict:
     captured_at = datetime.now(timezone.utc).isoformat()
     cached_payload = read_json_cache(RAW_CACHE_NAME)
     if selected_date is None and not force_refresh and _covers_cache_is_current(cached_payload):
@@ -129,20 +157,13 @@ def import_covers_props(
             cached_payload.get("games", []),
             update_game_markets=update_game_markets,
         )
-        synced = 0
-        sync_error = None
-        if sync_props:
-            try:
-                synced = sync_prop_lines_from_sportsbook(conn)
-            except sqlite3.OperationalError as exc:
-                sync_error = str(exc)
         return {
             **result,
-            "synced_props": synced,
+            "synced_props": 0,
             "status": "loaded_from_cache",
             "source": "cache",
             "message": "Loaded Covers props from saved JSON.",
-            "sync_error": sync_error,
+            "prop_sync_eligible": True,
         }
 
     try:
@@ -161,6 +182,7 @@ def import_covers_props(
                 "status": "loaded_from_cache",
                 "source": "cache",
                 "message": f"Fresh Covers scrape failed while loading matchups; kept saved Covers data. {exc}",
+                "prop_sync_eligible": True,
             }
         return {
             "events": 0,
@@ -170,6 +192,7 @@ def import_covers_props(
             "status": "failed",
             "source": PROVIDER,
             "message": f"Fresh Covers scrape failed while loading matchups. {exc}",
+            "prop_sync_eligible": False,
         }
     odds_board = _fetch_odds_board(selected_date)
     imported_rows = []
@@ -230,6 +253,7 @@ def import_covers_props(
                 "source": PROVIDER,
                 "message": "Imported Covers matchup lines without player prop rows.",
                 "errors": errors,
+                "prop_sync_eligible": False,
             }
         if isinstance(cached_payload, dict) and cached_payload.get("rows"):
             result = _replace_covers_rows(
@@ -245,6 +269,7 @@ def import_covers_props(
                 "source": "cache",
                 "message": "Fresh Covers scrape returned no prop rows; kept saved Covers data.",
                 "errors": errors,
+                "prop_sync_eligible": True,
             }
         return {
             "events": len(games),
@@ -255,6 +280,7 @@ def import_covers_props(
             "source": PROVIDER,
             "message": "Fresh Covers scrape returned no prop rows.",
             "errors": errors,
+            "prop_sync_eligible": False,
         }
     write_json_cache(
         RAW_CACHE_NAME,
@@ -274,21 +300,14 @@ def import_covers_props(
         game_payload,
         update_game_markets=update_game_markets,
     )
-    synced = 0
-    sync_error = None
-    if sync_props:
-        try:
-            synced = sync_prop_lines_from_sportsbook(conn)
-        except sqlite3.OperationalError as exc:
-            sync_error = str(exc)
     return {
         **result,
-        "synced_props": synced,
+        "synced_props": 0,
         "status": "imported",
         "source": PROVIDER,
         "captured_at": captured_at,
         "errors": errors,
-        "sync_error": sync_error,
+        "prop_sync_eligible": True,
     }
 
 

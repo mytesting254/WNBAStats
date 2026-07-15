@@ -127,7 +127,21 @@ def import_the_odds_api_props(
     force_refresh: bool = False,
     progress_callback: Callable[[str, int, int, str | None], None] | None = None,
 ) -> dict:
-    return _import_the_odds_api_props(conn, force_refresh=force_refresh, progress_callback=progress_callback)
+    result = _import_the_odds_api_provider_rows(conn, force_refresh=force_refresh, progress_callback=progress_callback)
+    if not bool(result.get("prop_sync_eligible")):
+        result.setdefault("synced_props", 0)
+        return result
+    synced = 0
+    sync_error = None
+    try:
+        synced = _sync_props_after_import(conn, progress_callback)
+    except sqlite3.OperationalError as exc:
+        sync_error = str(exc)
+    return {
+        **result,
+        "synced_props": synced,
+        "sync_error": sync_error,
+    }
 
 
 def import_historical_odds_api_game_markets(
@@ -235,7 +249,7 @@ def import_historical_odds_api_game_markets(
     }
 
 
-def _import_the_odds_api_props(
+def _import_the_odds_api_provider_rows(
     conn: sqlite3.Connection,
     *,
     force_refresh: bool = False,
@@ -246,21 +260,14 @@ def _import_the_odds_api_props(
         if progress_callback is not None:
             progress_callback("loading_saved_cache", 0, 1, "Loading saved Odds API cache.")
         result = _replace_sportsbook_rows(conn, cached_payload, datetime.now(timezone.utc).isoformat())
-        synced = 0
-        sync_error = None
-        try:
-            synced = _sync_props_after_import(conn, progress_callback)
-        except sqlite3.OperationalError as exc:
-            sync_error = str(exc)
         if progress_callback is not None:
             progress_callback("loading_saved_cache", 1, 1, "Saved Odds API cache loaded.")
         return {
             **result,
-            "synced_props": synced,
             "status": "loaded_from_cache",
             "source": "cache",
             "message": "Loaded sportsbook props from saved JSON.",
-            "sync_error": sync_error,
+            "prop_sync_eligible": True,
         }
 
     load_dotenv()
@@ -270,6 +277,7 @@ def _import_the_odds_api_props(
             "status": "missing_api_key",
             "message": "Set ODDS_API_KEY to import live sportsbook player props.",
             "imported": 0,
+            "prop_sync_eligible": False,
         }
 
     captured_at = datetime.now(timezone.utc).isoformat()
@@ -316,31 +324,26 @@ def _import_the_odds_api_props(
         persisted_payload if isinstance(persisted_payload, list) else merged_payload,
         captured_at,
     )
-    synced = 0
-    sync_error = None
-    try:
-        synced = _sync_props_after_import(conn, progress_callback)
-    except sqlite3.OperationalError as exc:
-        sync_error = str(exc)
     status = "imported"
     message = None
+    prop_sync_eligible = True
     if errors and fetched_payload:
         status = "partial_import"
         message = f"Imported {len(fetched_payload)} event(s) with {len(errors)} provider error(s)."
     elif errors:
         status = "provider_error"
         message = f"Odds API import failed for {len(errors)} request(s)."
+        prop_sync_eligible = False
     return {
         **result,
-        "synced_props": synced,
         "status": status,
         "source": "provider",
         "fetched_events": len(fetched_payload),
         "cached_events": len(merged_payload),
         "captured_at": captured_at,
-        "sync_error": sync_error,
         "errors": errors,
         "message": message,
+        "prop_sync_eligible": prop_sync_eligible,
     }
 
 

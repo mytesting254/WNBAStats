@@ -6,6 +6,8 @@ Use this document to separate:
 
 - active model fixes
 - training/data-pipeline work
+- prop ingestion refactor
+  see `PROP_INGESTION_REFACTOR.md` for the shared provider-ingestion plus downstream prop-sync pipeline split
 - evaluation/reporting work
 - operational follow-up
 

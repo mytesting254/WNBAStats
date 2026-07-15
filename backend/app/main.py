@@ -34,7 +34,7 @@ from .auth import (
 )
 from .bootstrap import ensure_teams, normalize_team_abbreviation
 from .cache import delete_json_cache, read_json_cache, write_json_cache
-from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _metadata_from_page, import_covers_props
+from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, import_covers_props
 from .db import connect, init_db, sqlite_write_lock, using_turso
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .game_prediction_tracking import save_game_prediction, save_game_predictions, settle_completed_game_predictions
@@ -43,6 +43,7 @@ from .odds_import import (
     import_historical_odds_api_game_markets,
     RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME,
     SyncPropLinesResult,
+    _import_the_odds_api_provider_rows,
     import_the_odds_api_props,
     line_discrepancies,
     list_sportsbook_props,
@@ -51,6 +52,15 @@ from .odds_import import (
     sync_prop_lines_from_sportsbook,
 )
 from .player_identity import player_is_skeletal, player_lookup_parts, resolve_player_identity
+from .prop_ingestion import (
+    PropPostProcessPolicy,
+    PropPipelineResult,
+    build_covers_provider_ingestion,
+    build_no_provider_ingestion,
+    build_odds_provider_ingestion,
+    run_post_pipeline_steps,
+    run_prop_sync_pipeline,
+)
 from .projections import LiveRebuildResult, rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
@@ -3836,15 +3846,18 @@ def _repair_current_slate_props(
     target_game_ids: list[int] | None = None,
     progress_callback: Callable[[str, int, int, str | None], None] | None = None,
 ) -> dict[str, Any]:
-    rebuild_chunk_size = 20
     if target_game_ids is None:
         scope, target_game_ids = _repair_current_slate_target(conn)
     else:
         target_game_ids = sorted({int(game_id) for game_id in target_game_ids if int(game_id) > 0})
         scope = "injury_update"
-    if not target_game_ids:
+    ingestion = build_no_provider_ingestion(
+        scope="injury_update" if scope == "injury_update" else "current_slate",
+        target_game_ids=target_game_ids,
+    )
+    if not ingestion.target_game_ids:
         if progress_callback is not None:
-            progress_callback("syncing_props", 0, 0, "No scheduled games were available for repair.")
+            progress_callback("syncing_props", 0, 0, str(ingestion.message or "No scheduled games were available for repair."))
         return {
             "scope": scope,
             "target_game_ids": [],
@@ -3852,96 +3865,36 @@ def _repair_current_slate_props(
             "synced_props": 0,
             "rebuilt_predictions": 0,
         }
-    if scope == "injury_update":
-        scanned = 0
-        synced = 0
-        changed_prop_line_ids: list[int] = []
-        if progress_callback is not None:
-            progress_callback(
-                "syncing_props",
-                1,
-                1,
-                f"Skipped sportsbook sync for injury update; rebuilding all projections for {len(target_game_ids)} affected games.",
-            )
-    else:
-        if progress_callback is not None:
-            progress_callback("syncing_props", 0, 1, f"Syncing props for {len(target_game_ids)} games.")
-        sync_result = sync_prop_lines_from_sportsbook(
-            conn,
-            game_ids=target_game_ids,
-            fast_fail=True,
-            rebuild_predictions_after=False,
-            include_change_details=True,
-            progress_callback=lambda current, total, message: progress_callback("syncing_props", current, total, message)
-            if progress_callback is not None
-            else None,
-        )
-        if isinstance(sync_result, SyncPropLinesResult):
-            scanned = sync_result.synced_props
-            synced = sync_result.changed_props
-            changed_prop_line_ids = sync_result.changed_prop_line_ids
-        else:
-            scanned = int(sync_result)
-            synced = int(sync_result)
-            changed_prop_line_ids = []
-    if scope == "injury_update":
-        # Availability changes alter teammate context across the whole slate, so
-        # targeted roster repairs skip sportsbook sync and rebuild by game so
-        # teammate context, usage, and game totals all update together.
-        rebuild_result = rebuild_predictions_live(
-            conn,
-            game_ids=target_game_ids,
-            prop_line_ids=None,
-            chunk_size=rebuild_chunk_size,
-            progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
-            if progress_callback is not None
-            else None,
-        )
-    elif changed_prop_line_ids:
-        rebuild_result = rebuild_predictions_live(
-            conn,
-            game_ids=None,
-            prop_line_ids=changed_prop_line_ids,
-            chunk_size=rebuild_chunk_size,
-            progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
-            if progress_callback is not None
-            else None,
-        )
-    else:
-        # Injury/availability changes affect every player projection in the
-        # slate even when sportsbook lines themselves are unchanged.
-        rebuild_result = rebuild_predictions_live(
-            conn,
-            game_ids=target_game_ids,
-            prop_line_ids=None,
-            chunk_size=rebuild_chunk_size,
-            progress_callback=lambda current, total, message: progress_callback("rebuilding_predictions", current, total, message)
-            if progress_callback is not None
-            else None,
-        )
-    game_rebuild_result = rebuild_game_predictions_live(
+    pipeline_result: PropPipelineResult = run_prop_sync_pipeline(
         conn,
-        game_ids=target_game_ids,
-        progress_callback=lambda current, total, message: progress_callback("rebuilding_games", current, total, message)
-        if progress_callback is not None
-        else None,
+        request_source=scope,
+        target_game_ids=ingestion.target_game_ids,
+        sync_props=ingestion.prop_sync_eligible,
+        fast_fail=True,
+        rebuild_mode=ingestion.rebuild_mode,
+        fallback_target_game_rebuild_when_unchanged=ingestion.fallback_target_game_rebuild_when_unchanged,
+        initial_sync_message=ingestion.initial_sync_message,
+        skip_sync_message=ingestion.skip_sync_message,
+        sync_props_fn=sync_prop_lines_from_sportsbook,
+        rebuild_predictions_fn=rebuild_predictions_live,
+        rebuild_games_fn=rebuild_game_predictions_live,
+        snapshot_watchlist_fn=_snapshot_watchlist,
+        watchlist_snapshot_date=datetime.now(LOCAL_TZ).date().isoformat(),
+        progress_callback=progress_callback,
     )
-    if progress_callback is not None:
-        progress_callback("rebuilding_games", game_rebuild_result["attempted"], game_rebuild_result["attempted"], "Refreshing watchlist snapshot.")
-    watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
     return {
         "scope": scope,
-        "target_game_ids": target_game_ids,
-        "scanned_props": int(scanned),
-        "synced_props": int(synced),
-        "changed_prop_line_ids": changed_prop_line_ids,
-        "attempted_predictions": int(rebuild_result.attempted),
-        "rebuilt_predictions": int(rebuild_result.written),
-        "skipped_predictions": int(rebuild_result.skipped),
-        "rebuild_errors": list(rebuild_result.errors[:20]),
-        "attempted_game_predictions": int(game_rebuild_result["attempted"]),
-        "rebuilt_game_predictions": int(game_rebuild_result["written"]),
-        "watchlist_snapshot": watchlist_snapshot,
+        "target_game_ids": list(pipeline_result.target_game_ids),
+        "scanned_props": int(pipeline_result.scanned_props),
+        "synced_props": int(pipeline_result.synced_props),
+        "changed_prop_line_ids": list(pipeline_result.changed_prop_line_ids),
+        "attempted_predictions": int(pipeline_result.attempted_predictions),
+        "rebuilt_predictions": int(pipeline_result.rebuilt_predictions),
+        "skipped_predictions": int(pipeline_result.skipped_predictions),
+        "rebuild_errors": list(pipeline_result.rebuild_errors),
+        "attempted_game_predictions": int(pipeline_result.attempted_game_predictions),
+        "rebuilt_game_predictions": int(pipeline_result.rebuilt_game_predictions),
+        "watchlist_snapshot": pipeline_result.watchlist_snapshot,
     }
 
 
@@ -4035,23 +3988,22 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
             message=f"Settled {int(game_settlements['settled'])} game predictions.",
         )
     _invalidate_read_caches()
-    with connect() as conn:
-        _set_prop_sync_progress(
-            stage="publishing_payloads",
+    run_post_pipeline_steps(
+        connect_fn=connect,
+        policy=PropPostProcessPolicy(
+            publish_mode="current_read",
+            publish_start_message="Publishing refreshed read payloads.",
+            publish_done_message="Legacy recalculate finished.",
+        ),
+        progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+            stage=stage,
             stage_index=6,
             stage_total=total_stages,
-            current=0,
-            total=1,
-            message="Publishing refreshed read payloads.",
-        )
-        _publish_current_read_payloads(conn)
-    _set_prop_sync_progress(
-        stage="publishing_payloads",
-        stage_index=6,
-        stage_total=total_stages,
-        current=1,
-        total=1,
-        message="Legacy recalculate finished.",
+            current=current,
+            total=total,
+            message=message,
+        ),
+        publish_current_read_payloads_fn=lambda conn: _publish_current_read_payloads(conn),
     )
     return {
         "predictions": int(rebuild_result["rebuilt_predictions"]),
@@ -4135,40 +4087,37 @@ def _run_current_slate_repair_job(target_game_ids: list[int] | None = None) -> d
                 message=message,
             ),
         )
-        _set_prop_sync_progress(
-            conn=conn,
-            stage="settling_recent_finals",
-            stage_index=4,
-            stage_total=total_stages,
-            current=0,
-            total=1,
-            message="Settling recent completed games.",
-        )
-        result["recent_finals_settlement"] = _settle_recent_completed_games(conn)
     _invalidate_read_caches()
-    with connect() as conn:
-        _set_prop_sync_progress(
-            stage="publishing_payloads",
-            stage_index=5,
-            stage_total=total_stages,
-            current=0,
-            total=1,
-            message="Publishing repaired payloads.",
-        )
-        result["published_payloads"] = _publish_post_mutation_read_payloads(
-            conn,
+    post_result = run_post_pipeline_steps(
+        connect_fn=connect,
+        policy=PropPostProcessPolicy(
+            settle_recent_finals=True,
+            publish_mode="targeted",
             matchup_game_ids=list(result.get("target_game_ids") or []),
             full_matchup_refresh=False,
             include_performance=False,
-        )
-    _set_prop_sync_progress(
-        stage="publishing_payloads",
-        stage_index=5,
-        stage_total=total_stages,
-        current=1,
-        total=1,
-        message="Current slate repair finished.",
+            settle_recent_finals_message="Settling recent completed games.",
+            publish_start_message="Publishing repaired payloads.",
+            publish_done_message="Current slate repair finished.",
+        ),
+        progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+            stage=stage,
+            stage_index=4 if stage == "settling_recent_finals" else 5,
+            stage_total=total_stages,
+            current=current,
+            total=total,
+            message=message,
+        ),
+        settle_recent_finals_fn=_settle_recent_completed_games,
+        publish_post_mutation_payloads_fn=lambda conn, policy: _publish_post_mutation_read_payloads(
+            conn,
+            matchup_game_ids=list(policy.matchup_game_ids or []),
+            full_matchup_refresh=policy.full_matchup_refresh,
+            include_performance=policy.include_performance,
+        ),
     )
+    result["recent_finals_settlement"] = post_result.recent_finals_settlement
+    result["published_payloads"] = post_result.published_payloads
     return result
 
 
@@ -4239,7 +4188,7 @@ def _queue_current_slate_repair_job(
 def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
     total_stages = 6
     with connect() as conn:
-        result = import_the_odds_api_props(
+        result = _import_the_odds_api_provider_rows(
             conn,
             force_refresh=force_refresh,
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
@@ -4258,18 +4207,9 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
                 message=message,
             ),
         )
-        _set_prop_sync_progress(
-            conn=conn,
-            stage="settling_recent_finals",
-            stage_index=4,
-            stage_total=total_stages,
-            current=0,
-            total=1,
-            message="Settling recent completed games.",
-        )
-        result["recent_finals_settlement"] = _settle_recent_completed_games(conn)
-    if result.get("status") in {"missing_api_key", "provider_error"}:
-        message = str(result.get("message") or "Odds import failed.")
+    ingestion = build_odds_provider_ingestion(result)
+    if ingestion.status in {"missing_api_key", "provider_error"}:
+        message = str(ingestion.message or "Odds import failed.")
         _mutate_prop_sync_state(
             running=False,
             finished_at=datetime.now(timezone.utc).isoformat(),
@@ -4280,68 +4220,74 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             message=message,
         )
         return result
-    covers_result: dict[str, Any] | None = None
-    covers_error: str | None = None
-    try:
-        _set_prop_sync_progress(
-            stage="refreshing_covers_context",
-            stage_index=5,
-            stage_total=total_stages,
-            current=0,
-            total=1,
-            message="Refreshing Covers matchup context for H2H and team history.",
-        )
-        with connect() as conn:
-            covers_result = import_covers_props(
-                conn,
-                selected_date=_local_today_iso(),
-                force_refresh=True,
-                sync_props=False,
-                update_game_markets=False,
-            )
-        _set_prop_sync_progress(
-            stage="refreshing_covers_context",
-            stage_index=5,
-            stage_total=total_stages,
-            current=1,
-            total=1,
-            message="Covers matchup context refreshed.",
-        )
-    except Exception as exc:
-        covers_error = str(exc)
-        _set_prop_sync_progress(
-            stage="refreshing_covers_context",
-            stage_index=5,
-            stage_total=total_stages,
-            current=1,
-            total=1,
-            message=f"Covers matchup context refresh failed: {covers_error}",
-        )
-    _invalidate_read_caches()
     with connect() as conn:
-        _set_prop_sync_progress(
-            stage="publishing_payloads",
-            stage_index=6,
-            stage_total=total_stages,
-            current=0,
-            total=1,
-            message="Publishing refreshed odds payloads.",
+        pipeline_result = run_prop_sync_pipeline(
+            conn,
+            request_source=ingestion.source,
+            target_game_ids=ingestion.target_game_ids,
+            sync_props=ingestion.prop_sync_eligible,
+            rebuild_mode=ingestion.rebuild_mode,
+            fallback_target_game_rebuild_when_unchanged=ingestion.fallback_target_game_rebuild_when_unchanged,
+            skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
+            sync_props_fn=sync_prop_lines_from_sportsbook,
+            rebuild_predictions_fn=rebuild_predictions_live,
+            progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                conn=conn,
+                stage=stage,
+                stage_index=2 if stage == "syncing_props" else 3,
+                stage_total=total_stages,
+                current=current,
+                total=total,
+                message=message,
+            ),
         )
-        result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+        result["synced_props"] = int(pipeline_result.scanned_props)
+        result["changed_props"] = int(pipeline_result.synced_props)
+        result["target_game_ids"] = list(pipeline_result.target_game_ids)
+        result["attempted_predictions"] = int(pipeline_result.attempted_predictions)
+        result["rebuilt_predictions"] = int(pipeline_result.rebuilt_predictions)
+        result["skipped_predictions"] = int(pipeline_result.skipped_predictions)
+    _invalidate_read_caches()
+    post_result = run_post_pipeline_steps(
+        connect_fn=connect,
+        policy=PropPostProcessPolicy(
+            settle_recent_finals=True,
+            refresh_covers_context=True,
+            publish_mode="full",
+            settle_recent_finals_message="Settling recent completed games.",
+            covers_refresh_start_message="Refreshing Covers matchup context for H2H and team history.",
+            covers_refresh_done_message="Covers matchup context refreshed.",
+            publish_start_message="Publishing refreshed odds payloads.",
+            publish_done_message=str(result.get("message") or "Odds import finished."),
+        ),
+        progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+            stage=stage,
+            stage_index=4 if stage == "settling_recent_finals" else 5 if stage == "refreshing_covers_context" else 6,
+            stage_total=total_stages,
+            current=current,
+            total=total,
+            message=message,
+        ),
+        settle_recent_finals_fn=_settle_recent_completed_games,
+        refresh_covers_context_fn=lambda conn: import_covers_props(
+            conn,
+            selected_date=_local_today_iso(),
+            force_refresh=True,
+            sync_props=False,
+            update_game_markets=False,
+        ),
+        publish_post_mutation_payloads_fn=lambda conn, _policy: _publish_post_mutation_read_payloads(conn),
+    )
+    result["recent_finals_settlement"] = post_result.recent_finals_settlement
+    covers_result = post_result.covers_context
+    covers_error = post_result.covers_context_error
+    result["published_payloads"] = post_result.published_payloads
     if covers_result is not None:
         result["covers_context"] = covers_result
         if covers_result.get("message"):
             result["message"] = f"{str(result.get('message') or 'Odds import finished.')} {covers_result['message']}"
     if covers_error:
         result["covers_context_error"] = covers_error
-    _set_prop_sync_progress(
-        stage="publishing_payloads",
-        stage_index=6,
-        stage_total=total_stages,
-        current=1,
-        total=1,
-        message=str(result.get("message") or "Odds import finished."),
-    )
     return result
 
 
@@ -5526,11 +5472,14 @@ def import_covers(request: Request, selected_date: str | None = None, force_refr
 
 def _import_covers_impl(*, request: Request | None, selected_date: str | None, force_refresh: bool) -> dict[str, Any]:
     with connect() as conn:
-        result = import_covers_props(conn, selected_date=selected_date, force_refresh=force_refresh, sync_props=False)
-    sync_started = _start_prop_sync_if_needed("covers_import", request=request)
+        result = _import_covers_provider_rows(conn, selected_date=selected_date, force_refresh=force_refresh, update_game_markets=True)
+    ingestion = build_covers_provider_ingestion(result)
+    sync_started = False
+    if ingestion.prop_sync_eligible:
+        sync_started = _start_prop_sync_if_needed("covers_import", request=request)
     result["sync_started"] = sync_started
     if sync_started:
-        base_message = str(result.get("message") or "").strip()
+        base_message = str(ingestion.message or "").strip()
         if base_message:
             result["message"] = f"{base_message} Prop sync queued in background."
         else:
@@ -5565,13 +5514,17 @@ def _import_rotowire_injuries_impl(*, request: Request | None, force_refresh: bo
         result["roster_cache_refresh"] = _publish_roster_cache_async()
     affected_game_ids = list(result.get("affected_game_ids") or [])
     roster_changed = bool(result.get("roster_changed"))
+    repair_ingestion = build_no_provider_ingestion(
+        scope="injury_update",
+        target_game_ids=affected_game_ids if roster_changed else [],
+    )
     result["repair"] = (
-        _queue_current_slate_repair_job(affected_game_ids, request=request)
-        if roster_changed and affected_game_ids
+        _queue_current_slate_repair_job(repair_ingestion.target_game_ids, request=request)
+        if repair_ingestion.status == "ready" and repair_ingestion.target_game_ids
         else {
             "status": "not_needed",
             "scope": "injury_update",
-            "target_game_ids": affected_game_ids if roster_changed else [],
+            "target_game_ids": repair_ingestion.target_game_ids,
         }
     )
     result["specials"] = (
@@ -6591,86 +6544,67 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
         try:
             _append_job_run_event(job_run_id, "job.running", "Background prop sync started.", details={"source": source})
             with connect() as conn:
-                sync_result = sync_prop_lines_from_sportsbook(
+                pipeline_result = run_prop_sync_pipeline(
                     conn,
-                    rebuild_predictions_after=False,
-                    include_change_details=True,
-                    progress_callback=lambda current, total, message: _set_prop_sync_progress(
+                    request_source=source,
+                    sync_props=True,
+                    rebuild_mode="changed_props",
+                    skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
+                    sync_props_fn=sync_prop_lines_from_sportsbook,
+                    rebuild_predictions_fn=rebuild_predictions_live,
+                    progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
                         conn=conn,
-                        stage="syncing_props",
-                        stage_index=1,
+                        stage=stage,
+                        stage_index=1 if stage == "syncing_props" else 2,
                         stage_total=3,
                         current=current,
                         total=total,
                         message=message,
                     ),
                 )
-                touched_game_ids = list(sync_result.touched_game_ids)
+                touched_game_ids = list(pipeline_result.target_game_ids)
                 _set_prop_sync_progress(
                     conn=conn,
                     scope=source,
                     target_game_ids=touched_game_ids,
                 )
-                if sync_result.changed_prop_line_ids:
-                    rebuild_result = rebuild_predictions_live(
-                        conn,
-                        game_ids=None,
-                        prop_line_ids=sync_result.changed_prop_line_ids,
-                        progress_callback=lambda current, total, message: _set_prop_sync_progress(
-                            conn=conn,
-                            stage="rebuilding_predictions",
-                            stage_index=2,
-                            stage_total=3,
-                            current=current,
-                            total=total,
-                            message=message,
-                        ),
-                    )
-                else:
-                    rebuild_result = LiveRebuildResult(projections=[], attempted=0, written=0, skipped=0, errors=[])
-                    _set_prop_sync_progress(
-                        conn=conn,
-                        stage="rebuilding_predictions",
-                        stage_index=2,
-                        stage_total=3,
-                        current=0,
-                        total=0,
-                        message="No prop-line changes; skipped prediction rebuild.",
-                    )
             _invalidate_read_caches()
-            with connect() as conn:
-                _set_prop_sync_progress(
-                    stage="publishing_payloads",
-                    stage_index=3,
-                    stage_total=3,
-                    current=0,
-                    total=1,
-                    message="Publishing synced payloads.",
-                )
-                published_payloads = _publish_post_mutation_read_payloads(
-                    conn,
+            post_result = run_post_pipeline_steps(
+                connect_fn=connect,
+                policy=PropPostProcessPolicy(
+                    publish_mode="targeted",
                     matchup_game_ids=touched_game_ids,
                     full_matchup_refresh=False,
                     include_performance=False,
-                )
-            _set_prop_sync_progress(
-                stage="publishing_payloads",
-                stage_index=3,
-                stage_total=3,
-                current=1,
-                total=1,
-                message="Background prop sync finished.",
+                    publish_start_message="Publishing synced payloads.",
+                    publish_done_message="Background prop sync finished.",
+                ),
+                progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                    stage=stage,
+                    stage_index=3,
+                    stage_total=3,
+                    current=current,
+                    total=total,
+                    message=message,
+                ),
+                publish_post_mutation_payloads_fn=lambda conn, policy: _publish_post_mutation_read_payloads(
+                    conn,
+                    matchup_game_ids=list(policy.matchup_game_ids or []),
+                    full_matchup_refresh=policy.full_matchup_refresh,
+                    include_performance=policy.include_performance,
+                ),
             )
+            published_payloads = post_result.published_payloads or {}
             _mutate_prop_sync_state(
                 running=False,
                 finished_at=datetime.now(timezone.utc).isoformat(),
                 last_result={
                     "source": source,
-                    "synced_props": int(sync_result.synced_props),
-                    "changed_props": int(sync_result.changed_props),
-                    "rebuilt_predictions": int(rebuild_result.written),
-                    "attempted_predictions": int(rebuild_result.attempted),
-                    "skipped_predictions": int(rebuild_result.skipped),
+                    "synced_props": int(pipeline_result.scanned_props),
+                    "changed_props": int(pipeline_result.synced_props),
+                    "rebuilt_predictions": int(pipeline_result.rebuilt_predictions),
+                    "attempted_predictions": int(pipeline_result.attempted_predictions),
+                    "skipped_predictions": int(pipeline_result.skipped_predictions),
                     "target_game_ids": touched_game_ids,
                     "published_payloads": published_payloads,
                 },
@@ -6685,11 +6619,11 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
                 status="completed",
                 result={
                     "source": source,
-                    "synced_props": int(sync_result.synced_props),
-                    "changed_props": int(sync_result.changed_props),
-                    "rebuilt_predictions": int(rebuild_result.written),
-                    "attempted_predictions": int(rebuild_result.attempted),
-                    "skipped_predictions": int(rebuild_result.skipped),
+                    "synced_props": int(pipeline_result.scanned_props),
+                    "changed_props": int(pipeline_result.synced_props),
+                    "rebuilt_predictions": int(pipeline_result.rebuilt_predictions),
+                    "attempted_predictions": int(pipeline_result.attempted_predictions),
+                    "skipped_predictions": int(pipeline_result.skipped_predictions),
                     "target_game_ids": touched_game_ids,
                     "published_payloads": published_payloads,
                 },

@@ -1358,20 +1358,18 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_ro
     monkeypatch.setattr(main_module, "rebuild_predictions", fail_rebuild)
     monkeypatch.setattr(
         main_module,
-        "_refresh_roster_read_payloads",
-        lambda conn: {
-            main_module.ROSTER_CACHE_NAME: 12,
-        },
+        "_publish_roster_cache_async",
+        lambda: {"status": "queued", "started_at": "2026-05-08T00:00:00+00:00"},
     )
-    monkeypatch.setattr(main_module, "_roster_payload", lambda conn, refresh_lineups=False: roster_payload)
+    monkeypatch.setattr(main_module, "_roster_payload_lightweight", lambda: roster_payload)
     monkeypatch.setattr(
         main_module,
         "_queue_current_slate_repair_job",
-        lambda game_ids=None: {"status": "queued", "scope": "injury_update", "target_game_ids": list(game_ids or [])},
+        lambda game_ids=None, request=None: {"status": "queued", "scope": "injury_update", "target_game_ids": list(game_ids or [])},
     )
     monkeypatch.setattr(main_module, "queue_prepare_stocks_games", lambda game_ids=None: list(game_ids or []) == [991, 992])
 
-    result = main_module.import_rotowire_injuries(force_refresh=True)
+    result = main_module._import_rotowire_injuries_impl(request=None, force_refresh=True)
 
     assert connect_calls == 1
     assert rebuild_called is False
@@ -1379,7 +1377,7 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_ro
     assert result["predictions"] == 0
     assert result["affected_game_ids"] == [991, 992]
     assert result["published_payloads"] == {
-        main_module.ROSTER_CACHE_NAME: 12,
+        main_module.ROSTER_CACHE_NAME: 1,
     }
     assert result["roster"] == roster_payload
     assert result["repair"] == {"status": "queued", "scope": "injury_update", "target_game_ids": [991, 992]}
@@ -1414,12 +1412,10 @@ def test_rotowire_refresh_route_skips_repair_when_roster_snapshot_is_unchanged(m
     monkeypatch.setattr(main_module, "delete_json_cache", lambda name: True)
     monkeypatch.setattr(
         main_module,
-        "_refresh_roster_read_payloads",
-        lambda conn: {
-            main_module.ROSTER_CACHE_NAME: 12,
-        },
+        "_publish_roster_cache_async",
+        lambda: {"status": "queued", "started_at": "2026-05-08T00:00:00+00:00"},
     )
-    monkeypatch.setattr(main_module, "_roster_payload", lambda conn, refresh_lineups=False: roster_payload)
+    monkeypatch.setattr(main_module, "_roster_payload_lightweight", lambda: roster_payload)
 
     repair_called = False
 
@@ -1435,7 +1431,7 @@ def test_rotowire_refresh_route_skips_repair_when_roster_snapshot_is_unchanged(m
         lambda game_ids=None: (_ for _ in ()).throw(AssertionError("queue_prepare_stocks_games should not be called")),
     )
 
-    result = main_module.import_rotowire_injuries(force_refresh=True)
+    result = main_module._import_rotowire_injuries_impl(request=None, force_refresh=True)
 
     assert connect_calls == 1
     assert repair_called is False
@@ -1443,6 +1439,76 @@ def test_rotowire_refresh_route_skips_repair_when_roster_snapshot_is_unchanged(m
     assert result["roster"] == roster_payload
     assert result["repair"] == {"status": "not_needed", "scope": "injury_update", "target_game_ids": []}
     assert result["specials"] == {"status": "not_needed", "target_game_ids": []}
+
+
+def test_covers_refresh_route_does_not_queue_prop_sync_after_failed_import(monkeypatch) -> None:
+    connect_calls = 0
+
+    class DummyConn:
+        def __enter__(self):
+            nonlocal connect_calls
+            connect_calls += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(
+        main_module,
+        "_import_covers_provider_rows",
+        lambda conn, selected_date=None, force_refresh=False, update_game_markets=True: {
+            "status": "failed",
+            "source": "covers",
+            "message": "Fresh Covers scrape failed.",
+            "prop_sync_eligible": False,
+        },
+    )
+    monkeypatch.setattr(main_module, "_start_prop_sync_if_needed", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sync should not queue")))
+    monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
+    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"matchups": 1})
+
+    result = main_module._import_covers_impl(request=None, selected_date=None, force_refresh=True)
+
+    assert connect_calls == 2
+    assert result["sync_started"] is False
+    assert result["published_payloads"] == {"matchups": 1}
+    assert result["message"] == "Fresh Covers scrape failed."
+
+
+def test_covers_refresh_route_does_not_queue_prop_sync_for_game_markets_only(monkeypatch) -> None:
+    connect_calls = 0
+
+    class DummyConn:
+        def __enter__(self):
+            nonlocal connect_calls
+            connect_calls += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(
+        main_module,
+        "_import_covers_provider_rows",
+        lambda conn, selected_date=None, force_refresh=False, update_game_markets=True: {
+            "status": "imported_game_markets_only",
+            "source": "covers",
+            "message": "Imported Covers matchup lines without player prop rows.",
+            "prop_sync_eligible": False,
+        },
+    )
+    monkeypatch.setattr(main_module, "_start_prop_sync_if_needed", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sync should not queue")))
+    monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
+    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"matchups": 1})
+
+    result = main_module._import_covers_impl(request=None, selected_date=None, force_refresh=True)
+
+    assert connect_calls == 2
+    assert result["sync_started"] is False
+    assert result["published_payloads"] == {"matchups": 1}
+    assert result["message"] == "Imported Covers matchup lines without player prop rows."
 
 
 def test_espn_history_accepts_batch_dates(monkeypatch) -> None:
@@ -7074,21 +7140,39 @@ def test_run_odds_import_job_refreshes_covers_without_overwriting_game_markets(m
 
     monkeypatch.setattr(
         main_module,
-        "import_the_odds_api_props",
+        "_import_the_odds_api_provider_rows",
         lambda conn, force_refresh=False, progress_callback=None: (
             progress_callback("requesting_provider", 1, 1, "Fetched provider payload.")
             if progress_callback is not None
             else None
-        ) or (
-            progress_callback("syncing_props", 40, 176, "Matched props.")
-            if progress_callback is not None
-            else None
-        ) or (
-            progress_callback("rebuilding_predictions", 20, 146, "Built 20 projections.")
-            if progress_callback is not None
-            else None
-        ) or {"status": "imported", "message": "ok"},
+        ) or {"status": "imported", "message": "ok", "prop_sync_eligible": True},
     )
+    monkeypatch.setattr(
+        main_module,
+        "sync_prop_lines_from_sportsbook",
+        lambda conn, **kwargs: (
+            kwargs["progress_callback"](40, 176, "Matched props.") if kwargs.get("progress_callback") is not None else None
+        ) or SyncPropLinesResult(
+            synced_props=176,
+            changed_props=20,
+            changed_prop_line_ids=list(range(20)),
+            touched_game_ids=[9910],
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "rebuild_predictions_live",
+        lambda conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None: (
+            progress_callback(20, 146, "Built 20 projections.") if progress_callback is not None else None
+        ) or projections_module.LiveRebuildResult(
+            projections=[],
+            attempted=146,
+            written=20,
+            skipped=126,
+            errors=[],
+        ),
+    )
+    monkeypatch.setattr(main_module, "_settle_recent_completed_games", lambda conn: {"selected_dates": []})
 
     def fake_import_covers_props(conn, selected_date=None, force_refresh=False, sync_props=True, update_game_markets=True):
         captured["selected_date"] = selected_date
