@@ -396,30 +396,31 @@ def _create_job_run(
     actor = _audit_actor(request)
     started_at = _utc_now_iso()
     try:
-        with connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO job_runs (
-                    job_type, status, trigger_action, request_id, source_path, actor_type, actor_id,
-                    actor_name, target_json, metadata_json, started_at, updated_at
-                ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    job_type,
-                    trigger_action,
-                    _request_id(request),
-                    source_path,
-                    actor["actor_type"],
-                    actor["actor_id"],
-                    actor["actor_name"],
-                    _json_text(_normalize_audit_payload(target)) if target is not None else None,
-                    _json_text(_normalize_audit_payload(metadata)) if metadata is not None else None,
-                    started_at,
-                    started_at,
-                ),
-            )
-            conn.commit()
-            job_run_id = int(cursor.lastrowid) if cursor.lastrowid is not None else None
+        with sqlite_write_lock():
+            with connect() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO job_runs (
+                        job_type, status, trigger_action, request_id, source_path, actor_type, actor_id,
+                        actor_name, target_json, metadata_json, started_at, updated_at
+                    ) VALUES (?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_type,
+                        trigger_action,
+                        _request_id(request),
+                        source_path,
+                        actor["actor_type"],
+                        actor["actor_id"],
+                        actor["actor_name"],
+                        _json_text(_normalize_audit_payload(target)) if target is not None else None,
+                        _json_text(_normalize_audit_payload(metadata)) if metadata is not None else None,
+                        started_at,
+                        started_at,
+                    ),
+                )
+                conn.commit()
+                job_run_id = int(cursor.lastrowid) if cursor.lastrowid is not None else None
     except Exception as exc:
         _audit_log(logging.ERROR, "audit.job.persist_failed", job_type=job_type, error=str(exc))
         return None
@@ -438,22 +439,23 @@ def _append_job_run_event(
     if not job_run_id:
         return
     try:
-        with connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO job_run_events (job_run_id, created_at, level, event_type, message, details_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    int(job_run_id),
-                    _utc_now_iso(),
-                    level,
-                    event_type,
-                    message,
-                    _json_text(_normalize_audit_payload(details)) if details is not None else None,
-                ),
-            )
-            conn.commit()
+        with sqlite_write_lock():
+            with connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO job_run_events (job_run_id, created_at, level, event_type, message, details_json)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        int(job_run_id),
+                        _utc_now_iso(),
+                        level,
+                        event_type,
+                        message,
+                        _json_text(_normalize_audit_payload(details)) if details is not None else None,
+                    ),
+                )
+                conn.commit()
     except Exception as exc:
         _audit_log(logging.ERROR, "audit.job.event_failed", job_run_id=job_run_id, error=str(exc), event_type=event_type)
         return
@@ -472,33 +474,34 @@ def _finish_job_run(
         return
     finished_at = _utc_now_iso()
     try:
-        with connect() as conn:
-            row = conn.execute("SELECT started_at FROM job_runs WHERE id = ?", (int(job_run_id),)).fetchone()
-            duration_ms = None
-            if row and row["started_at"]:
-                try:
-                    started = datetime.fromisoformat(str(row["started_at"]).replace("Z", "+00:00"))
-                    finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
-                    duration_ms = round((finished - started).total_seconds() * 1000.0, 2)
-                except ValueError:
-                    duration_ms = None
-            conn.execute(
-                """
-                UPDATE job_runs
-                SET status = ?, result_json = ?, last_error = ?, finished_at = ?, duration_ms = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    status,
-                    _json_text(_normalize_audit_payload(result)) if result is not None else None,
-                    _truncate_text(error_text, 1200),
-                    finished_at,
-                    duration_ms,
-                    finished_at,
-                    int(job_run_id),
-                ),
-            )
-            conn.commit()
+        with sqlite_write_lock():
+            with connect() as conn:
+                row = conn.execute("SELECT started_at FROM job_runs WHERE id = ?", (int(job_run_id),)).fetchone()
+                duration_ms = None
+                if row and row["started_at"]:
+                    try:
+                        started = datetime.fromisoformat(str(row["started_at"]).replace("Z", "+00:00"))
+                        finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+                        duration_ms = round((finished - started).total_seconds() * 1000.0, 2)
+                    except ValueError:
+                        duration_ms = None
+                conn.execute(
+                    """
+                    UPDATE job_runs
+                    SET status = ?, result_json = ?, last_error = ?, finished_at = ?, duration_ms = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        status,
+                        _json_text(_normalize_audit_payload(result)) if result is not None else None,
+                        _truncate_text(error_text, 1200),
+                        finished_at,
+                        duration_ms,
+                        finished_at,
+                        int(job_run_id),
+                    ),
+                )
+                conn.commit()
     except Exception as exc:
         _audit_log(logging.ERROR, "audit.job.finish_failed", job_run_id=job_run_id, error=str(exc))
         return
@@ -657,26 +660,27 @@ def _create_prop_sync_job_record(
     target_game_ids: list[int] | None = None,
 ) -> int | None:
     try:
-        with connect() as conn:
-            cursor = conn.execute(
-                """
-                INSERT INTO prop_sync_jobs (
-                    scope, status, started_at, stage, stage_index, stage_total,
-                    current_count, total_count, percent, message, target_game_ids_json, updated_at
-                ) VALUES (?, ?, ?, ?, 0, 1, 0, 0, 0.0, ?, ?, ?)
-                """,
-                (
-                    scope,
-                    status,
-                    started_at,
-                    "queued",
-                    message,
-                    _json_text(list(target_game_ids or [])),
-                    started_at,
-                ),
-            )
-            conn.commit()
-            return int(cursor.lastrowid) if cursor.lastrowid is not None else None
+        with sqlite_write_lock():
+            with connect() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO prop_sync_jobs (
+                        scope, status, started_at, stage, stage_index, stage_total,
+                        current_count, total_count, percent, message, target_game_ids_json, updated_at
+                    ) VALUES (?, ?, ?, ?, 0, 1, 0, 0, 0.0, ?, ?, ?)
+                    """,
+                    (
+                        scope,
+                        status,
+                        started_at,
+                        "queued",
+                        message,
+                        _json_text(list(target_game_ids or [])),
+                        started_at,
+                    ),
+                )
+                conn.commit()
+                return int(cursor.lastrowid) if cursor.lastrowid is not None else None
     except Exception as exc:
         print(f"[prop-sync] unable to create job record: {exc}")
         return None
@@ -688,50 +692,51 @@ def _persist_prop_sync_job_snapshot(snapshot: dict[str, Any], *, conn=None) -> N
         return
     try:
         owns_connection = conn is None
-        db_conn = conn if conn is not None else connect()
-        db_conn.execute(
-            """
-            UPDATE prop_sync_jobs
-            SET
-                scope = ?,
-                status = ?,
-                started_at = ?,
-                finished_at = ?,
-                stage = ?,
-                stage_index = ?,
-                stage_total = ?,
-                current_count = ?,
-                total_count = ?,
-                percent = ?,
-                message = ?,
-                last_error = ?,
-                last_result_json = ?,
-                target_game_ids_json = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                snapshot.get("scope"),
-                snapshot.get("status") or "idle",
-                snapshot.get("started_at"),
-                snapshot.get("finished_at"),
-                snapshot.get("stage"),
-                int(snapshot.get("stage_index") or 0),
-                int(snapshot.get("stage_total") or 1),
-                int(snapshot.get("current") or 0),
-                int(snapshot.get("total") or 0),
-                float(snapshot.get("percent") or 0.0),
-                snapshot.get("message"),
-                snapshot.get("last_error"),
-                _json_text(snapshot.get("last_result")) if snapshot.get("last_result") is not None else None,
-                _json_text(list(snapshot.get("target_game_ids") or [])),
-                snapshot.get("updated_at"),
-                int(job_id),
-            ),
-        )
-        if owns_connection:
-            db_conn.commit()
-            db_conn.close()
+        with sqlite_write_lock():
+            db_conn = conn if conn is not None else connect()
+            db_conn.execute(
+                """
+                UPDATE prop_sync_jobs
+                SET
+                    scope = ?,
+                    status = ?,
+                    started_at = ?,
+                    finished_at = ?,
+                    stage = ?,
+                    stage_index = ?,
+                    stage_total = ?,
+                    current_count = ?,
+                    total_count = ?,
+                    percent = ?,
+                    message = ?,
+                    last_error = ?,
+                    last_result_json = ?,
+                    target_game_ids_json = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    snapshot.get("scope"),
+                    snapshot.get("status") or "idle",
+                    snapshot.get("started_at"),
+                    snapshot.get("finished_at"),
+                    snapshot.get("stage"),
+                    int(snapshot.get("stage_index") or 0),
+                    int(snapshot.get("stage_total") or 1),
+                    int(snapshot.get("current") or 0),
+                    int(snapshot.get("total") or 0),
+                    float(snapshot.get("percent") or 0.0),
+                    snapshot.get("message"),
+                    snapshot.get("last_error"),
+                    _json_text(snapshot.get("last_result")) if snapshot.get("last_result") is not None else None,
+                    _json_text(list(snapshot.get("target_game_ids") or [])),
+                    snapshot.get("updated_at"),
+                    int(job_id),
+                ),
+            )
+            if owns_connection:
+                db_conn.commit()
+                db_conn.close()
     except Exception as exc:
         print(f"[prop-sync] unable to persist job snapshot: {exc}")
 

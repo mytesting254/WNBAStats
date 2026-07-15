@@ -836,18 +836,26 @@ def _replace_sportsbook_rows(conn: sqlite3.Connection, raw_payload: list[dict], 
         game_id = _match_or_create_local_game(conn, event_odds)
         _update_game_market_from_event(conn, event_odds, game_id)
         imported_rows.extend(_event_rows(event_odds, captured_at, game_id=game_id))
-    conn.execute("DELETE FROM sportsbook_prop_lines WHERE provider = ?", (PROVIDER,))
-    conn.executemany(
-        """
-        INSERT INTO sportsbook_prop_lines (
-            provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
-            bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        imported_rows,
-    )
-    provider_player_ids_filled = _backfill_provider_player_ids(conn, provider=PROVIDER)
-    conn.commit()
+    with sqlite_write_lock():
+        _begin_immediate_with_retry(conn)
+        _execute_with_lock_retry(
+            conn,
+            "DELETE FROM sportsbook_prop_lines WHERE provider = ?",
+            (PROVIDER,),
+        )
+        if imported_rows:
+            _executemany_with_lock_retry(
+                conn,
+                """
+                INSERT INTO sportsbook_prop_lines (
+                    provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                    bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                imported_rows,
+            )
+        provider_player_ids_filled = _backfill_provider_player_ids(conn, provider=PROVIDER)
+        conn.commit()
     return {
         "events": len(active_payload),
         "imported": len(imported_rows),
