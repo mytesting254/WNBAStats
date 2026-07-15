@@ -5993,6 +5993,54 @@ def test_run_legacy_recalculate_job_tracks_repair_substages_separately(monkeypat
     assert ("publishing_payloads", 6, 6, 1, "Legacy recalculate finished.") in progress_updates
 
 
+def test_run_current_slate_repair_job_reports_progress_without_worker_connection(monkeypatch) -> None:
+    progress_updates: list[dict[str, object]] = []
+
+    def fake_repair(conn, target_game_ids=None, progress_callback=None):
+        if progress_callback is not None:
+            progress_callback("syncing_props", 1, 1, "Skipped sportsbook sync for injury update.")
+            progress_callback("rebuilding_predictions", 20, 146, "Built 20 projections.")
+            progress_callback("rebuilding_games", 1, 3, "Built 1 game prediction.")
+        return {
+            "scope": "injury_update",
+            "target_game_ids": [9910],
+            "rebuilt_predictions": 20,
+            "attempted_game_predictions": 3,
+            "rebuilt_game_predictions": 1,
+        }
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module, "_repair_current_slate_props", fake_repair)
+    monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
+    monkeypatch.setattr(
+        main_module,
+        "run_post_pipeline_steps",
+        lambda **kwargs: SimpleNamespace(
+            recent_finals_settlement={"settled_games": 1},
+            published_payloads={"watchlist.json": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_set_prop_sync_progress",
+        lambda *args, **kwargs: progress_updates.append(dict(kwargs)),
+    )
+
+    result = main_module._run_current_slate_repair_job([9910])
+
+    assert result["target_game_ids"] == [9910]
+    assert result["published_payloads"] == {"watchlist.json": 1}
+    assert any(update.get("stage") == "rebuilding_predictions" for update in progress_updates)
+    assert all("conn" not in update for update in progress_updates)
+
+
 def test_row_to_prop_sync_state_marks_stale_jobs() -> None:
     stale_started_at = "2026-07-01T00:00:00+00:00"
     stale_updated_at = "2026-07-01T00:05:00+00:00"

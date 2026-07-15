@@ -4955,6 +4955,7 @@ function formatPropSyncStage(value?: string | null) {
     syncing_props: "Syncing props",
     refreshing_covers_context: "Refreshing Covers context",
     rebuilding_predictions: "Rebuilding projections",
+    rebuilding_games: "Rebuilding game predictions",
     settling_props: "Settling props",
     settling_games: "Settling games",
     publishing_payloads: "Publishing payloads"

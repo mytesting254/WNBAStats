@@ -3942,7 +3942,6 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
         rebuild_result = _repair_current_slate_props(
             conn,
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
-                conn=conn,
                 stage=stage,
                 stage_index=(
                     1
@@ -4078,7 +4077,6 @@ def _run_current_slate_repair_job(target_game_ids: list[int] | None = None) -> d
             conn,
             target_game_ids=target_game_ids,
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
-                conn=conn,
                 stage=stage,
                 stage_index=1 if stage == "syncing_props" else (2 if stage == "rebuilding_predictions" else 3),
                 stage_total=total_stages,
@@ -4192,7 +4190,6 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             conn,
             force_refresh=force_refresh,
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
-                conn=conn,
                 stage=stage,
                 stage_index=(
                     1
@@ -4232,7 +4229,6 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             sync_props_fn=sync_prop_lines_from_sportsbook,
             rebuild_predictions_fn=rebuild_predictions_live,
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
-                conn=conn,
                 stage=stage,
                 stage_index=2 if stage == "syncing_props" else 3,
                 stage_total=total_stages,
@@ -6553,7 +6549,6 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
                     sync_props_fn=sync_prop_lines_from_sportsbook,
                     rebuild_predictions_fn=rebuild_predictions_live,
                     progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
-                        conn=conn,
                         stage=stage,
                         stage_index=1 if stage == "syncing_props" else 2,
                         stage_total=3,
@@ -6564,7 +6559,6 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
                 )
                 touched_game_ids = list(pipeline_result.target_game_ids)
                 _set_prop_sync_progress(
-                    conn=conn,
                     scope=source,
                     target_game_ids=touched_game_ids,
                 )
