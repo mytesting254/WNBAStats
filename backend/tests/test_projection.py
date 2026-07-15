@@ -10455,3 +10455,18 @@ def test_resolve_roster_player_display_fast_falls_back_to_unique_initial_last_na
     assert player["position"] == "G"
 
 
+
+def test_roster_endpoint_bypasses_app_response_cache() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/roster",
+            "raw_path": b"/api/roster",
+            "query_string": b"",
+            "headers": [],
+        }
+    )
+
+    assert main_module._should_cache_app_response(request) is False
+
