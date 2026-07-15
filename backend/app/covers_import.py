@@ -731,7 +731,15 @@ def _historical_start_from_page(page: str | None) -> str | None:
     if not match:
         return None
     cleaned = f"{match.group('date')} {match.group('time').upper()}"
-    parsed = datetime.strptime(cleaned, "%B %d, %Y %I:%M%p").replace(tzinfo=LOCAL_TZ)
+    parsed = None
+    for fmt in ("%B %d, %Y %I:%M%p", "%B %d, %Y %I:%M %p", "%b %d, %Y %I:%M%p", "%b %d, %Y %I:%M %p"):
+        try:
+            parsed = datetime.strptime(cleaned, fmt).replace(tzinfo=LOCAL_TZ)
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        raise ValueError(f"Unable to parse Covers historical start time: {cleaned}")
     return parsed.astimezone(timezone.utc).isoformat()
 
 

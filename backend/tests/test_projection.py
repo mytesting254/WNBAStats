@@ -7904,6 +7904,18 @@ def test_odds_cache_summary_reports_active_cache_path(monkeypatch, tmp_path) -> 
     assert summary["future_events"] == 1
 
 
+def test_covers_historical_start_from_page_accepts_abbreviated_month_names() -> None:
+    page = """
+    <div>
+      12:00 PM ET · Jul 15, 2026
+    </div>
+    """
+
+    parsed = covers_import_module._historical_start_from_page(page)
+
+    assert parsed == "2026-07-15T16:00:00+00:00"
+
+
 def test_run_odds_import_job_refreshes_covers_without_overwriting_game_markets(monkeypatch) -> None:
     captured: dict[str, object] = {}
     progress_updates: list[tuple[str | None, int | None, int | None, int | None, str | None]] = []

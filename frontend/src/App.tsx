@@ -48,6 +48,7 @@ import {
   type ModelPerformance,
   type ModelRun,
   type OpsHealth,
+  type PropSyncHealth,
   type RosterPlayer,
   type SpecialStocksSnapshot,
   type SpecialStocksPerformance,
@@ -349,7 +350,9 @@ export function App() {
     detail: string;
     startedAt: string;
     waitingForBackground: boolean;
+    backendJobId?: number | null;
   } | null>(null);
+  const [displayPropSync, setDisplayPropSync] = useState<PropSyncHealth | null>(null);
   const loadRequestIdRef = useRef(0);
   const operationsBusyRef = useRef(false);
   const toastTimerRef = useRef<number | null>(null);
@@ -632,7 +635,12 @@ export function App() {
   }, [activePipeline, opsHealth?.prop_sync.running]);
 
   useEffect(() => {
-    const propSync = opsHealth?.prop_sync;
+    const next = opsHealth?.prop_sync ?? null;
+    setDisplayPropSync((previous) => mergePropSyncProgress(previous, next));
+  }, [opsHealth?.prop_sync]);
+
+  useEffect(() => {
+    const propSync = displayPropSync;
     if (!propSync || propSync.running || !propSync.finished_at) {
       return;
     }
@@ -641,13 +649,13 @@ export function App() {
     }
     lastCompletedPropSyncRef.current = propSync.finished_at;
     void load({ silent: true });
-  }, [opsHealth?.prop_sync.running, opsHealth?.prop_sync.finished_at]);
+  }, [displayPropSync?.running, displayPropSync?.finished_at]);
 
   useEffect(() => {
     if (!activePipeline?.waitingForBackground) {
       return;
     }
-    const propSync = opsHealth?.prop_sync;
+    const propSync = displayPropSync;
     if (!propSync || propSync.running || !propSync.finished_at) {
       return;
     }
@@ -657,7 +665,37 @@ export function App() {
       return;
     }
     setActivePipeline(null);
-  }, [activePipeline, opsHealth?.prop_sync]);
+  }, [activePipeline, displayPropSync]);
+
+  useEffect(() => {
+    if (!activePipeline?.waitingForBackground) {
+      return;
+    }
+    const propSync = displayPropSync;
+    if (!propSync?.running || propSync.job_id == null) {
+      return;
+    }
+    const pipelineStartedAt = Date.parse(activePipeline.startedAt);
+    const syncStartedAt = Date.parse(propSync.started_at ?? "");
+    if (Number.isNaN(pipelineStartedAt) || Number.isNaN(syncStartedAt) || syncStartedAt < pipelineStartedAt) {
+      return;
+    }
+    if (activePipeline.scope && propSync.scope && activePipeline.scope !== propSync.scope) {
+      return;
+    }
+    setActivePipeline((current) => {
+      if (current == null || !current.waitingForBackground) {
+        return current;
+      }
+      if (current.backendJobId === propSync.job_id) {
+        return current;
+      }
+      return {
+        ...current,
+        backendJobId: propSync.job_id,
+      };
+    });
+  }, [activePipeline, displayPropSync]);
 
   function handleReload() {
     if (activeTab === "props") {
@@ -1336,6 +1374,7 @@ export function App() {
             authSubmitting={authSubmitting}
             authState={authState}
             opsHealth={opsHealth}
+            displayPropSync={displayPropSync}
             activePipeline={activePipeline}
             adminUsername={adminUsername}
             adminPassword={adminPassword}
@@ -1423,6 +1462,7 @@ function DataView({
   authSubmitting,
   authState,
   opsHealth,
+  displayPropSync,
   activePipeline,
   adminUsername,
   adminPassword,
@@ -1475,6 +1515,7 @@ function DataView({
   authSubmitting: boolean;
   authState: AuthState;
   opsHealth: OpsHealth | null;
+  displayPropSync: PropSyncHealth | null;
   activePipeline: {
     scope: string;
     label: string;
@@ -1482,6 +1523,7 @@ function DataView({
     detail: string;
     startedAt: string;
     waitingForBackground: boolean;
+    backendJobId?: number | null;
   } | null;
   adminUsername: string;
   adminPassword: string;
@@ -1557,12 +1599,19 @@ function DataView({
     ? "No missing-score scan loaded yet."
     : `Missing: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`;
   const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
-  const propSync = opsHealth?.prop_sync;
+  const propSync = displayPropSync;
+  const backendPipelineSync = activePipeline?.waitingForBackground
+    ? matchActivePipelineSync(activePipeline, propSync)
+    : null;
   const pipelineRunning = activePipeline != null;
-  const pipelineStageLabel = activePipeline ? formatPipelineStage(activePipeline.stage) : formatPropSyncStage(propSync?.stage);
+  const pipelineStageLabel = activePipeline
+    ? activePipeline.waitingForBackground
+      ? formatPropSyncStage(backendPipelineSync?.stage)
+      : formatPipelineStage(activePipeline.stage)
+    : formatPropSyncStage(propSync?.stage);
   const pipelinePercent = pipelineRunning
     ? activePipeline?.waitingForBackground
-      ? Math.max(0, Math.min(100, Math.round((propSync?.percent ?? 0) * 100)))
+      ? Math.max(0, Math.min(100, Math.round((backendPipelineSync?.percent ?? 0) * 100)))
       : 15
     : Math.max(0, Math.min(100, Math.round((propSync?.percent ?? 0) * 100)));
   const pipelineLabel = pipelineRunning
@@ -1573,7 +1622,9 @@ function DataView({
         ? "Background Prop Sync"
         : "Clear";
   const pipelineDetail = pipelineRunning
-    ? activePipeline!.detail
+    ? activePipeline!.waitingForBackground
+      ? backendPipelineSync?.message || activePipeline!.detail
+      : activePipeline!.detail
     : propSync == null
       ? "Operations health unavailable."
       : propSync.running
@@ -1617,7 +1668,7 @@ function DataView({
                 <p className="progress-caption">
                   {pipelineRunning
                     ? activePipeline?.waitingForBackground
-                      ? formatPropSyncProgressCaption(propSync ?? undefined)
+                      ? formatPropSyncProgressCaption(backendPipelineSync ?? undefined)
                       : "Request is running on the backend."
                     : propSync?.running
                       ? formatPropSyncProgressCaption(propSync)
@@ -4977,6 +5028,74 @@ function formatPipelineStage(value?: string | null) {
     return "Idle";
   }
   return labels[value] ?? formatPropSyncStage(value);
+}
+
+function matchActivePipelineSync(
+  activePipeline: {
+    scope: string;
+    startedAt: string;
+    waitingForBackground: boolean;
+    backendJobId?: number | null;
+  } | null,
+  sync: PropSyncHealth | null,
+) {
+  if (!activePipeline?.waitingForBackground || !sync) {
+    return null;
+  }
+  if (activePipeline.backendJobId != null && sync.job_id != null && activePipeline.backendJobId !== sync.job_id) {
+    return null;
+  }
+  if (activePipeline.scope && sync.scope && activePipeline.scope !== sync.scope) {
+    return null;
+  }
+  const pipelineStartedAt = Date.parse(activePipeline.startedAt);
+  const syncStartedAt = Date.parse(sync.started_at ?? "");
+  if (!Number.isNaN(pipelineStartedAt) && !Number.isNaN(syncStartedAt) && syncStartedAt < pipelineStartedAt) {
+    return null;
+  }
+  return sync;
+}
+
+function mergePropSyncProgress(previous: PropSyncHealth | null, next: PropSyncHealth | null): PropSyncHealth | null {
+  if (!next) {
+    return previous;
+  }
+  if (!previous) {
+    return next;
+  }
+
+  const previousJobId = previous.job_id ?? null;
+  const nextJobId = next.job_id ?? null;
+  if (previousJobId != null && nextJobId != null && previousJobId !== nextJobId) {
+    const previousStartedAt = Date.parse(previous.started_at ?? "");
+    const nextStartedAt = Date.parse(next.started_at ?? "");
+    if (!Number.isNaN(previousStartedAt) && !Number.isNaN(nextStartedAt) && nextStartedAt < previousStartedAt) {
+      return previous;
+    }
+    return next;
+  }
+
+  const previousStageIndex = Math.max(0, Number(previous.stage_index ?? 0));
+  const nextStageIndex = Math.max(0, Number(next.stage_index ?? 0));
+  if (nextStageIndex < previousStageIndex) {
+    return previous;
+  }
+
+  const previousStage = previous.stage ?? null;
+  const nextStage = next.stage ?? null;
+  const previousCurrent = Math.max(0, Number(previous.current ?? 0));
+  const nextCurrent = Math.max(0, Number(next.current ?? 0));
+  if (nextStageIndex === previousStageIndex && previousStage === nextStage && nextCurrent < previousCurrent) {
+    return previous;
+  }
+
+  const previousUpdatedAt = Date.parse(previous.updated_at ?? "");
+  const nextUpdatedAt = Date.parse(next.updated_at ?? "");
+  if (!Number.isNaN(previousUpdatedAt) && !Number.isNaN(nextUpdatedAt) && nextUpdatedAt < previousUpdatedAt) {
+    return previous;
+  }
+
+  return next;
 }
 
 function formatPropSyncProgressCaption(sync?: {
