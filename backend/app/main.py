@@ -5219,6 +5219,315 @@ def _minutes_metric_summary(rows: list[dict[str, float | str | int | None]]) -> 
     }
 
 
+def _minutes_trend_bucket(value: float) -> str:
+    if value <= -4.0:
+        return "drop"
+    if value >= 3.5:
+        return "rise"
+    return "stable"
+
+
+def _minutes_volatility_bucket(value: float) -> str:
+    if value >= 8.0:
+        return "high"
+    if value >= 5.0:
+        return "medium"
+    return "low"
+
+
+def _minutes_context_bucket(row: dict[str, float | str | int | None]) -> str:
+    if int(row.get("recent_transfer") or 0) == 1:
+        return "recent_transfer"
+    if float(row.get("recent_absence_days") or 0.0) >= 7.0:
+        return "absence_return"
+    unavailable_minutes = float(row.get("same_position_unavailable_minutes") or 0.0)
+    key_out_count = float(row.get("same_position_key_out_count") or 0.0)
+    if unavailable_minutes >= 18.0 and key_out_count >= 1.0:
+        return "vacancy"
+    if unavailable_minutes >= 10.0 or key_out_count >= 1.0:
+        return "soft_vacancy"
+    return "stable_context"
+
+
+def _minutes_breakdown_entry(rows: list[dict[str, float | str | int | None]]) -> dict[str, Any]:
+    summary = _minutes_metric_summary(rows)
+    if not rows:
+        return {
+            **summary,
+            "delta_vs_recent_blend": None,
+            "overpredict_rate": None,
+            "underpredict_rate": None,
+            "avg_learned_minus_recent_blend": None,
+        }
+    count = len(rows)
+    overpredict_rate = sum(1 for row in rows if float(row["learned_error"]) > 0.0) / count
+    underpredict_rate = sum(1 for row in rows if float(row["learned_error"]) < 0.0) / count
+    avg_learned_minus_recent_blend = sum(
+        float(row["learned_minutes"]) - float(row["recent_blend_minutes"])
+        for row in rows
+    ) / count
+    return {
+        **summary,
+        "delta_vs_recent_blend": round(float(summary["production_mae"]) - float(summary["recent_blend_mae"]), 3),
+        "overpredict_rate": round(overpredict_rate, 3),
+        "underpredict_rate": round(underpredict_rate, 3),
+        "avg_learned_minus_recent_blend": round(avg_learned_minus_recent_blend, 3),
+        "avg_post_blend_minus_recent_blend": round(
+            sum(float(row["post_blend_projection"]) - float(row["recent_blend_minutes"]) for row in rows) / count,
+            3,
+        ),
+        "avg_post_anchor_minus_recent_blend": round(
+            sum(float(row["post_anchor_projection"]) - float(row["recent_blend_minutes"]) for row in rows) / count,
+            3,
+        ),
+        "avg_post_baseline_minus_recent_blend": round(
+            sum(float(row["post_baseline_projection"]) - float(row["recent_blend_minutes"]) for row in rows) / count,
+            3,
+        ),
+        "avg_post_recency_floor_minus_recent_blend": round(
+            sum(float(row["post_recency_floor_projection"]) - float(row["recent_blend_minutes"]) for row in rows) / count,
+            3,
+        ),
+        "avg_post_bounds_minus_recent_blend": round(
+            sum(float(row["post_bounds_projection"]) - float(row["recent_blend_minutes"]) for row in rows) / count,
+            3,
+        ),
+        "avg_post_hard_rules_minus_recent_blend": round(
+            sum(float(row["post_hard_rules_projection"]) - float(row["recent_blend_minutes"]) for row in rows) / count,
+            3,
+        ),
+        "avg_post_rebound_guard_minus_recent_blend": round(
+            sum(float(row["post_rebound_guard_projection"]) - float(row["recent_blend_minutes"]) for row in rows) / count,
+            3,
+        ),
+        "avg_final_minus_recent_blend": round(
+            sum(float(row["final_projection"]) - float(row["recent_blend_minutes"]) for row in rows) / count,
+            3,
+        ),
+    }
+
+
+def _minutes_slice_report(
+    rows: list[dict[str, float | str | int | None]],
+    *,
+    key_name: str,
+    min_rows: int,
+) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, float | str | int | None]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row[key_name]), []).append(row)
+    report: dict[str, dict[str, Any]] = {}
+    for key, bucket_rows in sorted(grouped.items()):
+        if len(bucket_rows) < min_rows:
+            continue
+        report[key] = _minutes_breakdown_entry(bucket_rows)
+    return report
+
+
+def _minutes_biggest_regressions(
+    rows: list[dict[str, float | str | int | None]],
+    *,
+    min_rows: int,
+    limit: int,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for dimension in ("role_bucket", "trend_bucket", "volatility_bucket", "context_bucket"):
+        grouped: dict[str, list[dict[str, float | str | int | None]]] = {}
+        for row in rows:
+            grouped.setdefault(str(row[dimension]), []).append(row)
+        for key, bucket_rows in grouped.items():
+            if len(bucket_rows) < min_rows:
+                continue
+            entry = _minutes_breakdown_entry(bucket_rows)
+            delta = entry["delta_vs_recent_blend"]
+            if delta is None:
+                continue
+            candidates.append({
+                "dimension": dimension,
+                "label": key,
+                **entry,
+            })
+    candidates.sort(key=lambda item: (float(item["delta_vs_recent_blend"]), item["rows"]), reverse=True)
+    return candidates[:limit]
+
+
+def _minutes_top_loss_rows(
+    rows: list[dict[str, float | str | int | None]],
+    *,
+    role_bucket: str | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    filtered = [
+        row for row in rows
+        if role_bucket is None or str(row["role_bucket"]) == role_bucket
+    ]
+    filtered.sort(
+        key=lambda row: (
+            abs(float(row["learned_error"])) - abs(float(row["recent_blend_error"])),
+            abs(float(row["learned_error"])),
+        ),
+        reverse=True,
+    )
+    top_rows: list[dict[str, Any]] = []
+    for row in filtered[:limit]:
+        top_rows.append({
+            "player_id": int(row["player_id"]),
+            "game_id": int(row["game_id"]),
+            "game_date": str(row["game_date"]),
+            "role_bucket": str(row["role_bucket"]),
+            "trend_bucket": str(row["trend_bucket"]),
+            "volatility_bucket": str(row["volatility_bucket"]),
+            "context_bucket": str(row["context_bucket"]),
+            "actual_minutes": round(float(row["actual_minutes"]), 3),
+            "recent_blend_minutes": round(float(row["recent_blend_minutes"]), 3),
+            "learned_minutes": round(float(row["learned_minutes"]), 3),
+            "recent_blend_error": round(float(row["recent_blend_error"]), 3),
+            "learned_error": round(float(row["learned_error"]), 3),
+            "delta_vs_recent_blend_abs": round(
+                abs(float(row["learned_error"])) - abs(float(row["recent_blend_error"])),
+                3,
+            ),
+            "post_blend_projection": round(float(row["post_blend_projection"]), 3),
+            "post_anchor_projection": round(float(row["post_anchor_projection"]), 3),
+            "post_baseline_projection": round(float(row["post_baseline_projection"]), 3),
+            "post_recency_floor_projection": round(float(row["post_recency_floor_projection"]), 3),
+            "post_bounds_projection": round(float(row["post_bounds_projection"]), 3),
+            "post_hard_rules_projection": round(float(row["post_hard_rules_projection"]), 3),
+            "post_rebound_guard_projection": round(float(row["post_rebound_guard_projection"]), 3),
+            "final_projection": round(float(row["final_projection"]), 3),
+            "minutes_trend": round(float(row["minutes_trend"]), 3),
+            "minute_volatility": round(float(row["minute_volatility"]), 3),
+            "recent_absence_days": (
+                round(float(row["recent_absence_days"]), 3)
+                if row["recent_absence_days"] is not None
+                else None
+            ),
+            "same_position_unavailable_minutes": round(float(row["same_position_unavailable_minutes"]), 3),
+            "same_position_key_out_count": round(float(row["same_position_key_out_count"]), 3),
+        })
+    return top_rows
+
+
+def _build_minutes_eval_rows(conn: Any, effective_start: str) -> list[dict[str, float | str | int | None]]:
+    rows = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
+    eval_rows: list[dict[str, float | str | int | None]] = []
+    for player in rows:
+        player_id = int(player["id"])
+        training_rows = _player_training_rows(conn, player_id)
+        minutes_history = [float(row["minutes"] or 0.0) for row in training_rows]
+        for idx in range(5, len(training_rows)):
+            current = training_rows[idx]
+            game_date = str(current["game_date"] or "")
+            if game_date[:10] < str(effective_start):
+                continue
+            newest_minutes = list(reversed(minutes_history[max(0, idx - 10):idx]))
+            if len(newest_minutes) < 5:
+                continue
+            previous_game_date = str(training_rows[idx - 1]["game_date"]) if idx > 0 else None
+            context = _historical_game_context(current)
+            minute_volatility = _minute_volatility(newest_minutes)
+            minutes_trend = _recent_trend(newest_minutes)
+            ewma_minutes = _ewma_newest_first(newest_minutes, alpha=0.38)
+            recent_minutes_avg = sum(newest_minutes[:5]) / min(len(newest_minutes), 5)
+            last_10_minutes_avg = sum(newest_minutes) / len(newest_minutes)
+            recent_absence_days = _days_between_game_dates(previous_game_date, game_date)
+            blowout = _blowout_adjustment(conn, context, str(current["rotation_role"] or "starter"))
+            team_transition = _team_transition_features_from_player_rows(
+                conn,
+                player_id=player_id,
+                team_id=int(current["team_id"]),
+                player_rows=training_rows,
+                row_index=idx,
+            )
+            lineup_context = _minutes_lineup_context_from_player_rows(
+                conn,
+                player_id=player_id,
+                team_id=int(current["team_id"]),
+                player_rows=training_rows,
+                row_index=idx,
+            )
+            opportunity_context = _historical_minutes_opportunity_context(
+                conn,
+                player_id=player_id,
+                game_id=int(current["game_id"]),
+                team_id=int(current["team_id"]),
+                position=str(current["position"] or ""),
+                before_game_date=game_date,
+            )
+            learned_minutes, _note, stage_details = _project_minutes(
+                conn,
+                player_id=player_id,
+                game_id=int(current["game_id"]),
+                rotation_role=str(current["rotation_role"] or "starter"),
+                ewma_minutes=ewma_minutes,
+                minutes_trend=minutes_trend,
+                recent_minutes_avg=recent_minutes_avg,
+                last_10_minutes_avg=last_10_minutes_avg,
+                minute_volatility=minute_volatility,
+                context=context,
+                blowout_delta=float(blowout["minutes_delta"]),
+                injury_delta=0.0,
+                injury_status="available",
+                recent_absence_days=recent_absence_days,
+                team_transition=team_transition,
+                lineup_context=lineup_context,
+                opportunity_context=opportunity_context,
+                before_game_date=game_date,
+                allow_training=False,
+                include_stage_details=True,
+            )
+            role_state = _classify_minutes_role(
+                rotation_role=str(current["rotation_role"] or "starter"),
+                recent_minutes_avg=recent_minutes_avg,
+                last_10_minutes_avg=last_10_minutes_avg,
+                ewma_minutes=ewma_minutes,
+                minutes_trend=minutes_trend,
+                minute_volatility=minute_volatility,
+                injury_status="available",
+                injury_delta=0.0,
+                recent_absence_days=recent_absence_days,
+                lineup_context=lineup_context,
+                opportunity_context=opportunity_context,
+            )
+            heuristic_minutes = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
+            recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
+            actual_minutes = float(current["minutes"] or 0.0)
+            eval_rows.append({
+                "player_id": player_id,
+                "game_id": int(current["game_id"]),
+                "game_date": game_date,
+                "season": game_date[:4],
+                "role_bucket": role_state.bucket,
+                "recent_transfer": 1 if float(team_transition[0]) > 0.0 and float(team_transition[0]) <= 10.0 else 0,
+                "recent_absence_days": recent_absence_days,
+                "minutes_trend": minutes_trend,
+                "minute_volatility": minute_volatility,
+                "same_position_unavailable_minutes": float(opportunity_context[0]) if opportunity_context else 0.0,
+                "same_position_key_out_count": float(opportunity_context[1]) if opportunity_context else 0.0,
+                "trend_bucket": _minutes_trend_bucket(minutes_trend),
+                "volatility_bucket": _minutes_volatility_bucket(minute_volatility),
+                "learned_minutes": learned_minutes,
+                "recent_blend_minutes": recent_blend,
+                "actual_minutes": actual_minutes,
+                "post_blend_projection": float(stage_details.get("post_blend_projection") or learned_minutes),
+                "post_anchor_projection": float(stage_details.get("post_anchor_projection") or learned_minutes),
+                "post_baseline_projection": float(stage_details.get("post_baseline_projection") or learned_minutes),
+                "post_recency_floor_projection": float(stage_details.get("post_recency_floor_projection") or learned_minutes),
+                "post_bounds_projection": float(stage_details.get("post_bounds_projection") or learned_minutes),
+                "post_hard_rules_projection": float(stage_details.get("post_hard_rules_projection") or learned_minutes),
+                "post_rebound_guard_projection": float(stage_details.get("post_rebound_guard_projection") or learned_minutes),
+                "final_projection": float(stage_details.get("final_projection") or learned_minutes),
+                "heuristic_error": heuristic_minutes - actual_minutes,
+                "learned_error": learned_minutes - actual_minutes,
+                "recent5_error": recent_minutes_avg - actual_minutes,
+                "recent10_error": last_10_minutes_avg - actual_minutes,
+                "recent_blend_error": recent_blend - actual_minutes,
+            })
+    for row in eval_rows:
+        row["context_bucket"] = _minutes_context_bucket(row)
+    return eval_rows
+
+
 @app.get("/api/minutes-diagnostics")
 def minutes_diagnostics(start_date: str | None = None) -> dict[str, Any]:
     evaluation_start = (start_date or "").strip()
@@ -5230,103 +5539,7 @@ def minutes_diagnostics(start_date: str | None = None) -> dict[str, Any]:
 
     with connect() as conn:
         effective_start = evaluation_start or conn.execute("SELECT DATE(?) AS d", (_training_start_date(),)).fetchone()["d"]
-        player_rows_by_id: dict[int, list[Any]] = {}
-        rows = conn.execute("SELECT id FROM players ORDER BY id").fetchall()
-        eval_rows: list[dict[str, float | str | int | None]] = []
-        for player in rows:
-            player_id = int(player["id"])
-            training_rows = _player_training_rows(conn, player_id)
-            player_rows_by_id[player_id] = training_rows
-            minutes_history = [float(row["minutes"] or 0.0) for row in training_rows]
-            for idx in range(5, len(training_rows)):
-                current = training_rows[idx]
-                game_date = str(current["game_date"] or "")
-                if game_date[:10] < str(effective_start):
-                    continue
-                newest_minutes = list(reversed(minutes_history[max(0, idx - 10):idx]))
-                if len(newest_minutes) < 5:
-                    continue
-                previous_game_date = str(training_rows[idx - 1]["game_date"]) if idx > 0 else None
-                context = _historical_game_context(current)
-                minute_volatility = _minute_volatility(newest_minutes)
-                ewma_minutes = _ewma_newest_first(newest_minutes, alpha=0.38)
-                minutes_trend = _recent_trend(newest_minutes)
-                recent_minutes_avg = sum(newest_minutes[:5]) / min(len(newest_minutes), 5)
-                last_10_minutes_avg = sum(newest_minutes) / len(newest_minutes)
-                recent_absence_days = _days_between_game_dates(previous_game_date, game_date)
-                blowout = _blowout_adjustment(conn, context, str(current["rotation_role"] or "starter"))
-                team_transition = _team_transition_features_from_player_rows(
-                    conn,
-                    player_id=player_id,
-                    team_id=int(current["team_id"]),
-                    player_rows=training_rows,
-                    row_index=idx,
-                )
-                lineup_context = _minutes_lineup_context_from_player_rows(
-                    conn,
-                    player_id=player_id,
-                    team_id=int(current["team_id"]),
-                    player_rows=training_rows,
-                    row_index=idx,
-                )
-                opportunity_context = _historical_minutes_opportunity_context(
-                    conn,
-                    player_id=player_id,
-                    game_id=int(current["game_id"]),
-                    team_id=int(current["team_id"]),
-                    position=str(current["position"] or ""),
-                    before_game_date=game_date,
-                )
-                learned_minutes, _ = _project_minutes(
-                    conn,
-                    player_id=player_id,
-                    game_id=int(current["game_id"]),
-                    rotation_role=str(current["rotation_role"] or "starter"),
-                    ewma_minutes=ewma_minutes,
-                    minutes_trend=minutes_trend,
-                    recent_minutes_avg=recent_minutes_avg,
-                    last_10_minutes_avg=last_10_minutes_avg,
-                    minute_volatility=minute_volatility,
-                    context=context,
-                    blowout_delta=float(blowout["minutes_delta"]),
-                    injury_delta=0.0,
-                    injury_status="available",
-                    recent_absence_days=recent_absence_days,
-                    team_transition=team_transition,
-                    lineup_context=lineup_context,
-                    opportunity_context=opportunity_context,
-                    before_game_date=game_date,
-                    allow_training=False,
-                )
-                role_state = _classify_minutes_role(
-                    rotation_role=str(current["rotation_role"] or "starter"),
-                    recent_minutes_avg=recent_minutes_avg,
-                    last_10_minutes_avg=last_10_minutes_avg,
-                    ewma_minutes=ewma_minutes,
-                    minutes_trend=minutes_trend,
-                    minute_volatility=minute_volatility,
-                    injury_status="available",
-                    injury_delta=0.0,
-                    recent_absence_days=recent_absence_days,
-                    lineup_context=lineup_context,
-                    opportunity_context=opportunity_context,
-                )
-                heuristic_minutes = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
-                recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
-                actual_minutes = float(current["minutes"] or 0.0)
-                eval_rows.append({
-                    "player_id": player_id,
-                    "game_id": int(current["game_id"]),
-                    "game_date": game_date,
-                    "season": game_date[:4],
-                    "role_bucket": role_state.bucket,
-                    "recent_transfer": 1 if float(team_transition[0]) > 0.0 and float(team_transition[0]) <= 10.0 else 0,
-                    "learned_error": learned_minutes - actual_minutes,
-                    "heuristic_error": heuristic_minutes - actual_minutes,
-                    "recent5_error": recent_minutes_avg - actual_minutes,
-                    "recent10_error": last_10_minutes_avg - actual_minutes,
-                    "recent_blend_error": recent_blend - actual_minutes,
-                })
+        eval_rows = _build_minutes_eval_rows(conn, str(effective_start))
 
     by_role: dict[str, list[dict[str, float | str | int | None]]] = {}
     by_season: dict[str, list[dict[str, float | str | int | None]]] = {}
@@ -5349,6 +5562,17 @@ def minutes_diagnostics(start_date: str | None = None) -> dict[str, Any]:
         "by_season": {
             season: _minutes_metric_summary(season_rows)
             for season, season_rows in sorted(by_season.items())
+        },
+        "breakdown": {
+            "by_trend": _minutes_slice_report(eval_rows, key_name="trend_bucket", min_rows=25),
+            "by_volatility": _minutes_slice_report(eval_rows, key_name="volatility_bucket", min_rows=25),
+            "by_context": _minutes_slice_report(eval_rows, key_name="context_bucket", min_rows=25),
+            "biggest_regressions": _minutes_biggest_regressions(eval_rows, min_rows=25, limit=8),
+            "top_loss_rows": {
+                "overall": _minutes_top_loss_rows(eval_rows, limit=10),
+                "rotation": _minutes_top_loss_rows(eval_rows, role_bucket="rotation", limit=10),
+                "starter_volatile": _minutes_top_loss_rows(eval_rows, role_bucket="starter_volatile", limit=10),
+            },
         },
     }
 

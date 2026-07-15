@@ -283,15 +283,19 @@ Recent minutes-model work also added:
 - same-position opportunity and competition context
 - opportunity persistence / trend and returner-pressure features
 - curated minutes training data cleanup for injury-exit lows, overtime-like spikes, and extreme one-off role collapses
+- stage-level minutes diagnostics with trend / volatility / context slices plus top-loss row exports
+- narrow late-stage caps for unsupported upside, including `soft_vacancy` `starter_volatile` rise cases
 
-Recent measured live diagnostics for the minutes path (`adaptive-context-v7-minutes-opportunity-context`, evaluation start `2025-01-01`):
+Recent measured live diagnostics for the minutes path (`adaptive-context-v10-market-gated-context`, evaluation start `2026-07-01`):
 
-- overall MAE: `5.027`
-- `recent_blend` MAE: `5.038`
-- heuristic MAE: `5.215`
-- recent-transfer MAE: `4.803` vs `recent_blend` `5.006`
+- overall MAE: `4.397`
+- `recent_blend` MAE: `4.305`
+- heuristic MAE: `4.614`
+- recent-transfer MAE: `3.174` vs `recent_blend` `3.490`
+- `starter_volatile` MAE: `4.787` vs `recent_blend` `4.640`
+- `rotation` MAE: `5.167` vs `recent_blend` `4.945`
 
-The minutes layer is now slightly ahead of the simple `recent_blend` baseline overall and materially better than the old heuristic, but it still underperforms `recent_blend` in the hardest buckets (`rotation`, `starter_volatile`, `core_starter`, and the `2026` slice). Treat it as a production-safe context layer that is still under active improvement, not a finished edge source.
+The minutes layer is materially better than the old heuristic and useful as a production context layer, but it still trails the simple `recent_blend` baseline overall and in the hardest current slices, especially `rotation` and `starter_volatile`. Treat it as an actively refined context system, not a finished standalone edge source.
 
 Recent accuracy hardening also includes:
 

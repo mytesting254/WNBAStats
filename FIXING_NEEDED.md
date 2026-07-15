@@ -101,11 +101,34 @@ Pending work:
 - improve the weak buckets specifically:
   - `rotation`
   - `starter_volatile`
-  - `core_starter`
   - `2026` slice
+- keep slicing diagnostics by:
+  - `trend_bucket`
+  - `volatility_bucket`
+  - `context_bucket`
+  - top-loss rows for `rotation` and `starter_volatile`
+- keep targeted late-stage controls narrow:
+  - true vacancy should still pass through
+  - unsupported `starter_volatile` rise cases can be capped in `soft_vacancy`
 - keep cleanup/calibration focused on hard buckets rather than broad feature expansion
 - confirm whether current row-quality cleanup is enough or whether more role-specific pruning is needed
 - document final promotion criteria for minutes so it can gate downstream player-prop work cleanly
+
+Latest status:
+
+- diagnostics CLI added: `scripts/inspect_minutes_diagnostics.py`
+- latest checked window: `2026-07-01` on `data/wnba-live-source.sqlite`
+- current production metrics:
+  - overall minutes MAE: `4.397`
+  - `recent_blend` MAE: `4.305`
+  - `starter_volatile` MAE: `4.787` vs `recent_blend` `4.640`
+  - `rotation` MAE: `5.167` vs `recent_blend` `4.945`
+  - `soft_vacancy` MAE: `4.453` vs `recent_blend` `4.278`
+- latest implemented refinement:
+  - final-stage `soft-vacancy rise cap` for unsupported `starter_volatile` upside
+  - measured effect: overall improved from `4.409` to `4.397`
+  - measured effect: `starter_volatile` improved from `4.844` to `4.787`
+  - remaining conclusion: the biggest open regressions are still concentrated in `rotation` and stable-context / true-vacancy `starter_volatile` rows
 
 Current source docs:
 

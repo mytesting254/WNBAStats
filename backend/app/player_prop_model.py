@@ -300,7 +300,7 @@ _CONNECTION_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | N
 _CONNECTION_RESIDUAL_MODEL_CACHE: dict[tuple[int, str, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_MINUTES_MODEL_CACHE: dict[tuple[int, str | None, ModelTuningConfig], RidgeModel | None] = {}
 _CONNECTION_GAME_TOTAL_MEAN_CACHE: dict[int, float] = {}
-_CONNECTION_TRAINING_CACHE: dict[int, dict[str, dict[tuple, object]]] = {}
+_CONNECTION_TRAINING_CACHE: dict[tuple[int, str], dict[str, dict[tuple, object]]] = {}
 
 MINUTES_ROLE_BUCKETS = ["core_starter", "starter_volatile", "rotation", "bench", "fringe"]
 
@@ -2779,7 +2779,9 @@ def _project_minutes(
     opportunity_context: list[float] | None = None,
     before_game_date: str | None = None,
     allow_training: bool = True,
-) -> tuple[float, str]:
+    include_stage_details: bool = False,
+) -> tuple[float, str] | tuple[float, str, dict[str, float | str | None]]:
+    stage_details: dict[str, float | str | None] = {}
     base_heuristic = max(ewma_minutes + (0.35 * minutes_trend), 4.0)
     recent_blend = _minutes_recent_blend(
         recent_minutes_avg=recent_minutes_avg,
@@ -2792,6 +2794,8 @@ def _project_minutes(
     )
     hard_statuses = {"out", "inactive", "suspended", "unavailable"}
     if str(injury_status or "").strip().lower() in hard_statuses:
+        if include_stage_details:
+            return 0.0, "hard rule out", {"role_bucket": None, "base_heuristic": base_heuristic, "recent_blend": recent_blend, "recency_anchor": recency_anchor}
         return 0.0, "hard rule out"
     venue_delta = 0.0
     if conn is not None:
@@ -2818,6 +2822,9 @@ def _project_minutes(
     )
     learned_minutes = None
     blend_note = "heuristic only"
+    stage_details["base_heuristic"] = base_heuristic
+    stage_details["recent_blend"] = recent_blend
+    stage_details["recency_anchor"] = recency_anchor
     if conn is not None:
         minutes_model = train_minutes_model(conn, role_bucket=role_state.bucket, allow_training=allow_training)
         model_scope = f"role {role_state.bucket}"
@@ -2852,6 +2859,7 @@ def _project_minutes(
             blend_weight = _minutes_earned_blend_weight(
                 base_weight=base_blend_weight,
                 learned_minutes=learned_minutes,
+                recent_blend=recent_blend,
                 recency_anchor=recency_anchor,
                 role_bucket=role_state.bucket,
                 minute_volatility=minute_volatility,
@@ -2859,9 +2867,15 @@ def _project_minutes(
                 recent_drop=role_state.recent_drop,
                 recent_spike=role_state.recent_spike,
                 injury_delta=injury_delta,
+                opportunity_context=opportunity_context,
             )
             projected = ((1.0 - blend_weight) * projected) + (blend_weight * learned_minutes)
             blend_note = f"learned blend {blend_weight:.0%}/{base_blend_weight:.0%} ({model_scope}, delta {learned_delta:+.1f})"
+            stage_details["learned_minutes"] = learned_minutes
+            stage_details["base_blend_weight"] = base_blend_weight
+            stage_details["blend_weight"] = blend_weight
+    stage_details["post_blend_projection"] = projected
+    stage_details["role_bucket"] = role_state.bucket
     anchor_weight = _minutes_recency_anchor_weight(
         role_bucket=role_state.bucket,
         minute_volatility=minute_volatility,
@@ -2871,6 +2885,8 @@ def _project_minutes(
         injury_delta=injury_delta,
     )
     projected = ((1.0 - anchor_weight) * projected) + (anchor_weight * recency_anchor)
+    stage_details["anchor_weight"] = anchor_weight
+    stage_details["post_anchor_projection"] = projected
     reference_baseline = _minutes_reference_baseline(
         role_state=role_state,
         base_heuristic=base_heuristic,
@@ -2894,6 +2910,9 @@ def _project_minutes(
         injury_delta=injury_delta,
     )
     projected = ((1.0 - baseline_guard_weight) * projected) + (baseline_guard_weight * reference_baseline)
+    stage_details["reference_baseline"] = reference_baseline
+    stage_details["baseline_guard_weight"] = baseline_guard_weight
+    stage_details["post_baseline_projection"] = projected
     projected = _apply_minutes_recency_floor(
         projected=projected,
         role_state=role_state,
@@ -2907,6 +2926,7 @@ def _project_minutes(
         recent_absence_days=recent_absence_days,
         team_transition=team_transition,
     )
+    stage_details["post_recency_floor_projection"] = projected
     lower_bound, upper_bound = _role_aware_minutes_bounds(
         role_state,
         last_10_minutes_avg=last_10_minutes_avg,
@@ -2916,6 +2936,7 @@ def _project_minutes(
         injury_delta=injury_delta,
     )
     projected = _clamp(projected, lower_bound, upper_bound)
+    stage_details["post_bounds_projection"] = projected
     projected, hard_rule_notes = _apply_minutes_hard_rules(
         projected=projected,
         role_state=role_state,
@@ -2923,10 +2944,12 @@ def _project_minutes(
         injury_status=injury_status,
         injury_delta=injury_delta,
         blowout_delta=blowout_delta,
+        recent_blend=recent_blend,
         recent_minutes_avg=recent_minutes_avg,
         last_10_minutes_avg=last_10_minutes_avg,
         opportunity_context=opportunity_context,
     )
+    stage_details["post_hard_rules_projection"] = projected
     projected, rebound_guard_notes = _apply_minutes_rebound_guard(
         projected=projected,
         role_state=role_state,
@@ -2940,11 +2963,13 @@ def _project_minutes(
         team_transition=team_transition,
         blowout_delta=blowout_delta,
     )
+    stage_details["post_rebound_guard_projection"] = projected
     projected, stable_context_notes = _apply_minutes_stable_context_cap(
         projected=projected,
         role_state=role_state,
         recent_blend=recent_blend,
         recency_anchor=recency_anchor,
+        last_10_minutes_avg=last_10_minutes_avg,
         minutes_trend=minutes_trend,
         minute_volatility=minute_volatility,
         injury_status=injury_status,
@@ -2954,6 +2979,7 @@ def _project_minutes(
         opportunity_context=opportunity_context,
     )
     projected = _clamp(projected, lower_bound, upper_bound)
+    stage_details["final_projection"] = projected
     if abs(venue_delta) >= 0.05:
         venue_note = f", venue {venue_delta:+.1f}"
     else:
@@ -2963,7 +2989,10 @@ def _project_minutes(
     baseline_note = f", baseline {reference_baseline:.1f} @ {baseline_guard_weight:.0%}"
     all_rule_notes = [*hard_rule_notes, *rebound_guard_notes, *stable_context_notes]
     hard_rule_suffix = f", {'; '.join(all_rule_notes)}" if all_rule_notes else ""
-    return projected, f"{role_state.bucket} bounds {lower_bound:.1f}-{upper_bound:.1f}{venue_note}, {blend_note}{learned_note}{anchor_note}{baseline_note}{hard_rule_suffix}"
+    note = f"{role_state.bucket} bounds {lower_bound:.1f}-{upper_bound:.1f}{venue_note}, {blend_note}{learned_note}{anchor_note}{baseline_note}{hard_rule_suffix}"
+    if include_stage_details:
+        return projected, note, stage_details
+    return projected, note
 
 
 def _minutes_recency_anchor(
@@ -3006,6 +3035,8 @@ def _minutes_recency_anchor_weight(
         weight -= 0.05
     if recent_spike and injury_delta > 0:
         weight -= 0.08
+    elif role_bucket == "starter_volatile" and recent_spike and injury_delta <= 0:
+        weight += 0.06
     return max(0.10, min(0.42, weight))
 
 
@@ -3062,6 +3093,8 @@ def _minutes_baseline_guard_weight(
         weight -= 0.04
     if recent_spike and injury_delta > 0:
         weight -= 0.08
+    elif role_bucket == "starter_volatile" and recent_spike and injury_delta <= 0:
+        weight += 0.06
     if learned_minutes is not None:
         deviation = abs(learned_minutes - recency_anchor)
         baseline_gap = abs(learned_minutes - reference_baseline)
@@ -3115,6 +3148,7 @@ def _apply_minutes_stable_context_cap(
     role_state: MinutesRoleState,
     recent_blend: float,
     recency_anchor: float,
+    last_10_minutes_avg: float,
     minutes_trend: float,
     minute_volatility: float,
     injury_status: str,
@@ -3134,6 +3168,32 @@ def _apply_minutes_stable_context_cap(
         normalized_opportunity = (normalized_opportunity + [0.0, 0.0])[:2]
     same_position_unavailable_minutes = float(normalized_opportunity[0])
     same_position_key_out_count = float(normalized_opportunity[1])
+    strong_vacancy = same_position_unavailable_minutes >= 18.0 and same_position_key_out_count >= 1.0
+    soft_vacancy = (
+        not strong_vacancy
+        and (same_position_unavailable_minutes >= 10.0 or same_position_key_out_count >= 1.0)
+    )
+    if (
+        role_state.bucket == "starter_volatile"
+        and role_state.recent_spike
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and soft_vacancy
+    ):
+        soft_vacancy_cap = max(
+            role_state.lower_bound,
+            min(
+                role_state.upper_bound,
+                max(
+                    recent_blend + 1.4,
+                    recency_anchor + 0.9,
+                    last_10_minutes_avg + 0.6,
+                ),
+            ),
+        )
+        if projected > soft_vacancy_cap:
+            projected = soft_vacancy_cap
+            notes.append("soft-vacancy rise cap")
     dynamic_context = any(
         (
             abs(injury_delta) >= 1.0,
@@ -3143,7 +3203,7 @@ def _apply_minutes_stable_context_cap(
             minute_volatility >= 8.0,
             abs(minutes_trend) >= 3.5,
             transitional,
-            same_position_unavailable_minutes >= 18.0 and same_position_key_out_count >= 1.0,
+            strong_vacancy,
         )
     )
     if dynamic_context:
@@ -3157,6 +3217,24 @@ def _apply_minutes_stable_context_cap(
     capped = _clamp(projected, lower_cap, upper_cap)
     if abs(capped - projected) >= 0.05:
         notes.append("stable-context recent blend cap")
+    stable_upside_tolerance = None
+    if role_state.bucket == "core_starter":
+        stable_upside_tolerance = 1.4
+    elif role_state.bucket == "starter_volatile":
+        stable_upside_tolerance = 1.8
+    elif role_state.bucket == "rotation":
+        stable_upside_tolerance = 2.0
+    if stable_upside_tolerance is not None:
+        stable_upside_cap = max(
+            role_state.lower_bound,
+            min(
+                role_state.upper_bound,
+                max(recent_blend + stable_upside_tolerance, last_10_minutes_avg + 0.8),
+            ),
+        )
+        if capped > stable_upside_cap:
+            capped = stable_upside_cap
+            notes.append("stable-context upside cap")
     return capped, notes
 
 
@@ -3457,6 +3535,7 @@ def _apply_minutes_hard_rules(
     injury_status: str,
     injury_delta: float,
     blowout_delta: float,
+    recent_blend: float,
     recent_minutes_avg: float,
     last_10_minutes_avg: float,
     opportunity_context: list[float] | None = None,
@@ -3498,12 +3577,24 @@ def _apply_minutes_hard_rules(
         and same_position_key_out_count >= 1.0
         and role_state.bucket in {"starter_volatile", "rotation", "bench"}
     ):
+        vacancy_lift = min(2.0, same_position_unavailable_minutes / 18.0)
+        last_10_floor = last_10_minutes_avg - 0.5
+        recent_blend_floor = recent_blend + 0.25
+        if role_state.bucket == "rotation":
+            vacancy_lift = min(1.1, same_position_unavailable_minutes / 24.0)
+            last_10_floor = last_10_minutes_avg - 1.5
+            recent_blend_floor = recent_blend + 0.1
+        elif role_state.bucket == "bench":
+            vacancy_lift = min(1.4, same_position_unavailable_minutes / 22.0)
+            last_10_floor = last_10_minutes_avg - 1.0
+            recent_blend_floor = recent_blend + 0.15
         opportunity_floor = min(
             role_state.upper_bound,
             max(
                 role_state.lower_bound,
-                recent_minutes_avg + min(2.0, same_position_unavailable_minutes / 18.0),
-                last_10_minutes_avg - 0.5,
+                recent_minutes_avg + vacancy_lift,
+                last_10_floor,
+                recent_blend_floor,
             ),
         )
         if projected < opportunity_floor:
@@ -3607,6 +3698,8 @@ def _minutes_model_weight(
         weight = 0.27
     else:
         weight = 0.18
+    if role_bucket in {"starter_volatile", "rotation"}:
+        weight -= 0.03
     if role_bucket in {"bench", "fringe"}:
         weight -= 0.08
     if minute_volatility >= 8.0:
@@ -3620,6 +3713,7 @@ def _minutes_earned_blend_weight(
     *,
     base_weight: float,
     learned_minutes: float,
+    recent_blend: float,
     recency_anchor: float,
     role_bucket: str,
     minute_volatility: float,
@@ -3627,6 +3721,7 @@ def _minutes_earned_blend_weight(
     recent_drop: bool,
     recent_spike: bool,
     injury_delta: float,
+    opportunity_context: list[float] | None = None,
 ) -> float:
     tolerance = 2.2 if role_bucket == "core_starter" else 2.8 if role_bucket in {"starter_volatile", "rotation"} else 3.2
     if minute_volatility >= 8.0:
@@ -3642,6 +3737,71 @@ def _minutes_earned_blend_weight(
         penalty *= 0.82
     if recent_spike and injury_delta > 0:
         penalty *= 0.78
+    if (
+        role_bucket in {"starter_volatile", "rotation"}
+        and not recent_spike
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+    ):
+        unsupported_upside_gap = max(learned_minutes - recent_blend, 0.0)
+        if unsupported_upside_gap >= 1.5:
+            penalty = max(
+                penalty,
+                min(0.72, 0.18 + (unsupported_upside_gap - 1.5) / 4.0),
+            )
+    if (
+        role_bucket == "starter_volatile"
+        and recent_spike
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+    ):
+        unsupported_spike_gap = max(learned_minutes - recency_anchor, 0.0)
+        normalized_opportunity = list(opportunity_context or [0.0, 0.0])
+        if len(normalized_opportunity) < 2:
+            normalized_opportunity = (normalized_opportunity + [0.0, 0.0])[:2]
+        same_position_unavailable_minutes = float(normalized_opportunity[0])
+        same_position_key_out_count = float(normalized_opportunity[1])
+        strong_vacancy = same_position_unavailable_minutes >= 18.0 and same_position_key_out_count >= 1.0
+        soft_vacancy = same_position_unavailable_minutes >= 10.0 or same_position_key_out_count >= 1.0
+        if unsupported_spike_gap >= 1.0 and not strong_vacancy:
+            base_penalty = 0.22 if soft_vacancy else 0.28
+            penalty = max(
+                penalty,
+                min(0.72, base_penalty + (unsupported_spike_gap - 1.0) / 4.5),
+            )
+    if (
+        role_bucket in {"starter_volatile", "rotation"}
+        and minute_volatility < 5.0
+        and not recent_drop
+        and not recent_spike
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+    ):
+        stable_low_vol_penalty = 0.24 if role_bucket == "starter_volatile" else 0.30
+        stable_low_vol_gap = abs(learned_minutes - recent_blend)
+        if stable_low_vol_gap >= 1.0:
+            stable_low_vol_penalty += min(0.14, (stable_low_vol_gap - 1.0) / 6.0)
+        penalty = max(penalty, min(0.72, stable_low_vol_penalty))
+    normalized_opportunity = list(opportunity_context or [0.0, 0.0])
+    if len(normalized_opportunity) < 2:
+        normalized_opportunity = (normalized_opportunity + [0.0, 0.0])[:2]
+    same_position_unavailable_minutes = float(normalized_opportunity[0])
+    same_position_key_out_count = float(normalized_opportunity[1])
+    if (
+        role_bucket in {"starter_volatile", "rotation"}
+        and minute_volatility < 5.0
+        and not recent_drop
+        and not recent_spike
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and same_position_unavailable_minutes < 18.0
+        and same_position_key_out_count < 1.0
+    ):
+        quiet_context_penalty = 0.42 if role_bucket == "starter_volatile" else 0.48
+        quiet_context_gap = abs(learned_minutes - recent_blend)
+        if quiet_context_gap >= 0.75:
+            quiet_context_penalty += min(0.12, (quiet_context_gap - 0.75) / 5.0)
+        penalty = max(penalty, min(0.78, quiet_context_penalty))
     earned_weight = base_weight * (1.0 - penalty)
     return max(0.03, min(base_weight, earned_weight))
 
@@ -4912,13 +5072,25 @@ def _player_archetype_profile_from_rows(
 
 
 def _connection_training_cache_bucket(conn: sqlite3.Connection, name: str) -> dict[tuple, object]:
-    conn_id = id(conn)
-    buckets = _CONNECTION_TRAINING_CACHE.setdefault(conn_id, {})
+    conn_key = (id(conn), _connection_training_cache_db_marker(conn))
+    buckets = _CONNECTION_TRAINING_CACHE.setdefault(conn_key, {})
     bucket = buckets.get(name)
     if bucket is None:
         bucket = {}
         buckets[name] = bucket
     return bucket  # type: ignore[return-value]
+
+
+def _connection_training_cache_db_marker(conn: sqlite3.Connection) -> str:
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+    except sqlite3.Error:
+        return ""
+    if row is None:
+        return ""
+    if "file" in row.keys():
+        return str(row["file"] or "")
+    return str(row[2] or "") if len(row) > 2 else ""
 
 
 def _player_training_rows(conn: sqlite3.Connection, player_id: int) -> list[sqlite3.Row]:

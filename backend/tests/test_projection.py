@@ -1893,6 +1893,303 @@ def test_minutes_projection_caps_stable_context_near_recent_blend(monkeypatch) -
     assert "stable-context recent blend cap" in note
 
 
+def test_minutes_projection_tightens_stable_rotation_upside_without_vacancy(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.player_prop_model.train_minutes_model",
+        lambda *_args, **_kwargs: RidgeModel(
+            market="minutes:rotation",
+            rows=500,
+            intercept=0.0,
+            coefficients=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_means=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_scales=[1.0] * len(MINUTES_FEATURE_NAMES),
+        ),
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 20.0)
+    monkeypatch.setattr("backend.app.player_prop_model._venue_minutes_adjustment", lambda *_args, **_kwargs: 0.0)
+
+    recent_minutes_avg = 23.0
+    last_10_minutes_avg = 22.0
+    recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
+    projected, note = _project_minutes(
+        sqlite3.connect(":memory:"),
+        player_id=10061,
+        game_id=2061,
+        rotation_role="rotation",
+        ewma_minutes=22.4,
+        minutes_trend=0.7,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minute_volatility=3.6,
+        context={"is_home": True, "rest_days": 2, "team_spread": 2.5},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=None,
+        team_transition=[18.0, 0.1, 0.0, 0.84],
+        lineup_context=[0.15, 0.79, 0.31],
+        opportunity_context=[0.0, 0.0, 0.0, 18.0, 0.0, 0.0, 0.0],
+        before_game_date=None,
+    )
+
+    assert projected <= max(recent_blend + 2.0, last_10_minutes_avg + 0.8)
+    assert "learned blend 9%/33%" in note
+
+
+def test_minutes_projection_uses_more_conservative_blend_for_unsupported_rotation_upside(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.player_prop_model.train_minutes_model",
+        lambda *_args, **_kwargs: RidgeModel(
+            market="minutes:rotation",
+            rows=500,
+            intercept=0.0,
+            coefficients=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_means=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_scales=[1.0] * len(MINUTES_FEATURE_NAMES),
+        ),
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 6.0)
+    monkeypatch.setattr("backend.app.player_prop_model._venue_minutes_adjustment", lambda *_args, **_kwargs: 0.0)
+
+    projected, note = _project_minutes(
+        sqlite3.connect(":memory:"),
+        player_id=10062,
+        game_id=2062,
+        rotation_role="rotation",
+        ewma_minutes=22.0,
+        minutes_trend=0.3,
+        recent_minutes_avg=22.5,
+        last_10_minutes_avg=22.0,
+        minute_volatility=4.1,
+        context={"is_home": True, "rest_days": 2, "team_spread": 2.0},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=None,
+        team_transition=[20.0, 0.0, 0.0, 0.82],
+        lineup_context=[0.15, 0.80, 0.30],
+        opportunity_context=[0.0, 0.0, 0.0, 20.0, 0.0, 0.0, 0.0],
+        before_game_date=None,
+    )
+
+    assert "learned blend 9%/33%" in note
+    assert projected < 24.5
+
+
+def test_minutes_projection_keeps_rotation_vacancy_floor_close_to_recent_blend() -> None:
+    recent_minutes_avg = 21.0
+    last_10_minutes_avg = 23.0
+    recent_blend = (0.65 * recent_minutes_avg) + (0.35 * last_10_minutes_avg)
+
+    projected, note = _project_minutes(
+        None,
+        player_id=10063,
+        game_id=2063,
+        rotation_role="rotation",
+        ewma_minutes=20.5,
+        minutes_trend=0.2,
+        recent_minutes_avg=recent_minutes_avg,
+        last_10_minutes_avg=last_10_minutes_avg,
+        minute_volatility=4.4,
+        context={"is_home": True},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=None,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        lineup_context=[0.15, 0.79, 0.28],
+        opportunity_context=[24.0, 1.0, 0.0, 20.0, 0.0, 0.0, 0.0],
+        before_game_date=None,
+    )
+
+    assert projected <= recent_blend + 0.8
+    assert "hard rule same-position vacancy floor" in note
+
+
+def test_minutes_earned_blend_weight_cuts_stable_low_vol_rotation_weight() -> None:
+    weight = player_prop_model_module._minutes_earned_blend_weight(
+        base_weight=0.33,
+        learned_minutes=24.8,
+        recent_blend=22.2,
+        recency_anchor=22.3,
+        role_bucket="rotation",
+        minute_volatility=4.2,
+        recent_absence_days=None,
+        recent_drop=False,
+        recent_spike=False,
+        injury_delta=0.0,
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert weight == pytest.approx(0.132)
+
+
+def test_minutes_earned_blend_weight_preserves_more_weight_with_real_vacancy() -> None:
+    quiet = player_prop_model_module._minutes_earned_blend_weight(
+        base_weight=0.33,
+        learned_minutes=24.8,
+        recent_blend=22.2,
+        recency_anchor=22.3,
+        role_bucket="rotation",
+        minute_volatility=4.2,
+        recent_absence_days=None,
+        recent_drop=False,
+        recent_spike=False,
+        injury_delta=0.0,
+        opportunity_context=[0.0, 0.0],
+    )
+    vacancy = player_prop_model_module._minutes_earned_blend_weight(
+        base_weight=0.33,
+        learned_minutes=24.8,
+        recent_blend=22.2,
+        recency_anchor=22.3,
+        role_bucket="rotation",
+        minute_volatility=4.2,
+        recent_absence_days=None,
+        recent_drop=False,
+        recent_spike=False,
+        injury_delta=0.0,
+        opportunity_context=[22.0, 1.0],
+    )
+
+    assert vacancy > quiet
+
+
+def test_minutes_context_bucket_distinguishes_soft_vacancy() -> None:
+    assert main_module._minutes_context_bucket({
+        "recent_transfer": 0,
+        "recent_absence_days": 0.0,
+        "same_position_unavailable_minutes": 12.0,
+        "same_position_key_out_count": 0.0,
+    }) == "soft_vacancy"
+    assert main_module._minutes_context_bucket({
+        "recent_transfer": 0,
+        "recent_absence_days": 0.0,
+        "same_position_unavailable_minutes": 20.0,
+        "same_position_key_out_count": 1.0,
+    }) == "vacancy"
+
+
+def test_minutes_projection_uses_lower_blend_for_unsupported_starter_volatile_spike(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.player_prop_model.train_minutes_model",
+        lambda *_args, **_kwargs: RidgeModel(
+            market="minutes:starter_volatile",
+            rows=500,
+            intercept=0.0,
+            coefficients=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_means=[0.0] * len(MINUTES_FEATURE_NAMES),
+            feature_scales=[1.0] * len(MINUTES_FEATURE_NAMES),
+        ),
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 6.0)
+    monkeypatch.setattr("backend.app.player_prop_model._venue_minutes_adjustment", lambda *_args, **_kwargs: 0.0)
+
+    projected, note = _project_minutes(
+        sqlite3.connect(":memory:"),
+        player_id=10064,
+        game_id=2064,
+        rotation_role="starter",
+        ewma_minutes=25.0,
+        minutes_trend=3.6,
+        recent_minutes_avg=28.0,
+        last_10_minutes_avg=24.0,
+        minute_volatility=5.1,
+        context={"is_home": True, "rest_days": 2, "team_spread": 2.0},
+        blowout_delta=0.0,
+        injury_delta=0.0,
+        injury_status="available",
+        recent_absence_days=None,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        lineup_context=[0.17, 0.82, 0.41],
+        opportunity_context=[0.0, 0.0, 0.0, 20.0, 0.0, 0.0, 0.0],
+        before_game_date=None,
+    )
+
+    assert "starter_volatile" in note
+    assert "learned blend 9%/33%" in note
+    assert projected < 29.5
+
+
+def test_minutes_earned_blend_weight_keeps_soft_vacancy_above_quiet_spike() -> None:
+    quiet = player_prop_model_module._minutes_earned_blend_weight(
+        base_weight=0.33,
+        learned_minutes=31.0,
+        recent_blend=26.0,
+        recency_anchor=26.5,
+        role_bucket="starter_volatile",
+        minute_volatility=5.2,
+        recent_absence_days=None,
+        recent_drop=False,
+        recent_spike=True,
+        injury_delta=0.0,
+        opportunity_context=[0.0, 0.0],
+    )
+    soft = player_prop_model_module._minutes_earned_blend_weight(
+        base_weight=0.33,
+        learned_minutes=31.0,
+        recent_blend=26.0,
+        recency_anchor=26.5,
+        role_bucket="starter_volatile",
+        minute_volatility=5.2,
+        recent_absence_days=None,
+        recent_drop=False,
+        recent_spike=True,
+        injury_delta=0.0,
+        opportunity_context=[12.0, 0.0],
+    )
+    hard = player_prop_model_module._minutes_earned_blend_weight(
+        base_weight=0.33,
+        learned_minutes=31.0,
+        recent_blend=26.0,
+        recency_anchor=26.5,
+        role_bucket="starter_volatile",
+        minute_volatility=5.2,
+        recent_absence_days=None,
+        recent_drop=False,
+        recent_spike=True,
+        injury_delta=0.0,
+        opportunity_context=[22.0, 1.0],
+    )
+
+    assert quiet == soft < hard
+
+
+def test_minutes_stable_context_cap_limits_soft_vacancy_starter_rise() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=25.5,
+        last_10_minutes_avg=22.5,
+        ewma_minutes=23.5,
+        minutes_trend=3.4,
+        minute_volatility=5.2,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        lineup_context=[0.17, 0.82, 0.41],
+        opportunity_context=[12.0, 0.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=29.0,
+        role_state=role_state,
+        recent_blend=24.45,
+        recency_anchor=24.55,
+        last_10_minutes_avg=22.5,
+        minutes_trend=3.4,
+        minute_volatility=5.2,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[12.0, 0.0],
+    )
+
+    assert role_state.bucket == "starter_volatile"
+    assert "soft-vacancy rise cap" in notes
+    assert capped == pytest.approx(25.85)
+
+
 def test_minutes_projection_rebound_guard_protects_strong_role_drop() -> None:
     recent_minutes_avg = 25.0
     last_10_minutes_avg = 29.0
@@ -1973,6 +2270,127 @@ def test_minutes_metric_summary_exposes_production_alias() -> None:
 
     assert summary["production_mae"] == summary["learned_mae"] == 1.5
     assert summary["production_bias"] == summary["learned_bias"] == 0.5
+
+
+def test_minutes_breakdown_entry_exposes_recent_blend_delta() -> None:
+    rows = [
+        {
+            "learned_error": 3.0,
+            "heuristic_error": 2.0,
+            "recent5_error": 1.0,
+            "recent10_error": 1.5,
+            "recent_blend_error": 1.0,
+            "learned_minutes": 27.0,
+            "recent_blend_minutes": 24.0,
+            "post_blend_projection": 26.5,
+            "post_anchor_projection": 26.0,
+            "post_baseline_projection": 25.5,
+            "post_recency_floor_projection": 25.0,
+            "post_bounds_projection": 25.0,
+            "post_hard_rules_projection": 25.5,
+            "post_rebound_guard_projection": 26.5,
+            "final_projection": 27.0,
+        },
+        {
+            "learned_error": -1.0,
+            "heuristic_error": -0.5,
+            "recent5_error": -1.5,
+            "recent10_error": -1.0,
+            "recent_blend_error": -0.5,
+            "learned_minutes": 19.0,
+            "recent_blend_minutes": 20.0,
+            "post_blend_projection": 19.5,
+            "post_anchor_projection": 19.0,
+            "post_baseline_projection": 19.5,
+            "post_recency_floor_projection": 19.0,
+            "post_bounds_projection": 19.0,
+            "post_hard_rules_projection": 19.0,
+            "post_rebound_guard_projection": 19.0,
+            "final_projection": 19.0,
+        },
+    ]
+
+    entry = main_module._minutes_breakdown_entry(rows)
+
+    assert entry["production_mae"] == pytest.approx(2.0)
+    assert entry["recent_blend_mae"] == pytest.approx(0.75)
+    assert entry["delta_vs_recent_blend"] == pytest.approx(1.25)
+    assert entry["overpredict_rate"] == pytest.approx(0.5)
+    assert entry["underpredict_rate"] == pytest.approx(0.5)
+    assert entry["avg_learned_minus_recent_blend"] == pytest.approx(1.0)
+    assert entry["avg_post_blend_minus_recent_blend"] == pytest.approx(1.0)
+    assert entry["avg_post_anchor_minus_recent_blend"] == pytest.approx(0.5)
+    assert entry["avg_post_baseline_minus_recent_blend"] == pytest.approx(0.5)
+    assert entry["avg_post_recency_floor_minus_recent_blend"] == pytest.approx(0.0)
+    assert entry["avg_post_bounds_minus_recent_blend"] == pytest.approx(0.0)
+    assert entry["avg_post_hard_rules_minus_recent_blend"] == pytest.approx(0.25)
+    assert entry["avg_post_rebound_guard_minus_recent_blend"] == pytest.approx(0.75)
+    assert entry["avg_final_minus_recent_blend"] == pytest.approx(1.0)
+
+
+def test_minutes_top_loss_rows_orders_by_regression_vs_recent_blend() -> None:
+    rows = [
+        {
+            "player_id": 1,
+            "game_id": 10,
+            "game_date": "2026-07-01",
+            "role_bucket": "rotation",
+            "trend_bucket": "stable",
+            "volatility_bucket": "low",
+            "context_bucket": "stable_context",
+            "actual_minutes": 20.0,
+            "recent_blend_minutes": 21.0,
+            "learned_minutes": 25.0,
+            "recent_blend_error": 1.0,
+            "learned_error": 5.0,
+            "post_blend_projection": 24.0,
+            "post_anchor_projection": 23.0,
+            "post_baseline_projection": 22.5,
+            "post_recency_floor_projection": 22.0,
+            "post_bounds_projection": 22.0,
+            "post_hard_rules_projection": 24.0,
+            "post_rebound_guard_projection": 25.0,
+            "final_projection": 25.0,
+            "minutes_trend": 0.2,
+            "minute_volatility": 4.0,
+            "recent_absence_days": None,
+            "same_position_unavailable_minutes": 0.0,
+            "same_position_key_out_count": 0.0,
+        },
+        {
+            "player_id": 2,
+            "game_id": 11,
+            "game_date": "2026-07-02",
+            "role_bucket": "rotation",
+            "trend_bucket": "stable",
+            "volatility_bucket": "low",
+            "context_bucket": "stable_context",
+            "actual_minutes": 20.0,
+            "recent_blend_minutes": 21.0,
+            "learned_minutes": 22.0,
+            "recent_blend_error": 1.0,
+            "learned_error": 2.0,
+            "post_blend_projection": 21.5,
+            "post_anchor_projection": 21.4,
+            "post_baseline_projection": 21.3,
+            "post_recency_floor_projection": 21.2,
+            "post_bounds_projection": 21.2,
+            "post_hard_rules_projection": 21.8,
+            "post_rebound_guard_projection": 22.0,
+            "final_projection": 22.0,
+            "minutes_trend": 0.1,
+            "minute_volatility": 4.1,
+            "recent_absence_days": None,
+            "same_position_unavailable_minutes": 0.0,
+            "same_position_key_out_count": 0.0,
+        },
+    ]
+
+    top_rows = main_module._minutes_top_loss_rows(rows, role_bucket="rotation", limit=2)
+
+    assert len(top_rows) == 2
+    assert top_rows[0]["player_id"] == 1
+    assert top_rows[0]["delta_vs_recent_blend_abs"] == pytest.approx(4.0)
 
 
 def test_minutes_feature_values_include_role_shift_signals() -> None:
