@@ -10379,3 +10379,79 @@ def test_watchlist_snapshot_and_settlement_sync(monkeypatch) -> None:
     assert settled["wins_count"] >= 1
     assert refreshed["settled_count"] >= 1
     assert refreshed["wins_count"] >= 1
+def test_resolve_roster_player_display_fast_falls_back_to_unique_league_wide_name() -> None:
+    load_test_history()
+    with connect() as conn:
+        la_team_id = int(
+            conn.execute("SELECT id FROM teams WHERE abbreviation = 'LA'").fetchone()[0]
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (777151, "Kelsey Plum", la_team_id, "G", "starter"),
+        )
+        player_rows = conn.execute(
+            """
+            SELECT
+                p.id AS player_id,
+                p.full_name,
+                p.team_id,
+                t.abbreviation AS team_abbreviation,
+                p.rotation_role,
+                p.position
+            FROM players p
+            LEFT JOIN teams t ON t.id = p.team_id
+            """
+        ).fetchall()
+        player_index = main_module._build_roster_player_index(player_rows)
+        player, display_fallback = main_module._resolve_roster_player_display(
+            conn,
+            "LV",
+            "Kelsey Plum",
+            player_rows=player_rows,
+            player_index=player_index,
+        )
+
+    assert display_fallback is None
+    assert player is not None
+    assert int(player["player_id"]) == 777151
+    assert player["rotation_role"] == "starter"
+
+
+def test_resolve_roster_player_display_fast_falls_back_to_unique_initial_last_name() -> None:
+    load_test_history()
+    with connect() as conn:
+        min_team_id = int(
+            conn.execute("SELECT id FROM teams WHERE abbreviation = 'MIN'").fetchone()[0]
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (777161, "DiJonai Carrington", min_team_id, "G", "rotation"),
+        )
+        player_rows = conn.execute(
+            """
+            SELECT
+                p.id AS player_id,
+                p.full_name,
+                p.team_id,
+                t.abbreviation AS team_abbreviation,
+                p.rotation_role,
+                p.position
+            FROM players p
+            LEFT JOIN teams t ON t.id = p.team_id
+            """
+        ).fetchall()
+        player_index = main_module._build_roster_player_index(player_rows)
+        player, display_fallback = main_module._resolve_roster_player_display(
+            conn,
+            "CHI",
+            "D. Carrington",
+            player_rows=player_rows,
+            player_index=player_index,
+        )
+
+    assert display_fallback is None
+    assert player is not None
+    assert int(player["player_id"]) == 777161
+    assert player["position"] == "G"
+
+

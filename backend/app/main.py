@@ -1809,15 +1809,16 @@ def _resolve_roster_player_display_fast(
             team_candidates.extend(player_index["team_last"].get((normalized_team, last_name), []))
         player = _best_roster_candidate(_dedupe_roster_candidates(team_candidates))
 
-    if not player or not player_is_skeletal(player):
-        return player, None
-
     fallback_candidates: list[dict[str, Any]] = []
     if normalized_name:
         fallback_candidates.extend(player_index["global_normalized"].get(normalized_name, []))
     if first_initial and last_name:
         fallback_candidates.extend(player_index["global_initial_last"].get((first_initial, last_name), []))
     fallback = _best_roster_candidate(_dedupe_roster_candidates(fallback_candidates))
+    if not player:
+        return fallback, None
+    if not player_is_skeletal(player):
+        return player, None
     if not fallback or int(fallback["player_id"]) == int(player["player_id"]) or player_is_skeletal(fallback):
         return player, None
     return player, fallback
