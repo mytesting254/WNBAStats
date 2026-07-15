@@ -206,6 +206,12 @@ class _GamePredictionCache:
 _DIRECT_MODEL_CACHE: dict[tuple[str, str, int, int], _DirectGameModel] = {}
 
 
+def _row_value(row: Mapping[str, Any] | sqlite3.Row, key: str, default: Any = None) -> Any:
+    if isinstance(row, sqlite3.Row):
+        return row[key] if key in row.keys() else default
+    return row.get(key, default)
+
+
 def project_game(
     conn: sqlite3.Connection,
     game: Mapping[str, Any],
@@ -248,13 +254,13 @@ def project_game(
         home_team_id=home_team_id,
         away_team_id=away_team_id,
         game_id=int(game["id"]),
-        game_date=str(game.get("game_date") or "") or None,
+        game_date=str(_row_value(game, "game_date") or "") or None,
         rest_days_home=int(game["rest_days_home"] or 2),
         rest_days_away=int(game["rest_days_away"] or 2),
         spread_home=spread_home,
         game_total=game_total,
-        home_moneyline=_coerce_float(game.get("home_moneyline")),
-        away_moneyline=_coerce_float(game.get("away_moneyline")),
+        home_moneyline=_coerce_float(_row_value(game, "home_moneyline")),
+        away_moneyline=_coerce_float(_row_value(game, "away_moneyline")),
     )
     direct_margin = _predict_direct_game_value(conn, "margin", direct_features)
     direct_total = _predict_direct_game_value(conn, "total", direct_features)
