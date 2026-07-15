@@ -1933,19 +1933,22 @@ def _roster_team_injury_impacts(conn: Any, team_ids: dict[str, int]) -> dict[str
     rows = conn.execute(
         f"""
         WITH latest_injuries AS (
-            SELECT
-                p.team_id,
-                p.id AS player_id,
-                lower(trim(i.status)) AS status,
-                p.rotation_role
-            FROM injuries i
-            JOIN players p ON p.id = i.player_id
-            WHERE p.team_id IN ({placeholders})
-              AND i.captured_at = (
-                  SELECT MAX(i2.captured_at)
-                  FROM injuries i2
-                  WHERE i2.player_id = i.player_id
-              )
+            SELECT team_id, player_id, status, rotation_role
+            FROM (
+                SELECT
+                    p.team_id,
+                    p.id AS player_id,
+                    lower(trim(i.status)) AS status,
+                    p.rotation_role,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY i.player_id
+                        ORDER BY i.captured_at DESC, i.id DESC
+                    ) AS rn
+                FROM injuries i
+                JOIN players p ON p.id = i.player_id
+                WHERE p.team_id IN ({placeholders})
+            )
+            WHERE rn = 1
         ),
         ranked_contrib AS (
             SELECT

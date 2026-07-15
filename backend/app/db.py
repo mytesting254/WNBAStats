@@ -1177,6 +1177,7 @@ CREATE TABLE IF NOT EXISTS job_run_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_player_stats_player_game ON player_game_stats(player_id, game_id);
+CREATE INDEX IF NOT EXISTS idx_injuries_player_captured ON injuries(player_id, captured_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_team_results_team_game ON team_game_results(team_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_player_game_availability_game ON player_game_availability(game_id, player_id);
 CREATE INDEX IF NOT EXISTS idx_prop_lines_game ON prop_lines(game_id);
