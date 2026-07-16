@@ -191,6 +191,14 @@ count mismatches fail fast with a clear app error instead of a vague SQLite
 column-count error. A redeploy is still required before the live container uses
 that safeguard.
 
+If the `Data` tab `Live Pipeline` card appears stuck on an older stage such as
+`Requesting provider data` at `17%` while the import actually continues, check
+the deployed revision. The July 16, 2026 fix makes `/api/ops/health` prefer the
+persisted `prop_sync_jobs` row over stale in-memory state, and the frontend now
+allows a newer finished sync payload to replace an older running one. Until
+that build is deployed, the UI can look hung even when the backend job already
+reached prediction rebuild or payload publish.
+
 A copy/paste template is also available at `deploy/wnba-daily-props.cron`.
 
 ### Specials Stocks Prep

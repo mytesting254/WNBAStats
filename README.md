@@ -386,6 +386,8 @@ Click `Refresh Odds` only when you want a fresh provider call. The request now q
 
 `Refresh Odds`, `Refresh Covers`, `Recalculate`, and roster-triggered current-slate repairs all publish their work into the same background prop-sync status card. Those jobs now report monotonic stage progress: provider/cache load, prop sync, projection rebuild, game rebuild or settlement, optional Covers context refresh, then payload publish. Within one stage the `current/total` values may advance in chunks, but they should not jump backward because one substep reused another substep's totals.
 
+The `Live Pipeline` card now also prefers the persisted `prop_sync_jobs` record over stale in-memory job state during background-thread handoff or container restart windows. That avoids a false "stuck at 17%" view where the UI kept showing `requesting_provider` even after the durable job row had already advanced into prediction rebuild or payload publish.
+
 Fresh calls merge by provider event id, so future events already saved in `sportsbook_props_raw.json` remain cached instead of being discarded.
 
 The raw Odds API cache is a single rolling file, not a dated archive. `Load Saved Odds` only replays cached events whose game date matches the app's current local date, so yesterday's payload can still exist in the JSON file but will be ignored on today's replay path.
@@ -423,6 +425,8 @@ Before treating a deployment as production-ready, verify all of the following:
   - stale proxy config
 - `2am America/New_York` cron logs can show `Internal Server Error` even when cron itself ran:
   - on Thursday, July 16, 2026, the actual failure was a bad `settled_props` insert shape during `settle_completed_props`, not a missing scheduled slate and not a skipped cron trigger
+- if the matchup card colors a strong defensive rank as bad, verify the frontend build includes the defensive-rank tone fix:
+  - defensive ranks use the same ordinal direction as other ranks, so low numbers are good; for example `#3` season defense should render as positive, not negative
 - Covers refresh failures are often scraper/parser issues, not route issues.
 - H2H can be legitimately sparse for new matchups; that is not always a data bug.
 

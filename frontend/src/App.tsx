@@ -5046,8 +5046,8 @@ function rankTone(rank: number | null | undefined, reverseGood = false) {
   if (typeof rank !== "number" || !Number.isFinite(rank)) {
     return "";
   }
-  const isPositive = reverseGood ? rank >= 10 : rank <= 4;
-  const isNegative = reverseGood ? rank <= 4 : rank >= 10;
+  const isPositive = rank <= 4;
+  const isNegative = rank >= 10;
   if (isPositive) {
     return "mini-stat-positive";
   }

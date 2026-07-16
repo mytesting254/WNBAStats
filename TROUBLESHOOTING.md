@@ -193,6 +193,7 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - `Refresh Odds` fails or reports missing API key
 - `Refresh Odds` stays queued or previously ended in a `504 Gateway Time-out`
 - `Refresh Odds`, `Refresh Covers`, `Recalculate`, or roster-change repair appears to jump backward in the progress card
+- the `Live Pipeline` card stays pinned to an old stage like `Requesting provider data` / `17%` even though the import job actually finished
 
 ### Likely Cause
 
@@ -201,6 +202,8 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - reverse proxy timed out before the old synchronous import finished
 - the raw payload was saved, but it belonged to a previous local date so `Load Saved Odds` does not replay it today
 - the deployed backend is older than the stage-splitting fix and is still collapsing prop sync plus projection rebuild into the same progress stage
+- the API is returning stale in-memory prop-sync state instead of the newer persisted `prop_sync_jobs` record
+- the frontend is preserving an older running progress snapshot instead of replacing it with a newer finished payload
 
 ### What To Check
 
@@ -208,6 +211,8 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - provider key is attached to the active backend resource
 - the deployed backend includes the queued `/api/odds/import` implementation and the `Data` tab shows the `Live Pipeline` card
 - the deployed backend includes the progress-stage split for odds sync, covers sync, recalculate, and roster-triggered repair
+- the deployed backend includes the `prop_sync_jobs` source-of-truth fix from Thursday, July 16, 2026, so `/api/ops/health` does not fall back to an older in-memory job snapshot
+- the deployed frontend includes the progress-merge fix from Thursday, July 16, 2026, so a newer terminal sync state can replace an older running one
 - the active runtime cache path contains `sportsbook_props_raw.json`
   the correct path is the backend runtime cache, not necessarily repo-local `data/cache/`
 - `/api/odds/cache` reports the expected runtime `path`
@@ -215,6 +220,26 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - if player props load but matchup spread/total/moneyline do not, confirm the saved payload includes `h2h`, `spreads`, and `totals` markets and that those values were written onto `games`
 - if same-day Covers cache exists, verify matchup payloads are using Covers game markets only as fallback, not overwriting already-populated Odds API game fields
 - during an active sync, stage-local counts should only move forward inside the current stage; a pattern like `40/176 -> 20/146 -> 40/176` indicates the old backend code is still running
+- if the DB row in `prop_sync_jobs` has already advanced into `rebuilding_predictions` or `publishing_payloads` but the UI still shows `requesting_provider`, the deployed frontend/backend bundle is stale
+
+## Matchup Defense Rank Color Is Backwards
+
+### Symptom
+
+- the Matchups tab shows a strong defense like `#3` in red
+- a poor defense rank like `#12` or `#15` appears green
+
+### Likely Cause
+
+- the frontend build is older than the matchup-rank tone fix and still treats defensive rank as if a higher number were better
+
+### What To Check
+
+- confirm the deployed frontend includes the Thursday, July 16, 2026 rank-tone fix
+- `Season Def` should treat low rank numbers as positive, the same way `Season Off` and `Season Net` already do
+- for the Washington Mystics example on Thursday, July 16, 2026:
+  - `def_rank = 3` is correct in the payload
+  - the UI should render that badge as positive
 
 ## `2am` Cron Shows `Internal Server Error`
 
