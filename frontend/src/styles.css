@@ -1699,7 +1699,7 @@ tbody tr.selected {
   color: #9a6700;
 }
 
-.mini-stat span {
+.mini-stat > span {
   display: block;
   margin-bottom: 5px;
   color: #5b4b8a;
