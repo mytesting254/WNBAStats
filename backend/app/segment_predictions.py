@@ -17,6 +17,7 @@ from .segment_training_db import _segment_history_context
 
 SEGMENT_TARGETS = ("q1_total", "first_half_total")
 _SEGMENT_MODEL_CACHE: dict[tuple[str, str, int], SegmentPredictionModel] = {}
+Q1_TOTAL_MODEL_BLEND_WEIGHT = 0.20
 
 
 @dataclass(frozen=True)
@@ -38,8 +39,9 @@ def project_game_segments(
     home_team_id = int(game["home_team_id"])
     away_team_id = int(game["away_team_id"])
     cache = runtime_cache or gp._GamePredictionCache(conn, (home_team_id, away_team_id))
-    home_context = _current_team_context(cache, home_team_id)
-    away_context = _current_team_context(cache, away_team_id)
+    game_date = str(_game_value(game, "game_date") or "")
+    home_context = _current_team_context(conn, team_id=home_team_id, game_date=game_date)
+    away_context = _current_team_context(conn, team_id=away_team_id, game_date=game_date)
     if home_context["games"] < 3 or away_context["games"] < 3:
         return {
             "projected_q1_total": None,
@@ -54,9 +56,27 @@ def project_game_segments(
     )
     q1_model = _train_segment_model_cached(conn, "q1_total")
     first_half_model = _train_segment_model_cached(conn, "first_half_total")
+    q1_prediction = (
+        _postprocess_segment_prediction(
+            "q1_total",
+            predict_segment_total(q1_model, segment_features),
+            segment_features,
+        )
+        if q1_model
+        else None
+    )
+    first_half_prediction = (
+        _postprocess_segment_prediction(
+            "first_half_total",
+            predict_segment_total(first_half_model, segment_features),
+            segment_features,
+        )
+        if first_half_model
+        else None
+    )
     return {
-        "projected_q1_total": round(predict_segment_total(q1_model, segment_features), 1) if q1_model else None,
-        "projected_first_half_total": round(predict_segment_total(first_half_model, segment_features), 1) if first_half_model else None,
+        "projected_q1_total": round(q1_prediction, 1) if q1_prediction is not None else None,
+        "projected_first_half_total": round(first_half_prediction, 1) if first_half_prediction is not None else None,
     }
 
 
@@ -83,14 +103,17 @@ def evaluate_segment_model(model: SegmentPredictionModel, rows: list[tuple[list[
     if not test_rows:
         test_rows = train_rows
     refit = _fit_segment_model(model.target, train_rows)
-    predictions = [_predict_segment_model(refit, features) for features, _ in test_rows]
+    predictions = [
+        _postprocess_segment_prediction(model.target, _predict_segment_model(refit, features), features)
+        for features, _ in test_rows
+    ]
     actuals = [actual for _, actual in test_rows]
     baselines = [_baseline_prediction(model.target, features) for features, _ in test_rows]
     return _metric_payload(predictions, actuals, baselines, len(train_rows), len(test_rows))
 
 
 def predict_segment_total(model: SegmentPredictionModel, features: list[float]) -> float:
-    return _predict_segment_model(model, features)
+    return _postprocess_segment_prediction(model.target, _predict_segment_model(model, features), features)
 
 
 def _train_segment_model_cached(conn: sqlite3.Connection, target: str) -> SegmentPredictionModel | None:
@@ -222,6 +245,13 @@ def _baseline_prediction(target: str, features: list[float]) -> float:
     raise ValueError(f"Unsupported segment target: {target}")
 
 
+def _postprocess_segment_prediction(target: str, prediction: float, features: list[float]) -> float:
+    if target == "q1_total":
+        baseline = _baseline_prediction(target, features)
+        return (Q1_TOTAL_MODEL_BLEND_WEIGHT * float(prediction)) + ((1.0 - Q1_TOTAL_MODEL_BLEND_WEIGHT) * baseline)
+    return float(prediction)
+
+
 def _metric_payload(
     predictions: list[float],
     actuals: list[float],
@@ -278,24 +308,6 @@ def _empty_metrics() -> dict[str, object]:
     }
 
 
-def _current_team_context(cache: gp._GamePredictionCache, team_id: int) -> dict[str, float]:
-    avg_points = float(cache.team_average(team_id, "points"))
-    avg_allowed = float(cache.team_average(team_id, "opponent_points"))
-    avg_possessions = float(cache.team_average(team_id, "possessions"))
-    recent_points = float(cache.weighted_recent(team_id, "points"))
-    recent_allowed = float(cache.weighted_recent(team_id, "opponent_points"))
-    recent_possessions = float(cache.weighted_recent(team_id, "possessions"))
-    return {
-        "games": float(cache.team_count(team_id)),
-        "avg_points": avg_points,
-        "avg_allowed": avg_allowed,
-        "avg_possessions": avg_possessions,
-        "recent_points": recent_points,
-        "recent_allowed": recent_allowed,
-        "recent_possessions": recent_possessions,
-    }
-
-
 def _segment_features(
     conn: sqlite3.Connection,
     game: Mapping[str, Any],
@@ -306,9 +318,10 @@ def _segment_features(
 ) -> list[float]:
     home_team_id = int(game["home_team_id"])
     away_team_id = int(game["away_team_id"])
+    game_date = str(_game_value(game, "game_date") or "")
     pace_factor = gp._clamp(
         ((float(home_context["avg_possessions"]) + float(away_context["avg_possessions"])) / 2.0)
-        / max(float(cache.league_possessions()), 1.0),
+        / max(_league_half_possessions(conn, game_date=game_date), 1.0),
         0.94,
         1.06,
     )
@@ -343,7 +356,6 @@ def _segment_features(
         home_moneyline=gp._coerce_float(game["home_moneyline"]),
         away_moneyline=gp._coerce_float(game["away_moneyline"]),
     )
-    game_date = str(_game_value(game, "game_date") or "")
     home_segment_context = _team_segment_context(conn, team_id=home_team_id, game_date=game_date)
     away_segment_context = _team_segment_context(conn, team_id=away_team_id, game_date=game_date)
     return [
@@ -402,6 +414,63 @@ def _team_segment_context(conn: sqlite3.Connection, *, team_id: int, game_date: 
             first_half_allowed=float(row["first_half_allowed"]),
         )
     return _segment_history_context(history)
+
+
+def _current_team_context(conn: sqlite3.Connection, *, team_id: int, game_date: str) -> dict[str, float]:
+    rows = conn.execute(
+        """
+        SELECT
+            g.game_date,
+            CASE WHEN g.home_team_id = ? THEN segments.home_1h_points ELSE segments.away_1h_points END AS points,
+            CASE WHEN g.home_team_id = ? THEN segments.away_1h_points ELSE segments.home_1h_points END AS opponent_points,
+            (
+                CASE
+                    WHEN g.home_team_id = ? THEN COALESCE(home_result.possessions, away_result.possessions, 78.0)
+                    ELSE COALESCE(away_result.possessions, home_result.possessions, 78.0)
+                END
+            ) / 2.0 AS possessions
+        FROM games g
+        JOIN team_game_results home_result ON home_result.game_id = g.id AND home_result.team_id = g.home_team_id
+        JOIN team_game_results away_result ON away_result.game_id = g.id AND away_result.team_id = g.away_team_id
+        JOIN game_segment_results segments ON segments.game_id = g.id
+        WHERE g.status = 'final'
+          AND ? IN (g.home_team_id, g.away_team_id)
+          AND g.game_date < ?
+          AND segments.home_1h_points IS NOT NULL
+          AND segments.away_1h_points IS NOT NULL
+        ORDER BY g.game_date ASC, g.start_time ASC, g.id ASC
+        """,
+        (team_id, team_id, team_id, team_id, game_date),
+    ).fetchall()
+    history: dict[int, dict[str, object]] = {}
+    for row in rows:
+        gp._append_team_history(
+            history,
+            team_id=team_id,
+            game_date=str(row["game_date"]),
+            points=float(row["points"] or 0.0),
+            opponent_points=float(row["opponent_points"] or 0.0),
+            possessions=float(row["possessions"] or 39.0),
+        )
+    return gp._team_history_context(history.get(team_id))
+
+
+def _league_half_possessions(conn: sqlite3.Connection, *, game_date: str) -> float:
+    row = conn.execute(
+        """
+        SELECT AVG(COALESCE(team_game_results.possessions, 78.0) / 2.0) AS avg_half_possessions
+        FROM team_game_results
+        JOIN games g ON g.id = team_game_results.game_id
+        JOIN game_segment_results segments ON segments.game_id = g.id
+        WHERE g.status = 'final'
+          AND g.game_date < ?
+          AND segments.home_1h_points IS NOT NULL
+          AND segments.away_1h_points IS NOT NULL
+        """,
+        (game_date,),
+    ).fetchone()
+    value = float(row["avg_half_possessions"] or 39.0) if row is not None else 39.0
+    return max(value, 1.0)
 
 
 def _append_segment_row(

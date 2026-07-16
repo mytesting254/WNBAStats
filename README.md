@@ -67,6 +67,7 @@ The app is built around a provider-backed pregame workflow:
 
 - The matchup payload is assembled in the backend and includes:
   - projection output
+  - segment projection output for `Q1` total and `1H` total
   - market overrides
   - team last-10 summaries
   - Covers records
@@ -76,6 +77,34 @@ The app is built around a provider-backed pregame workflow:
   - `0` meetings: simple note
   - `1` meeting: compact summary
   - `2+` meetings: full table
+
+### Segment Projections
+
+- Segment actuals are stored in `game_segment_results`.
+- ESPN summary imports and possession backfills are responsible for populating:
+  - `home_q1_points`
+  - `away_q1_points`
+  - `home_1h_points`
+  - `away_1h_points`
+- Segment training rows are curated into a separate SQLite file:
+  - default path: `data/wnba-segment-training.sqlite`
+  - override: `WNBA_SEGMENT_TRAINING_DB_PATH`
+- The current live matchup UI exposes:
+  - `projected_q1_total`
+  - `projected_first_half_total`
+- If those fields show `N/A`, check these in order:
+  - `game_segment_results` has rows in the live runtime DB
+  - the live segment training DB has non-zero `included_rows`
+  - matchup caches were republished after the segment DB rebuild
+
+### Segment Runtime Scaling
+
+- Segment runtime features must stay on the same scale as segment training.
+- The current segment model is trained on first-half context, not full-game context:
+  - team scoring context uses historical `1H` points and `1H` allowed
+  - possessions are halved from full-game possessions
+  - pace references are computed on first-half scale
+- If runtime code accidentally feeds full-game team scoring into the segment model, `Q1` and `1H` totals can inflate to impossible values. Treat that as a feature-scale bug, not a model-quality issue.
 
 ### Roster Surface
 
