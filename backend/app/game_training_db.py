@@ -10,7 +10,7 @@ from .game_pregame_features import GAME_PREGAME_FEATURE_VERSION
 from .paths import get_training_db_path
 
 
-GAME_TRAINING_DB_VERSION = "v2"
+GAME_TRAINING_DB_VERSION = "v3"
 _GAME_TRAINING_DB_LOCK = threading.RLock()
 
 
@@ -297,6 +297,14 @@ def _rebuild_game_training_examples(
             away_game_count=int(away_context["games"]),
             home_recent_possessions=float(home_context["recent_possessions"]),
             away_recent_possessions=float(away_context["recent_possessions"]),
+            home_season_off_rating=gp._team_rating(float(home_context["avg_points"]), float(home_context["avg_possessions"])),
+            away_season_off_rating=gp._team_rating(float(away_context["avg_points"]), float(away_context["avg_possessions"])),
+            home_season_def_rating=gp._team_rating(float(home_context["avg_allowed"]), float(home_context["avg_possessions"])),
+            away_season_def_rating=gp._team_rating(float(away_context["avg_allowed"]), float(away_context["avg_possessions"])),
+            home_recent_off_rating=gp._team_rating(float(home_context["recent_points"]), float(home_context["recent_possessions"])),
+            away_recent_off_rating=gp._team_rating(float(away_context["recent_points"]), float(away_context["recent_possessions"])),
+            home_recent_def_rating=gp._team_rating(float(home_context["recent_allowed"]), float(home_context["recent_possessions"])),
+            away_recent_def_rating=gp._team_rating(float(away_context["recent_allowed"]), float(away_context["recent_possessions"])),
             spread_home=gp._coerce_float(row["spread_home"]),
             game_total=gp._coerce_float(row["game_total"]),
             home_moneyline=gp._coerce_float(row["home_moneyline"]),

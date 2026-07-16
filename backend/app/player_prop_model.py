@@ -19,7 +19,7 @@ from .odds import american_to_implied_probability
 from .timezone_utils import APP_TIMEZONE
 
 
-MODEL_VERSION = "adaptive-context-v10-market-gated-context"
+MODEL_VERSION = "adaptive-context-v11-ratings-context"
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
 MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
@@ -72,6 +72,10 @@ FEATURE_NAMES = [
     "same_position_opportunity_persistence",
     "same_position_competition_minutes",
     "recent_opponent_factor",
+    "team_off_rating_factor",
+    "opponent_def_rating_factor",
+    "recent_opponent_def_rating_factor",
+    "matchup_net_rating_diff",
 ]
 FEATURE_INDEX = {name: idx for idx, name in enumerate(FEATURE_NAMES)}
 MINUTES_FEATURE_NAMES = [
@@ -899,6 +903,48 @@ def feature_snapshot(
     pace_factor = _cached_pace_factor(conn, context["team_id"], context["opponent_id"]) if context else 1.0
     opponent_factor = _cached_opponent_factor(conn, context["opponent_id"], market) if context else 1.0
     recent_opponent_factor = _cached_recent_opponent_factor(conn, context["opponent_id"], market) if context else 1.0
+    team_rating_context = _cached_team_rating_context(conn, int(context["team_id"]), reference_game_date) if context else None
+    opponent_rating_context = _cached_team_rating_context(conn, int(context["opponent_id"]), reference_game_date) if context else None
+    league_rating_context = _cached_league_rating_context(conn, reference_game_date) if context else None
+    team_off_rating_factor = (
+        _clamp(
+            float(team_rating_context["off_rating"]) / max(float(league_rating_context["off_rating"]), 1.0),
+            0.94,
+            1.06,
+        )
+        if isinstance(team_rating_context, dict) and isinstance(league_rating_context, dict)
+        else 1.0
+    )
+    opponent_def_rating_factor = (
+        _clamp(
+            max(float(league_rating_context["def_rating"]), 1.0) / max(float(opponent_rating_context["def_rating"]), 1.0),
+            0.94,
+            1.06,
+        )
+        if isinstance(opponent_rating_context, dict) and isinstance(league_rating_context, dict)
+        else 1.0
+    )
+    recent_opponent_def_rating_factor = (
+        _clamp(
+            max(float(league_rating_context["recent_def_rating"]), 1.0) / max(float(opponent_rating_context["recent_def_rating"]), 1.0),
+            0.93,
+            1.07,
+        )
+        if isinstance(opponent_rating_context, dict) and isinstance(league_rating_context, dict)
+        else 1.0
+    )
+    matchup_net_rating_diff = (
+        float(team_rating_context["net_rating"]) - float(opponent_rating_context["net_rating"])
+        if isinstance(team_rating_context, dict) and isinstance(opponent_rating_context, dict)
+        else 0.0
+    )
+    rating_context_factor = _clamp(
+        (0.45 * team_off_rating_factor)
+        + (0.35 * opponent_def_rating_factor)
+        + (0.20 * recent_opponent_def_rating_factor),
+        0.92,
+        1.08,
+    )
     common_opponent_factor = _cached_common_opponent_factor(
         conn,
         player_id,
@@ -935,6 +981,7 @@ def feature_snapshot(
         component_base
         * pace_factor
         * opponent_factor
+        * rating_context_factor
         * common_opponent_factor
         * h2h_factor
         * home_factor
@@ -967,6 +1014,10 @@ def feature_snapshot(
         *archetype.feature_values(),
         *team_transition,
         *market_context_features,
+        team_off_rating_factor,
+        opponent_def_rating_factor,
+        recent_opponent_def_rating_factor,
+        matchup_net_rating_diff,
     ]
     archetype_note = ", ".join(archetype.labels()) or "balanced"
     reason = (
@@ -986,7 +1037,7 @@ def feature_snapshot(
         f" Minutes projection: {minutes_note}."
         f" Lineup share {float(lineup_context[0]):.2f}, lineup rank {float(lineup_context[1]):.2f}, position share {float(lineup_context[2]):.2f}."
         f" Opportunity unavailable {float(opportunity_context[0]):.1f}, key outs {float(opportunity_context[1]):.1f}, persistence {float(opportunity_context[2]):.2f}, competition {float(opportunity_context[3]):.1f}."
-        f" Recent opponent {recent_opponent_factor:.2f}."
+        f" Recent opponent {recent_opponent_factor:.2f}. Ratings: team off {team_off_rating_factor:.2f}, opp def {opponent_def_rating_factor:.2f}, recent opp def {recent_opponent_def_rating_factor:.2f}, net diff {matchup_net_rating_diff:+.1f}."
     )
     return FeatureSnapshot(
         features,
@@ -2404,6 +2455,25 @@ def _historical_training_features(
     pace_factor = _cached_pace_factor(conn, int(context["team_id"]), int(context["opponent_id"]))
     opponent_factor = _cached_opponent_factor(conn, int(context["opponent_id"]), market)
     recent_opponent_factor = _cached_recent_opponent_factor(conn, int(context["opponent_id"]), market)
+    team_rating_context = _cached_team_rating_context(conn, int(context["team_id"]), current_game_date)
+    opponent_rating_context = _cached_team_rating_context(conn, int(context["opponent_id"]), current_game_date)
+    league_rating_context = _cached_league_rating_context(conn, current_game_date)
+    team_off_rating_factor = _clamp(
+        float(team_rating_context["off_rating"]) / max(float(league_rating_context["off_rating"]), 1.0),
+        0.94,
+        1.06,
+    )
+    opponent_def_rating_factor = _clamp(
+        max(float(league_rating_context["def_rating"]), 1.0) / max(float(opponent_rating_context["def_rating"]), 1.0),
+        0.94,
+        1.06,
+    )
+    recent_opponent_def_rating_factor = _clamp(
+        max(float(league_rating_context["recent_def_rating"]), 1.0) / max(float(opponent_rating_context["recent_def_rating"]), 1.0),
+        0.93,
+        1.07,
+    )
+    matchup_net_rating_diff = float(team_rating_context["net_rating"]) - float(opponent_rating_context["net_rating"])
     if player_rows is not None and row_index is not None:
         common_opponent_factor = _common_opponent_factor_from_rows(
             conn,
@@ -2499,6 +2569,13 @@ def _historical_training_features(
         consistency_score=consistency_score,
         value_volatility=value_volatility,
     )
+    component_projection *= _clamp(
+        (0.45 * team_off_rating_factor)
+        + (0.35 * opponent_def_rating_factor)
+        + (0.20 * recent_opponent_def_rating_factor),
+        0.92,
+        1.08,
+    )
     is_home = bool(context["is_home"])
     rest_days = int(context["rest_days"])
     team_spread = context["team_spread"]
@@ -2552,6 +2629,10 @@ def _historical_training_features(
         *archetype.feature_values(),
         *team_transition,
         *market_context_features,
+        team_off_rating_factor,
+        opponent_def_rating_factor,
+        recent_opponent_def_rating_factor,
+        matchup_net_rating_diff,
     ]
 
 
@@ -2894,6 +2975,7 @@ def _project_minutes(
         recent_minutes_avg=recent_minutes_avg,
         last_10_minutes_avg=last_10_minutes_avg,
         minutes_trend=minutes_trend,
+        minute_volatility=minute_volatility,
         injury_status=injury_status,
         injury_delta=injury_delta,
         recent_absence_days=recent_absence_days,
@@ -3048,6 +3130,7 @@ def _minutes_reference_baseline(
     recent_minutes_avg: float,
     last_10_minutes_avg: float,
     minutes_trend: float,
+    minute_volatility: float,
     injury_status: str,
     injury_delta: float,
     recent_absence_days: float | None,
@@ -3055,7 +3138,14 @@ def _minutes_reference_baseline(
     status = str(injury_status or "").strip().lower()
     baseline = recent_blend
     if role_state.recent_drop or minutes_trend <= -4.0:
-        baseline = (0.55 * recent_blend) + (0.45 * base_heuristic)
+        blend_recent_weight = 0.55
+        if role_state.bucket in {"bench", "fringe"} and (
+            recent_absence_days is None or recent_absence_days < 7.0
+        ):
+            blend_recent_weight = 0.72
+        if minute_volatility < 5.5 and (recent_absence_days is None or recent_absence_days < 7.0):
+            blend_recent_weight = max(blend_recent_weight, 0.78 if role_state.bucket in {"bench", "fringe"} else 0.68)
+        baseline = (blend_recent_weight * recent_blend) + ((1.0 - blend_recent_weight) * base_heuristic)
     if recent_absence_days is not None and recent_absence_days >= 7:
         baseline = (0.50 * baseline) + (0.50 * base_heuristic)
     if status in {"questionable", "gtd", "doubtful"}:
@@ -3174,6 +3264,29 @@ def _apply_minutes_stable_context_cap(
         and (same_position_unavailable_minutes >= 10.0 or same_position_key_out_count >= 1.0)
     )
     if (
+        role_state.bucket == "core_starter"
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and not role_state.recent_drop
+        and not role_state.recent_spike
+        and not soft_vacancy
+        and not strong_vacancy
+        and minute_volatility < 5.8
+        and abs(minutes_trend) < 2.5
+    ):
+        core_starter_floor = min(
+            role_state.upper_bound,
+            max(
+                role_state.lower_bound,
+                recent_blend - 1.3,
+                recency_anchor - 1.0,
+                last_10_minutes_avg - 1.9,
+            ),
+        )
+        if projected < core_starter_floor:
+            projected = core_starter_floor
+            notes.append("stable-context core-starter floor")
+    if (
         role_state.bucket == "starter_volatile"
         and role_state.recent_spike
         and injury_delta <= 0.0
@@ -3194,6 +3307,292 @@ def _apply_minutes_stable_context_cap(
         if projected > soft_vacancy_cap:
             projected = soft_vacancy_cap
             notes.append("soft-vacancy rise cap")
+    if (
+        role_state.bucket == "starter_volatile"
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and soft_vacancy
+        and not role_state.recent_spike
+        and minute_volatility < 5.8
+    ):
+        soft_vacancy_floor = min(
+            role_state.upper_bound,
+            max(
+                role_state.lower_bound,
+                recent_blend - 0.9,
+                recency_anchor - 0.7,
+            ),
+        )
+        if projected < soft_vacancy_floor:
+            projected = soft_vacancy_floor
+            notes.append("soft-vacancy starter floor")
+    if (
+        role_state.bucket == "starter_volatile"
+        and role_state.recent_spike
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and not soft_vacancy
+        and not strong_vacancy
+        and minute_volatility < 8.5
+    ):
+        rise_buffer = 1.9
+        anchor_buffer = 1.3
+        last10_buffer = 1.1
+        if minute_volatility < 7.6:
+            rise_buffer = 1.5
+            anchor_buffer = 1.0
+            last10_buffer = 0.8
+        stable_rise_cap = max(
+            role_state.lower_bound,
+            min(
+                role_state.upper_bound,
+                max(
+                    recent_blend + rise_buffer,
+                    recency_anchor + anchor_buffer,
+                    last_10_minutes_avg + last10_buffer,
+                ),
+            ),
+        )
+        if projected > stable_rise_cap:
+            projected = stable_rise_cap
+            notes.append("stable-context starter rise cap")
+    if (
+        role_state.bucket == "starter_volatile"
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and not soft_vacancy
+        and not strong_vacancy
+        and not role_state.recent_spike
+        and minute_volatility < 6.6
+    ):
+        stable_starter_floor = min(
+            role_state.upper_bound,
+            max(
+                role_state.lower_bound,
+                recent_blend - 2.1,
+                recency_anchor - 1.7,
+            ),
+        )
+        if minute_volatility < 4.9 and abs(minutes_trend) < 1.6:
+            stable_starter_floor = min(
+                role_state.upper_bound,
+                max(
+                    stable_starter_floor,
+                    recent_blend - 1.4,
+                    recency_anchor - 1.2,
+                ),
+            )
+        if minute_volatility < 6.2 and abs(minutes_trend) < 0.8:
+            stable_starter_floor = min(
+                role_state.upper_bound,
+                max(
+                    stable_starter_floor,
+                    recent_blend - 1.5,
+                    recency_anchor - 1.0,
+                ),
+            )
+        if projected < stable_starter_floor:
+            projected = stable_starter_floor
+            notes.append("stable-context starter floor")
+    if (
+        role_state.bucket == "rotation"
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and soft_vacancy
+        and role_state.recent_spike
+        and minute_volatility < 6.4
+    ):
+        soft_vacancy_rotation_rise_cap = max(
+            role_state.lower_bound,
+            min(
+                role_state.upper_bound,
+                max(
+                    recent_blend + 1.4,
+                    recency_anchor + 0.9,
+                    last_10_minutes_avg + 0.7,
+                ),
+            ),
+        )
+        if projected > soft_vacancy_rotation_rise_cap:
+            projected = soft_vacancy_rotation_rise_cap
+            notes.append("soft-vacancy rotation rise cap")
+    if (
+        role_state.bucket == "rotation"
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and soft_vacancy
+    ):
+        soft_vacancy_floor = min(
+            role_state.upper_bound,
+            max(
+                role_state.lower_bound,
+                recent_blend - 0.6,
+                last_10_minutes_avg - 1.2,
+            ),
+        )
+        if projected < soft_vacancy_floor:
+            projected = soft_vacancy_floor
+            notes.append("soft-vacancy rotation floor")
+    if (
+        role_state.bucket == "rotation"
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and not soft_vacancy
+        and not strong_vacancy
+        and minute_volatility < 7.4
+        and abs(minutes_trend) < 4.0
+    ):
+        stable_rotation_floor = min(
+            role_state.upper_bound,
+            max(
+                role_state.lower_bound,
+                recent_blend - 1.6,
+                recency_anchor - 1.4,
+            ),
+        )
+        if minute_volatility < 7.3 and abs(minutes_trend) >= 3.0:
+            stable_rotation_floor = min(
+                role_state.upper_bound,
+                max(
+                    stable_rotation_floor,
+                    recent_blend - 1.3,
+                    recency_anchor - 1.1,
+                ),
+            )
+        if minute_volatility < 6.6 and abs(minutes_trend) < 3.0:
+            stable_rotation_floor = min(
+                role_state.upper_bound,
+                max(
+                    stable_rotation_floor,
+                    recent_blend - 1.2,
+                    recency_anchor - 0.9,
+                ),
+            )
+        if minute_volatility < 4.9 and abs(minutes_trend) < 1.6:
+            stable_rotation_floor = min(
+                role_state.upper_bound,
+                max(
+                    stable_rotation_floor,
+                    recent_blend - 1.1,
+                    recency_anchor - 1.0,
+                ),
+            )
+        if projected < stable_rotation_floor:
+            projected = stable_rotation_floor
+            notes.append("stable-context rotation floor")
+    if (
+        role_state.bucket == "rotation"
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and not soft_vacancy
+        and not strong_vacancy
+        and minute_volatility < 7.6
+        and abs(minutes_trend) < 2.5
+    ):
+        rise_buffer = 1.0
+        last10_buffer = 0.6
+        if minute_volatility >= 6.8:
+            rise_buffer = 0.8
+            last10_buffer = 0.5
+        stable_rotation_rise_cap = max(
+            role_state.lower_bound,
+            min(
+                role_state.upper_bound,
+                max(
+                    recent_blend + rise_buffer,
+                    last_10_minutes_avg + last10_buffer,
+                ),
+            ),
+        )
+        if projected > stable_rotation_rise_cap:
+            projected = stable_rotation_rise_cap
+            notes.append("stable-context rotation rise cap")
+    if (
+        role_state.bucket == "rotation"
+        and role_state.recent_spike
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and strong_vacancy
+        and minute_volatility < 7.4
+    ):
+        vacancy_rotation_rise_cap = max(
+            role_state.lower_bound,
+            min(
+                role_state.upper_bound,
+                max(
+                    recent_blend + 1.5,
+                    recency_anchor + 0.9,
+                    last_10_minutes_avg + 0.5,
+                ),
+            ),
+        )
+        if projected > vacancy_rotation_rise_cap:
+            projected = vacancy_rotation_rise_cap
+            notes.append("vacancy rotation rise cap")
+    if (
+        role_state.bucket == "rotation"
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and strong_vacancy
+        and minute_volatility < 6.6
+        and abs(minutes_trend) < 3.0
+    ):
+        stable_vacancy_rotation_cap = max(
+            role_state.lower_bound,
+            min(
+                role_state.upper_bound,
+                max(
+                    recent_blend + 1.25,
+                    recency_anchor + 0.75,
+                    last_10_minutes_avg - 0.1,
+                ),
+            ),
+        )
+        if projected > stable_vacancy_rotation_cap:
+            projected = stable_vacancy_rotation_cap
+            notes.append("stable-vacancy rotation rise cap")
+    if (
+        role_state.bucket == "starter_volatile"
+        and role_state.recent_spike
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and strong_vacancy
+        and minute_volatility < 6.8
+    ):
+        vacancy_starter_rise_cap = max(
+            role_state.lower_bound,
+            min(
+                role_state.upper_bound,
+                max(
+                    recent_blend + 1.9,
+                    recency_anchor + 1.1,
+                    last_10_minutes_avg + 0.7,
+                ),
+            ),
+        )
+        if projected > vacancy_starter_rise_cap:
+            projected = vacancy_starter_rise_cap
+            notes.append("vacancy starter rise cap")
+    if (
+        role_state.bucket in {"starter_volatile", "rotation"}
+        and injury_delta <= 0.0
+        and recent_absence_days is not None
+        and 7.0 <= recent_absence_days < 14.0
+        and minute_volatility < 6.8
+        and minutes_trend > -4.5
+        and not strong_vacancy
+    ):
+        absence_return_floor = min(
+            role_state.upper_bound,
+            max(
+                role_state.lower_bound,
+                recency_anchor - 1.1,
+                recent_blend - 1.4,
+            ),
+        )
+        if projected < absence_return_floor:
+            projected = absence_return_floor
+            notes.append("absence-return floor")
     dynamic_context = any(
         (
             abs(injury_delta) >= 1.0,
@@ -3580,10 +3979,22 @@ def _apply_minutes_hard_rules(
         vacancy_lift = min(2.0, same_position_unavailable_minutes / 18.0)
         last_10_floor = last_10_minutes_avg - 0.5
         recent_blend_floor = recent_blend + 0.25
-        if role_state.bucket == "rotation":
-            vacancy_lift = min(1.1, same_position_unavailable_minutes / 24.0)
-            last_10_floor = last_10_minutes_avg - 1.5
-            recent_blend_floor = recent_blend + 0.1
+        if role_state.bucket == "starter_volatile":
+            vacancy_lift = min(1.35, same_position_unavailable_minutes / 28.0)
+            last_10_floor = last_10_minutes_avg - 0.9
+            recent_blend_floor = recent_blend + 0.05
+            if not role_state.recent_spike:
+                vacancy_lift = min(0.45, same_position_unavailable_minutes / 80.0)
+                last_10_floor = last_10_minutes_avg - 2.1
+                recent_blend_floor = recent_blend - 0.3
+        elif role_state.bucket == "rotation":
+            vacancy_lift = min(0.65, same_position_unavailable_minutes / 36.0)
+            last_10_floor = last_10_minutes_avg - 2.0
+            recent_blend_floor = recent_blend - 0.1
+            if not role_state.recent_spike:
+                vacancy_lift = min(0.3, same_position_unavailable_minutes / 90.0)
+                last_10_floor = last_10_minutes_avg - 2.6
+                recent_blend_floor = recent_blend - 0.45
         elif role_state.bucket == "bench":
             vacancy_lift = min(1.4, same_position_unavailable_minutes / 22.0)
             last_10_floor = last_10_minutes_avg - 1.0
@@ -3802,6 +4213,22 @@ def _minutes_earned_blend_weight(
         if quiet_context_gap >= 0.75:
             quiet_context_penalty += min(0.12, (quiet_context_gap - 0.75) / 5.0)
         penalty = max(penalty, min(0.78, quiet_context_penalty))
+    if (
+        role_bucket == "rotation"
+        and minute_volatility < 7.5
+        and not recent_drop
+        and not recent_spike
+        and injury_delta <= 0.0
+        and (recent_absence_days is None or recent_absence_days < 7.0)
+        and same_position_unavailable_minutes < 10.0
+        and same_position_key_out_count < 1.0
+    ):
+        quiet_rotation_upside_gap = max(learned_minutes - recent_blend, 0.0)
+        if quiet_rotation_upside_gap >= 1.5:
+            quiet_rotation_penalty = 0.44 + min(0.18, (quiet_rotation_upside_gap - 1.5) / 4.0)
+            if minute_volatility < 6.0:
+                quiet_rotation_penalty += 0.04
+            penalty = max(penalty, min(0.78, quiet_rotation_penalty))
     earned_weight = base_weight * (1.0 - penalty)
     return max(0.03, min(base_weight, earned_weight))
 
@@ -4061,8 +4488,6 @@ def _model_fingerprint(conn: sqlite3.Connection) -> str:
     tables = [
         "player_game_stats",
         "games",
-        "injuries",
-        "manual_adjustments",
         "player_team_history",
         "team_game_results",
         "players",
@@ -5256,6 +5681,29 @@ def _cached_recent_opponent_factor(conn: sqlite3.Connection, opponent_id: int, m
     return cache[key]  # type: ignore[return-value]
 
 
+def _cached_team_rating_context(
+    conn: sqlite3.Connection,
+    team_id: int,
+    before_game_date: str | None,
+) -> dict[str, float]:
+    cache = _connection_training_cache_bucket(conn, "team_rating_context")
+    key = (int(team_id), str(before_game_date or ""))
+    if key not in cache:
+        cache[key] = _team_rating_context(conn, int(team_id), before_game_date)
+    return cache[key]  # type: ignore[return-value]
+
+
+def _cached_league_rating_context(
+    conn: sqlite3.Connection,
+    before_game_date: str | None,
+) -> dict[str, float]:
+    cache = _connection_training_cache_bucket(conn, "league_rating_context")
+    key = str(before_game_date or "")
+    if key not in cache:
+        cache[key] = _league_rating_context(conn, before_game_date)
+    return cache[key]  # type: ignore[return-value]
+
+
 def _cached_player_common_opponent_rows(
     conn: sqlite3.Connection,
     player_id: int,
@@ -5660,6 +6108,117 @@ def _pace_factor(conn: sqlite3.Connection, team_id: int, opponent_id: int) -> fl
     team_pace = _avg_scalar(conn, "SELECT AVG(possessions) FROM team_game_results WHERE team_id = ?", (team_id,)) or league_pace
     opponent_pace = _avg_scalar(conn, "SELECT AVG(possessions) FROM team_game_results WHERE team_id = ?", (opponent_id,)) or league_pace
     return _clamp(((team_pace + opponent_pace) / 2) / league_pace, 0.94, 1.06)
+
+
+def _team_rating_context(
+    conn: sqlite3.Connection,
+    team_id: int,
+    before_game_date: str | None,
+) -> dict[str, float]:
+    date_filter = "AND g.game_date < ?" if before_game_date else ""
+    params: list[object] = [int(team_id)]
+    if before_game_date:
+        params.append(str(before_game_date))
+    row = conn.execute(
+        f"""
+        WITH ranked AS (
+            SELECT
+                r.points,
+                r.opponent_points,
+                r.possessions,
+                ROW_NUMBER() OVER (
+                    ORDER BY g.game_date DESC, g.start_time DESC, r.game_id DESC, r.id DESC
+                ) AS rn
+            FROM team_game_results r
+            JOIN games g ON g.id = r.game_id
+            WHERE r.team_id = ?
+              {date_filter}
+        )
+        SELECT
+            COUNT(*) AS games,
+            COALESCE(SUM(points), 0.0) AS total_points,
+            COALESCE(SUM(opponent_points), 0.0) AS total_allowed,
+            COALESCE(SUM(possessions), 0.0) AS total_possessions,
+            COALESCE(SUM(CASE WHEN rn <= 10 THEN points ELSE 0 END), 0.0) AS recent_points,
+            COALESCE(SUM(CASE WHEN rn <= 10 THEN opponent_points ELSE 0 END), 0.0) AS recent_allowed,
+            COALESCE(SUM(CASE WHEN rn <= 10 THEN possessions ELSE 0 END), 0.0) AS recent_possessions,
+            COALESCE(SUM(CASE WHEN rn <= 10 THEN 1 ELSE 0 END), 0) AS recent_games
+        FROM ranked
+        """,
+        tuple(params),
+    ).fetchone()
+    if row is None:
+        return {
+            "games": 0.0,
+            "off_rating": 100.0,
+            "def_rating": 100.0,
+            "net_rating": 0.0,
+            "recent_off_rating": 100.0,
+            "recent_def_rating": 100.0,
+            "recent_net_rating": 0.0,
+        }
+    total_possessions = float(row["total_possessions"] or 0.0)
+    recent_possessions = float(row["recent_possessions"] or 0.0)
+    off_rating = (100.0 * float(row["total_points"] or 0.0)) / max(total_possessions, 1.0)
+    def_rating = (100.0 * float(row["total_allowed"] or 0.0)) / max(total_possessions, 1.0)
+    recent_off_rating = (100.0 * float(row["recent_points"] or 0.0)) / max(recent_possessions, 1.0)
+    recent_def_rating = (100.0 * float(row["recent_allowed"] or 0.0)) / max(recent_possessions, 1.0)
+    return {
+        "games": float(row["games"] or 0.0),
+        "off_rating": off_rating,
+        "def_rating": def_rating,
+        "net_rating": off_rating - def_rating,
+        "recent_off_rating": recent_off_rating,
+        "recent_def_rating": recent_def_rating,
+        "recent_net_rating": recent_off_rating - recent_def_rating,
+    }
+
+
+def _league_rating_context(
+    conn: sqlite3.Connection,
+    before_game_date: str | None,
+) -> dict[str, float]:
+    date_filter = "WHERE g.game_date < ?" if before_game_date else ""
+    params: tuple[object, ...] = (str(before_game_date),) if before_game_date else ()
+    row = conn.execute(
+        f"""
+        WITH ranked AS (
+            SELECT
+                r.points,
+                r.opponent_points,
+                r.possessions,
+                ROW_NUMBER() OVER (
+                    ORDER BY g.game_date DESC, g.start_time DESC, r.game_id DESC, r.id DESC
+                ) AS rn
+            FROM team_game_results r
+            JOIN games g ON g.id = r.game_id
+            {date_filter}
+        )
+        SELECT
+            COALESCE(SUM(points), 0.0) AS total_points,
+            COALESCE(SUM(opponent_points), 0.0) AS total_allowed,
+            COALESCE(SUM(possessions), 0.0) AS total_possessions,
+            COALESCE(SUM(CASE WHEN rn <= 40 THEN points ELSE 0 END), 0.0) AS recent_points,
+            COALESCE(SUM(CASE WHEN rn <= 40 THEN opponent_points ELSE 0 END), 0.0) AS recent_allowed,
+            COALESCE(SUM(CASE WHEN rn <= 40 THEN possessions ELSE 0 END), 0.0) AS recent_possessions
+        FROM ranked
+        """,
+        params,
+    ).fetchone()
+    total_possessions = float(row["total_possessions"] or 0.0) if row is not None else 0.0
+    recent_possessions = float(row["recent_possessions"] or 0.0) if row is not None else 0.0
+    off_rating = (100.0 * float(row["total_points"] or 0.0)) / max(total_possessions, 1.0) if row is not None else 100.0
+    def_rating = (100.0 * float(row["total_allowed"] or 0.0)) / max(total_possessions, 1.0) if row is not None else 100.0
+    recent_off_rating = (100.0 * float(row["recent_points"] or 0.0)) / max(recent_possessions, 1.0) if row is not None else 100.0
+    recent_def_rating = (100.0 * float(row["recent_allowed"] or 0.0)) / max(recent_possessions, 1.0) if row is not None else 100.0
+    return {
+        "off_rating": off_rating,
+        "def_rating": def_rating,
+        "net_rating": off_rating - def_rating,
+        "recent_off_rating": recent_off_rating,
+        "recent_def_rating": recent_def_rating,
+        "recent_net_rating": recent_off_rating - recent_def_rating,
+    }
 
 
 def _opponent_factor(conn: sqlite3.Connection, opponent_id: int, market: str) -> float:

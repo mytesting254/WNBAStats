@@ -438,7 +438,6 @@ def _source_signature(conn: sqlite3.Connection) -> str:
         "games",
         "players",
         "player_team_history",
-        "injuries",
         "team_game_results",
     ]
     parts: list[str] = []

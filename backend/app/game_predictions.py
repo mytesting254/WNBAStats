@@ -61,6 +61,16 @@ GAME_DIRECT_FEATURE_NAMES = [
     "away_recent_vs_season_allowed",
     "home_recent_vs_season_possessions",
     "away_recent_vs_season_possessions",
+    "home_season_off_rating",
+    "away_season_off_rating",
+    "home_season_def_rating",
+    "away_season_def_rating",
+    "home_recent_off_rating",
+    "away_recent_off_rating",
+    "home_recent_def_rating",
+    "away_recent_def_rating",
+    "season_net_rating_diff",
+    "recent_net_rating_diff",
     "spread_home",
     "game_total",
     "home_implied_prob",
@@ -576,6 +586,8 @@ def _direct_game_features(
     away_average_allowed = cache.team_average(away_team_id, "opponent_points")
     home_average_possessions = cache.team_average(home_team_id, "possessions")
     away_average_possessions = cache.team_average(away_team_id, "possessions")
+    home_recent_possessions = cache.weighted_recent(home_team_id, "possessions")
+    away_recent_possessions = cache.weighted_recent(away_team_id, "possessions")
     return _assemble_direct_game_features(
         home_recent_points=home_recent_points,
         away_recent_points=away_recent_points,
@@ -592,8 +604,16 @@ def _direct_game_features(
         rest_days_away=rest_days_away,
         home_game_count=cache.team_count(home_team_id),
         away_game_count=cache.team_count(away_team_id),
-        home_recent_possessions=cache.weighted_recent(home_team_id, "possessions"),
-        away_recent_possessions=cache.weighted_recent(away_team_id, "possessions"),
+        home_recent_possessions=home_recent_possessions,
+        away_recent_possessions=away_recent_possessions,
+        home_season_off_rating=_team_rating(home_average_points, home_average_possessions),
+        away_season_off_rating=_team_rating(away_average_points, away_average_possessions),
+        home_season_def_rating=_team_rating(home_average_allowed, home_average_possessions),
+        away_season_def_rating=_team_rating(away_average_allowed, away_average_possessions),
+        home_recent_off_rating=_team_rating(home_recent_points, home_recent_possessions),
+        away_recent_off_rating=_team_rating(away_recent_points, away_recent_possessions),
+        home_recent_def_rating=_team_rating(home_recent_allowed, home_recent_possessions),
+        away_recent_def_rating=_team_rating(away_recent_allowed, away_recent_possessions),
         spread_home=spread_home,
         game_total=game_total,
         home_moneyline=home_moneyline,
@@ -620,6 +640,14 @@ def _assemble_direct_game_features(
     away_game_count: int | float,
     home_recent_possessions: float,
     away_recent_possessions: float,
+    home_season_off_rating: float,
+    away_season_off_rating: float,
+    home_season_def_rating: float,
+    away_season_def_rating: float,
+    home_recent_off_rating: float,
+    away_recent_off_rating: float,
+    home_recent_def_rating: float,
+    away_recent_def_rating: float,
     spread_home: float | None,
     game_total: float | None,
     home_moneyline: float | None,
@@ -631,6 +659,18 @@ def _assemble_direct_game_features(
     season_allowed_delta = float(home_average_allowed) - float(away_average_allowed)
     recent_possessions_delta = float(home_recent_possessions) - float(away_recent_possessions)
     season_possessions_delta = float(home_average_possessions) - float(away_average_possessions)
+    season_net_rating_diff = (
+        float(home_season_off_rating)
+        - float(home_season_def_rating)
+        - float(away_season_off_rating)
+        + float(away_season_def_rating)
+    )
+    recent_net_rating_diff = (
+        float(home_recent_off_rating)
+        - float(home_recent_def_rating)
+        - float(away_recent_off_rating)
+        + float(away_recent_def_rating)
+    )
     home_implied_prob = _moneyline_implied_probability(home_moneyline) or 0.5
     away_implied_prob = _moneyline_implied_probability(away_moneyline) or 0.5
     vig_free_home_prob = _vig_free_home_probability(home_moneyline, away_moneyline) or 0.5
@@ -663,6 +703,16 @@ def _assemble_direct_game_features(
         float(away_recent_allowed) - float(away_average_allowed),
         float(home_recent_possessions) - float(home_average_possessions),
         float(away_recent_possessions) - float(away_average_possessions),
+        home_season_off_rating,
+        away_season_off_rating,
+        home_season_def_rating,
+        away_season_def_rating,
+        home_recent_off_rating,
+        away_recent_off_rating,
+        home_recent_def_rating,
+        away_recent_def_rating,
+        season_net_rating_diff,
+        recent_net_rating_diff,
         float(spread_home or 0.0),
         float(game_total or 0.0),
         home_implied_prob,
@@ -1075,6 +1125,10 @@ def _predict_direct_model(model: _DirectGameModel, features: list[float]) -> flo
     if model.target in {"total_market", "ats_market"}:
         return _clamp(prediction, -30.0, 30.0)
     return _clamp(prediction, 120.0, 220.0)
+
+
+def _team_rating(points_or_allowed: float, possessions: float) -> float:
+    return (100.0 * float(points_or_allowed)) / max(float(possessions), 1.0)
 
 
 def _baseline_points_from_context(

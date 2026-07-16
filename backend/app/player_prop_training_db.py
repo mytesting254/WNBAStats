@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .paths import get_training_db_path
 
-PLAYER_PROP_TRAINING_DB_VERSION = "v3"
+PLAYER_PROP_TRAINING_DB_VERSION = "v4"
 
 MARKET_SAMPLE_CURATION_POLICY: dict[str, dict[str, dict[str, float | bool]]] = {}
 
