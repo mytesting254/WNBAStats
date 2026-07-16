@@ -1639,8 +1639,6 @@ function DataView({
     : propSync.running
       ? propSync.message || `Started ${formatDateTime(propSync.started_at)}`
       : `Last finished ${formatDateTime(propSync.finished_at)}`;
-  const runtimeStorage = opsHealth?.runtime_storage;
-
   return (
     <section className="matchup-list">
       <div className="board-panel">
@@ -1758,27 +1756,6 @@ function DataView({
                 {authSubmitting ? "Signing Out" : `Sign Out (${authState.user?.username})`}
               </button>
             </div>
-        {runtimeStorage ? (
-          <article className="operation-card operation-card-storage">
-            <div>
-              <p className="eyebrow">runtime storage</p>
-              <h3>Source of Truth</h3>
-              <p>{runtimeStorage.team_boxscores_flow}</p>
-            </div>
-            <div className="detail-grid">
-              <Metric label="Canonical DB" value={runtimeStorage.source_of_truth} />
-              <Metric label="Training Store" value={runtimeStorage.training_store} />
-              <Metric label="Raw Team Stats" value={runtimeStorage.team_boxscores_table} />
-              <Metric label="Derived Results" value={runtimeStorage.team_results_table} />
-            </div>
-            <div className="storage-path-list">
-              <code>{runtimeStorage.db_path}</code>
-              <code>{runtimeStorage.training_db_path}</code>
-              <code>{runtimeStorage.cache_dir}</code>
-              <code>{runtimeStorage.snapshot_dir}</code>
-            </div>
-          </article>
-        ) : null}
         <div className="data-layout">
           <OperationCard
             title="The Odds API"
