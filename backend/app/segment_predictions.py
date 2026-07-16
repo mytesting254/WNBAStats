@@ -343,8 +343,9 @@ def _segment_features(
         home_moneyline=gp._coerce_float(game["home_moneyline"]),
         away_moneyline=gp._coerce_float(game["away_moneyline"]),
     )
-    home_segment_context = _team_segment_context(conn, team_id=home_team_id, game_date=str(game.get("game_date") or ""))
-    away_segment_context = _team_segment_context(conn, team_id=away_team_id, game_date=str(game.get("game_date") or ""))
+    game_date = str(_game_value(game, "game_date") or "")
+    home_segment_context = _team_segment_context(conn, team_id=home_team_id, game_date=game_date)
+    away_segment_context = _team_segment_context(conn, team_id=away_team_id, game_date=game_date)
     return [
         *base_features,
         float(home_segment_context["avg_q1_points"]),
@@ -431,3 +432,9 @@ def _append_segment_row(
     history["recent_first_half_points"] = recent_first_half_points[-5:]
     history["recent_first_half_allowed"] = recent_first_half_allowed[-5:]
     history["last_game_date"] = game_date
+
+
+def _game_value(game: Mapping[str, Any] | sqlite3.Row, key: str, default: Any = None) -> Any:
+    if isinstance(game, sqlite3.Row):
+        return game[key] if key in game.keys() else default
+    return game.get(key, default)
