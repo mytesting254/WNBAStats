@@ -1640,7 +1640,9 @@ function DataView({
       ? "Unknown"
       : propSync.running
         ? "Background Prop Sync"
-        : "Clear";
+        : propSync.finished_at
+          ? "Last Completed"
+          : "Clear";
   const pipelineDetail = pipelineRunning
     ? activePipeline!.waitingForBackground
       ? backendPipelineSync?.message || activePipeline!.detail
@@ -1653,6 +1655,9 @@ function DataView({
   const progressPercent = Math.max(0, Math.min(100, Math.round((propSync?.percent ?? 0) * 100)));
   const progressStageLabel = formatPropSyncStage(propSync?.stage);
   const queueLabel = propSync == null ? "Unknown" : propSync.running ? "Running" : "Clear";
+  const queueDisplayLabel = propSync == null ? "Unknown" : propSync.running ? "Running" : propSync.finished_at ? "Completed" : "Clear";
+  const pipelineRequestState = pipelineRunning ? "Active" : propSync?.finished_at ? "Completed" : "Idle";
+  const pipelineBackgroundState = pipelineRunning ? (activePipeline?.waitingForBackground ? "Queued" : "None") : (propSync?.running ? "Running" : propSync?.finished_at ? "Finished" : "Idle");
   const queueDetail = propSync == null
     ? "Operations health unavailable."
     : propSync.running
@@ -1689,26 +1694,26 @@ function DataView({
                     ? activePipeline?.waitingForBackground
                       ? formatPropSyncProgressCaption(backendPipelineSync ?? undefined)
                       : "Request is running on the backend."
-                    : propSync?.running
+                    : propSync?.running || propSync?.finished_at
                       ? formatPropSyncProgressCaption(propSync)
                       : "No active ingest request."}
                 </p>
               </div>
             </div>
             <div className="detail-grid detail-grid-compact">
-              <Metric label="Request" value={pipelineRunning ? "Active" : "Idle"} />
+              <Metric label="Request" value={pipelineRequestState} />
               <Metric label="Phase" value={pipelineStageLabel} />
               <Metric label="Started" value={pipelineRunning ? formatDateTime(activePipeline?.startedAt) : formatDateTime(propSync?.started_at)} />
               <Metric
                 label="Background"
-                value={pipelineRunning ? (activePipeline?.waitingForBackground ? "Queued" : "None") : (propSync?.running ? "Running" : "Idle")}
+                value={pipelineBackgroundState}
               />
             </div>
           </article>
           <article className="operation-card operation-card-compact">
             <div>
               <p className="eyebrow">prop sync queue</p>
-              <h3>{queueLabel}</h3>
+              <h3>{queueDisplayLabel}</h3>
               <p>{queueDetail}</p>
               {propSync ? (
                 <div className="progress-block" aria-live="polite">
