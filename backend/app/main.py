@@ -125,7 +125,7 @@ GEM_MIN_EDGE = float(os.getenv("GEM_MIN_EDGE", "0.05"))
 READ_CACHE_VERSION = 1
 INCREASED_ROLE_USAGE_THRESHOLD = 1.04
 INCREASED_ROLE_MINUTES_THRESHOLD = 1.0
-APP_RESPONSE_CACHE_VERSION = 2
+APP_RESPONSE_CACHE_VERSION = 3
 APP_RESPONSE_CACHE_TTL_SECONDS = int(os.getenv("APP_RESPONSE_CACHE_TTL_SECONDS", "3600"))
 VALUE_BOARD_TTL_SECONDS = int(os.getenv("VALUE_BOARD_TTL_SECONDS", "300"))
 WATCHLIST_TTL_SECONDS = int(os.getenv("WATCHLIST_TTL_SECONDS", "300"))
@@ -533,6 +533,7 @@ def _should_cache_app_response(request: Request) -> bool:
         "/api/cache/status",
         "/api/cache/events",
         "/api/props/sync-status",
+        "/api/matchups",
         "/api/special/stocks",
         "/api/roster",
     }:
