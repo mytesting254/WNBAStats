@@ -1721,14 +1721,20 @@ tbody tr.selected {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  white-space: nowrap;
 }
 
 .pace-value {
+  display: inline-block;
+  flex: 0 0 auto;
+  font: inherit;
+  line-height: inherit;
   font-variant-numeric: tabular-nums;
 }
 
 .pace-arrow {
-  font-size: 18px;
+  flex: 0 0 auto;
+  font-size: 22px;
   line-height: 1;
 }
 
@@ -1743,7 +1749,10 @@ tbody tr.selected {
 .pace-neutral-arrows {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
+  flex: 0 0 auto;
+  font-size: 22px;
+  line-height: 1;
 }
 
 .pace-arrow-left {
