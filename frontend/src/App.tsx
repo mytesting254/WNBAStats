@@ -5210,12 +5210,34 @@ function mergePropSyncProgress(previous: PropSyncHealth | null, next: PropSyncHe
 
   const previousJobId = previous.job_id ?? null;
   const nextJobId = next.job_id ?? null;
+  const previousUpdatedAt = Date.parse(previous.updated_at ?? "");
+  const nextUpdatedAt = Date.parse(next.updated_at ?? "");
+  const nextFinishedAt = Date.parse(next.finished_at ?? "");
+
   if (previousJobId != null && nextJobId != null && previousJobId !== nextJobId) {
     const previousStartedAt = Date.parse(previous.started_at ?? "");
     const nextStartedAt = Date.parse(next.started_at ?? "");
     if (!Number.isNaN(previousStartedAt) && !Number.isNaN(nextStartedAt) && nextStartedAt < previousStartedAt) {
       return previous;
     }
+    return next;
+  }
+
+  if (
+    previous.running
+    && !next.running
+    && (
+      previousJobId === nextJobId
+      || (
+        !Number.isNaN(nextUpdatedAt)
+        && (Number.isNaN(previousUpdatedAt) || nextUpdatedAt >= previousUpdatedAt)
+      )
+      || (
+        !Number.isNaN(nextFinishedAt)
+        && (Number.isNaN(previousUpdatedAt) || nextFinishedAt >= previousUpdatedAt)
+      )
+    )
+  ) {
     return next;
   }
 
@@ -5233,8 +5255,6 @@ function mergePropSyncProgress(previous: PropSyncHealth | null, next: PropSyncHe
     return previous;
   }
 
-  const previousUpdatedAt = Date.parse(previous.updated_at ?? "");
-  const nextUpdatedAt = Date.parse(next.updated_at ?? "");
   if (!Number.isNaN(previousUpdatedAt) && !Number.isNaN(nextUpdatedAt) && nextUpdatedAt < previousUpdatedAt) {
     return previous;
   }

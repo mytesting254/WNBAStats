@@ -1078,6 +1078,11 @@ def _resolved_prop_sync_state() -> tuple[dict[str, Any], dict[str, Any] | None]:
     if sync_job_id is None:
         return latest_job, latest_job
     if latest_job_id is not None and sync_job_id != latest_job_id:
+        # The persisted job table is the durable source of truth across
+        # container restarts and background-thread handoffs. When it reports a
+        # different job id, prefer that record over older in-memory state.
+        if latest_job_id > int(sync_job_id):
+            return latest_job, latest_job
         if latest_updated_at and (not sync_updated_at or latest_updated_at >= sync_updated_at):
             return latest_job, latest_job
         return sync_state, latest_job
