@@ -2778,7 +2778,10 @@ function PropsView({
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
-                        <span>{prop.team} | {displaySportsbookName(prop)}</span>
+                        <span className="sportsbook-inline">
+                          <span>{prop.team} | </span>
+                          <SportsbookLogo name={displaySportsbookName(prop)} />
+                        </span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-l5`)}
                       </div>
                     </div>
@@ -2811,7 +2814,10 @@ function PropsView({
               <div className="detail-title">
                 <TeamLogo src={selected.team_logo_url} alt={`${selected.team} logo`} />
                 <div>
-                  <p className="eyebrow">{selected.team} | {displaySportsbookName(selected)}</p>
+                  <p className="eyebrow sportsbook-inline">
+                    <span>{selected.team} | </span>
+                    <SportsbookLogo name={displaySportsbookName(selected)} />
+                  </p>
                   <h3><PlayerLabel name={selected.player} position={selected.position} increasedRole={selected.increased_role} /></h3>
                 </div>
               </div>
@@ -3061,7 +3067,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                     {renderRecentFormWithMinutes(g, `${g.id}-gem-flat-l5`)}
                   </td>
                   <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
-                  <td>{displaySportsbookName(g)}</td>
+                  <td><SportsbookLogo name={displaySportsbookName(g)} /></td>
                   <td>{formatPercent(g.edge)}</td>
                   <td>{formatPercent(g.expected_value)}</td>
                   <td>{g.line_gap.toFixed(1)}</td>
@@ -3148,7 +3154,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                             {renderRecentFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-l5`)}
                           </td>
                           <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
-                          <td>{displaySportsbookName(g)}</td>
+                          <td><SportsbookLogo name={displaySportsbookName(g)} /></td>
                           <td>{formatPercent(g.edge)}</td>
                           <td>{formatPercent(g.expected_value)}</td>
                           <td>
@@ -3261,14 +3267,15 @@ function DiscrepanciesView({
                     <span>{item.price_gap} cents</span>
                   </td>
                   <td>
-                    <strong>{item.best_price.sportsbook}</strong>
+                    <strong><SportsbookLogo name={item.best_price.sportsbook} /></strong>
                     <span>{item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}</span>
                   </td>
                   <td>
                     <div className="book-line-list">
                       {item.book_lines.map((book) => (
                         <span key={`${item.player_name}-${item.market}-${item.side}-${book.sportsbook}-${book.line}-${book.price}`}>
-                          {book.sportsbook}: {book.line.toFixed(1)} {formatAmerican(book.price)}
+                          <SportsbookLogo name={book.sportsbook} className="compact" />
+                          <span>{book.line.toFixed(1)} {formatAmerican(book.price)}</span>
                         </span>
                       ))}
                     </div>
@@ -4095,7 +4102,7 @@ function WatchlistView({
                       </td>
                       <td>{marketLabel(prop.market)}</td>
                       <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
-                      <td>{displaySportsbookName(prop)}</td>
+                      <td><SportsbookLogo name={displaySportsbookName(prop)} /></td>
                       <td>{prop.line.toFixed(1)}</td>
                       <td>{prop.projection.toFixed(1)}</td>
                       <td>{formatSigned(prop.projection - prop.line)}</td>
@@ -4780,7 +4787,8 @@ function MatchupProps({
               <span>{marketLabel(item.market)} | {item.side.toUpperCase()}</span>
               <strong>{item.player_name}</strong>
               <em>
-                {item.best_price.sportsbook} {item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}
+                <SportsbookLogo name={item.best_price.sportsbook} className="compact" />
+                {" "}{item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}
                 {" | "}Gap {item.line_gap.toFixed(1)}
               </em>
             </div>
@@ -4820,7 +4828,7 @@ function MatchupProps({
                   </td>
                   <td>{marketLabel(prop.market)}</td>
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
-                  <td>{displaySportsbookName(prop)}</td>
+                  <td><SportsbookLogo name={displaySportsbookName(prop)} /></td>
                   <td>{prop.line.toFixed(1)}</td>
                   <td>{prop.projection.toFixed(1)}</td>
                   <td>{formatSigned(prop.projection - prop.line)}</td>
@@ -4882,15 +4890,15 @@ function LineGapsTable({ discrepancies }: { discrepancies: LineDiscrepancy[] }) 
                 <td>{marketLabel(item.market)}</td>
                 <td><span className={`side ${item.side}`}>{item.side}</span></td>
                 <td>
-                  <strong>{item.best_price.sportsbook}</strong>
+                  <strong><SportsbookLogo name={item.best_price.sportsbook} /></strong>
                   <span>{item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}</span>
                 </td>
                 <td>
-                  <strong>{item.low_line.sportsbook}</strong>
+                  <strong><SportsbookLogo name={item.low_line.sportsbook} /></strong>
                   <span>{item.low_line.line.toFixed(1)} {formatAmerican(item.low_line.price)}</span>
                 </td>
                 <td>
-                  <strong>{item.high_line.sportsbook}</strong>
+                  <strong><SportsbookLogo name={item.high_line.sportsbook} /></strong>
                   <span>{item.high_line.line.toFixed(1)} {formatAmerican(item.high_line.price)}</span>
                 </td>
                 <td>{item.books}</td>
@@ -4927,7 +4935,7 @@ function SportsbookLinesTable({ lines, total }: { lines: Matchup["sportsbook_pro
                 <td><span className={`side ${item.side}`}>{item.side}</span></td>
                 <td>{item.line.toFixed(1)}</td>
                 <td>{formatAmerican(item.price)}</td>
-                <td>{item.sportsbook}</td>
+                <td><SportsbookLogo name={item.sportsbook} /></td>
               </tr>
             ))}
             {total > lines.length && (
@@ -5055,6 +5063,38 @@ function TeamLogo({ src, alt }: { src?: string | null; alt: string }) {
     return <div className="team-logo fallback" aria-hidden="true" />;
   }
   return <img className="team-logo" src={src} alt={alt} loading="lazy" onError={() => setFailed(true)} />;
+}
+
+function SportsbookLogo({
+  name,
+  className = ""
+}: {
+  name: string;
+  className?: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  const label = String(name || "").trim() || "Unknown";
+  const file = sportsbookLogoFile(label);
+
+  useEffect(() => {
+    setFailed(false);
+  }, [file]);
+
+  if (!file || failed) {
+    return <span className={`sportsbook-badge fallback ${className}`.trim()}>{label}</span>;
+  }
+
+  return (
+    <span className={`sportsbook-badge ${className}`.trim()} title={label}>
+      <img
+        className="sportsbook-logo"
+        src={`/sportsbook-logos/${file}.svg`}
+        alt={`${label} logo`}
+        loading="lazy"
+        onError={() => setFailed(true)}
+      />
+    </span>
+  );
 }
 
 function PlayerLabel({
@@ -5850,6 +5890,24 @@ function compareDiscrepancies(a: LineDiscrepancy, b: LineDiscrepancy, field: Dis
 
 function displaySportsbookName(item: { sportsbook: string; display_sportsbook?: string | null }) {
   return item.display_sportsbook?.trim() || item.sportsbook?.trim() || "Unknown";
+}
+
+function sportsbookLogoFile(name: string) {
+  const normalized = name.trim().toLowerCase();
+  const aliases: Record<string, string> = {
+    "bet mgm": "betmgm",
+    betmgm: "betmgm",
+    caesars: "caesars",
+    "caesars sportsbook": "caesars",
+    draftkings: "draftkings",
+    "draft kings": "draftkings",
+    espnbet: "espn-bet",
+    "espn bet": "espn-bet",
+    fanduel: "fanduel",
+    fanatics: "fanatics",
+    "fanatics sportsbook": "fanatics"
+  };
+  return aliases[normalized] ?? null;
 }
 
 function sportsbookFilterOptions(items: Array<{ sportsbook: string; display_sportsbook?: string | null }>) {
