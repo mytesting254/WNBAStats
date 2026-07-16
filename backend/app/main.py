@@ -64,6 +64,7 @@ from .prop_ingestion import (
 from .projections import LiveRebuildResult, rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
 from .settlement import settle_completed_props
+from .segment_predictions import project_game_segments
 from .stocks_tracking import (
     SPECIALS_DEFAULT_HIGH_THRESHOLD,
     SPECIALS_DEFAULT_WATCH_THRESHOLD,
@@ -3239,6 +3240,7 @@ def _build_matchup_payload_item(
     game_context["rest_days_home"] = home_rest_days if home_rest_days is not None else 2
     game_context["rest_days_away"] = away_rest_days if away_rest_days is not None else 2
     prediction = project_game(conn, game_context, runtime_cache=game_prediction_cache)
+    segment_prediction = project_game_segments(conn, game_context, runtime_cache=game_prediction_cache)
     game_prediction_id = _latest_game_prediction_id(conn, game_id)
     market_payload = _matchup_game_markets(game_context)
     home_team_ratings = team_ratings_by_team_id.get(int(game["home_team_id"]))
@@ -3279,6 +3281,7 @@ def _build_matchup_payload_item(
         **prediction_state,
         "blowout_risk": _blowout_display(game_context["spread_home"], "starter")["blowout_risk"],
         **prediction,
+        **segment_prediction,
         "home": home_summary,
         "away": away_summary,
         "covers_records": group_covers_records,

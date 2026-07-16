@@ -48,3 +48,14 @@ def get_training_db_path() -> Path:
         base_dir = Path(db_override).resolve().parent
         return base_dir / "wnba-training.sqlite"
     return get_data_dir() / "wnba-training.sqlite"
+
+
+def get_segment_training_db_path() -> Path:
+    override = os.getenv("WNBA_SEGMENT_TRAINING_DB_PATH")
+    if override:
+        return Path(override)
+    db_override = os.getenv("WNBA_DB_PATH")
+    if db_override:
+        base_dir = Path(db_override).resolve().parent
+        return base_dir / "wnba-segment-training.sqlite"
+    return get_data_dir() / "wnba-segment-training.sqlite"

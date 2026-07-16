@@ -3406,6 +3406,8 @@ function MatchupsView({
                 <MiniStat label="ATS Pick" value={selectedMatchup.ats_pick} />
                 <MiniStat label="ATS Pick Edge" value={formatAtsPickEdge(selectedMatchup)} />
                 <MiniStat label="Projected Total" value={formatProjectedTotal(selectedMatchup)} />
+                <MiniStat label="Q1 Total Proj" value={formatSegmentTotal(selectedMatchup.projected_q1_total)} />
+                <MiniStat label="1H Total Proj" value={formatSegmentTotal(selectedMatchup.projected_first_half_total)} />
                 <MiniStat label="O/U Edge" value={formatNullableEdge(selectedMatchup.total_edge)} />
                 <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
                 <MiniStat
@@ -4632,6 +4634,8 @@ function MatchupProps({
         <MiniStat label="ATS Pick" value={matchup.ats_pick} />
         <MiniStat label="ATS Pick Edge" value={formatAtsPickEdge(matchup)} />
         <MiniStat label="Projected Total" value={formatProjectedTotal(matchup)} />
+        <MiniStat label="Q1 Total Proj" value={formatSegmentTotal(matchup.projected_q1_total)} />
+        <MiniStat label="1H Total Proj" value={formatSegmentTotal(matchup.projected_first_half_total)} />
         <MiniStat label="O/U Edge" value={formatNullableEdge(matchup.total_edge)} />
         <MiniStat label="Confidence" value={matchup.game_confidence} />
       </div>
@@ -6135,6 +6139,13 @@ function formatProjectedTotal(matchup: Matchup) {
     return "N/A";
   }
   return `${matchup.total_pick} ${matchup.projected_total.toFixed(1)}`;
+}
+
+function formatSegmentTotal(value: number | null | undefined) {
+  if (value == null) {
+    return "N/A";
+  }
+  return value.toFixed(1);
 }
 
 function formatAtsPickEdge(matchup: Matchup) {

@@ -708,6 +708,8 @@ export type Matchup = {
   away_projected_points: number | null;
   projected_margin: number | null;
   projected_total: number | null;
+  projected_q1_total?: number | null;
+  projected_first_half_total?: number | null;
   winner_pick: string;
   ats_pick: string;
   ats_edge: number | null;

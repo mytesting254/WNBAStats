@@ -374,6 +374,26 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS game_segment_results (
+                game_id INTEGER PRIMARY KEY,
+                home_q1_points INTEGER,
+                away_q1_points INTEGER,
+                home_q2_points INTEGER,
+                away_q2_points INTEGER,
+                home_1h_points INTEGER,
+                away_1h_points INTEGER,
+                home_q3_points INTEGER,
+                away_q3_points INTEGER,
+                home_q4_points INTEGER,
+                away_q4_points INTEGER,
+                source TEXT NOT NULL DEFAULT 'espn_summary',
+                captured_at TEXT NOT NULL,
+                FOREIGN KEY (game_id) REFERENCES games(id)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS sportsbook_prop_lines (
                 id INTEGER PRIMARY KEY,
                 provider TEXT NOT NULL,
@@ -1005,6 +1025,23 @@ CREATE TABLE IF NOT EXISTS team_game_boxscores (
     FOREIGN KEY (game_id) REFERENCES games(id),
     FOREIGN KEY (team_id) REFERENCES teams(id),
     UNIQUE(game_id, team_id)
+);
+
+CREATE TABLE IF NOT EXISTS game_segment_results (
+    game_id INTEGER PRIMARY KEY,
+    home_q1_points INTEGER,
+    away_q1_points INTEGER,
+    home_q2_points INTEGER,
+    away_q2_points INTEGER,
+    home_1h_points INTEGER,
+    away_1h_points INTEGER,
+    home_q3_points INTEGER,
+    away_q3_points INTEGER,
+    home_q4_points INTEGER,
+    away_q4_points INTEGER,
+    source TEXT NOT NULL DEFAULT 'espn_summary',
+    captured_at TEXT NOT NULL,
+    FOREIGN KEY (game_id) REFERENCES games(id)
 );
 
 CREATE TABLE IF NOT EXISTS injuries (

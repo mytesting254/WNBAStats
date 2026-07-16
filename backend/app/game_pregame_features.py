@@ -18,13 +18,23 @@ def build_team_pregame_features(
     use_injury_context: bool = False,
     runtime_cache: dict[str, dict[tuple, object]] | None = None,
 ) -> dict[str, float]:
+    cache = runtime_cache.setdefault("team_pregame_features", {}) if runtime_cache is not None else None
+    cache_key = (int(team_id), int(game_id), str(before_game_date or ""), bool(use_injury_context))
+    if cache is not None and cache_key in cache:
+        cached = cache[cache_key]
+        if isinstance(cached, dict):
+            return dict(cached)
     players = _candidate_team_players(
         conn,
         team_id=team_id,
         before_game_date=before_game_date,
+        runtime_cache=runtime_cache,
     )
     if not players:
-        return _empty_team_pregame_features()
+        empty = _empty_team_pregame_features()
+        if cache is not None:
+            cache[cache_key] = dict(empty)
+        return empty
 
     rows: list[dict[str, float]] = []
     for player_id in players:
@@ -41,7 +51,10 @@ def build_team_pregame_features(
             rows.append(projection_row)
 
     if not rows:
-        return _empty_team_pregame_features()
+        empty = _empty_team_pregame_features()
+        if cache is not None:
+            cache[cache_key] = dict(empty)
+        return empty
 
     rows.sort(key=lambda item: (item["projected_minutes"], item["projected_points"]), reverse=True)
     total_minutes = sum(item["projected_minutes"] for item in rows)
@@ -55,7 +68,7 @@ def build_team_pregame_features(
     rebounder_count = sum(1 for item in rows if item["projected_rebounds"] >= 4.0)
     minute_floor_players = sum(1 for item in rows if item["projected_minutes"] >= 16.0)
 
-    return {
+    features = {
         "projected_minutes_total": round(total_minutes, 3),
         "projected_points_total": round(total_points, 3),
         "projected_rebounds_total": round(total_rebounds, 3),
@@ -67,6 +80,9 @@ def build_team_pregame_features(
         "rebounder_count": float(rebounder_count),
         "core_minutes_count": float(minute_floor_players),
     }
+    if cache is not None:
+        cache[cache_key] = dict(features)
+    return features
 
 
 def _candidate_team_players(
@@ -74,7 +90,14 @@ def _candidate_team_players(
     *,
     team_id: int,
     before_game_date: str | None,
+    runtime_cache: dict[str, dict[tuple, object]] | None = None,
 ) -> list[int]:
+    cache = runtime_cache.setdefault("candidate_team_players", {}) if runtime_cache is not None else None
+    cache_key = (int(team_id), str(before_game_date or ""))
+    if cache is not None and cache_key in cache:
+        cached = cache[cache_key]
+        if isinstance(cached, list):
+            return [int(player_id) for player_id in cached]
     params: list[object] = [int(team_id)]
     date_filter = ""
     if before_game_date:
@@ -113,6 +136,8 @@ def _candidate_team_players(
             player_ids.append(player_id)
         if len(player_ids) >= ROSTER_PLAYER_LIMIT:
             break
+    if cache is not None:
+        cache[cache_key] = list(player_ids)
     return player_ids
 
 
@@ -126,6 +151,14 @@ def _player_team_projection_row(
     use_injury_context: bool,
     runtime_cache: dict[str, dict[tuple, object]] | None,
 ) -> dict[str, float] | None:
+    cache = runtime_cache.setdefault("player_team_projection_row", {}) if runtime_cache is not None else None
+    cache_key = (int(player_id), int(team_id), int(game_id), str(before_game_date or ""), bool(use_injury_context))
+    if cache is not None and cache_key in cache:
+        cached = cache[cache_key]
+        if cached is None:
+            return None
+        if isinstance(cached, dict):
+            return dict(cached)
     shared = _shared_projection_context(
         conn,
         player_id=player_id,
@@ -138,25 +171,34 @@ def _player_team_projection_row(
     )
     context = shared.get("context") if isinstance(shared, dict) else None
     if not isinstance(context, dict) or int(context.get("team_id") or 0) != int(team_id):
+        if cache is not None:
+            cache[cache_key] = None
         return None
     history_rows = list(shared.get("history_rows") or [])
     if not history_rows:
+        if cache is not None:
+            cache[cache_key] = None
         return None
     current_team_rows = _current_team_rows(history_rows, team_id=team_id)
     sample_rows = current_team_rows or history_rows[:5]
     projected_minutes = float(shared.get("projected_minutes") or 0.0)
     if projected_minutes <= 0.0:
+        if cache is not None:
+            cache[cache_key] = None
         return None
 
     points_rate = _weighted_rate(sample_rows, "points")
     rebounds_rate = _weighted_rate(sample_rows, "rebounds")
     assists_rate = _weighted_rate(sample_rows, "assists")
-    return {
+    row = {
         "projected_minutes": projected_minutes,
         "projected_points": max(0.0, projected_minutes * points_rate),
         "projected_rebounds": max(0.0, projected_minutes * rebounds_rate),
         "projected_assists": max(0.0, projected_minutes * assists_rate),
     }
+    if cache is not None:
+        cache[cache_key] = dict(row)
+    return row
 
 
 def _current_team_rows(history_rows: list[sqlite3.Row], *, team_id: int) -> list[sqlite3.Row]:

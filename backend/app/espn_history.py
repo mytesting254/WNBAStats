@@ -65,6 +65,7 @@ def import_espn_scoreboard(
     payload = fetch_scoreboard(season, force_refresh=force_refresh, selected_date=selected_date)
     inserted_games = 0
     inserted_results = 0
+    updated_game_segment_results = 0
 
     for event in payload.get("events", []):
         competition = _competition(event)
@@ -169,6 +170,7 @@ def import_espn_scoreboard(
                 ],
             )
             inserted_results += 2
+            updated_game_segment_results += _upsert_game_segment_results(conn, game_id, summary_payload)
         inserted_games += 1
 
     conn.commit()
@@ -177,6 +179,7 @@ def import_espn_scoreboard(
         "selected_date": selected_date,
         "inserted_games": inserted_games,
         "inserted_team_game_results": inserted_results,
+        "updated_game_segment_results": updated_game_segment_results,
         "source": "espn_scoreboard",
     }
 
@@ -224,6 +227,7 @@ def import_espn_player_boxscores(
     skipped_games = 0
     updated_team_game_results = 0
     updated_team_game_boxscores = 0
+    updated_game_segment_results = 0
     existing_player_ids = {
         int(row["id"])
         for row in conn.execute("SELECT id FROM players").fetchall()
@@ -263,6 +267,7 @@ def import_espn_player_boxscores(
 
         updated_team_game_boxscores += _upsert_team_game_boxscores(conn, game_id, payload)
         updated_team_game_results += _update_team_game_result_possessions(conn, game_id, payload)
+        updated_game_segment_results += _upsert_game_segment_results(conn, game_id, payload)
         player_rows = _player_stat_rows(conn, game_id, payload)
         injury_rows = _injury_availability_rows(conn, game_id, payload, player_rows)
         if not player_rows and not injury_rows:
@@ -373,6 +378,7 @@ def import_espn_player_boxscores(
         "recorded_player_game_availability": len(availability_rows),
         "updated_team_game_results": updated_team_game_results,
         "updated_team_game_boxscores": updated_team_game_boxscores,
+        "updated_game_segment_results": updated_game_segment_results,
         "deleted_dnp_prop_lines": deleted_dnp_prop_lines,
         "missing_only": missing_only,
         "source": "espn_summary",
@@ -414,6 +420,7 @@ def backfill_espn_team_possessions(
 
     updated_team_game_results = 0
     updated_team_game_boxscores = 0
+    updated_game_segment_results = 0
     skipped_games = 0
 
     def fetch_game(game) -> tuple[int, int, dict[str, Any] | None]:
@@ -442,6 +449,7 @@ def backfill_espn_team_possessions(
             continue
         updated_team_game_boxscores += _upsert_team_game_boxscores(conn, game_id, payload)
         updated = _update_team_game_result_possessions(conn, game_id, payload)
+        updated_game_segment_results += _upsert_game_segment_results(conn, game_id, payload)
         updated_team_game_results += updated
         if updated <= 0:
             skipped_games += 1
@@ -453,6 +461,7 @@ def backfill_espn_team_possessions(
         "games_checked": len(games),
         "updated_team_game_results": updated_team_game_results,
         "updated_team_game_boxscores": updated_team_game_boxscores,
+        "updated_game_segment_results": updated_game_segment_results,
         "games_with_updates": updated_team_game_results // 2,
         "skipped_games": skipped_games,
         "only_placeholder": only_placeholder,
@@ -682,6 +691,90 @@ def _upsert_team_game_boxscores(conn: sqlite3.Connection, game_id: int, payload:
         rows,
     )
     return len(rows)
+
+
+def _upsert_game_segment_results(conn: sqlite3.Connection, game_id: int, payload: dict[str, Any] | None) -> int:
+    segment = _summary_game_segment_row(payload)
+    if segment is None:
+        return 0
+    captured_at = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """
+        INSERT INTO game_segment_results (
+            game_id,
+            home_q1_points, away_q1_points,
+            home_q2_points, away_q2_points,
+            home_1h_points, away_1h_points,
+            home_q3_points, away_q3_points,
+            home_q4_points, away_q4_points,
+            source, captured_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(game_id) DO UPDATE SET
+            home_q1_points = excluded.home_q1_points,
+            away_q1_points = excluded.away_q1_points,
+            home_q2_points = excluded.home_q2_points,
+            away_q2_points = excluded.away_q2_points,
+            home_1h_points = excluded.home_1h_points,
+            away_1h_points = excluded.away_1h_points,
+            home_q3_points = excluded.home_q3_points,
+            away_q3_points = excluded.away_q3_points,
+            home_q4_points = excluded.home_q4_points,
+            away_q4_points = excluded.away_q4_points,
+            source = excluded.source,
+            captured_at = excluded.captured_at
+        """,
+        (game_id, *segment, "espn_summary", captured_at),
+    )
+    return 1
+
+
+def _summary_game_segment_row(payload: dict[str, Any] | None) -> tuple[int | None, ...] | None:
+    if not isinstance(payload, dict):
+        return None
+    competitors = (((payload.get("header") or {}).get("competitions") or [{}])[0].get("competitors") or [])
+    home = _competitor(competitors, "home")
+    away = _competitor(competitors, "away")
+    if not home or not away:
+        return None
+
+    home_lines = _competitor_linescores(home)
+    away_lines = _competitor_linescores(away)
+    if not home_lines or not away_lines:
+        return None
+
+    home_q1 = home_lines[0] if len(home_lines) >= 1 else None
+    away_q1 = away_lines[0] if len(away_lines) >= 1 else None
+    home_q2 = home_lines[1] if len(home_lines) >= 2 else None
+    away_q2 = away_lines[1] if len(away_lines) >= 2 else None
+    home_q3 = home_lines[2] if len(home_lines) >= 3 else None
+    away_q3 = away_lines[2] if len(away_lines) >= 3 else None
+    home_q4 = home_lines[3] if len(home_lines) >= 4 else None
+    away_q4 = away_lines[3] if len(away_lines) >= 4 else None
+    home_1h = (home_q1 or 0) + (home_q2 or 0) if home_q1 is not None or home_q2 is not None else None
+    away_1h = (away_q1 or 0) + (away_q2 or 0) if away_q1 is not None or away_q2 is not None else None
+
+    return (
+        home_q1,
+        away_q1,
+        home_q2,
+        away_q2,
+        home_1h,
+        away_1h,
+        home_q3,
+        away_q3,
+        home_q4,
+        away_q4,
+    )
+
+
+def _competitor_linescores(competitor: dict[str, Any]) -> list[int]:
+    values: list[int] = []
+    for item in competitor.get("linescores") or []:
+        value = _parse_int(item.get("displayValue"))
+        if value is None:
+            continue
+        values.append(value)
+    return values
 
 
 def _summary_team_boxscore_row(
