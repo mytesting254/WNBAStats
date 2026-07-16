@@ -872,6 +872,11 @@ games for stabilization, and blends same-home/away plus scheduled-game
 ET-today run in about `1m 1s` for `3` prepared games, `79` candidates, and
 `79` fresh snapshots.
 
+The `Special Props` tab now exposes calibration tables for both `2+ Stocks Prob`
+and `3+ Stocks Prob`. Each table shows settled count, hits, average predicted
+probability, and realized hit rate by probability bucket so the UI can compare
+how the 2+ and 3+ models are tracking separately.
+
 Network access notes:
 
 - `dev.sh` defaults to `127.0.0.1` outside Codespaces and `0.0.0.0` inside Codespaces. Override with `BACKEND_HOST` or `FRONTEND_HOST` if needed.

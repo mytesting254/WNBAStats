@@ -1531,6 +1531,7 @@ def special_stocks_stats() -> dict[str, Any]:
             "recommended_candidate_hit_rate_2_plus": None,
             "threshold_recommendations": default_special_threshold_recommendations(),
             "calibration_buckets": empty_buckets,
+            "calibration_buckets_3_plus": empty_buckets,
         }
     with connect() as conn:
         prune_special_snapshots(conn)
@@ -1559,28 +1560,33 @@ def special_stocks_stats() -> dict[str, Any]:
         ("50-60%", 0.5, 0.6),
         ("60%+", 0.6, None),
     ]
-    calibration_buckets: list[dict[str, Any]] = []
-    for label, min_prob, max_prob in bucket_defs:
-        bucket_rows = [
-            row for row in settled_rows
-            if float(_row_value(row, "stocks_prob_2_plus") or 0.0) >= min_prob
-            and (max_prob is None or float(_row_value(row, "stocks_prob_2_plus") or 0.0) < max_prob)
-        ]
-        bucket_hits = sum(1 for row in bucket_rows if float(_row_value(row, "actual_stocks") or 0.0) >= 2.0)
-        avg_bucket_prob = (
-            sum(float(_row_value(row, "stocks_prob_2_plus") or 0.0) for row in bucket_rows) / len(bucket_rows)
-            if bucket_rows
-            else None
-        )
-        calibration_buckets.append({
-            "label": label,
-            "min_prob": min_prob,
-            "max_prob": max_prob,
-            "count": len(bucket_rows),
-            "hits": bucket_hits,
-            "avg_prob": round(avg_bucket_prob, 4) if avg_bucket_prob is not None else None,
-            "hit_rate": round(bucket_hits / len(bucket_rows), 4) if bucket_rows else None,
-        })
+    def _calibration_buckets(prob_key: str, hit_threshold: float) -> list[dict[str, Any]]:
+        buckets: list[dict[str, Any]] = []
+        for label, min_prob, max_prob in bucket_defs:
+            bucket_rows = [
+                row for row in settled_rows
+                if float(_row_value(row, prob_key) or 0.0) >= min_prob
+                and (max_prob is None or float(_row_value(row, prob_key) or 0.0) < max_prob)
+            ]
+            bucket_hits = sum(1 for row in bucket_rows if float(_row_value(row, "actual_stocks") or 0.0) >= hit_threshold)
+            avg_bucket_prob = (
+                sum(float(_row_value(row, prob_key) or 0.0) for row in bucket_rows) / len(bucket_rows)
+                if bucket_rows
+                else None
+            )
+            buckets.append({
+                "label": label,
+                "min_prob": min_prob,
+                "max_prob": max_prob,
+                "count": len(bucket_rows),
+                "hits": bucket_hits,
+                "avg_prob": round(avg_bucket_prob, 4) if avg_bucket_prob is not None else None,
+                "hit_rate": round(bucket_hits / len(bucket_rows), 4) if bucket_rows else None,
+            })
+        return buckets
+
+    calibration_buckets = _calibration_buckets("stocks_prob_2_plus", 2.0)
+    calibration_buckets_3_plus = _calibration_buckets("stocks_prob_3_plus", 3.0)
     threshold_recommendations = fit_special_threshold_recommendations(settled_rows)
     recommended_candidate_threshold = float(
         threshold_recommendations.get("high_confidence_threshold") or SPECIALS_DEFAULT_HIGH_THRESHOLD
@@ -1614,6 +1620,7 @@ def special_stocks_stats() -> dict[str, Any]:
         ),
         "threshold_recommendations": threshold_recommendations,
         "calibration_buckets": calibration_buckets,
+        "calibration_buckets_3_plus": calibration_buckets_3_plus,
     }
 
 

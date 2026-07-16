@@ -122,6 +122,15 @@ export type SpecialStocksPerformance = {
     avg_prob: number | null;
     hit_rate: number | null;
   }>;
+  calibration_buckets_3_plus: Array<{
+    label: string;
+    min_prob: number;
+    max_prob: number | null;
+    count: number;
+    hits: number;
+    avg_prob: number | null;
+    hit_rate: number | null;
+  }>;
 };
 
 export type SportsbookProp = {

@@ -4414,7 +4414,31 @@ function SpecialStocksView({
                   </thead>
                   <tbody>
                     {(performance?.calibration_buckets ?? []).map((bucket) => (
-                      <tr key={bucket.label}>
+                      <tr key={`2plus-${bucket.label}`}>
+                        <td>{bucket.label}</td>
+                        <td>{bucket.count}</td>
+                        <td>{bucket.hits}</td>
+                        <td>{formatPercent(bucket.avg_prob ?? undefined)}</td>
+                        <td>{formatPercent(bucket.hit_rate ?? undefined)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="table-wrap special-calibration-table-wrap">
+                <table className="special-calibration-table">
+                  <thead>
+                    <tr>
+                      <th>3+ Stocks Prob</th>
+                      <th>Settled</th>
+                      <th>Hits</th>
+                      <th>Avg Prob</th>
+                      <th>Actual Hit</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(performance?.calibration_buckets_3_plus ?? []).map((bucket) => (
+                      <tr key={`3plus-${bucket.label}`}>
                         <td>{bucket.label}</td>
                         <td>{bucket.count}</td>
                         <td>{bucket.hits}</td>
@@ -4452,8 +4476,8 @@ function SpecialStocksView({
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("steal_prob_2_plus")}>2+ STL {sortIndicator("steal_prob_2_plus")}</button></th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("block_prob_1_plus")}>1+ BLK {sortIndicator("block_prob_1_plus")}</button></th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("block_prob_2_plus")}>2+ BLK {sortIndicator("block_prob_2_plus")}</button></th>
-                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("stocks_prob_2_plus")}>2+ Stocks {sortIndicator("stocks_prob_2_plus")}</button></th>
-                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("stocks_prob_3_plus")}>3+ Stocks {sortIndicator("stocks_prob_3_plus")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("stocks_prob_2_plus")}>2+ STK Prob {sortIndicator("stocks_prob_2_plus")}</button></th>
+                      <th><button type="button" className="table-sort-button" onClick={() => toggleSort("stocks_prob_3_plus")}>3+ STK Prob {sortIndicator("stocks_prob_3_plus")}</button></th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("captured_at")}>Captured {sortIndicator("captured_at")}</button></th>
                     </tr>
                   </thead>

@@ -1258,7 +1258,7 @@ tbody tr.selected {
 }
 
 .special-props-table {
-  min-width: 1150px;
+  min-width: 1080px;
   background: #ffffff;
 }
 
@@ -1275,7 +1275,7 @@ tbody tr.selected {
 }
 
 .special-props-table .special-col-probability {
-  width: 96px;
+  width: 78px;
 }
 
 .special-props-table .special-col-captured {
