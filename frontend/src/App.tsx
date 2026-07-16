@@ -3365,14 +3365,14 @@ function MatchupsView({
               </div>
               <div className="prediction-strip">
                 <MiniStat label="Projected Score" value={formatProjectedScore(selectedMatchup)} />
-                <MiniStat label="Winner" value={selectedMatchup.winner_pick} />
-                <MiniStat label="ATS" value={selectedMatchup.ats_pick} />
-                <MiniStat label="ATS Edge" value={formatNullableEdge(selectedMatchup.ats_edge)} />
-                <MiniStat label="Model Total" value={formatProjectedTotal(selectedMatchup)} />
+                <MiniStat label="Model Winner" value={selectedMatchup.winner_pick} />
+                <MiniStat label="ATS Pick" value={selectedMatchup.ats_pick} />
+                <MiniStat label="ATS Pick Edge" value={formatAtsPickEdge(selectedMatchup)} />
+                <MiniStat label="Projected Total" value={formatProjectedTotal(selectedMatchup)} />
                 <MiniStat label="O/U Edge" value={formatNullableEdge(selectedMatchup.total_edge)} />
                 <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
                 <MiniStat
-                  label="Net Diff"
+                  label={seasonNetDiffLabel(selectedMatchup)}
                   value={formatSignedNumber(selectedMatchup.rating_differentials?.season_net_diff)}
                   className={signedValueTone(selectedMatchup.rating_differentials?.season_net_diff)}
                 />
@@ -4551,10 +4551,10 @@ function MatchupProps({
     <div className="matchup-props">
       <div className="parlay-game-summary" aria-label="Game model prediction">
         <MiniStat label="Projected Score" value={formatProjectedScore(matchup)} />
-        <MiniStat label="Winner" value={matchup.winner_pick} />
-        <MiniStat label="ATS" value={matchup.ats_pick} />
-        <MiniStat label="ATS Edge" value={formatNullableEdge(matchup.ats_edge)} />
-        <MiniStat label="Model Total" value={formatProjectedTotal(matchup)} />
+        <MiniStat label="Model Winner" value={matchup.winner_pick} />
+        <MiniStat label="ATS Pick" value={matchup.ats_pick} />
+        <MiniStat label="ATS Pick Edge" value={formatAtsPickEdge(matchup)} />
+        <MiniStat label="Projected Total" value={formatProjectedTotal(matchup)} />
         <MiniStat label="O/U Edge" value={formatNullableEdge(matchup.total_edge)} />
         <MiniStat label="Confidence" value={matchup.game_confidence} />
       </div>
@@ -6007,6 +6007,17 @@ function formatProjectedTotal(matchup: Matchup) {
     return "N/A";
   }
   return `${matchup.total_pick} ${matchup.projected_total.toFixed(1)}`;
+}
+
+function formatAtsPickEdge(matchup: Matchup) {
+  if (matchup.ats_edge == null || !matchup.ats_pick || matchup.ats_pick === "N/A") {
+    return "N/A";
+  }
+  return `${matchup.ats_pick} ${formatNullableEdge(Math.abs(matchup.ats_edge))}`;
+}
+
+function seasonNetDiffLabel(matchup: Matchup) {
+  return `${matchup.home_team} Season Net Diff`;
 }
 
 function formatAmerican(value: number) {
