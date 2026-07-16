@@ -1,5 +1,17 @@
 # Ratings Plan
 
+## Current Status
+
+The core ratings plan is now live:
+
+- real ESPN-derived possessions are stored in `team_game_results`
+- raw ESPN team box-score facts persist in `team_game_boxscores`
+- matchup payloads expose season and recent ratings context
+- player-prop and game-model training rebuilds invalidate when team-stat repairs change the runtime source tables
+- the displayed pace values now read from real stored possessions for hydrated/backfilled games instead of the old placeholder-only path
+
+The remaining sections in this file are still useful as design notes for future extensions such as four-factor context, opponent-adjusted ratings, or additional cached/materialized views.
+
 ## Goal
 
 Add team offensive, defensive, and net ratings to the app in a way that is:
@@ -32,9 +44,13 @@ Owning the computation is better than depending on an external rank because:
 
 ## Existing Data Source
 
-Primary table:
+Primary derived table:
 
 - [backend/app/db.py](/root/WNBAStats/backend/app/db.py:899) defines `team_game_results`
+
+Primary raw facts table:
+
+- [backend/app/db.py](/root/WNBAStats/backend/app/db.py:916) defines `team_game_boxscores`
 
 Relevant fields:
 

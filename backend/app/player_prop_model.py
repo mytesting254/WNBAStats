@@ -4485,20 +4485,67 @@ def _market_price_nudge(market: str) -> float:
 
 
 def _model_fingerprint(conn: sqlite3.Connection) -> str:
-    tables = [
-        "player_game_stats",
-        "games",
-        "player_team_history",
-        "team_game_results",
-        "players",
+    parts = [
+        _table_signature(
+            conn,
+            "games",
+            "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, COALESCE(MAX(game_date), '') AS max_game_date",
+        ),
+        _table_signature(
+            conn,
+            "player_game_stats",
+            (
+                "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, "
+                "ROUND(COALESCE(SUM(minutes), 0), 3) AS minutes_sum, "
+                "ROUND(COALESCE(SUM(points + rebounds + assists + steals + blocks + turnovers), 0), 3) AS stat_sum"
+            ),
+        ),
+        _table_signature(
+            conn,
+            "player_team_history",
+            "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, COALESCE(MAX(game_id), 0) AS max_game_id",
+        ),
+        _table_signature(
+            conn,
+            "team_game_results",
+            (
+                "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, "
+                "ROUND(COALESCE(SUM(points + opponent_points), 0), 3) AS scoring_sum, "
+                "ROUND(COALESCE(SUM(possessions), 0), 3) AS possessions_sum, "
+                "SUM(CASE WHEN COALESCE(possessions_source, 'fallback') != 'fallback' THEN 1 ELSE 0 END) AS sourced_rows"
+            ),
+        ),
+        _table_signature(
+            conn,
+            "team_game_boxscores",
+            (
+                "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, "
+                "ROUND(COALESCE(SUM(field_goals_attempted + free_throws_attempted + offensive_rebounds), 0), 3) AS volume_sum, "
+                "ROUND(COALESCE(SUM(COALESCE(total_turnovers, turnovers + team_turnovers, turnovers, team_turnovers, 0)), 0), 3) AS turnover_sum, "
+                "ROUND(COALESCE(SUM(possessions), 0), 3) AS possessions_sum"
+            ),
+        ),
+        _table_signature(
+            conn,
+            "settled_props",
+            (
+                "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, "
+                "ROUND(COALESCE(SUM(actual_result + COALESCE(team_possessions, 0) + COALESCE(net_rating, 0)), 0), 3) AS outcome_sum"
+            ),
+        ),
+        _table_signature(
+            conn,
+            "players",
+            "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, COALESCE(MAX(team_id), 0) AS max_team_id",
+        ),
     ]
-    parts: list[str] = []
-    for table in tables:
-        row = conn.execute(
-            f"SELECT COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id FROM {table}"
-        ).fetchone()
-        parts.append(f"{table}:{int(row['row_count'] or 0)}:{int(row['max_id'] or 0)}")
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _table_signature(conn: sqlite3.Connection, table: str, select_sql: str) -> str:
+    row = conn.execute(f"SELECT {select_sql} FROM {table}").fetchone()
+    values = [f"{key}={row[key]}" for key in row.keys()]
+    return f"{table}:" + ",".join(values)
 
 
 def _config_fingerprint(config: ModelTuningConfig) -> str:

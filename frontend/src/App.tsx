@@ -1639,6 +1639,7 @@ function DataView({
     : propSync.running
       ? propSync.message || `Started ${formatDateTime(propSync.started_at)}`
       : `Last finished ${formatDateTime(propSync.finished_at)}`;
+  const runtimeStorage = opsHealth?.runtime_storage;
 
   return (
     <section className="matchup-list">
@@ -1757,6 +1758,27 @@ function DataView({
                 {authSubmitting ? "Signing Out" : `Sign Out (${authState.user?.username})`}
               </button>
             </div>
+        {runtimeStorage ? (
+          <article className="operation-card operation-card-storage">
+            <div>
+              <p className="eyebrow">runtime storage</p>
+              <h3>Source of Truth</h3>
+              <p>{runtimeStorage.team_boxscores_flow}</p>
+            </div>
+            <div className="detail-grid">
+              <Metric label="Canonical DB" value={runtimeStorage.source_of_truth} />
+              <Metric label="Training Store" value={runtimeStorage.training_store} />
+              <Metric label="Raw Team Stats" value={runtimeStorage.team_boxscores_table} />
+              <Metric label="Derived Results" value={runtimeStorage.team_results_table} />
+            </div>
+            <div className="storage-path-list">
+              <code>{runtimeStorage.db_path}</code>
+              <code>{runtimeStorage.training_db_path}</code>
+              <code>{runtimeStorage.cache_dir}</code>
+              <code>{runtimeStorage.snapshot_dir}</code>
+            </div>
+          </article>
+        ) : null}
         <div className="data-layout">
           <OperationCard
             title="The Odds API"
@@ -3372,7 +3394,11 @@ function MatchupsView({
                 <MiniStat label="Model Total" value={formatProjectedTotal(selectedMatchup)} />
                 <MiniStat label="O/U Edge" value={formatNullableEdge(selectedMatchup.total_edge)} />
                 <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
-                <MiniStat label="Net Diff" value={formatSignedNumber(selectedMatchup.rating_differentials?.season_net_diff)} />
+                <MiniStat
+                  label="Net Diff"
+                  value={formatSignedNumber(selectedMatchup.rating_differentials?.season_net_diff)}
+                  className={signedValueTone(selectedMatchup.rating_differentials?.season_net_diff)}
+                />
               </div>
               <CoversRecordsPanel matchup={selectedMatchup} />
             </article>
@@ -4936,12 +4962,36 @@ function TeamSummary({
         <span>PA {summary.avg_points_against.toFixed(1)}</span>
       </div>
       <div className="stat-strip ratings-strip">
-        <MiniStat label="Season Net" value={formatRatingWithRank(ratings?.season?.net_rating, ratings?.net_rank)} />
-        <MiniStat label="Season Off" value={formatRatingWithRank(ratings?.season?.off_rating, ratings?.off_rank)} />
-        <MiniStat label="Season Def" value={formatRatingWithRank(ratings?.season?.def_rating, ratings?.def_rank, true)} />
-        <MiniStat label="L10 Net" value={formatSignedNumber(ratings?.last_10?.net_rating)} />
-        <MiniStat label={context === "home" ? "Home Net" : "Away Net"} value={formatSignedNumber(venueRatings?.net_rating)} />
-        <MiniStat label="Pace" value={formatRatingValue(ratings?.season?.pace)} />
+        <MiniStat
+          label="Season Net"
+          value={formatRatingWithRank(ratings?.season?.net_rating, ratings?.net_rank)}
+          className={rankTone(ratings?.net_rank)}
+        />
+        <MiniStat
+          label="Season Off"
+          value={formatRatingWithRank(ratings?.season?.off_rating, ratings?.off_rank)}
+          className={rankTone(ratings?.off_rank)}
+        />
+        <MiniStat
+          label="Season Def"
+          value={formatRatingWithRank(ratings?.season?.def_rating, ratings?.def_rank, true)}
+          className={rankTone(ratings?.def_rank, true)}
+        />
+        <MiniStat
+          label="L10 Net"
+          value={formatSignedNumber(ratings?.last_10?.net_rating)}
+          className={signedValueTone(ratings?.last_10?.net_rating)}
+        />
+        <MiniStat
+          label={context === "home" ? "Home Net" : "Away Net"}
+          value={formatSignedNumber(venueRatings?.net_rating)}
+          className={signedValueTone(venueRatings?.net_rating)}
+        />
+        <MiniStat
+          label="Pace"
+          value={<PaceSignal value={ratings?.season?.pace} rank={ratings?.pace_rank} />}
+          className={paceTone(ratings?.pace_rank)}
+        />
       </div>
     </div>
   );
@@ -4980,9 +5030,9 @@ function PlayerLabel({
   );
 }
 
-function MiniStat({ label, value }: { label: string; value: string }) {
+function MiniStat({ label, value, className = "" }: { label: string; value: ReactNode; className?: string }) {
   return (
-    <div className="mini-stat">
+    <div className={`mini-stat ${className}`.trim()}>
       <span>{label}</span>
       <strong>{value}</strong>
     </div>
@@ -5013,6 +5063,82 @@ function formatRatingWithRank(
     return ratingText;
   }
   return `${ratingText} (#${rank}${reverseGood ? " D" : ""})`;
+}
+
+function rankTone(rank: number | null | undefined, reverseGood = false) {
+  if (typeof rank !== "number" || !Number.isFinite(rank)) {
+    return "";
+  }
+  const isPositive = reverseGood ? rank >= 10 : rank <= 4;
+  const isNegative = reverseGood ? rank <= 4 : rank >= 10;
+  if (isPositive) {
+    return "mini-stat-positive";
+  }
+  if (isNegative) {
+    return "mini-stat-negative";
+  }
+  return "mini-stat-neutral";
+}
+
+function paceTone(rank: number | null | undefined) {
+  if (typeof rank !== "number" || !Number.isFinite(rank)) {
+    return "";
+  }
+  if (rank <= 4) {
+    return "mini-stat-positive";
+  }
+  if (rank >= 10) {
+    return "mini-stat-negative";
+  }
+  return "mini-stat-neutral";
+}
+
+function signedValueTone(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "";
+  }
+  if (value >= 3) {
+    return "mini-stat-positive";
+  }
+  if (value <= -3) {
+    return "mini-stat-negative";
+  }
+  return "mini-stat-neutral";
+}
+
+function PaceSignal({ value, rank }: { value: number | null | undefined; rank: number | null | undefined }) {
+  const text = formatRatingValue(value);
+  if (text === "N/A") {
+    return text;
+  }
+  if (typeof rank !== "number" || !Number.isFinite(rank)) {
+    return text;
+  }
+  if (rank <= 4) {
+    return (
+      <span className="pace-signal pace-signal-fast">
+        <span className="pace-value">{text}</span>
+        <span className="pace-arrow" aria-hidden="true">↑</span>
+      </span>
+    );
+  }
+  if (rank >= 10) {
+    return (
+      <span className="pace-signal pace-signal-slow">
+        <span className="pace-value">{text}</span>
+        <span className="pace-arrow" aria-hidden="true">↓</span>
+      </span>
+    );
+  }
+  return (
+    <span className="pace-signal pace-signal-neutral">
+      <span className="pace-value">{text}</span>
+      <span className="pace-neutral-arrows" aria-hidden="true">
+        <span className="pace-arrow-left">←</span>
+        <span className="pace-arrow-right">→</span>
+      </span>
+    </span>
+  );
 }
 
 function Metric({ label, value, className = "" }: { label: string; value: string; className?: string }) {

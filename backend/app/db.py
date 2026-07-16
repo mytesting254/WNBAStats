@@ -328,6 +328,50 @@ def init_db() -> None:
         result_columns = {row["name"] for row in conn.execute("PRAGMA table_info(team_game_results)").fetchall()}
         if result_columns and "possessions" not in result_columns:
             conn.execute("ALTER TABLE team_game_results ADD COLUMN possessions REAL NOT NULL DEFAULT 78.0")
+        if result_columns and "possessions_source" not in result_columns:
+            conn.execute("ALTER TABLE team_game_results ADD COLUMN possessions_source TEXT NOT NULL DEFAULT 'fallback'")
+            conn.execute(
+                """
+                UPDATE team_game_results
+                SET possessions_source = CASE
+                    WHEN ABS(possessions - 78.0) < 0.0001 THEN 'fallback'
+                    ELSE 'legacy'
+                END
+                """
+            )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS team_game_boxscores (
+                id INTEGER PRIMARY KEY,
+                game_id INTEGER NOT NULL,
+                team_id INTEGER NOT NULL,
+                is_home INTEGER NOT NULL,
+                points INTEGER,
+                rebounds INTEGER,
+                offensive_rebounds INTEGER,
+                defensive_rebounds INTEGER,
+                assists INTEGER,
+                steals INTEGER,
+                blocks INTEGER,
+                turnovers INTEGER,
+                team_turnovers INTEGER,
+                total_turnovers INTEGER,
+                fouls INTEGER,
+                field_goals_made INTEGER,
+                field_goals_attempted INTEGER,
+                threes_made INTEGER,
+                threes_attempted INTEGER,
+                free_throws_made INTEGER,
+                free_throws_attempted INTEGER,
+                possessions REAL,
+                source TEXT NOT NULL DEFAULT 'espn_summary',
+                captured_at TEXT NOT NULL,
+                FOREIGN KEY (game_id) REFERENCES games(id),
+                FOREIGN KEY (team_id) REFERENCES teams(id),
+                UNIQUE(game_id, team_id)
+            )
+            """
+        )
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS sportsbook_prop_lines (
@@ -376,6 +420,26 @@ def init_db() -> None:
             conn.execute("ALTER TABLE settled_props ADD COLUMN blowout_result TEXT")
         if "blowout_threshold" not in settled_columns:
             conn.execute("ALTER TABLE settled_props ADD COLUMN blowout_threshold REAL DEFAULT 15.0")
+        if "team_points" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN team_points REAL")
+        if "opponent_points" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN opponent_points REAL")
+        if "team_possessions" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN team_possessions REAL")
+        if "opponent_possessions" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN opponent_possessions REAL")
+        if "pace" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN pace REAL")
+        if "team_off_rating" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN team_off_rating REAL")
+        if "opponent_off_rating" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN opponent_off_rating REAL")
+        if "net_rating" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN net_rating REAL")
+        if "team_possessions_source" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN team_possessions_source TEXT")
+        if "opponent_possessions_source" not in settled_columns:
+            conn.execute("ALTER TABLE settled_props ADD COLUMN opponent_possessions_source TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS game_predictions (
@@ -904,12 +968,43 @@ CREATE TABLE IF NOT EXISTS team_game_results (
     points INTEGER NOT NULL,
     opponent_points INTEGER NOT NULL,
     possessions REAL NOT NULL DEFAULT 78.0,
+    possessions_source TEXT NOT NULL DEFAULT 'fallback',
     closing_spread REAL NOT NULL,
     closing_total REAL NOT NULL,
     ats_result TEXT NOT NULL,
     total_result TEXT NOT NULL,
     FOREIGN KEY (team_id) REFERENCES teams(id),
     FOREIGN KEY (game_id) REFERENCES games(id)
+);
+
+CREATE TABLE IF NOT EXISTS team_game_boxscores (
+    id INTEGER PRIMARY KEY,
+    game_id INTEGER NOT NULL,
+    team_id INTEGER NOT NULL,
+    is_home INTEGER NOT NULL,
+    points INTEGER,
+    rebounds INTEGER,
+    offensive_rebounds INTEGER,
+    defensive_rebounds INTEGER,
+    assists INTEGER,
+    steals INTEGER,
+    blocks INTEGER,
+    turnovers INTEGER,
+    team_turnovers INTEGER,
+    total_turnovers INTEGER,
+    fouls INTEGER,
+    field_goals_made INTEGER,
+    field_goals_attempted INTEGER,
+    threes_made INTEGER,
+    threes_attempted INTEGER,
+    free_throws_made INTEGER,
+    free_throws_attempted INTEGER,
+    possessions REAL,
+    source TEXT NOT NULL DEFAULT 'espn_summary',
+    captured_at TEXT NOT NULL,
+    FOREIGN KEY (game_id) REFERENCES games(id),
+    FOREIGN KEY (team_id) REFERENCES teams(id),
+    UNIQUE(game_id, team_id)
 );
 
 CREATE TABLE IF NOT EXISTS injuries (
@@ -973,6 +1068,16 @@ CREATE TABLE IF NOT EXISTS settled_props (
     team_spread REAL,
     blowout_result TEXT,
     blowout_threshold REAL DEFAULT 15.0,
+    team_points REAL,
+    opponent_points REAL,
+    team_possessions REAL,
+    opponent_possessions REAL,
+    pace REAL,
+    team_off_rating REAL,
+    opponent_off_rating REAL,
+    net_rating REAL,
+    team_possessions_source TEXT,
+    opponent_possessions_source TEXT,
     settled_at TEXT NOT NULL,
     FOREIGN KEY (prop_line_id) REFERENCES prop_lines(id)
 );
@@ -1179,6 +1284,7 @@ CREATE TABLE IF NOT EXISTS job_run_events (
 CREATE INDEX IF NOT EXISTS idx_player_stats_player_game ON player_game_stats(player_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_injuries_player_captured ON injuries(player_id, captured_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_team_results_team_game ON team_game_results(team_id, game_id);
+CREATE INDEX IF NOT EXISTS idx_team_boxscores_team_game ON team_game_boxscores(team_id, game_id);
 CREATE INDEX IF NOT EXISTS idx_player_game_availability_game ON player_game_availability(game_id, player_id);
 CREATE INDEX IF NOT EXISTS idx_prop_lines_game ON prop_lines(game_id);
 CREATE INDEX IF NOT EXISTS idx_predictions_prop ON prop_predictions(prop_line_id);

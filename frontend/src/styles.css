@@ -401,6 +401,26 @@ h3 {
   line-height: 1.45;
 }
 
+.operation-card-storage {
+  min-height: auto;
+  margin: 0 18px 18px;
+}
+
+.storage-path-list {
+  display: grid;
+  gap: 8px;
+}
+
+.storage-path-list code {
+  overflow-wrap: anywhere;
+  padding: 9px 10px;
+  border: 1px solid #d5dbe4;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #184f86;
+  font-size: 12px;
+}
+
 .cache-badge-row {
   display: flex;
   flex-wrap: wrap;
@@ -1649,6 +1669,36 @@ tbody tr.selected {
   box-shadow: 0 8px 24px rgba(76, 29, 149, 0.08);
 }
 
+.mini-stat-positive {
+  border-color: rgba(2, 122, 72, 0.28);
+  background: rgba(236, 253, 243, 0.92);
+}
+
+.mini-stat-positive span,
+.mini-stat-positive strong {
+  color: #027a48;
+}
+
+.mini-stat-negative {
+  border-color: rgba(180, 35, 24, 0.24);
+  background: rgba(254, 242, 242, 0.92);
+}
+
+.mini-stat-negative span,
+.mini-stat-negative strong {
+  color: #b42318;
+}
+
+.mini-stat-neutral {
+  border-color: rgba(126, 86, 16, 0.22);
+  background: rgba(255, 250, 235, 0.92);
+}
+
+.mini-stat-neutral span,
+.mini-stat-neutral strong {
+  color: #9a6700;
+}
+
 .mini-stat span {
   display: block;
   margin-bottom: 5px;
@@ -1665,6 +1715,43 @@ tbody tr.selected {
   line-height: 1.2;
   font-weight: 800;
   overflow-wrap: anywhere;
+}
+
+.pace-signal {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pace-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.pace-arrow {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.pace-signal-fast .pace-arrow {
+  color: #027a48;
+}
+
+.pace-signal-slow .pace-arrow {
+  color: #b42318;
+}
+
+.pace-neutral-arrows {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.pace-arrow-left {
+  color: #027a48;
+}
+
+.pace-arrow-right {
+  color: #b42318;
 }
 
 .metric.metric-compact strong {

@@ -288,14 +288,17 @@ Recent minutes-model work also added:
 
 Recent measured live diagnostics for the minutes path (`adaptive-context-v10-market-gated-context`, evaluation start `2026-07-01`):
 
-- overall MAE: `4.397`
+- overall MAE: `4.331`
 - `recent_blend` MAE: `4.305`
 - heuristic MAE: `4.614`
-- recent-transfer MAE: `3.174` vs `recent_blend` `3.490`
-- `starter_volatile` MAE: `4.787` vs `recent_blend` `4.640`
-- `rotation` MAE: `5.167` vs `recent_blend` `4.945`
+- recent-transfer MAE: `3.156` vs `recent_blend` `3.490`
+- `core_starter` MAE: `3.149` vs `recent_blend` `3.063`
+- `starter_volatile` MAE: `4.621` vs `recent_blend` `4.640`
+- `rotation` MAE: `4.965` vs `recent_blend` `4.945`
+- low-volatility slice: `4.205` vs `recent_blend` `4.058`
+- stable-trend slice: `4.245` vs `recent_blend` `4.134`
 
-The minutes layer is materially better than the old heuristic and useful as a production context layer, but it still trails the simple `recent_blend` baseline overall and in the hardest current slices, especially `rotation` and `starter_volatile`. Treat it as an actively refined context system, not a finished standalone edge source.
+The minutes layer is materially better than the old heuristic and useful as a production context layer, and the latest refinement pass closed much of the original `starter_volatile` and `rotation` gap. It still trails the simple `recent_blend` baseline overall, with the main remaining regressions concentrated in low-volatility / stable-context slices and a small residual `rotation` gap. Treat it as an actively refined context system, not a finished standalone edge source.
 
 Recent accuracy hardening also includes:
 
@@ -664,6 +667,9 @@ The CSV supports these columns:
 - `possessions`
 
 The importer writes rows into `games` and completed results into `team_game_results`.
+Raw ESPN team box-score facts also persist into `team_game_boxscores`, while
+`team_game_results` remains the derived team/game context layer used by ratings,
+matchups, settlement, and model features.
 
 You can also import completed WNBA games from ESPN scoreboard data:
 
@@ -701,7 +707,7 @@ POST /api/history/import/espn?season=2026&force_refresh=true&include_player_stat
 Completed games are matched to existing sportsbook-derived scheduled games by date/home/away, then marked `final` so they drop out of the upcoming Matchups tab while still contributing to last-10 history.
 When `include_player_stats=true`, ESPN player box scores are imported for the selected date, selected date batch, or requested season. The app then syncs matching sportsbook prop lines into deduped model prop lines so Parlay Candidates use provider-backed player game logs without counting identical sportsbook lines multiple times.
 
-After the ESPN sync finishes, the app settles saved player prop predictions and saved game predictions against the imported final scores and box scores, then rebuilds current predictions from the updated player history.
+After the ESPN sync finishes, the app settles saved player prop predictions and saved game predictions against the imported final scores and box scores, then rebuilds current predictions from the updated player history. Player-prop settlement now hydrates ESPN team stats for the affected final dates before writing `settled_props`, so pace, offensive-rating, defensive-rating, and net-rating context stays aligned with the same canonical team tables used by training.
 
 ## Local Data And Generated Files
 
@@ -829,6 +835,7 @@ source scripts/live_env.sh
 
 That resolves `WNBA_DB_PATH`, `WNBA_CACHE_DIR`, and `WNBA_SNAPSHOT_DIR` to the active app-attached volume before you run maintenance commands.
 Curated training rebuilds follow the same pathing, so `wnba-training.sqlite` is written beside the active `WNBA_DB_PATH` on the mounted volume unless you override `WNBA_TRAINING_DB_PATH` explicitly.
+The admin Data Operations screen now also exposes these resolved runtime paths so the mounted-volume source of truth is visible without shell access.
 
 For automated production backups, prefer a host scheduler instead of an app-process watcher. Example systemd units are provided at:
 
@@ -961,7 +968,9 @@ The app should write raw API responses into `data/cache/` or `data/raw/`, then n
 
 ## Model Notes
 
-Player prop projections still default live to the transparent `component-pregame-v2` baseline. The main learned candidate is `adaptive-context-v3-team-transition`, which starts from the same component projection and then applies an in-process ridge regression model trained from actual player game logs in the active runtime database. In normal app runs that database is Turso; local SQLite training is only used by tests or explicit commands that set `WNBA_DB_PATH`.
+Player prop projections still default live to the transparent `component-pregame-v2` baseline. The current learned candidate is `adaptive-context-v11-ratings-context`, which starts from the same component projection and then applies an in-process ridge regression model trained from actual player game logs plus ratings-aware team context in the active runtime database.
+
+Model invalidation now keys off aggregate runtime-table signatures instead of only row counts and `MAX(id)`. In-place ESPN possessions repairs, availability repairs, and team-boxscore updates therefore force clean derived-training rebuilds instead of silently reusing stale `wnba-training.sqlite` content.
 
 The live player-prop path now uses three historical layers when a sportsbook line is available:
 
@@ -1026,17 +1035,17 @@ Model/training doc map:
 - [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
   - operational/runtime failure cases
 
-The admin-only Model Lab tab trains against the active Turso database and records two benchmarks:
+The admin-only Model Lab tab trains against the active runtime database and records two benchmarks:
 
 ```text
 component-pregame-v2
   walk-forward component benchmark using only prior games
 
-adaptive-context-v3-team-transition
-  month-segmented walk-forward benchmark for the learned history/context model
+adaptive-context-v11-ratings-context
+  walk-forward benchmark for the learned ratings-aware history/context model
 ```
 
-Each training action saves both runs to Turso in `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. Learned-run payloads now also include game residual evaluation rows (`game_ats`, `game_total`, and `game_overall`) with both baseline and blended metrics so saved game predictions can be compared before and after the residual layer. The Model Lab now shows those game residual deltas directly alongside the existing player-market training tables. The comparison table shows the latest run for each model version side by side. Prediction-time learned models also train from the active connection when the app is using Turso, instead of reopening a local SQLite file.
+Each training action saves both runs to `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. Learned-run payloads now also include game residual evaluation rows (`game_ats`, `game_total`, and `game_overall`) with both baseline and blended metrics so saved game predictions can be compared before and after the residual layer. The Model Lab now shows those game residual deltas directly alongside the existing player-market training tables. The comparison table shows the latest run for each model version side by side.
 
 Learned player, minutes, residual, and game-model training defaults to a rolling previous-season window: January 1 of the prior Eastern calendar year through the latest ingested history. For example, 2026 runs train on rows dated `2025-01-01` or later. Set `WNBA_TRAINING_START_DATE=YYYY-MM-DD` for a one-off override. The resolved training start date is part of the model cache key and `model_runs` data signature, so changing the window cannot reuse stale cached models or stale Model Lab results.
 
@@ -1054,18 +1063,25 @@ Runtime behavior:
 
 - normal live prop rebuilds now prewarm learned player/minutes/residual models before writing predictions
 - if uploaded cache files do not match the active live DB fingerprint, the backend retrains from the active runtime instead of silently downgrading prop predictions to `component`
-- `adaptive-context-v3-team-transition` remains the current learned candidate version after deploy/restart, with uploaded cache files acting as a warm start rather than a hard dependency
+- full live training runs also prewarm current minutes, market, and residual artifacts into `/data/cache/model_artifacts`
+- `adaptive-context-v11-ratings-context` remains the current learned candidate version after deploy/restart, with uploaded cache files acting as a warm start rather than a hard dependency
 
-Latest live server-side run checked on `2026-07-12`:
+Latest live mounted-volume run checked on `2026-07-16`:
 
-- `model_version`: `adaptive-context-v3-team-transition`
-- `training_rows`: `24,156`
-- learned overall player-prop `MAE`: `2.771`
-- component baseline `MAE`: `2.638`
-- outcome: keep the component baseline live for regular player props
-- by-market result: the learned layer lost to baseline on every regular player-prop market in the latest saved run
-- residual exception: `points_assists` remains the only regular market with a clear residual-layer MAE gain (`4.458` vs residual baseline `5.081`)
-- game-side residuals remain the strongest learned result so far, especially `game_total` (`MAE 7.740` vs baseline `14.695`)
+- `status`: `completed`
+- `model_version`: `adaptive-context-v11-ratings-context`
+- `run_type`: `walk_forward_segments`
+- `training_rows`: `26,730`
+- `started_at`: `2026-07-16T02:46:39.383767+00:00`
+- `finished_at`: `2026-07-16T02:48:16.307853+00:00`
+- `prewarm`: `minutes=6`, `markets=11`, `residuals=1`
+- mounted-volume derived counts:
+  - `game_training_examples`: `794`
+  - `minutes_training_examples`: `15,324`
+  - `player_prop_training_examples`: `41,748`
+- latest mounted-volume artifacts:
+  - `component-pregame-v2__walk_forward_backtest__20260716T0244579998130000`
+  - `adaptive-context-v11-ratings-context__walk_forward_segments__20260716T0246393837670000`
 
 Useful options:
 

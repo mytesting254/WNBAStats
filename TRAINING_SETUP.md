@@ -20,6 +20,12 @@ Runtime defaults:
 - cache/artifacts: `/data/cache`
 - snapshots: `/data/snapshots`
 
+Current raw/derived split for team context:
+
+- raw ESPN team stats: `team_game_boxscores` in `wnba.sqlite`
+- derived team/game context: `team_game_results` in `wnba.sqlite`
+- derived curated examples: `*_training_examples` tables in `wnba-training.sqlite`
+
 Host path for the live mounted volume in the current deployment:
 
 - `/var/lib/docker/volumes/pqsez6mkr14y0bnlhmcdmikg_wnba-data/_data`
@@ -204,12 +210,20 @@ Verify game-training row counts on the live mounted volume:
 python scripts/live_backend.py exec -- python -c "import sqlite3, json; conn=sqlite3.connect('/data/wnba-training.sqlite'); print(json.dumps({'game_training_examples': conn.execute(\"SELECT COUNT(*) FROM game_training_examples\").fetchone()[0], 'game_training_clean': conn.execute(\"SELECT COUNT(*) FROM game_training_examples WHERE is_clean = 1\").fetchone()[0], 'game_training_excluded': conn.execute(\"SELECT COUNT(*) FROM game_training_examples WHERE is_clean = 0\").fetchone()[0]}, indent=2))"
 ```
 
-Live verification baseline from July 14, 2026:
+Live verification baseline from July 16, 2026:
 
-- `game_training_examples`: `790`
+- `game_training_examples`: `794`
 - `game_training_clean`: `503`
 - `game_training_excluded`: `287`
 - `exclusion_counts`: `before_training_start=273`, `missing_history_window=14`
+- `minutes_training_examples`: `15,324`
+- `minutes_training_clean`: `9,202`
+- `player_prop_training_examples`: `41,748`
+- latest successful mounted-volume training/prewarm run:
+  - `model_version`: `adaptive-context-v11-ratings-context`
+  - `run_type`: `walk_forward_segments`
+  - `training_rows`: `26,730`
+  - `prewarm`: `minutes=6`, `markets=11`, `residuals=1`
 
 ## Future Model Checklist
 

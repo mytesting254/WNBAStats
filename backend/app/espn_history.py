@@ -19,6 +19,8 @@ from .timezone_utils import APP_TIMEZONE
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary"
 LOCAL_TZ = APP_TIMEZONE
+
+
 def fetch_scoreboard(season: int, force_refresh: bool = False, selected_date: str | None = None) -> dict[str, Any]:
     dates_param = _scoreboard_dates_param(season, selected_date)
     cache_name = f"espn_wnba_scoreboard_{dates_param}.json"
@@ -103,6 +105,10 @@ def import_espn_scoreboard(
             game_total=total,
         )
         game_id = resolved or espn_event_id
+        summary_payload = None
+        if status == "final":
+            summary_payload = read_json_cache(f"espn_wnba_summary_{espn_event_id}.json")
+        possessions_by_team = _summary_team_possessions(conn, summary_payload) if isinstance(summary_payload, dict) else {}
 
         conn.execute(
             """
@@ -130,12 +136,36 @@ def import_espn_scoreboard(
                 """
                 INSERT INTO team_game_results (
                     team_id, game_id, is_home, points, opponent_points, possessions,
-                    closing_spread, closing_total, ats_result, total_result
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    possessions_source, closing_spread, closing_total, ats_result, total_result
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
-                    (home_team_id, game_id, 1, home_score, away_score, 78.0, 0.0, total, "push", "push"),
-                    (away_team_id, game_id, 0, away_score, home_score, 78.0, 0.0, total, "push", "push"),
+                    (
+                        home_team_id,
+                        game_id,
+                        1,
+                        home_score,
+                        away_score,
+                        possessions_by_team.get(int(home_team_id), 78.0),
+                        "espn_summary" if int(home_team_id) in possessions_by_team else "fallback",
+                        0.0,
+                        total,
+                        "push",
+                        "push",
+                    ),
+                    (
+                        away_team_id,
+                        game_id,
+                        0,
+                        away_score,
+                        home_score,
+                        possessions_by_team.get(int(away_team_id), 78.0),
+                        "espn_summary" if int(away_team_id) in possessions_by_team else "fallback",
+                        0.0,
+                        total,
+                        "push",
+                        "push",
+                    ),
                 ],
             )
             inserted_results += 2
@@ -192,6 +222,8 @@ def import_espn_player_boxscores(
     inserted_stats = 0
     inserted_players = 0
     skipped_games = 0
+    updated_team_game_results = 0
+    updated_team_game_boxscores = 0
     existing_player_ids = {
         int(row["id"])
         for row in conn.execute("SELECT id FROM players").fetchall()
@@ -229,6 +261,8 @@ def import_espn_player_boxscores(
             skipped_games += 1
             continue
 
+        updated_team_game_boxscores += _upsert_team_game_boxscores(conn, game_id, payload)
+        updated_team_game_results += _update_team_game_result_possessions(conn, game_id, payload)
         player_rows = _player_stat_rows(conn, game_id, payload)
         injury_rows = _injury_availability_rows(conn, game_id, payload, player_rows)
         if not player_rows and not injury_rows:
@@ -337,8 +371,91 @@ def import_espn_player_boxscores(
         "inserted_players": inserted_players,
         "inserted_player_game_stats": inserted_stats,
         "recorded_player_game_availability": len(availability_rows),
+        "updated_team_game_results": updated_team_game_results,
+        "updated_team_game_boxscores": updated_team_game_boxscores,
         "deleted_dnp_prop_lines": deleted_dnp_prop_lines,
         "missing_only": missing_only,
+        "source": "espn_summary",
+    }
+
+
+def backfill_espn_team_possessions(
+    conn: sqlite3.Connection,
+    season: int,
+    force_refresh: bool = False,
+    selected_date: str | None = None,
+    only_placeholder: bool = True,
+    max_games: int | None = None,
+    max_workers: int = 8,
+) -> dict[str, Any]:
+    date_filter = "AND g.game_date = ?" if selected_date else "AND g.game_date >= ? AND g.game_date < ?"
+    date_params = (selected_date,) if selected_date else (f"{season}-01-01", f"{season + 1}-01-01")
+    placeholder_filter = (
+        "AND (ABS(tgr.possessions - 78.0) < 0.0001 OR COALESCE(tgr.possessions_source, 'fallback') = 'fallback')"
+        if only_placeholder
+        else ""
+    )
+    games = conn.execute(
+        f"""
+        SELECT DISTINCT
+            g.id,
+            COALESCE(g.espn_event_id, g.id) AS summary_event_id
+        FROM games g
+        JOIN team_game_results tgr ON tgr.game_id = g.id
+        WHERE g.status = 'final'
+          {date_filter}
+          {placeholder_filter}
+        ORDER BY g.game_date DESC, g.start_time DESC, g.id DESC
+        """,
+        date_params,
+    ).fetchall()
+    if max_games is not None:
+        games = games[:max_games]
+
+    updated_team_game_results = 0
+    updated_team_game_boxscores = 0
+    skipped_games = 0
+
+    def fetch_game(game) -> tuple[int, int, dict[str, Any] | None]:
+        game_id = int(game["id"])
+        summary_event_id = int(game["summary_event_id"])
+        try:
+            return game_id, summary_event_id, fetch_summary(summary_event_id, force_refresh=force_refresh)
+        except Exception:
+            return game_id, summary_event_id, None
+
+    fetched_games: list[tuple[int, int, dict[str, Any] | None]] = []
+    workers = max(1, min(max_workers, len(games) or 1))
+    game_order = {int(game["id"]): index for index, game in enumerate(games)}
+    if workers == 1:
+        fetched_games = [fetch_game(game) for game in games]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(fetch_game, game) for game in games]
+            for future in as_completed(futures):
+                fetched_games.append(future.result())
+        fetched_games.sort(key=lambda item: game_order[item[0]])
+
+    for game_id, _summary_event_id, payload in fetched_games:
+        if payload is None:
+            skipped_games += 1
+            continue
+        updated_team_game_boxscores += _upsert_team_game_boxscores(conn, game_id, payload)
+        updated = _update_team_game_result_possessions(conn, game_id, payload)
+        updated_team_game_results += updated
+        if updated <= 0:
+            skipped_games += 1
+
+    conn.commit()
+    return {
+        "season": season,
+        "selected_date": selected_date,
+        "games_checked": len(games),
+        "updated_team_game_results": updated_team_game_results,
+        "updated_team_game_boxscores": updated_team_game_boxscores,
+        "games_with_updates": updated_team_game_results // 2,
+        "skipped_games": skipped_games,
+        "only_placeholder": only_placeholder,
         "source": "espn_summary",
     }
 
@@ -503,6 +620,218 @@ def _boxscore_team_id(conn: sqlite3.Connection, team_box: dict[str, Any]) -> int
     return ensure_team(conn, abbreviation or display_name)
 
 
+def _summary_team_possessions(conn: sqlite3.Connection, payload: dict[str, Any] | None) -> dict[int, float]:
+    if not isinstance(payload, dict):
+        return {}
+    teams = ((payload.get("boxscore") or {}).get("teams") or [])
+    possessions_by_team: dict[int, float] = {}
+    for team_box in teams:
+        team_id = _boxscore_team_id(conn, team_box)
+        if not team_id:
+            continue
+        possessions = _derive_team_possessions(team_box.get("statistics") or [])
+        if possessions is None or possessions <= 0:
+            continue
+        possessions_by_team[int(team_id)] = possessions
+    return possessions_by_team
+
+
+def _upsert_team_game_boxscores(conn: sqlite3.Connection, game_id: int, payload: dict[str, Any] | None) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    rows = []
+    captured_at = datetime.now(timezone.utc).isoformat()
+    teams = ((payload.get("boxscore") or {}).get("teams") or [])
+    for team_box in teams:
+        item = _summary_team_boxscore_row(conn, game_id, team_box, captured_at)
+        if item is not None:
+            rows.append(item)
+    if not rows:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO team_game_boxscores (
+            game_id, team_id, is_home, points, rebounds, offensive_rebounds, defensive_rebounds,
+            assists, steals, blocks, turnovers, team_turnovers, total_turnovers, fouls,
+            field_goals_made, field_goals_attempted, threes_made, threes_attempted,
+            free_throws_made, free_throws_attempted, possessions, source, captured_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(game_id, team_id) DO UPDATE SET
+            is_home = excluded.is_home,
+            points = excluded.points,
+            rebounds = excluded.rebounds,
+            offensive_rebounds = excluded.offensive_rebounds,
+            defensive_rebounds = excluded.defensive_rebounds,
+            assists = excluded.assists,
+            steals = excluded.steals,
+            blocks = excluded.blocks,
+            turnovers = excluded.turnovers,
+            team_turnovers = excluded.team_turnovers,
+            total_turnovers = excluded.total_turnovers,
+            fouls = excluded.fouls,
+            field_goals_made = excluded.field_goals_made,
+            field_goals_attempted = excluded.field_goals_attempted,
+            threes_made = excluded.threes_made,
+            threes_attempted = excluded.threes_attempted,
+            free_throws_made = excluded.free_throws_made,
+            free_throws_attempted = excluded.free_throws_attempted,
+            possessions = excluded.possessions,
+            source = excluded.source,
+            captured_at = excluded.captured_at
+        """,
+        rows,
+    )
+    return len(rows)
+
+
+def _summary_team_boxscore_row(
+    conn: sqlite3.Connection,
+    game_id: int,
+    team_box: dict[str, Any],
+    captured_at: str,
+) -> tuple[Any, ...] | None:
+    team_id = _boxscore_team_id(conn, team_box)
+    if not team_id:
+        return None
+    stat_map = _team_stat_map(team_box.get("statistics") or [])
+    possessions = _derive_team_possessions(team_box.get("statistics") or [])
+    home_away = str(team_box.get("homeAway") or "").strip().lower()
+    is_home = 1 if home_away == "home" else 0
+    fg_made, fg_attempted = _made_attempt_pair(_first_stat_value(stat_map, "fieldgoalsmadefieldgoalsattempted", "fg"))
+    threes_made, threes_attempted = _made_attempt_pair(_first_stat_value(stat_map, "threepointfieldgoalsmadethreepointfieldgoalsattempted", "3pt"))
+    ft_made, ft_attempted = _made_attempt_pair(_first_stat_value(stat_map, "freethrowsmadefreethrowsattempted", "ft"))
+    return (
+        game_id,
+        team_id,
+        is_home,
+        _parse_int(_first_stat_value(stat_map, "points", "pts")),
+        _parse_int(_first_stat_value(stat_map, "totalrebounds", "rebounds", "reb")),
+        _parse_int(_first_stat_value(stat_map, "offensiverebounds", "oreb", "or")),
+        _parse_int(_first_stat_value(stat_map, "defensiverebounds", "dreb", "dr")),
+        _parse_int(_first_stat_value(stat_map, "assists", "ast")),
+        _parse_int(_first_stat_value(stat_map, "steals", "stl")),
+        _parse_int(_first_stat_value(stat_map, "blocks", "blk")),
+        _parse_int(_first_stat_value(stat_map, "turnovers", "to")),
+        _parse_int(_first_stat_value(stat_map, "teamturnovers", "tto")),
+        _parse_int(_first_stat_value(stat_map, "totalturnovers", "toto")),
+        _parse_int(_first_stat_value(stat_map, "fouls", "pf")),
+        fg_made,
+        fg_attempted,
+        threes_made,
+        threes_attempted,
+        ft_made,
+        ft_attempted,
+        possessions,
+        "espn_summary",
+        captured_at,
+    )
+
+
+def _update_team_game_result_possessions(conn: sqlite3.Connection, game_id: int, payload: dict[str, Any] | None) -> int:
+    possessions_by_team = _summary_team_possessions(conn, payload)
+    if not possessions_by_team:
+        return 0
+    updated = 0
+    for team_id, possessions in possessions_by_team.items():
+        cursor = conn.execute(
+            """
+            UPDATE team_game_results
+            SET possessions = ?,
+                possessions_source = 'espn_summary'
+            WHERE game_id = ?
+              AND team_id = ?
+            """,
+            (possessions, game_id, team_id),
+        )
+        updated += max(cursor.rowcount, 0)
+    return updated
+
+
+def _derive_team_possessions(statistics: list[dict[str, Any]]) -> float | None:
+    stat_map = _team_stat_map(statistics)
+    fga = _resolve_team_attempts(stat_map, direct_keys=("fieldgoalsattempted", "fga"), composite_keys=("fg",))
+    fta = _resolve_team_attempts(stat_map, direct_keys=("freethrowsattempted", "fta"), composite_keys=("ft",))
+    offensive_rebounds = _first_stat_number(stat_map, "offensiverebounds", "oreb", "or")
+    total_turnovers = _first_stat_number(stat_map, "totalturnovers", "toto")
+    player_turnovers = _first_stat_number(stat_map, "turnovers", "to")
+    team_turnovers = _first_stat_number(stat_map, "teamturnovers", "tto")
+    turnovers = total_turnovers
+    if turnovers is None:
+        if player_turnovers is not None and team_turnovers is not None:
+            turnovers = player_turnovers + team_turnovers
+        else:
+            turnovers = player_turnovers
+    if fga is None or fta is None or offensive_rebounds is None or turnovers is None:
+        return None
+    return round(float(fga - offensive_rebounds + turnovers + (0.44 * fta)), 2)
+
+
+def _team_stat_map(statistics: list[dict[str, Any]]) -> dict[str, str]:
+    stat_map: dict[str, str] = {}
+    for stat in statistics:
+        display_value = str(stat.get("displayValue") or "").strip()
+        if not display_value:
+            continue
+        for key in (stat.get("name"), stat.get("abbreviation"), stat.get("label")):
+            normalized = _normalize_stat_key(key)
+            if normalized and normalized not in stat_map:
+                stat_map[normalized] = display_value
+    return stat_map
+
+
+def _resolve_team_attempts(
+    stat_map: dict[str, str],
+    *,
+    direct_keys: tuple[str, ...],
+    composite_keys: tuple[str, ...],
+) -> float | None:
+    direct_value = _first_stat_number(stat_map, *direct_keys)
+    if direct_value is not None:
+        return direct_value
+    for key in composite_keys:
+        attempts = _attempts_from_made_attempt(stat_map.get(key))
+        if attempts is not None:
+            return attempts
+    return None
+
+
+def _first_stat_value(stat_map: dict[str, str], *keys: str) -> str | None:
+    for key in keys:
+        value = stat_map.get(key)
+        if value is not None and str(value).strip():
+            return str(value)
+    return None
+
+
+def _first_stat_number(stat_map: dict[str, str], *keys: str) -> float | None:
+    for key in keys:
+        value = _parse_float(stat_map.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _attempts_from_made_attempt(value: str | None) -> float | None:
+    text = str(value or "").strip()
+    if not text or "-" not in text:
+        return None
+    _made, attempts = text.split("-", 1)
+    return _parse_float(attempts)
+
+
+def _made_attempt_pair(value: str | None) -> tuple[int | None, int | None]:
+    text = str(value or "").strip()
+    if not text or "-" not in text:
+        return None, None
+    made, attempts = text.split("-", 1)
+    return _parse_int(made), _parse_int(attempts)
+
+
+def _normalize_stat_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return "".join(ch for ch in text if ch.isalnum())
+
+
 def _delete_explicit_dnp_prop_lines(conn: sqlite3.Connection, game_ids: list[int]) -> int:
     if not game_ids:
         return 0
@@ -603,6 +932,13 @@ def _stat(raw_stats: list[Any], label_index: dict[str, int], label: str) -> str:
 def _parse_int(value: Any) -> int | None:
     try:
         return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_float(value: Any) -> float | None:
+    try:
+        return float(str(value).strip())
     except (TypeError, ValueError):
         return None
 

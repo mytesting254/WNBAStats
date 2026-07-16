@@ -155,6 +155,7 @@ def import_game_history(conn: sqlite3.Connection, csv_path: str | Path, clear_ex
                         home_points,
                         away_points,
                         possessions,
+                        "historical_csv" if row.get("possessions") not in (None, "") else "fallback",
                         closing_spread,
                         closing_total,
                         ats_result,
@@ -168,6 +169,7 @@ def import_game_history(conn: sqlite3.Connection, csv_path: str | Path, clear_ex
                         away_points,
                         home_points,
                         possessions,
+                        "historical_csv" if row.get("possessions") not in (None, "") else "fallback",
                         -closing_spread,
                         closing_total,
                         "cover" if ats_result == "no_cover" else "no_cover" if ats_result == "cover" else "push",
@@ -178,8 +180,8 @@ def import_game_history(conn: sqlite3.Connection, csv_path: str | Path, clear_ex
                     """
                     INSERT INTO team_game_results (
                         id, team_id, game_id, is_home, points, opponent_points, possessions,
-                        closing_spread, closing_total, ats_result, total_result
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        possessions_source, closing_spread, closing_total, ats_result, total_result
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     result_rows,
                 )

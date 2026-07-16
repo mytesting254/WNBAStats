@@ -97,7 +97,7 @@ from .player_prop_model import (
 )
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
 from .timezone_utils import APP_TIMEZONE, local_today_iso
-from .paths import get_cache_dir, get_db_path
+from .paths import get_cache_dir, get_db_path, get_snapshot_dir, get_training_db_path
 
 
 app = FastAPI(title="WNBA Prop Value API")
@@ -1621,6 +1621,17 @@ def ops_health() -> dict[str, Any]:
         "prop_sync": sync_state,
         "prop_sync_job": latest_job,
         "model_training": model_training_state,
+        "runtime_storage": {
+            "db_path": str(get_db_path()),
+            "training_db_path": str(get_training_db_path()),
+            "cache_dir": str(get_cache_dir()),
+            "snapshot_dir": str(get_snapshot_dir()),
+            "source_of_truth": "wnba.sqlite",
+            "training_store": "wnba-training.sqlite",
+            "team_boxscores_table": "team_game_boxscores",
+            "team_results_table": "team_game_results",
+            "team_boxscores_flow": "Raw ESPN team boxscores persist in team_game_boxscores. Training DB remains derived-only.",
+        },
     }
 
 
@@ -8258,6 +8269,12 @@ def _team_ratings_by_team(conn, team_ids: set[int]) -> dict[int, dict[str, Any]]
             sorted(ranked_season, key=lambda item: float(item[1]["net_rating"]), reverse=True)
         )
     }
+    pace_rank = {
+        team_id: idx + 1
+        for idx, (team_id, _payload) in enumerate(
+            sorted(ranked_season, key=lambda item: float(item[1]["pace"]), reverse=True)
+        )
+    }
 
     result: dict[int, dict[str, Any]] = {}
     for team_id in normalized_ids:
@@ -8269,6 +8286,7 @@ def _team_ratings_by_team(conn, team_ids: set[int]) -> dict[int, dict[str, Any]]
             "off_rank": off_rank.get(team_id),
             "def_rank": def_rank.get(team_id),
             "net_rank": net_rank.get(team_id),
+            "pace_rank": pace_rank.get(team_id),
         }
     return result
 

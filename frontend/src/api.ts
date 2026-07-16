@@ -213,6 +213,17 @@ export type OpsHealth = {
   prop_sync: PropSyncHealth;
   prop_sync_job?: PropSyncHealth | null;
   model_training: AsyncJobHealth;
+  runtime_storage?: {
+    db_path: string;
+    training_db_path: string;
+    cache_dir: string;
+    snapshot_dir: string;
+    source_of_truth: string;
+    training_store: string;
+    team_boxscores_table: string;
+    team_results_table: string;
+    team_boxscores_flow: string;
+  } | null;
 };
 
 export type PropSyncHealth = {
@@ -639,6 +650,7 @@ export type TeamRatings = {
   off_rank?: number | null;
   def_rank?: number | null;
   net_rank?: number | null;
+  pace_rank?: number | null;
 };
 
 export type Matchup = {

@@ -433,20 +433,56 @@ def _rebuild_minutes_training_examples(
 
 
 def _source_signature(conn: sqlite3.Connection) -> str:
-    tables = [
-        "player_game_stats",
-        "games",
-        "players",
-        "player_team_history",
-        "team_game_results",
+    parts = [
+        _table_signature(
+            conn,
+            "games",
+            "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, COALESCE(MAX(game_date), '') AS max_game_date",
+        ),
+        _table_signature(
+            conn,
+            "player_game_stats",
+            (
+                "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, "
+                "ROUND(COALESCE(SUM(minutes), 0), 3) AS minutes_sum"
+            ),
+        ),
+        _table_signature(
+            conn,
+            "players",
+            "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, COALESCE(MAX(team_id), 0) AS max_team_id",
+        ),
+        _table_signature(
+            conn,
+            "player_team_history",
+            "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, COALESCE(MAX(game_id), 0) AS max_game_id",
+        ),
+        _table_signature(
+            conn,
+            "player_game_availability",
+            (
+                "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, "
+                "SUM(CASE WHEN did_not_play = 1 THEN 1 ELSE 0 END) AS dnp_rows"
+            ),
+        ),
+        _table_signature(
+            conn,
+            "team_game_results",
+            (
+                "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, "
+                "ROUND(COALESCE(SUM(points + opponent_points), 0), 3) AS scoring_sum, "
+                "ROUND(COALESCE(SUM(possessions), 0), 3) AS possessions_sum, "
+                "SUM(CASE WHEN COALESCE(possessions_source, 'fallback') != 'fallback' THEN 1 ELSE 0 END) AS sourced_rows"
+            ),
+        ),
     ]
-    parts: list[str] = []
-    for table in tables:
-        row = conn.execute(
-            f"SELECT COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id FROM {table}"
-        ).fetchone()
-        parts.append(f"{table}:{int(row['row_count'] or 0)}:{int(row['max_id'] or 0)}")
     return "|".join(parts)
+
+
+def _table_signature(conn: sqlite3.Connection, table: str, select_sql: str) -> str:
+    row = conn.execute(f"SELECT {select_sql} FROM {table}").fetchone()
+    values = [f"{key}={row[key]}" for key in row.keys()]
+    return f"{table}:" + ",".join(values)
 
 
 def _ensure_training_example_columns(conn: sqlite3.Connection) -> None:

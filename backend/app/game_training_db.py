@@ -457,6 +457,25 @@ def _source_signature(conn: sqlite3.Connection) -> str:
         "games_final_max_id": int(row["max_id"] or 0),
         "games_final_max_date": str(row["max_game_date"] or ""),
     }
+    result_row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS row_count,
+            ROUND(COALESCE(SUM(points + opponent_points), 0), 3) AS scoring_sum,
+            ROUND(COALESCE(SUM(possessions), 0), 3) AS possessions_sum,
+            SUM(CASE WHEN COALESCE(possessions_source, 'fallback') != 'fallback' THEN 1 ELSE 0 END) AS sourced_rows
+        FROM team_game_results
+        """
+    ).fetchone()
+    boxscore_row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS row_count,
+            ROUND(COALESCE(SUM(field_goals_attempted + free_throws_attempted + offensive_rebounds), 0), 3) AS volume_sum,
+            ROUND(COALESCE(SUM(possessions), 0), 3) AS possessions_sum
+        FROM team_game_boxscores
+        """
+    ).fetchone()
     market_row = conn.execute(
         """
         SELECT
@@ -471,6 +490,17 @@ def _source_signature(conn: sqlite3.Connection) -> str:
         "spread": int(market_row["spread_rows"] or 0),
         "total": int(market_row["total_rows"] or 0),
         "moneyline": int(market_row["moneyline_rows"] or 0),
+    }
+    payload["team_results"] = {
+        "row_count": int(result_row["row_count"] or 0),
+        "scoring_sum": float(result_row["scoring_sum"] or 0.0),
+        "possessions_sum": float(result_row["possessions_sum"] or 0.0),
+        "sourced_rows": int(result_row["sourced_rows"] or 0),
+    }
+    payload["team_boxscores"] = {
+        "row_count": int(boxscore_row["row_count"] or 0),
+        "volume_sum": float(boxscore_row["volume_sum"] or 0.0),
+        "possessions_sum": float(boxscore_row["possessions_sum"] or 0.0),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     import hashlib

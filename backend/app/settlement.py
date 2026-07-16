@@ -13,6 +13,7 @@ def settle_completed_props(
     selected_dates: list[str] | None = None,
 ) -> dict:
     target_dates = _normalized_dates(selected_date, selected_dates)
+    hydrated_dates = _hydrate_team_stats_for_settlement(conn, target_dates)
     date_filter = ""
     params: tuple[str, ...] = ()
     if target_dates:
@@ -54,14 +55,29 @@ def settle_completed_props(
             pc.*,
             tgr.points AS team_points,
             tgr.opponent_points AS opponent_points,
+            tgr.possessions AS team_possessions,
+            tgr.possessions_source AS team_possessions_source,
+            opp.possessions AS opponent_possessions,
+            opp.possessions_source AS opponent_possessions_source,
             sp.id AS settled_prop_id,
             sp.game_margin AS existing_game_margin,
             sp.team_margin AS existing_team_margin,
             sp.team_spread AS existing_team_spread,
             sp.blowout_result AS existing_blowout_result,
-            sp.blowout_threshold AS existing_blowout_threshold
+            sp.blowout_threshold AS existing_blowout_threshold,
+            sp.team_points AS existing_team_points,
+            sp.opponent_points AS existing_opponent_points,
+            sp.team_possessions AS existing_team_possessions,
+            sp.opponent_possessions AS existing_opponent_possessions,
+            sp.pace AS existing_pace,
+            sp.team_off_rating AS existing_team_off_rating,
+            sp.opponent_off_rating AS existing_opponent_off_rating,
+            sp.net_rating AS existing_net_rating,
+            sp.team_possessions_source AS existing_team_possessions_source,
+            sp.opponent_possessions_source AS existing_opponent_possessions_source
         FROM prop_context pc
         LEFT JOIN team_game_results tgr ON tgr.game_id = pc.game_id AND tgr.team_id = pc.player_team_id
+        LEFT JOIN team_game_results opp ON opp.game_id = pc.game_id AND opp.team_id != pc.player_team_id
         LEFT JOIN settled_props sp ON sp.prop_line_id = pc.prop_line_id
         WHERE 1 = 1
         """
@@ -92,8 +108,11 @@ def settle_completed_props(
         INSERT INTO settled_props (
             prop_line_id, actual_result, winning_side, margin,
             player_minutes, game_margin, team_margin, team_spread,
-            blowout_result, blowout_threshold, settled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            blowout_result, blowout_threshold, team_points, opponent_points,
+            team_possessions, opponent_possessions, pace, team_off_rating,
+            opponent_off_rating, net_rating, team_possessions_source,
+            opponent_possessions_source, settled_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         settlements,
     )
@@ -110,6 +129,16 @@ def settle_completed_props(
             team_spread = ?,
             blowout_result = ?,
             blowout_threshold = ?,
+            team_points = ?,
+            opponent_points = ?,
+            team_possessions = ?,
+            opponent_possessions = ?,
+            pace = ?,
+            team_off_rating = ?,
+            opponent_off_rating = ?,
+            net_rating = ?,
+            team_possessions_source = ?,
+            opponent_possessions_source = ?,
             settled_at = ?
         WHERE prop_line_id = ?
         """,
@@ -125,6 +154,16 @@ def settle_completed_props(
                 settlement[8],
                 settlement[9],
                 settlement[10],
+                settlement[11],
+                settlement[12],
+                settlement[13],
+                settlement[14],
+                settlement[15],
+                settlement[16],
+                settlement[17],
+                settlement[18],
+                settlement[19],
+                settlement[20],
                 settlement[0],
             )
             for settlement in repairs
@@ -137,6 +176,7 @@ def settle_completed_props(
         "repaired": len(repairs),
         "skipped": skipped,
         "settled_at": settled_at,
+        "hydrated_dates": hydrated_dates,
         "selected_date": target_dates[0] if len(target_dates) == 1 else None,
         "selected_dates": target_dates,
     }
@@ -147,6 +187,47 @@ def _normalized_dates(selected_date: str | None, selected_dates: list[str] | Non
     values.extend(selected_dates or [])
     cleaned = sorted({str(value).strip() for value in values if str(value).strip()})
     return cleaned
+
+
+def _hydrate_team_stats_for_settlement(conn: sqlite3.Connection, target_dates: list[str]) -> list[str]:
+    candidate_dates = target_dates or _unsettled_final_prop_dates(conn)
+    hydrated_dates: list[str] = []
+    if not candidate_dates:
+        return hydrated_dates
+    from .espn_history import import_espn_player_boxscores
+
+    for item in candidate_dates:
+        try:
+            import_espn_player_boxscores(
+                conn,
+                _season_for_date(item),
+                force_refresh=False,
+                missing_only=False,
+                selected_date=item,
+            )
+            hydrated_dates.append(item)
+        except Exception:
+            continue
+    return hydrated_dates
+
+
+def _unsettled_final_prop_dates(conn: sqlite3.Connection) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT g.game_date
+        FROM prop_lines pl
+        JOIN games g ON g.id = pl.game_id
+        LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+        WHERE g.status = 'final'
+          AND sp.id IS NULL
+        ORDER BY g.game_date
+        """
+    ).fetchall()
+    return [str(row["game_date"]).strip() for row in rows if row["game_date"]]
+
+
+def _season_for_date(value: str) -> int:
+    return int(str(value).split("-", 1)[0])
 
 
 def _build_settlement(row: sqlite3.Row, settled_at: str) -> tuple:
@@ -166,6 +247,18 @@ def _build_settlement(row: sqlite3.Row, settled_at: str) -> tuple:
     if row["spread_home"] is not None:
         spread_home = float(row["spread_home"])
         team_spread = spread_home if int(row["player_team_id"]) == int(row["home_team_id"]) else -spread_home
+    team_points = float(row["team_points"]) if row["team_points"] is not None else None
+    opponent_points = float(row["opponent_points"]) if row["opponent_points"] is not None else None
+    team_possessions = float(row["team_possessions"]) if row["team_possessions"] is not None else None
+    opponent_possessions = float(row["opponent_possessions"]) if row["opponent_possessions"] is not None else None
+    pace = _average_nullable(team_possessions, opponent_possessions)
+    team_off_rating = _rating_per_100(team_points, team_possessions)
+    opponent_off_rating = _rating_per_100(opponent_points, opponent_possessions)
+    net_rating = (
+        round(team_off_rating - opponent_off_rating, 2)
+        if team_off_rating is not None and opponent_off_rating is not None
+        else None
+    )
     blowout_threshold = 15.0
     blowout_result = "unknown"
     if game_margin is not None:
@@ -181,6 +274,16 @@ def _build_settlement(row: sqlite3.Row, settled_at: str) -> tuple:
         team_spread,
         blowout_result,
         blowout_threshold,
+        team_points,
+        opponent_points,
+        team_possessions,
+        opponent_possessions,
+        pace,
+        team_off_rating,
+        opponent_off_rating,
+        net_rating,
+        str(row["team_possessions_source"] or "").strip() or None,
+        str(row["opponent_possessions_source"] or "").strip() or None,
         settled_at,
     )
 
@@ -195,4 +298,33 @@ def _needs_repair(row: sqlite3.Row) -> bool:
     existing_blowout = str(row["existing_blowout_result"] or "").strip().lower()
     if existing_blowout in {"", "unknown"}:
         return True
-    return row["existing_blowout_threshold"] is None
+    if row["existing_blowout_threshold"] is None:
+        return True
+    if row["existing_team_possessions"] is None and row["team_possessions"] is not None:
+        return True
+    if row["existing_opponent_possessions"] is None and row["opponent_possessions"] is not None:
+        return True
+    if row["existing_pace"] is None and (row["team_possessions"] is not None or row["opponent_possessions"] is not None):
+        return True
+    if row["existing_team_off_rating"] is None and row["team_possessions"] is not None:
+        return True
+    if row["existing_opponent_off_rating"] is None and row["opponent_possessions"] is not None:
+        return True
+    if row["existing_net_rating"] is None and row["team_possessions"] is not None and row["opponent_possessions"] is not None:
+        return True
+    if row["existing_team_possessions_source"] is None and row["team_possessions_source"] is not None:
+        return True
+    return row["existing_opponent_possessions_source"] is None and row["opponent_possessions_source"] is not None
+
+
+def _rating_per_100(points: float | None, possessions: float | None) -> float | None:
+    if points is None or possessions is None or possessions <= 0:
+        return None
+    return round((points / possessions) * 100.0, 2)
+
+
+def _average_nullable(left: float | None, right: float | None) -> float | None:
+    values = [value for value in (left, right) if value is not None]
+    if not values:
+        return None
+    return round(sum(values) / len(values), 2)

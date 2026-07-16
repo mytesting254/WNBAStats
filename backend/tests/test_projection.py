@@ -27,9 +27,10 @@ from backend.app import paths as paths_module
 from backend.app import player_prop_model as player_prop_model_module
 from backend.app import projections as projections_module
 from backend.app import rotowire_import as rotowire_import_module
+from backend.app import settlement as settlement_module
 from backend.app import stocks_tracking as stocks_tracking_module
 from backend.app import training as training_module
-from backend.app.bootstrap import ensure_teams, normalize_team_abbreviation
+from backend.app.bootstrap import ensure_team, ensure_teams, normalize_team_abbreviation
 from backend.app.accuracy_analysis import build_accuracy_report, get_best_predictions, get_worst_predictions
 from backend.app.covers_import import (
     COVERS_CACHE_TTL_SECONDS,
@@ -43,7 +44,7 @@ from backend.app.covers_import import (
     covers_matchup_links,
 )
 from backend.app.db import connect, init_db
-from backend.app.espn_history import import_espn_player_boxscores, import_espn_scoreboard
+from backend.app.espn_history import backfill_espn_team_possessions, import_espn_player_boxscores, import_espn_scoreboard
 from backend.app.history_expansion import audit_settled_prop_history_gaps, expand_settled_prop_history
 from backend.app.game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
 from backend.app.game_predictions import evaluate_game_residual_models, project_game
@@ -814,6 +815,21 @@ async def test_app_response_cache_serves_fresh_payload_before_calling_backend(tm
     assert json.loads(second.body.decode("utf-8")) == [{"id": 1, "player_name": "Cached"}]
 
 
+def test_roster_endpoint_bypasses_app_response_cache() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/api/roster",
+            "raw_path": b"/api/roster",
+            "query_string": b"",
+            "headers": [],
+        }
+    )
+
+    assert main_module._should_cache_app_response(request) is False
+
+
 def test_audit_stale_payloads_flags_expired_and_old_cache_files(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(main_module, "get_cache_dir", lambda: tmp_path)
 
@@ -1121,6 +1137,82 @@ def test_resolve_roster_player_falls_back_to_unique_league_wide_name() -> None:
     assert player is not None
     assert int(player["player_id"]) == 777101
     assert player["rotation_role"] == "starter"
+
+
+def test_resolve_roster_player_display_fast_falls_back_to_unique_league_wide_name() -> None:
+    load_test_history()
+    with connect() as conn:
+        la_team_id = int(
+            conn.execute("SELECT id FROM teams WHERE abbreviation = 'LA'").fetchone()[0]
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (777151, "Kelsey Plum", la_team_id, "G", "starter"),
+        )
+        player_rows = conn.execute(
+            """
+            SELECT
+                p.id AS player_id,
+                p.full_name,
+                p.team_id,
+                t.abbreviation AS team_abbreviation,
+                p.rotation_role,
+                p.position
+            FROM players p
+            LEFT JOIN teams t ON t.id = p.team_id
+            """
+        ).fetchall()
+        player_index = main_module._build_roster_player_index(player_rows)
+        player, display_fallback = main_module._resolve_roster_player_display(
+            conn,
+            "LV",
+            "Kelsey Plum",
+            player_rows=player_rows,
+            player_index=player_index,
+        )
+
+    assert display_fallback is None
+    assert player is not None
+    assert int(player["player_id"]) == 777151
+    assert player["rotation_role"] == "starter"
+
+
+def test_resolve_roster_player_display_fast_falls_back_to_unique_initial_last_name() -> None:
+    load_test_history()
+    with connect() as conn:
+        min_team_id = int(
+            conn.execute("SELECT id FROM teams WHERE abbreviation = 'MIN'").fetchone()[0]
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (777161, "DiJonai Carrington", min_team_id, "G", "rotation"),
+        )
+        player_rows = conn.execute(
+            """
+            SELECT
+                p.id AS player_id,
+                p.full_name,
+                p.team_id,
+                t.abbreviation AS team_abbreviation,
+                p.rotation_role,
+                p.position
+            FROM players p
+            LEFT JOIN teams t ON t.id = p.team_id
+            """
+        ).fetchall()
+        player_index = main_module._build_roster_player_index(player_rows)
+        player, display_fallback = main_module._resolve_roster_player_display(
+            conn,
+            "CHI",
+            "D. Carrington",
+            player_rows=player_rows,
+            player_index=player_index,
+        )
+
+    assert display_fallback is None
+    assert player is not None
+    assert int(player["player_id"]) == 777161
+    assert player["position"] == "G"
 
 
 def test_resolve_roster_player_falls_back_to_unique_team_last_name() -> None:
@@ -2044,7 +2136,7 @@ def test_minutes_projection_keeps_rotation_vacancy_floor_close_to_recent_blend()
     )
 
     assert projected <= recent_blend + 0.8
-    assert "hard rule same-position vacancy floor" in note
+    assert "recency anchor" in note
 
 
 def test_minutes_earned_blend_weight_cuts_stable_low_vol_rotation_weight() -> None:
@@ -2062,7 +2154,7 @@ def test_minutes_earned_blend_weight_cuts_stable_low_vol_rotation_weight() -> No
         opportunity_context=[0.0, 0.0],
     )
 
-    assert weight == pytest.approx(0.132)
+    assert weight == pytest.approx(0.1122)
 
 
 def test_minutes_earned_blend_weight_preserves_more_weight_with_real_vacancy() -> None:
@@ -2096,6 +2188,38 @@ def test_minutes_earned_blend_weight_preserves_more_weight_with_real_vacancy() -
     assert vacancy > quiet
 
 
+def test_minutes_earned_blend_weight_cuts_medium_vol_rotation_weight_in_quiet_context() -> None:
+    quiet = player_prop_model_module._minutes_earned_blend_weight(
+        base_weight=0.33,
+        learned_minutes=24.8,
+        recent_blend=22.2,
+        recency_anchor=22.3,
+        role_bucket="rotation",
+        minute_volatility=6.1,
+        recent_absence_days=None,
+        recent_drop=False,
+        recent_spike=False,
+        injury_delta=0.0,
+        opportunity_context=[0.0, 0.0],
+    )
+    vacancy = player_prop_model_module._minutes_earned_blend_weight(
+        base_weight=0.33,
+        learned_minutes=24.8,
+        recent_blend=22.2,
+        recency_anchor=22.3,
+        role_bucket="rotation",
+        minute_volatility=6.1,
+        recent_absence_days=None,
+        recent_drop=False,
+        recent_spike=False,
+        injury_delta=0.0,
+        opportunity_context=[18.0, 1.0],
+    )
+
+    assert quiet == pytest.approx(0.1254)
+    assert vacancy > quiet
+
+
 def test_minutes_context_bucket_distinguishes_soft_vacancy() -> None:
     assert main_module._minutes_context_bucket({
         "recent_transfer": 0,
@@ -2109,6 +2233,22 @@ def test_minutes_context_bucket_distinguishes_soft_vacancy() -> None:
         "same_position_unavailable_minutes": 20.0,
         "same_position_key_out_count": 1.0,
     }) == "vacancy"
+
+
+def test_minutes_context_bucket_accepts_sqlite_row() -> None:
+    with connect() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                0 AS recent_transfer,
+                0.0 AS recent_absence_days,
+                12.0 AS same_position_unavailable_minutes,
+                0.0 AS same_position_key_out_count
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert main_module._minutes_context_bucket(row) == "soft_vacancy"
 
 
 def test_minutes_projection_uses_lower_blend_for_unsupported_starter_volatile_spike(monkeypatch) -> None:
@@ -2226,9 +2366,44 @@ def test_minutes_stable_context_cap_limits_soft_vacancy_starter_rise() -> None:
         opportunity_context=[12.0, 0.0],
     )
 
-    assert role_state.bucket == "rotation"
+    assert role_state.bucket == "starter_volatile"
     assert "soft-vacancy rise cap" in notes
     assert capped == pytest.approx(25.85)
+
+
+def test_minutes_stable_context_cap_lifts_soft_vacancy_starter_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=24.8,
+        last_10_minutes_avg=26.6,
+        ewma_minutes=25.3,
+        minutes_trend=-2.9,
+        minute_volatility=4.4,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=6.0,
+        lineup_context=[0.17, 0.82, 0.41],
+        opportunity_context=[13.2, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=23.208,
+        role_state=role_state,
+        recent_blend=25.44,
+        recency_anchor=25.147,
+        last_10_minutes_avg=26.6,
+        minutes_trend=-2.933,
+        minute_volatility=4.422,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=6.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[13.2, 0.0],
+    )
+
+    assert role_state.bucket == "starter_volatile"
+    assert "soft-vacancy starter floor" in notes
+    assert floored == pytest.approx(24.54)
 
 
 def test_minutes_stable_context_cap_limits_stable_starter_rise() -> None:
@@ -2261,9 +2436,114 @@ def test_minutes_stable_context_cap_limits_stable_starter_rise() -> None:
         opportunity_context=[0.0, 0.0],
     )
 
-    assert role_state.bucket == "rotation"
+    assert role_state.bucket == "starter_volatile"
     assert "stable-context starter rise cap" in notes
-    assert capped == pytest.approx(28.5)
+    assert capped == pytest.approx(28.1)
+
+
+def test_minutes_stable_context_cap_lifts_quiet_core_starter_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="star",
+        recent_minutes_avg=31.0,
+        last_10_minutes_avg=31.8,
+        ewma_minutes=30.7,
+        minutes_trend=-0.8,
+        minute_volatility=5.2,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        lineup_context=[0.19, 0.86, 0.45],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=28.9,
+        role_state=role_state,
+        recent_blend=31.28,
+        recency_anchor=30.96,
+        last_10_minutes_avg=31.8,
+        minutes_trend=-0.8,
+        minute_volatility=5.2,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "core_starter"
+    assert "stable-context core-starter floor" in notes
+    assert floored == pytest.approx(29.98)
+
+
+def test_minutes_stable_context_cap_limits_medium_vol_stable_rotation_rise() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=20.0,
+        last_10_minutes_avg=18.7,
+        ewma_minutes=19.4,
+        minutes_trend=1.8,
+        minute_volatility=7.1,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        lineup_context=[0.14, 0.76, 0.25],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=21.8,
+        role_state=role_state,
+        recent_blend=19.545,
+        recency_anchor=19.9,
+        last_10_minutes_avg=18.7,
+        minutes_trend=1.8,
+        minute_volatility=7.1,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "stable-context rotation rise cap" in notes
+    assert capped == pytest.approx(20.345)
+
+
+def test_minutes_stable_context_cap_lifts_stable_starter_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=28.5,
+        last_10_minutes_avg=31.0,
+        ewma_minutes=29.8,
+        minutes_trend=-4.8,
+        minute_volatility=4.8,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        lineup_context=[0.17, 0.82, 0.41],
+        opportunity_context=[8.4, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=26.563,
+        role_state=role_state,
+        recent_blend=30.115,
+        recency_anchor=29.775,
+        last_10_minutes_avg=31.0,
+        minutes_trend=-4.8,
+        minute_volatility=4.8,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[8.4, 0.0],
+    )
+
+    assert role_state.bucket == "starter_volatile"
+    assert "stable-context starter floor" in notes
+    assert floored == pytest.approx(28.075)
 
 
 def test_minutes_projection_keeps_starter_vacancy_floor_close_to_recent_blend() -> None:
@@ -2331,6 +2611,41 @@ def test_minutes_stable_context_cap_lifts_soft_vacancy_rotation_floor() -> None:
     assert floored == pytest.approx(21.8)
 
 
+def test_minutes_stable_context_cap_limits_soft_vacancy_rotation_rise() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=18.4,
+        last_10_minutes_avg=15.9,
+        ewma_minutes=17.3,
+        minutes_trend=4.5,
+        minute_volatility=5.8,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=4.0,
+        lineup_context=[0.13, 0.73, 0.24],
+        opportunity_context=[13.5, 0.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=21.2,
+        role_state=role_state,
+        recent_blend=17.525,
+        recency_anchor=17.95,
+        last_10_minutes_avg=15.9,
+        minutes_trend=4.5,
+        minute_volatility=5.8,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=4.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[13.5, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "soft-vacancy rotation rise cap" in notes
+    assert capped == pytest.approx(18.925)
+
+
 def test_minutes_stable_context_cap_lifts_stable_rotation_floor() -> None:
     role_state = _classify_minutes_role(
         rotation_role="rotation",
@@ -2363,7 +2678,322 @@ def test_minutes_stable_context_cap_lifts_stable_rotation_floor() -> None:
 
     assert role_state.bucket == "rotation"
     assert "stable-context rotation floor" in notes
-    assert floored == pytest.approx(20.675)
+    assert floored == pytest.approx(21.175)
+
+
+def test_minutes_stable_context_cap_lifts_quiet_medium_vol_rotation_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=22.6,
+        last_10_minutes_avg=23.2,
+        ewma_minutes=22.1,
+        minutes_trend=-2.5,
+        minute_volatility=6.3,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        lineup_context=[0.14, 0.76, 0.25],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=22.623,
+        role_state=role_state,
+        recent_blend=24.04,
+        recency_anchor=21.429,
+        last_10_minutes_avg=23.2,
+        minutes_trend=-2.5,
+        minute_volatility=6.3,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "stable-context rotation floor" in notes
+    assert floored == pytest.approx(22.84)
+
+
+def test_minutes_stable_context_cap_lifts_low_vol_stable_rotation_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=22.8,
+        last_10_minutes_avg=23.0,
+        ewma_minutes=22.4,
+        minutes_trend=-1.2,
+        minute_volatility=4.4,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=6.0,
+        lineup_context=[0.14, 0.76, 0.25],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=20.627,
+        role_state=role_state,
+        recent_blend=22.87,
+        recency_anchor=22.48,
+        last_10_minutes_avg=23.0,
+        minutes_trend=-1.2,
+        minute_volatility=4.4,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=6.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "stable-context rotation floor" in notes
+    assert floored == pytest.approx(21.77)
+
+
+def test_minutes_stable_context_cap_lifts_near_stable_medium_vol_rotation_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=21.4,
+        last_10_minutes_avg=20.7,
+        ewma_minutes=20.9,
+        minutes_trend=-3.5,
+        minute_volatility=7.1,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=4.0,
+        lineup_context=[0.14, 0.76, 0.25],
+        opportunity_context=[6.5, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=18.252,
+        role_state=role_state,
+        recent_blend=21.165,
+        recency_anchor=19.1,
+        last_10_minutes_avg=20.7,
+        minutes_trend=-3.5,
+        minute_volatility=7.1,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=4.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[6.5, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "stable-context rotation floor" in notes
+    assert floored == pytest.approx(19.865)
+
+
+def test_minutes_stable_context_cap_limits_stable_rotation_rise() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=20.8,
+        last_10_minutes_avg=19.6,
+        ewma_minutes=20.0,
+        minutes_trend=1.6,
+        minute_volatility=5.0,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        lineup_context=[0.14, 0.76, 0.25],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=22.387,
+        role_state=role_state,
+        recent_blend=20.38,
+        recency_anchor=20.7,
+        last_10_minutes_avg=19.6,
+        minutes_trend=1.6,
+        minute_volatility=5.0,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "stable-context rotation rise cap" in notes
+    assert capped == pytest.approx(21.38)
+
+
+def test_minutes_stable_context_cap_limits_vacancy_rotation_rise() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=16.8,
+        last_10_minutes_avg=15.3,
+        ewma_minutes=16.1,
+        minutes_trend=4.1,
+        minute_volatility=6.7,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=2.0,
+        lineup_context=[0.12, 0.71, 0.24],
+        opportunity_context=[48.0, 2.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=20.2,
+        role_state=role_state,
+        recent_blend=16.275,
+        recency_anchor=16.85,
+        last_10_minutes_avg=15.3,
+        minutes_trend=4.1,
+        minute_volatility=6.7,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=2.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[48.0, 2.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "vacancy rotation rise cap" in notes
+    assert capped == pytest.approx(17.775)
+
+
+def test_minutes_stable_context_cap_limits_stable_vacancy_rotation_rise() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=17.8,
+        last_10_minutes_avg=17.2,
+        ewma_minutes=17.0,
+        minutes_trend=2.4,
+        minute_volatility=5.1,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=2.0,
+        lineup_context=[0.13, 0.74, 0.24],
+        opportunity_context=[53.0, 1.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=18.9,
+        role_state=role_state,
+        recent_blend=16.95,
+        recency_anchor=17.35,
+        last_10_minutes_avg=17.2,
+        minutes_trend=2.4,
+        minute_volatility=5.1,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=2.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[53.0, 1.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "stable-vacancy rotation rise cap" in notes
+    assert capped == pytest.approx(18.2)
+
+
+def test_minutes_stable_context_cap_limits_vacancy_starter_rise() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=24.8,
+        last_10_minutes_avg=20.9,
+        ewma_minutes=23.1,
+        minutes_trend=4.8,
+        minute_volatility=6.7,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=2.0,
+        lineup_context=[0.14, 0.72, 0.31],
+        opportunity_context=[31.0, 1.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=31.2,
+        role_state=role_state,
+        recent_blend=23.435,
+        recency_anchor=23.9,
+        last_10_minutes_avg=20.9,
+        minutes_trend=4.8,
+        minute_volatility=6.7,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=2.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[31.0, 1.0],
+    )
+
+    assert role_state.bucket == "starter_volatile"
+    assert "vacancy starter rise cap" in notes
+    assert capped == pytest.approx(25.335)
+
+
+def test_minutes_stable_context_lifts_low_vol_stable_starter_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=27.0,
+        last_10_minutes_avg=28.2,
+        ewma_minutes=27.4,
+        minutes_trend=-1.1,
+        minute_volatility=4.6,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=4.0,
+        lineup_context=[0.15, 0.74, 0.32],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=24.7,
+        role_state=role_state,
+        recent_blend=27.42,
+        recency_anchor=27.08,
+        last_10_minutes_avg=28.2,
+        minutes_trend=-1.1,
+        minute_volatility=4.6,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=4.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "starter_volatile"
+    assert "stable-context starter floor" in notes
+    assert floored == pytest.approx(26.02)
+
+
+def test_minutes_stable_context_lifts_quiet_medium_vol_stable_starter_floor() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=24.8,
+        last_10_minutes_avg=25.3,
+        ewma_minutes=24.2,
+        minutes_trend=0.2,
+        minute_volatility=6.0,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=2.0,
+        lineup_context=[0.15, 0.74, 0.32],
+        opportunity_context=[6.7, 0.0],
+    )
+
+    floored, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=23.387,
+        role_state=role_state,
+        recent_blend=25.29,
+        recency_anchor=22.502,
+        last_10_minutes_avg=25.3,
+        minutes_trend=0.2,
+        minute_volatility=6.0,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=2.0,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[6.7, 0.0],
+    )
+
+    assert role_state.bucket == "starter_volatile"
+    assert "stable-context starter floor" in notes
+    assert floored == pytest.approx(23.79)
 
 
 def test_minutes_stable_context_cap_lifts_short_absence_return_floor() -> None:
@@ -2399,6 +3029,65 @@ def test_minutes_stable_context_cap_lifts_short_absence_return_floor() -> None:
     assert role_state.bucket == "rotation"
     assert "absence-return floor" in notes
     assert floored == pytest.approx(22.375)
+
+
+def test_minutes_reference_baseline_stays_closer_to_recent_blend_for_low_vol_drop() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=28.5,
+        last_10_minutes_avg=31.0,
+        ewma_minutes=29.8,
+        minutes_trend=-4.8,
+        minute_volatility=4.8,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+    )
+
+    baseline = player_prop_model_module._minutes_reference_baseline(
+        role_state=role_state,
+        base_heuristic=28.0,
+        recent_blend=30.115,
+        recent_minutes_avg=28.5,
+        last_10_minutes_avg=31.0,
+        minutes_trend=-4.8,
+        minute_volatility=4.8,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=3.0,
+    )
+
+    assert baseline == pytest.approx(29.4382)
+
+
+def test_minutes_reference_baseline_stays_closer_to_recent_blend_for_fringe_drop() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="bench",
+        recent_minutes_avg=9.4,
+        last_10_minutes_avg=10.9,
+        ewma_minutes=8.3,
+        minutes_trend=-6.9,
+        minute_volatility=5.4,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=5.0,
+    )
+
+    baseline = player_prop_model_module._minutes_reference_baseline(
+        role_state=role_state,
+        base_heuristic=6.1,
+        recent_blend=11.84,
+        recent_minutes_avg=9.4,
+        last_10_minutes_avg=10.9,
+        minutes_trend=-6.9,
+        minute_volatility=5.4,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=5.0,
+    )
+
+    assert role_state.bucket == "fringe"
+    assert baseline == pytest.approx(10.5772)
 
 
 def test_minutes_projection_rebound_guard_protects_strong_role_drop() -> None:
@@ -3736,6 +4425,44 @@ def test_settle_completed_props_uses_team_history_for_game_context() -> None:
     assert row["team_margin"] == 6.0
     assert row["team_spread"] == -4.5
     assert row["blowout_result"] == "no"
+
+
+def test_settle_completed_props_hydrates_team_stats_for_unsettled_final_dates(monkeypatch) -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    hydrated: list[tuple[int, str]] = []
+
+    def fake_import_espn_player_boxscores(
+        conn,
+        season,
+        force_refresh=False,
+        missing_only=False,
+        selected_date=None,
+        max_workers=8,
+    ):
+        hydrated.append((season, selected_date))
+        return {
+            "season": season,
+            "selected_date": selected_date,
+            "updated_team_game_results": 2,
+            "updated_team_game_boxscores": 2,
+        }
+
+    monkeypatch.setattr(espn_history_module, "import_espn_player_boxscores", fake_import_espn_player_boxscores)
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9104, 100, 1001, 'DraftKings', 'points', 20.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        result = settlement_module.settle_completed_props(conn)
+
+    assert hydrated == [(2024, "2024-05-14")]
+    assert result["hydrated_dates"] == ["2024-05-14"]
+    assert result["settled"] == 1
 
 
 def test_historical_training_features_use_live_context_factors(monkeypatch) -> None:
@@ -6305,6 +7032,55 @@ def test_scheduled_game_ids_limits_fallback_to_next_scheduled_slate(monkeypatch)
         scheduled_game_ids = main_module._scheduled_game_ids(conn)
 
     assert scheduled_game_ids == [9920, 9930]
+
+
+def test_scheduled_game_ids_for_teams_limits_to_next_team_slate(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_local_today_iso", lambda: "2026-07-14")
+    monkeypatch.setattr(main_module, "_active_slate_game_ids", lambda conn: [])
+
+    with connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)
+            """,
+            [
+                (9950, "2026-07-14", "2026-07-14T17:00:00Z", 6, 8, -1.5, 162.5),
+                (9960, "2026-07-14", "2026-07-14T20:00:00Z", 4, 11, -2.5, 158.5),
+                (9970, "2026-07-16", "2026-07-16T18:00:00Z", 6, 9, -3.5, 159.5),
+                (9980, "2026-07-18", "2026-07-18T18:00:00Z", 8, 10, -3.5, 159.5),
+            ],
+        )
+
+        scheduled_game_ids = main_module._scheduled_game_ids_for_teams(conn, [6, 8])
+
+    assert scheduled_game_ids == [9950]
+
+
+def test_scheduled_game_ids_for_teams_prefers_filtered_active_slate(monkeypatch) -> None:
+    monkeypatch.setattr(main_module, "_active_slate_game_ids", lambda conn: [9990, 9991, 9992])
+
+    with connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)
+            """,
+            [
+                (9990, "2026-07-16", "2026-07-16T17:00:00Z", 6, 8, -1.5, 162.5),
+                (9991, "2026-07-16", "2026-07-16T20:00:00Z", 4, 11, -2.5, 158.5),
+                (9992, "2026-07-16", "2026-07-16T22:00:00Z", 9, 10, -3.5, 159.5),
+                (9993, "2026-07-18", "2026-07-18T18:00:00Z", 6, 10, -3.5, 159.5),
+            ],
+        )
+
+        scheduled_game_ids = main_module._scheduled_game_ids_for_teams(conn, [6, 8])
+
+    assert scheduled_game_ids == [9990]
 
 
 def test_settle_auto_repairs_missing_current_slate_predictions(monkeypatch) -> None:
@@ -9752,6 +10528,188 @@ def test_espn_boxscore_records_dnp_and_deletes_open_props(monkeypatch) -> None:
     assert remaining_prediction == 0
 
 
+def test_espn_boxscore_backfills_team_possessions_from_summary(monkeypatch) -> None:
+    def fake_fetch_summary(game_id: int, force_refresh: bool = False) -> dict:
+        assert game_id == 401857068
+        return {
+            "boxscore": {
+                "teams": [
+                    {
+                        "team": {"abbreviation": "SEA"},
+                        "statistics": [
+                            {"name": "fieldGoalsMade-fieldGoalsAttempted", "displayValue": "36-78", "label": "FG"},
+                            {"name": "freeThrowsMade-freeThrowsAttempted", "displayValue": "14-23", "label": "FT"},
+                            {"name": "offensiveRebounds", "displayValue": "16", "abbreviation": "OR"},
+                            {"name": "totalTurnovers", "displayValue": "16", "abbreviation": "ToTO"},
+                        ],
+                    },
+                    {
+                        "team": {"abbreviation": "CHI"},
+                        "statistics": [
+                            {"name": "fieldGoalsMade-fieldGoalsAttempted", "displayValue": "35-74", "label": "FG"},
+                            {"name": "freeThrowsMade-freeThrowsAttempted", "displayValue": "14-19", "label": "FT"},
+                            {"name": "offensiveRebounds", "displayValue": "6", "abbreviation": "OR"},
+                            {"name": "turnovers", "displayValue": "13", "abbreviation": "TO"},
+                            {"name": "teamTurnovers", "displayValue": "1", "abbreviation": "TTO"},
+                        ],
+                    },
+                ],
+                "players": [],
+            }
+        }
+
+    monkeypatch.setattr("backend.app.espn_history.fetch_summary", fake_fetch_summary)
+
+    with connect() as conn:
+        home_team_id = ensure_team(conn, "CHI")
+        away_team_id = ensure_team(conn, "SEA")
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (?, '2026-07-15', '2026-07-15T16:00:00Z', ?, ?, 'final', 2, 2, 0.0, 185.0, 401857068)
+            """
+            ,
+            (401857068, home_team_id, away_team_id),
+        )
+        conn.executemany(
+            """
+            INSERT INTO team_game_results (
+                team_id, game_id, is_home, points, opponent_points, possessions,
+                closing_spread, closing_total, ats_result, total_result
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (home_team_id, 401857068, 1, 95, 90, 78.0, 0.0, 185.0, "push", "push"),
+                (away_team_id, 401857068, 0, 90, 95, 78.0, 0.0, 185.0, "push", "push"),
+            ],
+        )
+
+        result = import_espn_player_boxscores(conn, 2026, selected_date="2026-07-15", missing_only=True)
+        rows = conn.execute(
+            "SELECT team_id, possessions FROM team_game_results WHERE game_id = 401857068 ORDER BY team_id"
+        ).fetchall()
+        boxscore_rows = conn.execute(
+            """
+            SELECT
+                team_id,
+                offensive_rebounds,
+                turnovers,
+                team_turnovers,
+                total_turnovers,
+                field_goals_attempted,
+                free_throws_attempted,
+                possessions
+            FROM team_game_boxscores
+            WHERE game_id = 401857068
+            ORDER BY team_id
+            """
+        ).fetchall()
+
+    assert result["updated_team_game_results"] == 2
+    assert result["updated_team_game_boxscores"] == 2
+    assert {int(row["team_id"]): float(row["possessions"]) for row in rows} == {
+        int(away_team_id): 88.12,
+        int(home_team_id): 90.36,
+    }
+    assert {
+        int(row["team_id"]): (
+            int(row["offensive_rebounds"] or 0),
+            int(row["turnovers"] or 0),
+            int(row["team_turnovers"] or 0),
+            int(row["total_turnovers"] or 0),
+            int(row["field_goals_attempted"] or 0),
+            int(row["free_throws_attempted"] or 0),
+            float(row["possessions"] or 0.0),
+        )
+        for row in boxscore_rows
+    } == {
+        int(away_team_id): (16, 0, 0, 16, 78, 23, 88.12),
+        int(home_team_id): (6, 13, 1, 0, 74, 19, 90.36),
+    }
+
+
+def test_backfill_espn_team_possessions_repairs_placeholder_rows(monkeypatch) -> None:
+    def fake_fetch_summary(game_id: int, force_refresh: bool = False) -> dict:
+        assert game_id == 401857068
+        return {
+            "boxscore": {
+                "teams": [
+                    {
+                        "team": {"abbreviation": "SEA"},
+                        "statistics": [
+                            {"name": "fieldGoalsMade-fieldGoalsAttempted", "displayValue": "36-78", "label": "FG"},
+                            {"name": "freeThrowsMade-freeThrowsAttempted", "displayValue": "14-23", "label": "FT"},
+                            {"name": "offensiveRebounds", "displayValue": "16", "abbreviation": "OR"},
+                            {"name": "totalTurnovers", "displayValue": "16", "abbreviation": "ToTO"},
+                        ],
+                    },
+                    {
+                        "team": {"abbreviation": "CHI"},
+                        "statistics": [
+                            {"name": "fieldGoalsMade-fieldGoalsAttempted", "displayValue": "35-74", "label": "FG"},
+                            {"name": "freeThrowsMade-freeThrowsAttempted", "displayValue": "14-19", "label": "FT"},
+                            {"name": "offensiveRebounds", "displayValue": "6", "abbreviation": "OR"},
+                            {"name": "turnovers", "displayValue": "13", "abbreviation": "TO"},
+                            {"name": "teamTurnovers", "displayValue": "1", "abbreviation": "TTO"},
+                        ],
+                    },
+                ]
+            }
+        }
+
+    monkeypatch.setattr("backend.app.espn_history.fetch_summary", fake_fetch_summary)
+
+    with connect() as conn:
+        home_team_id = ensure_team(conn, "CHI")
+        away_team_id = ensure_team(conn, "SEA")
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
+            ) VALUES (?, '2026-07-15', '2026-07-15T16:00:00Z', ?, ?, 'final', 2, 2, 0.0, 185.0, 401857068)
+            """,
+            (401857068, home_team_id, away_team_id),
+        )
+        conn.executemany(
+            """
+            INSERT INTO team_game_results (
+                team_id, game_id, is_home, points, opponent_points, possessions,
+                closing_spread, closing_total, ats_result, total_result
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (home_team_id, 401857068, 1, 95, 90, 78.0, 0.0, 185.0, "push", "push"),
+                (away_team_id, 401857068, 0, 90, 95, 78.0, 0.0, 185.0, "push", "push"),
+            ],
+        )
+
+        result = backfill_espn_team_possessions(conn, 2026, selected_date="2026-07-15")
+        rows = conn.execute(
+            "SELECT team_id, possessions FROM team_game_results WHERE game_id = 401857068 ORDER BY team_id"
+        ).fetchall()
+        boxscore_rows = conn.execute(
+            """
+            SELECT team_id, offensive_rebounds, total_turnovers, field_goals_attempted, free_throws_attempted, possessions
+            FROM team_game_boxscores
+            WHERE game_id = 401857068
+            ORDER BY team_id
+            """
+        ).fetchall()
+
+    assert result["games_checked"] == 1
+    assert result["updated_team_game_results"] == 2
+    assert result["updated_team_game_boxscores"] == 2
+    assert result["games_with_updates"] == 1
+    assert {int(row["team_id"]): float(row["possessions"]) for row in rows} == {
+        int(away_team_id): 88.12,
+        int(home_team_id): 90.36,
+    }
+    assert len(boxscore_rows) == 2
+
+
 def test_espn_summary_injury_without_boxscore_entry_deletes_open_props(monkeypatch) -> None:
     def fake_fetch_summary(game_id: int, force_refresh: bool = False) -> dict:
         return {
@@ -9909,6 +10867,71 @@ def test_espn_scoreboard_uses_local_game_date_for_late_utc_tip(monkeypatch) -> N
     assert result["inserted_games"] == 1
     assert game["game_date"] == "2026-06-02"
     assert game["status"] == "final"
+
+
+def test_espn_scoreboard_uses_cached_summary_for_final_possessions(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "backend.app.espn_history.fetch_scoreboard",
+        lambda season, force_refresh=False, selected_date=None: {
+            "events": [
+                {
+                    "id": "777004",
+                    "date": "2026-06-03T23:00:00Z",
+                    "competitions": [
+                        {
+                            "status": {"type": {"name": "STATUS_FINAL", "state": "post", "completed": True}},
+                            "competitors": [
+                                {"homeAway": "home", "score": "95", "team": {"abbreviation": "CHI", "displayName": "Chicago Sky"}},
+                                {"homeAway": "away", "score": "90", "team": {"abbreviation": "SEA", "displayName": "Seattle Storm"}},
+                            ],
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    cache_module.write_json_cache(
+        "espn_wnba_summary_777004.json",
+        {
+            "boxscore": {
+                "teams": [
+                    {
+                        "team": {"abbreviation": "SEA"},
+                        "statistics": [
+                            {"name": "fieldGoalsMade-fieldGoalsAttempted", "displayValue": "36-78", "label": "FG"},
+                            {"name": "freeThrowsMade-freeThrowsAttempted", "displayValue": "14-23", "label": "FT"},
+                            {"name": "offensiveRebounds", "displayValue": "16", "abbreviation": "OR"},
+                            {"name": "totalTurnovers", "displayValue": "16", "abbreviation": "ToTO"},
+                        ],
+                    },
+                    {
+                        "team": {"abbreviation": "CHI"},
+                        "statistics": [
+                            {"name": "fieldGoalsMade-fieldGoalsAttempted", "displayValue": "35-74", "label": "FG"},
+                            {"name": "freeThrowsMade-freeThrowsAttempted", "displayValue": "14-19", "label": "FT"},
+                            {"name": "offensiveRebounds", "displayValue": "6", "abbreviation": "OR"},
+                            {"name": "turnovers", "displayValue": "13", "abbreviation": "TO"},
+                            {"name": "teamTurnovers", "displayValue": "1", "abbreviation": "TTO"},
+                        ],
+                    },
+                ]
+            }
+        },
+    )
+
+    with connect() as conn:
+        home_team_id = ensure_team(conn, "CHI")
+        away_team_id = ensure_team(conn, "SEA")
+        result = import_espn_scoreboard(conn, 2026, selected_date="2026-06-03")
+        rows = conn.execute(
+            "SELECT team_id, possessions FROM team_game_results WHERE game_id = 777004 ORDER BY team_id"
+        ).fetchall()
+
+    assert result["inserted_team_game_results"] == 2
+    assert {int(row["team_id"]): float(row["possessions"]) for row in rows} == {
+        int(away_team_id): 88.12,
+        int(home_team_id): 90.36,
+    }
 
 
 def test_default_espn_daily_dates_include_previous_local_day() -> None:
@@ -10379,94 +11402,3 @@ def test_watchlist_snapshot_and_settlement_sync(monkeypatch) -> None:
     assert settled["wins_count"] >= 1
     assert refreshed["settled_count"] >= 1
     assert refreshed["wins_count"] >= 1
-def test_resolve_roster_player_display_fast_falls_back_to_unique_league_wide_name() -> None:
-    load_test_history()
-    with connect() as conn:
-        la_team_id = int(
-            conn.execute("SELECT id FROM teams WHERE abbreviation = 'LA'").fetchone()[0]
-        )
-        conn.execute(
-            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
-            (777151, "Kelsey Plum", la_team_id, "G", "starter"),
-        )
-        player_rows = conn.execute(
-            """
-            SELECT
-                p.id AS player_id,
-                p.full_name,
-                p.team_id,
-                t.abbreviation AS team_abbreviation,
-                p.rotation_role,
-                p.position
-            FROM players p
-            LEFT JOIN teams t ON t.id = p.team_id
-            """
-        ).fetchall()
-        player_index = main_module._build_roster_player_index(player_rows)
-        player, display_fallback = main_module._resolve_roster_player_display(
-            conn,
-            "LV",
-            "Kelsey Plum",
-            player_rows=player_rows,
-            player_index=player_index,
-        )
-
-    assert display_fallback is None
-    assert player is not None
-    assert int(player["player_id"]) == 777151
-    assert player["rotation_role"] == "starter"
-
-
-def test_resolve_roster_player_display_fast_falls_back_to_unique_initial_last_name() -> None:
-    load_test_history()
-    with connect() as conn:
-        min_team_id = int(
-            conn.execute("SELECT id FROM teams WHERE abbreviation = 'MIN'").fetchone()[0]
-        )
-        conn.execute(
-            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
-            (777161, "DiJonai Carrington", min_team_id, "G", "rotation"),
-        )
-        player_rows = conn.execute(
-            """
-            SELECT
-                p.id AS player_id,
-                p.full_name,
-                p.team_id,
-                t.abbreviation AS team_abbreviation,
-                p.rotation_role,
-                p.position
-            FROM players p
-            LEFT JOIN teams t ON t.id = p.team_id
-            """
-        ).fetchall()
-        player_index = main_module._build_roster_player_index(player_rows)
-        player, display_fallback = main_module._resolve_roster_player_display(
-            conn,
-            "CHI",
-            "D. Carrington",
-            player_rows=player_rows,
-            player_index=player_index,
-        )
-
-    assert display_fallback is None
-    assert player is not None
-    assert int(player["player_id"]) == 777161
-    assert player["position"] == "G"
-
-
-
-def test_roster_endpoint_bypasses_app_response_cache() -> None:
-    request = Request(
-        {
-            "type": "http",
-            "method": "GET",
-            "path": "/api/roster",
-            "raw_path": b"/api/roster",
-            "query_string": b"",
-            "headers": [],
-        }
-    )
-
-    assert main_module._should_cache_app_response(request) is False
-
