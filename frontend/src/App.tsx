@@ -4401,53 +4401,69 @@ function SpecialStocksView({
                 <MiniStat label="Avg 2+ Prob" value={formatPercent(performance?.avg_prob_2_plus ?? undefined)} />
                 <MiniStat label="Avg 3+ Prob" value={formatPercent(performance?.avg_prob_3_plus ?? undefined)} />
               </div>
-              <div className="table-wrap special-calibration-table-wrap">
-                <table className="special-calibration-table">
-                  <thead>
-                    <tr>
-                      <th>2+ Stocks Prob</th>
-                      <th>Settled</th>
-                      <th>Hits</th>
-                      <th>Avg Prob</th>
-                      <th>Actual Hit</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(performance?.calibration_buckets ?? []).map((bucket) => (
-                      <tr key={`2plus-${bucket.label}`}>
-                        <td>{bucket.label}</td>
-                        <td>{bucket.count}</td>
-                        <td>{bucket.hits}</td>
-                        <td>{formatPercent(bucket.avg_prob ?? undefined)}</td>
-                        <td>{formatPercent(bucket.hit_rate ?? undefined)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              <div className="table-wrap special-calibration-table-wrap">
-                <table className="special-calibration-table">
-                  <thead>
-                    <tr>
-                      <th>3+ Stocks Prob</th>
-                      <th>Settled</th>
-                      <th>Hits</th>
-                      <th>Avg Prob</th>
-                      <th>Actual Hit</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {(performance?.calibration_buckets_3_plus ?? []).map((bucket) => (
-                      <tr key={`3plus-${bucket.label}`}>
-                        <td>{bucket.label}</td>
-                        <td>{bucket.count}</td>
-                        <td>{bucket.hits}</td>
-                        <td>{formatPercent(bucket.avg_prob ?? undefined)}</td>
-                        <td>{formatPercent(bucket.hit_rate ?? undefined)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="special-calibration-section">
+                <div className="special-calibration-copy">
+                  <h4>Stocks Probability Calibration</h4>
+                  <p>Both calibration tables are shown below so the 2+ and 3+ distributions are separated and easy to compare.</p>
+                </div>
+                <div className="special-calibration-grid">
+                  <div className="table-wrap special-calibration-table-wrap special-calibration-table-wrap-2plus">
+                    <div className="special-calibration-title">
+                      <span>2+ Stocks Prob</span>
+                      <em>Calibrated against actual 2+ stocks hits</em>
+                    </div>
+                    <table className="special-calibration-table">
+                      <thead>
+                        <tr>
+                          <th>Bucket</th>
+                          <th>Settled</th>
+                          <th>Hits</th>
+                          <th>Avg Prob</th>
+                          <th>Actual Hit</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(performance?.calibration_buckets ?? []).map((bucket) => (
+                          <tr key={`2plus-${bucket.label}`}>
+                            <td>{bucket.label}</td>
+                            <td>{bucket.count}</td>
+                            <td>{bucket.hits}</td>
+                            <td>{formatPercent(bucket.avg_prob ?? undefined)}</td>
+                            <td>{formatPercent(bucket.hit_rate ?? undefined)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className="table-wrap special-calibration-table-wrap special-calibration-table-wrap-3plus">
+                    <div className="special-calibration-title">
+                      <span>3+ Stocks Prob</span>
+                      <em>Calibrated against actual 3+ stocks hits</em>
+                    </div>
+                    <table className="special-calibration-table">
+                      <thead>
+                        <tr>
+                          <th>Bucket</th>
+                          <th>Settled</th>
+                          <th>Hits</th>
+                          <th>Avg Prob</th>
+                          <th>Actual Hit</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(performance?.calibration_buckets_3_plus ?? []).map((bucket) => (
+                          <tr key={`3plus-${bucket.label}`}>
+                            <td>{bucket.label}</td>
+                            <td>{bucket.count}</td>
+                            <td>{bucket.hits}</td>
+                            <td>{formatPercent(bucket.avg_prob ?? undefined)}</td>
+                            <td>{formatPercent(bucket.hit_rate ?? undefined)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
               <div className="table-wrap special-props-table-wrap">
                 <table className="props-table special-props-table">

@@ -535,6 +535,7 @@ def _should_cache_app_response(request: Request) -> bool:
         "/api/props/sync-status",
         "/api/matchups",
         "/api/special/stocks",
+        "/api/special/stats",
         "/api/roster",
     }:
         return False

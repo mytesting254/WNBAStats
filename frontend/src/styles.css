@@ -1355,6 +1355,76 @@ tbody tr.selected {
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.04);
 }
 
+.special-calibration-table-wrap-2plus {
+  border-color: rgba(15, 118, 110, 0.18);
+  background:
+    linear-gradient(180deg, rgba(240, 253, 250, 0.98), rgba(236, 253, 245, 0.94));
+  box-shadow: 0 10px 28px rgba(15, 118, 110, 0.08);
+}
+
+.special-calibration-table-wrap-3plus {
+  border-color: rgba(180, 83, 9, 0.2);
+  background:
+    linear-gradient(180deg, rgba(255, 251, 235, 0.98), rgba(255, 247, 237, 0.94));
+  box-shadow: 0 10px 28px rgba(180, 83, 9, 0.08);
+}
+
+.special-calibration-section {
+  margin: 14px 0;
+}
+
+.special-calibration-copy {
+  margin: 0 18px 10px;
+}
+
+.special-calibration-copy h4 {
+  margin: 0 0 4px;
+  color: #1b1f29;
+  font-size: 14px;
+}
+
+.special-calibration-copy p {
+  margin: 0;
+  color: #667085;
+  font-size: 12px;
+}
+
+.special-calibration-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+}
+
+.special-calibration-title {
+  padding: 12px 14px 0;
+  color: #1b1f29;
+  font-size: 13px;
+  font-weight: 800;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.special-calibration-title span {
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.special-calibration-title em {
+  color: #667085;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.special-calibration-table-wrap-2plus .special-calibration-title span {
+  color: #0f766e;
+}
+
+.special-calibration-table-wrap-3plus .special-calibration-title span {
+  color: #b45309;
+}
+
 .special-calibration-table {
   width: 100%;
   min-width: 620px;
@@ -1368,9 +1438,17 @@ tbody tr.selected {
 }
 
 .special-calibration-table thead th {
-  background: #f8fafc;
+  background: rgba(248, 250, 252, 0.92);
   color: #667085;
   text-align: left;
+}
+
+.special-calibration-table-wrap-2plus .special-calibration-table thead th {
+  background: rgba(204, 251, 241, 0.55);
+}
+
+.special-calibration-table-wrap-3plus .special-calibration-table thead th {
+  background: rgba(254, 243, 199, 0.6);
 }
 
 .special-calibration-table td:nth-child(n + 2) {
@@ -2075,6 +2153,10 @@ tbody tr.selected {
 
   .summary-grid,
   .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .special-calibration-grid {
     grid-template-columns: 1fr;
   }
 
