@@ -54,6 +54,7 @@ import {
   type SpecialStocksPerformance,
   type StalePayloadAudit,
   type TeamLast10,
+  type TeamRatings,
   type ValueProp,
   type WatchlistPerformance,
   type WatchlistProp,
@@ -3345,6 +3346,7 @@ function MatchupsView({
                   logoUrl={selectedMatchup.away_logo_url}
                   restDays={selectedMatchup.away_rest_days}
                   summary={selectedMatchup.away}
+                  ratings={selectedMatchup.away_team_ratings}
                   context="away"
                   coversTeamRow={selectedCoversRecords.team_table.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.away_team))}
                   coversLast10Rows={selectedCoversRecords.away_last_10}
@@ -3356,6 +3358,7 @@ function MatchupsView({
                   logoUrl={selectedMatchup.home_logo_url}
                   restDays={selectedMatchup.home_rest_days}
                   summary={selectedMatchup.home}
+                  ratings={selectedMatchup.home_team_ratings}
                   context="home"
                   coversTeamRow={selectedCoversRecords.team_table.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.home_team))}
                   coversLast10Rows={selectedCoversRecords.home_last_10}
@@ -3369,6 +3372,7 @@ function MatchupsView({
                 <MiniStat label="Model Total" value={formatProjectedTotal(selectedMatchup)} />
                 <MiniStat label="O/U Edge" value={formatNullableEdge(selectedMatchup.total_edge)} />
                 <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
+                <MiniStat label="Net Diff" value={formatSignedNumber(selectedMatchup.rating_differentials?.season_net_diff)} />
               </div>
               <CoversRecordsPanel matchup={selectedMatchup} />
             </article>
@@ -4872,6 +4876,7 @@ function TeamSummary({
   logoUrl,
   restDays,
   summary,
+  ratings,
   context,
   coversTeamRow,
   coversLast10Rows
@@ -4882,6 +4887,7 @@ function TeamSummary({
   logoUrl?: string | null;
   restDays: number | null;
   summary: TeamLast10;
+  ratings?: TeamRatings | null;
   context: "home" | "away";
   coversTeamRow?: { team: string; record: string; ats: string; ou: string; away: string; home: string };
   coversLast10Rows?: CoversRecordRow[];
@@ -4896,6 +4902,7 @@ function TeamSummary({
   const contextRecord = coversTeamRow
     ? (context === "home" ? coversTeamRow.home : coversTeamRow.away)
     : contextDerived ?? (context === "home" ? `${summary.home_games}` : `${summary.away_games}`);
+  const venueRatings = context === "home" ? ratings?.home : ratings?.away;
   return (
     <div className="team-summary">
       <div className="team-title">
@@ -4927,6 +4934,14 @@ function TeamSummary({
       <div className="points-row">
         <span>PF {summary.avg_points_for.toFixed(1)}</span>
         <span>PA {summary.avg_points_against.toFixed(1)}</span>
+      </div>
+      <div className="stat-strip ratings-strip">
+        <MiniStat label="Season Net" value={formatRatingWithRank(ratings?.season?.net_rating, ratings?.net_rank)} />
+        <MiniStat label="Season Off" value={formatRatingWithRank(ratings?.season?.off_rating, ratings?.off_rank)} />
+        <MiniStat label="Season Def" value={formatRatingWithRank(ratings?.season?.def_rating, ratings?.def_rank, true)} />
+        <MiniStat label="L10 Net" value={formatSignedNumber(ratings?.last_10?.net_rating)} />
+        <MiniStat label={context === "home" ? "Home Net" : "Away Net"} value={formatSignedNumber(venueRatings?.net_rating)} />
+        <MiniStat label="Pace" value={formatRatingValue(ratings?.season?.pace)} />
       </div>
     </div>
   );
@@ -4972,6 +4987,32 @@ function MiniStat({ label, value }: { label: string; value: string }) {
       <strong>{value}</strong>
     </div>
   );
+}
+
+function formatRatingValue(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(1) : "N/A";
+}
+
+function formatSignedNumber(value: number | null | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "N/A";
+  }
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)}`;
+}
+
+function formatRatingWithRank(
+  value: number | null | undefined,
+  rank: number | null | undefined,
+  reverseGood = false,
+) {
+  const ratingText = formatRatingValue(value);
+  if (ratingText === "N/A") {
+    return ratingText;
+  }
+  if (typeof rank !== "number" || !Number.isFinite(rank)) {
+    return ratingText;
+  }
+  return `${ratingText} (#${rank}${reverseGood ? " D" : ""})`;
 }
 
 function Metric({ label, value, className = "" }: { label: string; value: string; className?: string }) {

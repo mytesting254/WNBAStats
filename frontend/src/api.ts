@@ -622,6 +622,25 @@ export type CoversRecords = {
   home_last_10: CoversRecordRow[];
 };
 
+export type TeamRatingsWindow = {
+  games: number;
+  possessions: number;
+  off_rating: number;
+  def_rating: number;
+  net_rating: number;
+  pace: number;
+};
+
+export type TeamRatings = {
+  season?: TeamRatingsWindow | null;
+  last_10?: TeamRatingsWindow | null;
+  home?: TeamRatingsWindow | null;
+  away?: TeamRatingsWindow | null;
+  off_rank?: number | null;
+  def_rank?: number | null;
+  net_rank?: number | null;
+};
+
 export type Matchup = {
   id: number;
   game_date: string;
@@ -677,6 +696,15 @@ export type Matchup = {
   game_reason: string;
   home: TeamLast10;
   away: TeamLast10;
+  home_team_ratings?: TeamRatings | null;
+  away_team_ratings?: TeamRatings | null;
+  rating_differentials?: {
+    season_net_diff?: number | null;
+    season_off_diff?: number | null;
+    season_def_diff?: number | null;
+    last_10_net_diff?: number | null;
+    pace_diff?: number | null;
+  } | null;
   covers_records?: CoversRecords | null;
   props: ValueProp[];
   sportsbook_props: SportsbookProp[];

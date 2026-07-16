@@ -3170,6 +3170,7 @@ def _build_matchup_payload_item(
     covers_market_odds: dict[int, dict],
     prediction_state_by_game: dict[int, dict[str, Any]],
     game_prediction_cache: _GamePredictionCache,
+    team_ratings_by_team_id: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
     home_summary = _team_last_10_summary(conn, int(game["home_team_id"]))
     away_summary = _team_last_10_summary(conn, int(game["away_team_id"]))
@@ -3213,6 +3214,8 @@ def _build_matchup_payload_item(
     prediction = project_game(conn, game_context, runtime_cache=game_prediction_cache)
     game_prediction_id = _latest_game_prediction_id(conn, game_id)
     market_payload = _matchup_game_markets(game_context)
+    home_team_ratings = team_ratings_by_team_id.get(int(game["home_team_id"]))
+    away_team_ratings = team_ratings_by_team_id.get(int(game["away_team_id"]))
     prediction_state = next(
         (prediction_state_by_game.get(int(candidate_id)) for candidate_id in game_ids if prediction_state_by_game.get(int(candidate_id))),
         prediction_state_by_game.get(game_id),
@@ -3255,6 +3258,9 @@ def _build_matchup_payload_item(
         "props": _value_board_payload_for_games(conn, game_ids, include_filtered_only=False),
         "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
         "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
+        "home_team_ratings": home_team_ratings,
+        "away_team_ratings": away_team_ratings,
+        "rating_differentials": _matchup_rating_differentials(home_team_ratings, away_team_ratings),
         "injury_source": injury_refresh.get("source"),
         "injury_captured_at": injury_refresh.get("captured_at"),
         "injury_from_cache": injury_refresh.get("from_cache"),
@@ -3276,6 +3282,14 @@ def _matchups_payload(conn, game_ids: list[int] | None = None) -> list[dict]:
     covers_records = _covers_records_by_game(conn)
     covers_market_odds = _covers_market_odds_by_game()
     prediction_state_by_game = _prediction_state_by_game(conn)
+    team_ratings_by_team_id = _team_ratings_by_team(
+        conn,
+        {
+            int(team_id)
+            for game, _game_ids in game_groups
+            for team_id in (int(game["home_team_id"]), int(game["away_team_id"]))
+        },
+    )
     game_prediction_cache = _GamePredictionCache(
         conn,
         tuple(team_id for game, _ in game_groups for team_id in (int(game["home_team_id"]), int(game["away_team_id"]))),
@@ -3292,6 +3306,7 @@ def _matchups_payload(conn, game_ids: list[int] | None = None) -> list[dict]:
                 covers_market_odds=covers_market_odds,
                 prediction_state_by_game=prediction_state_by_game,
                 game_prediction_cache=game_prediction_cache,
+                team_ratings_by_team_id=team_ratings_by_team_id,
             )
         )
     return payload
@@ -3418,6 +3433,14 @@ def _publish_matchup_snapshot_payloads(
     covers_market_odds = _covers_market_odds_by_game()
     prediction_state_by_game = _prediction_state_by_game(conn)
     game_groups = _scheduled_matchup_game_groups(conn, game_ids=game_ids)
+    team_ratings_by_team_id = _team_ratings_by_team(
+        conn,
+        {
+            int(team_id)
+            for game, _grouped_game_ids in game_groups
+            for team_id in (int(game["home_team_id"]), int(game["away_team_id"]))
+        },
+    )
     game_prediction_cache = _GamePredictionCache(
         conn,
         tuple(team_id for game, _ in game_groups for team_id in (int(game["home_team_id"]), int(game["away_team_id"]))),
@@ -3432,6 +3455,7 @@ def _publish_matchup_snapshot_payloads(
             covers_market_odds=covers_market_odds,
             prediction_state_by_game=prediction_state_by_game,
             game_prediction_cache=game_prediction_cache,
+            team_ratings_by_team_id=team_ratings_by_team_id,
         )
         snapshot_key = _matchup_snapshot_key(game)
         snapshot_payload = _matchup_snapshot_payload(
@@ -8135,6 +8159,143 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
         "avg_points_for": round(total_pts / count, 1) if count > 0 else 0,
         "avg_points_against": round(total_opp_pts / count, 1) if count > 0 else 0,
         "recent_games": recent_games,
+    }
+
+
+def _team_ratings_by_team(conn, team_ids: set[int]) -> dict[int, dict[str, Any]]:
+    normalized_ids = sorted({int(team_id) for team_id in team_ids if int(team_id) > 0})
+    if not normalized_ids:
+        return {}
+    if not hasattr(conn, "execute"):
+        return {}
+
+    latest_row = conn.execute(
+        """
+        SELECT MAX(substr(g.game_date, 1, 4)) AS season_year
+        FROM games g
+        JOIN team_game_results r ON r.game_id = g.id
+        """
+    ).fetchone()
+    season_year = str(latest_row["season_year"] or "").strip() if latest_row is not None else ""
+    if not season_year:
+        return {}
+
+    rows = conn.execute(
+        """
+        SELECT
+            r.team_id,
+            r.is_home,
+            r.points,
+            r.opponent_points,
+            r.possessions,
+            g.game_date,
+            g.start_time
+        FROM team_game_results r
+        JOIN games g ON g.id = r.game_id
+        WHERE substr(g.game_date, 1, 4) = ?
+        ORDER BY g.game_date DESC, g.start_time DESC, r.game_id DESC, r.id DESC
+        """,
+        (season_year,),
+    ).fetchall()
+
+    by_team: dict[int, list[Any]] = {}
+    for row in rows:
+        team_id = int(row["team_id"])
+        by_team.setdefault(team_id, []).append(row)
+
+    def _window_payload(window_rows: list[Any]) -> dict[str, Any] | None:
+        games = len(window_rows)
+        if games <= 0:
+            return None
+        possessions = sum(float(row["possessions"] or 0.0) for row in window_rows)
+        if possessions <= 0.0:
+            return None
+        points = sum(float(row["points"] or 0.0) for row in window_rows)
+        opponent_points = sum(float(row["opponent_points"] or 0.0) for row in window_rows)
+        return {
+            "games": games,
+            "possessions": round(possessions, 1),
+            "off_rating": round((100.0 * points) / possessions, 1),
+            "def_rating": round((100.0 * opponent_points) / possessions, 1),
+            "net_rating": round((100.0 * (points - opponent_points)) / possessions, 1),
+            "pace": round(possessions / games, 1),
+        }
+
+    payload_by_team: dict[int, dict[str, Any]] = {}
+    for team_id, team_rows in by_team.items():
+        season = _window_payload(team_rows)
+        last_10 = _window_payload(team_rows[:10])
+        home = _window_payload([row for row in team_rows if int(row["is_home"] or 0) == 1][:10])
+        away = _window_payload([row for row in team_rows if int(row["is_home"] or 0) != 1][:10])
+        payload_by_team[team_id] = {
+            "season": season,
+            "last_10": last_10,
+            "home": home,
+            "away": away,
+        }
+
+    ranked_season = [
+        (team_id, payload["season"])
+        for team_id, payload in payload_by_team.items()
+        if isinstance(payload.get("season"), dict)
+    ]
+    off_rank = {
+        team_id: idx + 1
+        for idx, (team_id, _payload) in enumerate(
+            sorted(ranked_season, key=lambda item: float(item[1]["off_rating"]), reverse=True)
+        )
+    }
+    def_rank = {
+        team_id: idx + 1
+        for idx, (team_id, _payload) in enumerate(
+            sorted(ranked_season, key=lambda item: float(item[1]["def_rating"]))
+        )
+    }
+    net_rank = {
+        team_id: idx + 1
+        for idx, (team_id, _payload) in enumerate(
+            sorted(ranked_season, key=lambda item: float(item[1]["net_rating"]), reverse=True)
+        )
+    }
+
+    result: dict[int, dict[str, Any]] = {}
+    for team_id in normalized_ids:
+        payload = payload_by_team.get(team_id)
+        if payload is None:
+            continue
+        result[team_id] = {
+            **payload,
+            "off_rank": off_rank.get(team_id),
+            "def_rank": def_rank.get(team_id),
+            "net_rank": net_rank.get(team_id),
+        }
+    return result
+
+
+def _matchup_rating_differentials(
+    home_ratings: dict[str, Any] | None,
+    away_ratings: dict[str, Any] | None,
+) -> dict[str, float | None]:
+    home_season = home_ratings.get("season") if isinstance(home_ratings, dict) else None
+    away_season = away_ratings.get("season") if isinstance(away_ratings, dict) else None
+    home_last_10 = home_ratings.get("last_10") if isinstance(home_ratings, dict) else None
+    away_last_10 = away_ratings.get("last_10") if isinstance(away_ratings, dict) else None
+
+    def _diff(left: Any, right: Any, key: str) -> float | None:
+        if not isinstance(left, dict) or not isinstance(right, dict):
+            return None
+        left_value = left.get(key)
+        right_value = right.get(key)
+        if not isinstance(left_value, (int, float)) or not isinstance(right_value, (int, float)):
+            return None
+        return round(float(left_value) - float(right_value), 1)
+
+    return {
+        "season_net_diff": _diff(home_season, away_season, "net_rating"),
+        "season_off_diff": _diff(home_season, away_season, "off_rating"),
+        "season_def_diff": _diff(home_season, away_season, "def_rating"),
+        "last_10_net_diff": _diff(home_last_10, away_last_10, "net_rating"),
+        "pace_diff": _diff(home_season, away_season, "pace"),
     }
 
 

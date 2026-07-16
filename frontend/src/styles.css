@@ -1636,6 +1636,10 @@ tbody tr.selected {
   margin: 14px 0;
 }
 
+.ratings-strip {
+  margin-top: 8px;
+}
+
 .mini-stat {
   min-height: 58px;
   padding: 10px;
