@@ -388,6 +388,8 @@ Click `Refresh Odds` only when you want a fresh provider call. The request now q
 
 The `Live Pipeline` card now also prefers the persisted `prop_sync_jobs` record over stale in-memory job state during background-thread handoff or container restart windows. That avoids a false "stuck at 17%" view where the UI kept showing `requesting_provider` even after the durable job row had already advanced into prediction rebuild or payload publish.
 
+The frontend now also registers `Recalculate` in that same card immediately and keeps following backend progress for `Refresh Covers` / `Refresh Odds` even if those imports finish while another prop-sync job is already running. Before that fix, the backend could keep working while the card appeared silent because the action did not own the active queue slot.
+
 Fresh calls merge by provider event id, so future events already saved in `sportsbook_props_raw.json` remain cached instead of being discarded.
 
 The raw Odds API cache is a single rolling file, not a dated archive. `Load Saved Odds` only replays cached events whose game date matches the app's current local date, so yesterday's payload can still exist in the JSON file but will be ignored on today's replay path.

@@ -194,6 +194,7 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - `Refresh Odds` stays queued or previously ended in a `504 Gateway Time-out`
 - `Refresh Odds`, `Refresh Covers`, `Recalculate`, or roster-change repair appears to jump backward in the progress card
 - the `Live Pipeline` card stays pinned to an old stage like `Requesting provider data` / `17%` even though the import job actually finished
+- `Refresh Covers` or `Recalculate` completes work, but the `Live Pipeline` card never shows progress for that run
 
 ### Likely Cause
 
@@ -204,6 +205,7 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - the deployed backend is older than the stage-splitting fix and is still collapsing prop sync plus projection rebuild into the same progress stage
 - the API is returning stale in-memory prop-sync state instead of the newer persisted `prop_sync_jobs` record
 - the frontend is preserving an older running progress snapshot instead of replacing it with a newer finished payload
+- the frontend build is older than the pipeline-attachment fix, so `Recalculate` never registers with the shared progress card and Covers/Odds imports can go visually silent when another prop-sync job is already running
 
 ### What To Check
 
@@ -213,6 +215,7 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - the deployed backend includes the progress-stage split for odds sync, covers sync, recalculate, and roster-triggered repair
 - the deployed backend includes the `prop_sync_jobs` source-of-truth fix from Thursday, July 16, 2026, so `/api/ops/health` does not fall back to an older in-memory job snapshot
 - the deployed frontend includes the progress-merge fix from Thursday, July 16, 2026, so a newer terminal sync state can replace an older running one
+- the deployed frontend includes the later July 16, 2026 pipeline-attachment fix so `Recalculate` sets `activePipeline` immediately and Covers/Odds continue following live backend progress when a prop-sync job is already active
 - the active runtime cache path contains `sportsbook_props_raw.json`
   the correct path is the backend runtime cache, not necessarily repo-local `data/cache/`
 - `/api/odds/cache` reports the expected runtime `path`

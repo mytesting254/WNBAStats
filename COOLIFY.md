@@ -199,6 +199,12 @@ allows a newer finished sync payload to replace an older running one. Until
 that build is deployed, the UI can look hung even when the backend job already
 reached prediction rebuild or payload publish.
 
+There is a second frontend-side visibility fix from July 16, 2026 as well:
+`Recalculate` now attaches to the shared `Live Pipeline` card immediately, and
+`Refresh Covers` / `Refresh Odds` keep following backend prop-sync progress
+even when another sync job already owns the active queue. Without that build,
+those actions can finish work in the backend while the card appears blank.
+
 A copy/paste template is also available at `deploy/wnba-daily-props.cron`.
 
 ### Specials Stocks Prep

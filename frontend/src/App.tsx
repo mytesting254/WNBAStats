@@ -728,9 +728,18 @@ export function App() {
     setRecalculating(true);
     setError(null);
     setOperationStatus(null);
+    setActivePipeline({
+      scope: "current_slate",
+      label: "Recalculate",
+      stage: "queued",
+      detail: "Queued for current-slate repair. Waiting for backend progress.",
+      startedAt: new Date().toISOString(),
+      waitingForBackground: true,
+    });
     try {
       const result = await repairCurrentSlateProps();
       if (result.status === "busy") {
+        setActivePipeline(null);
         setOperationStatus("Current-slate repair is already running.");
         return;
       }
@@ -746,9 +755,11 @@ export function App() {
         );
       }
     } catch (err) {
+      setActivePipeline(null);
       setError(err instanceof Error ? err.message : "Unable to recalculate projections");
     } finally {
       setRecalculating(false);
+      setActivePipeline((current) => (current?.waitingForBackground ? current : null));
     }
   }
 
@@ -915,17 +926,21 @@ export function App() {
         setError(result.message ?? "Set ODDS_API_KEY to import sportsbook odds");
         return;
       }
+      const liveHealth = await fetchOpsHealth().catch(() => null);
+      const shouldFollowBackground = Boolean(result.sync_started || liveHealth?.prop_sync.running);
       setActivePipeline((current) =>
         current == null
           ? null
           : {
               ...current,
-              stage: result.sync_started ? "queued" : "publishing_payloads",
+              stage: shouldFollowBackground ? "queued" : "publishing_payloads",
               detail: result.message
-                ?? (result.sync_started
-                  ? "Odds import finished. Background prop sync is queued."
+                ?? (shouldFollowBackground
+                  ? result.sync_started
+                    ? "Odds import finished. Background prop sync is queued."
+                    : "Odds import finished while another background prop sync is still running. Following live backend progress."
                   : "Odds import finished. Reloading dashboard payloads."),
-              waitingForBackground: Boolean(result.sync_started),
+              waitingForBackground: shouldFollowBackground,
             }
       );
       await load();
@@ -963,17 +978,21 @@ export function App() {
         setError(result.message ?? "Unable to import Covers odds");
         return;
       }
+      const liveHealth = await fetchOpsHealth().catch(() => null);
+      const shouldFollowBackground = Boolean(result.sync_started || liveHealth?.prop_sync.running);
       setActivePipeline((current) =>
         current == null
           ? null
           : {
               ...current,
-              stage: result.sync_started ? "queued" : "publishing_payloads",
+              stage: shouldFollowBackground ? "queued" : "publishing_payloads",
               detail: result.message
-                ?? (result.sync_started
-                  ? "Covers import finished. Background prop sync is queued."
+                ?? (shouldFollowBackground
+                  ? result.sync_started
+                    ? "Covers import finished. Background prop sync is queued."
+                    : "Covers import finished while another background prop sync is still running. Following live backend progress."
                   : "Covers import finished. Reloading dashboard payloads."),
-              waitingForBackground: Boolean(result.sync_started),
+              waitingForBackground: shouldFollowBackground,
             }
       );
       await load();
