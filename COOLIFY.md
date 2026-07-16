@@ -181,6 +181,16 @@ marks that player `didNotPlay`.
 - `WNBA_TRAIN_POLL_TIMEOUT_SECONDS` defaults to `1200`
 - `WNBA_TRAIN_POLL_INTERVAL_SECONDS` defaults to `5`
 
+If the `2am America/New_York` job logs `Internal Server Error`, do not assume
+cron skipped the run. On Thursday, July 16, 2026, the host cron entries fired
+as expected, but the `settle-and-train` path failed inside
+`settle_completed_props` because the `settled_props` insert shape had drifted.
+The repo now defines the settlement insert columns in one shared tuple and
+validates settlement row widths before `executemany`, so future tuple/column
+count mismatches fail fast with a clear app error instead of a vague SQLite
+column-count error. A redeploy is still required before the live container uses
+that safeguard.
+
 A copy/paste template is also available at `deploy/wnba-daily-props.cron`.
 
 ### Specials Stocks Prep

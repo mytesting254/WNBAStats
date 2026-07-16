@@ -6,6 +6,31 @@ from datetime import datetime, timezone
 from .projections import _market_value
 
 
+SETTLED_PROP_COLUMNS = (
+    "prop_line_id",
+    "actual_result",
+    "winning_side",
+    "margin",
+    "player_minutes",
+    "game_margin",
+    "team_margin",
+    "team_spread",
+    "blowout_result",
+    "blowout_threshold",
+    "team_points",
+    "opponent_points",
+    "team_possessions",
+    "opponent_possessions",
+    "pace",
+    "team_off_rating",
+    "opponent_off_rating",
+    "net_rating",
+    "team_possessions_source",
+    "opponent_possessions_source",
+    "settled_at",
+)
+
+
 def settle_completed_props(
     conn: sqlite3.Connection,
     *,
@@ -103,16 +128,14 @@ def settle_completed_props(
         elif _needs_repair(row):
             repairs.append(settlement)
 
+    _validate_settlement_rows(settlements)
+    _validate_settlement_rows(repairs)
+    insert_columns = ", ".join(SETTLED_PROP_COLUMNS)
+    insert_placeholders = ", ".join("?" for _ in SETTLED_PROP_COLUMNS)
     conn.executemany(
-        """
-        INSERT INTO settled_props (
-            prop_line_id, actual_result, winning_side, margin,
-            player_minutes, game_margin, team_margin, team_spread,
-            blowout_result, blowout_threshold, team_points, opponent_points,
-            team_possessions, opponent_possessions, pace, team_off_rating,
-            opponent_off_rating, net_rating, team_possessions_source,
-            opponent_possessions_source, settled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        f"""
+        INSERT INTO settled_props ({insert_columns})
+        VALUES ({insert_placeholders})
         """,
         settlements,
     )
@@ -180,6 +203,15 @@ def settle_completed_props(
         "selected_date": target_dates[0] if len(target_dates) == 1 else None,
         "selected_dates": target_dates,
     }
+
+
+def _validate_settlement_rows(rows: list[tuple]) -> None:
+    expected = len(SETTLED_PROP_COLUMNS)
+    for index, row in enumerate(rows):
+        if len(row) != expected:
+            raise ValueError(
+                f"settled_props row {index} has {len(row)} values; expected {expected}"
+            )
 
 
 def _normalized_dates(selected_date: str | None, selected_dates: list[str] | None) -> list[str]:

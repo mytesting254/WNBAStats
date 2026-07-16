@@ -421,6 +421,8 @@ Before treating a deployment as production-ready, verify all of the following:
 - blank frontend with working backend often means:
   - bad public `/api` routing
   - stale proxy config
+- `2am America/New_York` cron logs can show `Internal Server Error` even when cron itself ran:
+  - on Thursday, July 16, 2026, the actual failure was a bad `settled_props` insert shape during `settle_completed_props`, not a missing scheduled slate and not a skipped cron trigger
 - Covers refresh failures are often scraper/parser issues, not route issues.
 - H2H can be legitimately sparse for new matchups; that is not always a data bug.
 
@@ -708,7 +710,7 @@ POST /api/history/import/espn?season=2026&force_refresh=true&include_player_stat
 Completed games are matched to existing sportsbook-derived scheduled games by date/home/away, then marked `final` so they drop out of the upcoming Matchups tab while still contributing to last-10 history.
 When `include_player_stats=true`, ESPN player box scores are imported for the selected date, selected date batch, or requested season. The app then syncs matching sportsbook prop lines into deduped model prop lines so Parlay Candidates use provider-backed player game logs without counting identical sportsbook lines multiple times.
 
-After the ESPN sync finishes, the app settles saved player prop predictions and saved game predictions against the imported final scores and box scores, then rebuilds current predictions from the updated player history. Player-prop settlement now hydrates ESPN team stats for the affected final dates before writing `settled_props`, so pace, offensive-rating, defensive-rating, and net-rating context stays aligned with the same canonical team tables used by training.
+After the ESPN sync finishes, the app settles saved player prop predictions and saved game predictions against the imported final scores and box scores, then rebuilds current predictions from the updated player history. Player-prop settlement now hydrates ESPN team stats for the affected final dates before writing `settled_props`, so pace, offensive-rating, defensive-rating, and net-rating context stays aligned with the same canonical team tables used by training. The settlement writer now derives its placeholder count from a shared `settled_props` column tuple and validates each settlement row width before writing. That safeguard was added after the Thursday, July 16, 2026 overnight cron run failed with SQLite `22 values for 21 columns` during `settle_completed_props`.
 
 ## Local Data And Generated Files
 

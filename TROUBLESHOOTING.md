@@ -216,6 +216,35 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - if same-day Covers cache exists, verify matchup payloads are using Covers game markets only as fallback, not overwriting already-populated Odds API game fields
 - during an active sync, stage-local counts should only move forward inside the current stage; a pattern like `40/176 -> 20/146 -> 40/176` indicates the old backend code is still running
 
+## `2am` Cron Shows `Internal Server Error`
+
+### Symptom
+
+- host cron entry clearly fired at `2:00am America/New_York`
+- `/var/log/wnba-daily-props.log` shows `Internal Server Error`
+- current slate still exists in `games`, so it does not look like a schedule gap
+
+### Likely Cause
+
+- the cron wrapper ran correctly, but the `settle-and-train` path failed inside app code
+- on Thursday, July 16, 2026, the confirmed failure was a malformed `settled_props` insert during `settle_completed_props`
+
+### What To Check
+
+- confirm cron actually fired:
+  - `crontab -l`
+  - `tail -n 40 /var/log/wnba-daily-props.log`
+- reproduce the failing path inside the live backend:
+  - `python3 scripts/live_backend.py exec -- python - <<'PY'`
+  - call `_import_espn_history_impl(...)` or `settle_completed_props(...)`
+- if SQLite reports `22 values for 21 columns`, inspect [backend/app/settlement.py](/root/WNBAStats/backend/app/settlement.py:1)
+
+### Notes
+
+- this failure mode is not evidence that cron skipped the run
+- the repo now uses a shared `SETTLED_PROP_COLUMNS` tuple plus settlement-row width validation before `executemany`
+- the live container still needs a redeploy before it benefits from that safeguard
+
 ## SQLite And Persistence Problems
 
 ### Symptom
