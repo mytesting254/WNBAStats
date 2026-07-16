@@ -885,11 +885,13 @@ def _queue_model_training_job(request: Request | None = None) -> dict[str, Any]:
         )
         _append_job_run_event(job_run_id, "job.running", "Model training started.")
         try:
-            with connect() as conn:
-                result = run_walk_forward_training(conn)
+            with sqlite_write_lock():
+                with connect() as conn:
+                    result = run_walk_forward_training(conn)
             _invalidate_read_caches()
-            with connect() as conn:
-                result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+            with sqlite_write_lock():
+                with connect() as conn:
+                    result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
             _mutate_model_training_state(
                 running=False,
                 started_at=started_at,
