@@ -3942,6 +3942,11 @@ def _apply_minutes_hard_rules(
     notes: list[str] = []
     status = str(injury_status or "").strip().lower()
     role = str(rotation_role or "").strip().lower()
+    normalized_opportunity = list(opportunity_context or [0.0, 0.0])
+    if len(normalized_opportunity) < 2:
+        normalized_opportunity = (normalized_opportunity + [0.0, 0.0])[:2]
+    same_position_unavailable_minutes = float(normalized_opportunity[0])
+    same_position_key_out_count = float(normalized_opportunity[1])
 
     if status in {"questionable", "gtd"}:
         cap = max(role_state.lower_bound + 2.0, min(role_state.upper_bound, recent_minutes_avg * 0.92))
@@ -3955,7 +3960,26 @@ def _apply_minutes_hard_rules(
             notes.append("hard rule doubtful cap")
 
     if role in {"star", "starter"} and blowout_delta <= -1.0:
-        blowout_cap = max(role_state.lower_bound, min(role_state.upper_bound, last_10_minutes_avg + (blowout_delta * 0.85)))
+        blowout_cap = max(
+            role_state.lower_bound,
+            min(role_state.upper_bound, last_10_minutes_avg + (blowout_delta * 0.85)),
+        )
+        if (
+            role_state.bucket in {"core_starter", "starter_volatile"}
+            and same_position_unavailable_minutes >= 10.0
+            and same_position_key_out_count < 1.0
+            and blowout_delta > -1.6
+        ):
+            blowout_cap = max(
+                blowout_cap,
+                min(
+                    role_state.upper_bound,
+                    max(
+                        last_10_minutes_avg + (blowout_delta * 0.45),
+                        recent_blend - 0.8,
+                    ),
+                ),
+            )
         if projected > blowout_cap:
             projected = blowout_cap
             notes.append("hard rule blowout star cap")
@@ -3966,11 +3990,6 @@ def _apply_minutes_hard_rules(
             projected = floor
             notes.append("hard rule injury replacement floor")
 
-    normalized_opportunity = list(opportunity_context or [0.0, 0.0])
-    if len(normalized_opportunity) < 2:
-        normalized_opportunity = (normalized_opportunity + [0.0, 0.0])[:2]
-    same_position_unavailable_minutes = float(normalized_opportunity[0])
-    same_position_key_out_count = float(normalized_opportunity[1])
     if (
         same_position_unavailable_minutes >= 18.0
         and same_position_key_out_count >= 1.0

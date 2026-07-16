@@ -286,19 +286,20 @@ Recent minutes-model work also added:
 - stage-level minutes diagnostics with trend / volatility / context slices plus top-loss row exports
 - narrow late-stage caps for unsupported upside, including `soft_vacancy` `starter_volatile` rise cases
 
-Recent measured live diagnostics for the minutes path (`adaptive-context-v10-market-gated-context`, evaluation start `2026-07-01`):
+Recent measured live diagnostics for the minutes path (`adaptive-context-v10-market-gated-context`, evaluation start `2026-07-01`, last checked `2026-07-16`):
 
-- overall MAE: `4.331`
+- overall MAE: `4.330`
 - `recent_blend` MAE: `4.305`
 - heuristic MAE: `4.614`
 - recent-transfer MAE: `3.156` vs `recent_blend` `3.490`
-- `core_starter` MAE: `3.149` vs `recent_blend` `3.063`
-- `starter_volatile` MAE: `4.621` vs `recent_blend` `4.640`
+- `core_starter` MAE: `3.141` vs `recent_blend` `3.063`
+- `starter_volatile` MAE: `4.622` vs `recent_blend` `4.640`
 - `rotation` MAE: `4.965` vs `recent_blend` `4.945`
-- low-volatility slice: `4.205` vs `recent_blend` `4.058`
-- stable-trend slice: `4.245` vs `recent_blend` `4.134`
+- `soft_vacancy` MAE: `4.371` vs `recent_blend` `4.278`
+- low-volatility slice: `4.201` vs `recent_blend` `4.058`
+- stable-trend slice: `4.242` vs `recent_blend` `4.134`
 
-The minutes layer is materially better than the old heuristic and useful as a production context layer, and the latest refinement pass closed much of the original `starter_volatile` and `rotation` gap. It still trails the simple `recent_blend` baseline overall, with the main remaining regressions concentrated in low-volatility / stable-context slices and a small residual `rotation` gap. Treat it as an actively refined context system, not a finished standalone edge source.
+The minutes layer is materially better than the old heuristic and useful as a production context layer, and the latest refinement pass closed much of the original `starter_volatile` and `rotation` gap while reducing the `soft_vacancy` shortfall. It still trails the simple `recent_blend` baseline overall, with the main remaining regressions concentrated in low-volatility / stable-context slices and a small residual `rotation` gap. Treat it as an actively refined context system, not a finished standalone edge source.
 
 Recent accuracy hardening also includes:
 

@@ -3148,6 +3148,39 @@ def test_minutes_projection_rebound_guard_skips_weak_lineup_context() -> None:
     assert "rebound guard strong-role drop" not in note
 
 
+def test_minutes_hard_rules_soft_vacancy_starter_blowout_cap_is_less_aggressive() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="starter",
+        recent_minutes_avg=31.2,
+        last_10_minutes_avg=32.0,
+        ewma_minutes=31.0,
+        minutes_trend=2.4,
+        minute_volatility=3.6,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=2.0,
+        lineup_context=[0.18, 0.85, 0.33],
+        opportunity_context=[15.1, 0.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_hard_rules(
+        projected=33.5,
+        role_state=role_state,
+        rotation_role="starter",
+        injury_status="available",
+        injury_delta=0.0,
+        blowout_delta=-1.44,
+        recent_blend=33.82,
+        recent_minutes_avg=31.2,
+        last_10_minutes_avg=32.0,
+        opportunity_context=[15.1, 0.0],
+    )
+
+    assert role_state.bucket == "core_starter"
+    assert "hard rule blowout star cap" in notes
+    assert capped == pytest.approx(33.02)
+
+
 def test_minutes_metric_summary_exposes_production_alias() -> None:
     summary = main_module._minutes_metric_summary(
         [

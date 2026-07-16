@@ -117,18 +117,26 @@ Pending work:
 Latest status:
 
 - diagnostics CLI added: `scripts/inspect_minutes_diagnostics.py`
-- latest checked window: `2026-07-01` on `data/wnba-live-source.sqlite`
+- latest checked window: `2026-07-01` on `data/wnba-live-source.sqlite` (last checked `2026-07-16`)
 - current production metrics:
-  - overall minutes MAE: `4.397`
+  - overall minutes MAE: `4.330`
   - `recent_blend` MAE: `4.305`
-  - `starter_volatile` MAE: `4.787` vs `recent_blend` `4.640`
-  - `rotation` MAE: `5.167` vs `recent_blend` `4.945`
-  - `soft_vacancy` MAE: `4.453` vs `recent_blend` `4.278`
-- latest implemented refinement:
-  - final-stage `soft-vacancy rise cap` for unsupported `starter_volatile` upside
-  - measured effect: overall improved from `4.409` to `4.397`
-  - measured effect: `starter_volatile` improved from `4.844` to `4.787`
-  - remaining conclusion: the biggest open regressions are still concentrated in `rotation` and stable-context / true-vacancy `starter_volatile` rows
+  - `core_starter` MAE: `3.141` vs `recent_blend` `3.063`
+  - `starter_volatile` MAE: `4.622` vs `recent_blend` `4.640`
+  - `rotation` MAE: `4.965` vs `recent_blend` `4.945`
+  - low-volatility slice: `4.201` vs `recent_blend` `4.058`
+  - stable-trend slice: `4.242` vs `recent_blend` `4.134`
+  - `soft_vacancy` MAE: `4.371` vs `recent_blend` `4.278`
+- latest implemented refinements:
+  - quiet stable-context floors for `rotation`, `starter_volatile`, and `core_starter`
+  - tighter rise caps for stable and vacancy-driven `rotation` / `starter_volatile` upside
+  - more recent-weighted drop baselines for `bench` / `fringe` rows
+  - softer `hard rule blowout star cap` in soft-vacancy-like starter/star cases
+  - measured effect across the refinement pass: overall improved from `4.397` to `4.330`
+  - measured effect across the refinement pass: `starter_volatile` improved from `4.787` to `4.622`
+  - measured effect across the refinement pass: `rotation` improved from `5.167` to `4.965`
+  - measured effect across the refinement pass: `soft_vacancy` improved from `4.453` to `4.371`
+  - remaining conclusion: the biggest open regressions are now concentrated in low-volatility and stable-context slices, with `soft_vacancy` improved but still trailing `recent_blend`
 
 Current source docs:
 
