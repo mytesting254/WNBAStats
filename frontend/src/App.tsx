@@ -927,6 +927,9 @@ export function App() {
         return;
       }
       const liveHealth = await fetchOpsHealth().catch(() => null);
+      if (liveHealth) {
+        setOpsHealth(liveHealth);
+      }
       const shouldFollowBackground = Boolean(result.sync_started || liveHealth?.prop_sync.running);
       setActivePipeline((current) =>
         current == null
@@ -979,6 +982,9 @@ export function App() {
         return;
       }
       const liveHealth = await fetchOpsHealth().catch(() => null);
+      if (liveHealth) {
+        setOpsHealth(liveHealth);
+      }
       const shouldFollowBackground = Boolean(result.sync_started || liveHealth?.prop_sync.running);
       setActivePipeline((current) =>
         current == null
