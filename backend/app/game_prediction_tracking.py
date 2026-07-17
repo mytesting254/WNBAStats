@@ -18,15 +18,18 @@ def save_game_prediction(conn: sqlite3.Connection, game: Mapping, prediction: Ma
             INSERT INTO game_predictions (
                 game_id, model_version, prediction_time,
                 home_projected_points, away_projected_points, projected_margin, projected_total,
+                projected_q1_total, projected_first_half_total,
                 winner_pick, ats_pick, ats_edge, total_pick, total_edge,
                 confidence, reason, spread_home, game_total, home_rest_days, away_rest_days
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(game_id, model_version) DO UPDATE SET
                 prediction_time = excluded.prediction_time,
                 home_projected_points = excluded.home_projected_points,
                 away_projected_points = excluded.away_projected_points,
                 projected_margin = excluded.projected_margin,
                 projected_total = excluded.projected_total,
+                projected_q1_total = excluded.projected_q1_total,
+                projected_first_half_total = excluded.projected_first_half_total,
                 winner_pick = excluded.winner_pick,
                 ats_pick = excluded.ats_pick,
                 ats_edge = excluded.ats_edge,
@@ -47,6 +50,8 @@ def save_game_prediction(conn: sqlite3.Connection, game: Mapping, prediction: Ma
                 prediction.get("away_projected_points"),
                 prediction.get("projected_margin"),
                 prediction.get("projected_total"),
+                prediction.get("projected_q1_total"),
+                prediction.get("projected_first_half_total"),
                 str(prediction.get("winner_pick") or "N/A"),
                 str(prediction.get("ats_pick") or "N/A"),
                 prediction.get("ats_edge"),
@@ -81,6 +86,8 @@ def save_game_predictions(conn: sqlite3.Connection, games: list[Mapping], predic
                 prediction.get("away_projected_points"),
                 prediction.get("projected_margin"),
                 prediction.get("projected_total"),
+                prediction.get("projected_q1_total"),
+                prediction.get("projected_first_half_total"),
                 str(prediction.get("winner_pick") or "N/A"),
                 str(prediction.get("ats_pick") or "N/A"),
                 prediction.get("ats_edge"),
@@ -102,15 +109,18 @@ def save_game_predictions(conn: sqlite3.Connection, games: list[Mapping], predic
             INSERT INTO game_predictions (
                 game_id, model_version, prediction_time,
                 home_projected_points, away_projected_points, projected_margin, projected_total,
+                projected_q1_total, projected_first_half_total,
                 winner_pick, ats_pick, ats_edge, total_pick, total_edge,
                 confidence, reason, spread_home, game_total, home_rest_days, away_rest_days
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(game_id, model_version) DO UPDATE SET
                 prediction_time = excluded.prediction_time,
                 home_projected_points = excluded.home_projected_points,
                 away_projected_points = excluded.away_projected_points,
                 projected_margin = excluded.projected_margin,
                 projected_total = excluded.projected_total,
+                projected_q1_total = excluded.projected_q1_total,
+                projected_first_half_total = excluded.projected_first_half_total,
                 winner_pick = excluded.winner_pick,
                 ats_pick = excluded.ats_pick,
                 ats_edge = excluded.ats_edge,
@@ -151,13 +161,18 @@ def settle_completed_game_predictions(
             home.abbreviation AS home_team,
             away.abbreviation AS away_team,
             home_result.points AS home_score,
-            away_result.points AS away_score
+            away_result.points AS away_score,
+            segments.home_q1_points,
+            segments.away_q1_points,
+            segments.home_1h_points,
+            segments.away_1h_points
         FROM game_predictions gp
         JOIN games g ON g.id = gp.game_id
         JOIN teams home ON home.id = g.home_team_id
         JOIN teams away ON away.id = g.away_team_id
         JOIN team_game_results home_result ON home_result.game_id = g.id AND home_result.team_id = g.home_team_id
         JOIN team_game_results away_result ON away_result.game_id = g.id AND away_result.team_id = g.away_team_id
+        LEFT JOIN game_segment_results segments ON segments.game_id = g.id
         WHERE g.status = 'final'
         """
         + date_filter
@@ -179,10 +194,14 @@ def settle_completed_game_predictions(
         away_score = int(row["away_score"])
         actual_margin = float(home_score - away_score)
         actual_total = float(home_score + away_score)
+        actual_q1_total = _actual_segment_total(row, "home_q1_points", "away_q1_points")
+        actual_first_half_total = _actual_segment_total(row, "home_1h_points", "away_1h_points")
         actual_winner = row["home_team"] if home_score >= away_score else row["away_team"]
 
         actual_ats_pick = _actual_ats_pick(row, actual_margin)
         actual_total_result = _actual_total_result(row, actual_total)
+        q1_total_correct = _segment_total_correct(row["projected_q1_total"], actual_q1_total)
+        first_half_total_correct = _segment_total_correct(row["projected_first_half_total"], actual_first_half_total)
         winner_correct = int(str(row["winner_pick"]) == actual_winner)
         ats_correct = _pick_correct(str(row["ats_pick"]), actual_ats_pick)
         total_correct = _pick_correct(str(row["total_pick"]), actual_total_result)
@@ -196,8 +215,12 @@ def settle_completed_game_predictions(
                 actual_winner,
                 actual_margin,
                 actual_total,
+                actual_q1_total,
+                actual_first_half_total,
                 actual_ats_pick,
                 actual_total_result,
+                q1_total_correct,
+                first_half_total_correct,
                 winner_correct,
                 ats_correct,
                 total_correct,
@@ -209,10 +232,10 @@ def settle_completed_game_predictions(
         """
         INSERT INTO settled_game_predictions (
             game_prediction_id, game_id, home_score, away_score,
-            actual_winner, actual_margin, actual_total,
-            actual_ats_pick, actual_total_result,
+            actual_winner, actual_margin, actual_total, actual_q1_total, actual_first_half_total,
+            actual_ats_pick, actual_total_result, q1_total_correct, first_half_total_correct,
             winner_correct, ats_correct, total_correct, settled_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         settlements,
     )
@@ -251,6 +274,21 @@ def _pick_correct(predicted: str, actual: str | None) -> int | None:
     if actual == "push":
         return int(predicted.lower() == "push")
     return int(predicted.split(" ", 1)[0] == actual)
+
+
+def _actual_segment_total(row, home_key: str, away_key: str) -> float | None:
+    home_value = row[home_key]
+    away_value = row[away_key]
+    if home_value is None or away_value is None:
+        return None
+    return float(home_value) + float(away_value)
+
+
+def _segment_total_correct(projected: object, actual: float | None) -> int | None:
+    if projected is None or actual is None:
+        return None
+    tolerance = 0.5
+    return int(abs(float(projected) - float(actual)) <= tolerance)
 
 
 def _value(row: Mapping, key: str):

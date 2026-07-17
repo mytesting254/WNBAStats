@@ -92,6 +92,14 @@ The app is built around a provider-backed pregame workflow:
 - The current live matchup UI exposes:
   - `projected_q1_total`
   - `projected_first_half_total`
+- Saved game prediction tracking now also persists:
+  - `game_predictions.projected_q1_total`
+  - `game_predictions.projected_first_half_total`
+- Settled game prediction tracking now also persists:
+  - `settled_game_predictions.actual_q1_total`
+  - `settled_game_predictions.actual_first_half_total`
+  - `settled_game_predictions.q1_total_correct`
+  - `settled_game_predictions.first_half_total_correct`
 - The current model selection is target-specific:
   - `Q1` uses an opening-focused feature set plus a market anchor blend
   - `1H` uses the narrower pre-expansion core feature set
@@ -121,6 +129,23 @@ The app is built around a provider-backed pregame workflow:
   - `Q1` volatility
   - `Q1` fast-start rate
 - `1H` currently excludes those `Q1`-specific additions because they improved `Q1` but degraded `1H` holdout performance.
+
+### Segment Tracking And Backfill
+
+- Segment projections are tracked only when `game_predictions` rows are written.
+- For live slates, that means:
+  - deploy the code
+  - rebuild current scheduled game predictions
+  - let normal final-score settlement populate `settled_game_predictions`
+- Backfilling completed games has two modes:
+  - approximate retrospective backfill: easy, but can leak present-day context into old games
+  - chronological replay backfill: preferred for honest historical tracking
+- A trustworthy historical replay should:
+  - iterate games in date order
+  - use only pre-tipoff data available before each game
+  - avoid present-day injury leakage
+  - save prediction rows first, then settle against actual `Q1` / `1H` results
+- Do not treat a naive retrospective projection pass over completed games as clean model-evaluation history.
 
 ### Roster Surface
 

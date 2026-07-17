@@ -471,6 +471,8 @@ def init_db() -> None:
                 away_projected_points REAL,
                 projected_margin REAL,
                 projected_total REAL,
+                projected_q1_total REAL,
+                projected_first_half_total REAL,
                 winner_pick TEXT NOT NULL,
                 ats_pick TEXT NOT NULL,
                 ats_edge REAL,
@@ -487,6 +489,11 @@ def init_db() -> None:
             )
             """
         )
+        game_prediction_columns = {row["name"] for row in conn.execute("PRAGMA table_info(game_predictions)").fetchall()}
+        if "projected_q1_total" not in game_prediction_columns:
+            conn.execute("ALTER TABLE game_predictions ADD COLUMN projected_q1_total REAL")
+        if "projected_first_half_total" not in game_prediction_columns:
+            conn.execute("ALTER TABLE game_predictions ADD COLUMN projected_first_half_total REAL")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS settled_game_predictions (
@@ -498,8 +505,12 @@ def init_db() -> None:
                 actual_winner TEXT NOT NULL,
                 actual_margin REAL NOT NULL,
                 actual_total REAL NOT NULL,
+                actual_q1_total REAL,
+                actual_first_half_total REAL,
                 actual_ats_pick TEXT,
                 actual_total_result TEXT,
+                q1_total_correct INTEGER,
+                first_half_total_correct INTEGER,
                 winner_correct INTEGER NOT NULL,
                 ats_correct INTEGER,
                 total_correct INTEGER,
@@ -509,6 +520,15 @@ def init_db() -> None:
             )
             """
         )
+        settled_game_prediction_columns = {row["name"] for row in conn.execute("PRAGMA table_info(settled_game_predictions)").fetchall()}
+        if "actual_q1_total" not in settled_game_prediction_columns:
+            conn.execute("ALTER TABLE settled_game_predictions ADD COLUMN actual_q1_total REAL")
+        if "actual_first_half_total" not in settled_game_prediction_columns:
+            conn.execute("ALTER TABLE settled_game_predictions ADD COLUMN actual_first_half_total REAL")
+        if "q1_total_correct" not in settled_game_prediction_columns:
+            conn.execute("ALTER TABLE settled_game_predictions ADD COLUMN q1_total_correct INTEGER")
+        if "first_half_total_correct" not in settled_game_prediction_columns:
+            conn.execute("ALTER TABLE settled_game_predictions ADD COLUMN first_half_total_correct INTEGER")
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_player_stats_unique_player_game
@@ -1128,6 +1148,8 @@ CREATE TABLE IF NOT EXISTS game_predictions (
     away_projected_points REAL,
     projected_margin REAL,
     projected_total REAL,
+    projected_q1_total REAL,
+    projected_first_half_total REAL,
     winner_pick TEXT NOT NULL,
     ats_pick TEXT NOT NULL,
     ats_edge REAL,
@@ -1152,8 +1174,12 @@ CREATE TABLE IF NOT EXISTS settled_game_predictions (
     actual_winner TEXT NOT NULL,
     actual_margin REAL NOT NULL,
     actual_total REAL NOT NULL,
+    actual_q1_total REAL,
+    actual_first_half_total REAL,
     actual_ats_pick TEXT,
     actual_total_result TEXT,
+    q1_total_correct INTEGER,
+    first_half_total_correct INTEGER,
     winner_correct INTEGER NOT NULL,
     ats_correct INTEGER,
     total_correct INTEGER,
