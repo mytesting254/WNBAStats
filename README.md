@@ -332,6 +332,8 @@ Operational expectations:
 
 `Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
 
+Any table with a dedicated `Best` column uses the same fixed-width logo slot so sportsbook marks stay aligned across `Pregame Props`, `Gems`, `Watchlist`, `Parlays`, and discrepancy tables.
+
 Minutes projections are computed from a hybrid path:
 
 - recency-weighted heuristic (EWMA, trend, context, venue adjustment)
@@ -708,6 +710,31 @@ Refresh them with:
 ```powershell
 .\scripts\download_team_logos.ps1
 ```
+
+## Sportsbook Logos
+
+Sportsbook logo assets are served locally from:
+
+```text
+frontend/public/sportsbook-logos/
+```
+
+Current UI mappings use normalized filenames and extensions:
+
+- `bet365.jpg`
+- `betmgm.jpg`
+- `betrivers.jpg`
+- `caesars.png`
+- `draftkings.png`
+- `fanatics.jpg`
+- `fanduel.jpg`
+- `thescore-bet.jpg`
+
+Guidelines:
+
+- Prefer transparent logo assets when possible. Full promo tiles with baked-in colored backgrounds will render as boxes in the UI.
+- Keep filenames aligned with the frontend sportsbook map in `frontend/src/App.tsx`.
+- `Best` columns use a fixed-width centered logo slot, so replacements should preserve a reasonably tight crop around the mark.
 
 ## Historical Game Import
 

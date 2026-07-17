@@ -169,6 +169,39 @@ select {
   max-height: 34px;
 }
 
+.props-best-col,
+.props-best-book {
+  width: 128px;
+  min-width: 128px;
+  text-align: center;
+}
+
+.props-best-book .sportsbook-logo-wrap,
+.props-best-col .sportsbook-logo-wrap {
+  width: 108px;
+  min-width: 108px;
+  min-height: 34px;
+  height: 34px;
+  margin: 0 auto;
+}
+
+.props-best-book .sportsbook-logo,
+.props-best-col .sportsbook-logo {
+  width: 88px;
+  max-width: 88px;
+  height: 28px;
+  max-height: 28px;
+  object-fit: contain;
+  object-position: center;
+}
+
+.props-best-book .sportsbook-badge.fallback,
+.props-best-col .sportsbook-badge.fallback {
+  min-width: 108px;
+  min-height: 34px;
+  margin: 0 auto;
+}
+
 .app-shell {
   min-height: 100vh;
   padding: 28px;

@@ -2763,6 +2763,7 @@ function PropsView({
               <tr>
                 <th>Player</th>
                 <th>Market</th>
+                <th className="props-best-col">Best</th>
                 <th>Side</th>
                 <th>Line</th>
                 <th>Proj</th>
@@ -2778,15 +2779,13 @@ function PropsView({
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
-                        <span className="sportsbook-inline">
-                          <span>{prop.team} | </span>
-                          <SportsbookLogo name={displaySportsbookName(prop)} />
-                        </span>
+                        <span>{prop.team}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-l5`)}
                       </div>
                     </div>
                   </td>
                   <td>{marketLabel(prop.market)}</td>
+                  <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(prop)} className="compact props-best-logo" /></td>
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
                   <td>{prop.line.toFixed(1)}</td>
                   <td>{prop.projection.toFixed(1)}</td>
@@ -3048,7 +3047,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
               <tr>
                 <th>Player</th>
                 <th>Pick</th>
-                <th>Best</th>
+                <th className="props-best-col">Best</th>
                 <th>Edge</th>
                 <th>EV</th>
                 <th>Line Gap</th>
@@ -3067,7 +3066,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                     {renderRecentFormWithMinutes(g, `${g.id}-gem-flat-l5`)}
                   </td>
                   <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
-                  <td><SportsbookLogo name={displaySportsbookName(g)} /></td>
+                  <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(g)} className="compact props-best-logo" /></td>
                   <td>{formatPercent(g.edge)}</td>
                   <td>{formatPercent(g.expected_value)}</td>
                   <td>{g.line_gap.toFixed(1)}</td>
@@ -3138,7 +3137,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                       <tr>
                         <th>Player</th>
                         <th>Pick</th>
-                        <th>Best</th>
+                        <th className="props-best-col">Best</th>
                         <th>Edge</th>
                         <th>EV</th>
                         <th>Signals</th>
@@ -3154,7 +3153,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                             {renderRecentFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-l5`)}
                           </td>
                           <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
-                          <td><SportsbookLogo name={displaySportsbookName(g)} /></td>
+                          <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(g)} className="compact props-best-logo" /></td>
                           <td>{formatPercent(g.edge)}</td>
                           <td>{formatPercent(g.expected_value)}</td>
                           <td>
@@ -3248,7 +3247,7 @@ function DiscrepanciesView({
                 <th>Market</th>
                 <th>Side</th>
                 <th>Gap</th>
-                <th>Best</th>
+                <th className="props-best-col">Best</th>
                 <th>Books</th>
               </tr>
             </thead>
@@ -3266,7 +3265,7 @@ function DiscrepanciesView({
                     <strong>{item.line_gap.toFixed(1)}</strong>
                     <span>{item.price_gap} cents</span>
                   </td>
-                  <td>
+                  <td className="props-best-book">
                     <strong><SportsbookLogo name={item.best_price.sportsbook} /></strong>
                     <span>{item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}</span>
                   </td>
@@ -4079,7 +4078,7 @@ function WatchlistView({
                     <th>Player</th>
                     <th>Market</th>
                     <th>Side</th>
-                    <th>Best</th>
+                    <th className="props-best-col">Best</th>
                     <th>Line</th>
                     <th>Proj</th>
                     <th>Diff</th>
@@ -4104,7 +4103,7 @@ function WatchlistView({
                       </td>
                       <td>{marketLabel(prop.market)}</td>
                       <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
-                      <td><SportsbookLogo name={displaySportsbookName(prop)} /></td>
+                      <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(prop)} className="compact props-best-logo" /></td>
                       <td>{prop.line.toFixed(1)}</td>
                       <td>{prop.projection.toFixed(1)}</td>
                       <td>{formatSigned(prop.projection - prop.line)}</td>
@@ -4807,7 +4806,7 @@ function MatchupProps({
                 <th>Player</th>
                 <th>Market</th>
                 <th>Side</th>
-                <th>Best</th>
+                <th className="props-best-col">Best</th>
                 <th>Line</th>
                 <th>Proj</th>
                 <th>Diff</th>
@@ -4832,7 +4831,7 @@ function MatchupProps({
                   </td>
                   <td>{marketLabel(prop.market)}</td>
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
-                  <td><SportsbookLogo name={displaySportsbookName(prop)} /></td>
+                  <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(prop)} className="compact props-best-logo" /></td>
                   <td>{prop.line.toFixed(1)}</td>
                   <td>{prop.projection.toFixed(1)}</td>
                   <td>{formatSigned(prop.projection - prop.line)}</td>
@@ -4881,7 +4880,7 @@ function LineGapsTable({ discrepancies }: { discrepancies: LineDiscrepancy[] }) 
               <th>Player</th>
               <th>Market</th>
               <th>Side</th>
-              <th>Best</th>
+              <th className="props-best-col">Best</th>
               <th>Low</th>
               <th>High</th>
               <th>Books</th>
@@ -4893,7 +4892,7 @@ function LineGapsTable({ discrepancies }: { discrepancies: LineDiscrepancy[] }) 
                 <td>{item.player_name}</td>
                 <td>{marketLabel(item.market)}</td>
                 <td><span className={`side ${item.side}`}>{item.side}</span></td>
-                <td>
+                <td className="props-best-book">
                   <strong><SportsbookLogo name={item.best_price.sportsbook} /></strong>
                   <span>{item.best_price.line.toFixed(1)} {formatAmerican(item.best_price.price)}</span>
                 </td>
