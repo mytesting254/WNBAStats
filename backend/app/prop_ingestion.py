@@ -148,7 +148,7 @@ def run_prop_sync_pipeline(
     fast_fail: bool = False,
     rebuild_mode: Literal["changed_props", "target_games", "skip"] = "changed_props",
     fallback_target_game_rebuild_when_unchanged: bool = False,
-    rebuild_chunk_size: int = 20,
+    rebuild_chunk_size: int = 30,
     initial_sync_message: str | None = None,
     skip_sync_message: str | None = None,
     skip_rebuild_message: str | None = None,

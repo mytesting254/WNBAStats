@@ -452,7 +452,7 @@ def rebuild_predictions_live(
     game_ids: list[int] | None = None,
     prop_line_ids: list[int] | None = None,
     *,
-    chunk_size: int = 20,
+    chunk_size: int = 30,
     progress_callback: Callable[[int, int, str | None], None] | None = None,
 ) -> LiveRebuildResult:
     prop_ids = _target_scheduled_prop_line_ids(conn, game_ids=game_ids, prop_line_ids=prop_line_ids)

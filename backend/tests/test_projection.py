@@ -5103,7 +5103,7 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
             touched_game_ids=[9910],
         )
 
-    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None):
+    def fake_rebuild(conn, game_ids=None, prop_line_ids=None, chunk_size=30, progress_callback=None):
         rebuild_calls.append(
             (
                 list(game_ids) if game_ids is not None else None,
@@ -5183,7 +5183,7 @@ def test_repair_current_slate_props_injury_update_rebuilds_full_games_in_batches
     with connect() as conn:
         result = main_module._repair_current_slate_props(conn, target_game_ids=[9910])
 
-    assert rebuild_calls == [([9910], None, 20)]
+    assert rebuild_calls == [([9910], None, 30)]
     assert game_rebuild_calls == [[9910]]
     assert result["scope"] == "injury_update"
     assert result["scanned_props"] == 0
