@@ -3191,7 +3191,11 @@ function DiscrepanciesView({
 }) {
   const [market, setMarket] = useState("all");
   const [side, setSide] = useState("all");
-  const grouped = groupDiscrepanciesByMatchup(discrepancies);
+  const [sportsbookFilter, setSportsbookFilter] = useState("all");
+  const sportsbookOptions = useMemo(() => discrepancySportsbookFilterOptions(discrepancies), [discrepancies]);
+  const grouped = groupDiscrepanciesByMatchup(
+    discrepancies.filter((item) => sportsbookFilter === "all" || item.best_price.sportsbook === sportsbookFilter)
+  );
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const selectedGroup = grouped.find((group) => group.key === selectedKey) ?? grouped[0] ?? null;
   const selectedDiscrepancies = selectedGroup?.items ?? [];
@@ -3235,6 +3239,17 @@ function DiscrepanciesView({
             <option value="all">All sides</option>
             <option value="over">Over</option>
             <option value="under">Under</option>
+          </select>
+          <select
+            value={sportsbookFilter}
+            onChange={(event) => setSportsbookFilter(event.target.value)}
+            aria-label="Discrepancy best sportsbook filter"
+          >
+            {sportsbookOptions.map((sportsbook) => (
+              <option key={`discrepancy-book-${sportsbook}`} value={sportsbook}>
+                {sportsbook === "all" ? "All best books" : sportsbook}
+              </option>
+            ))}
           </select>
         </div>
         {error && <div className="error">{error}</div>}
@@ -5936,6 +5951,13 @@ function sportsbookFilterOptions(items: Array<{ sportsbook: string; display_spor
         .filter((sportsbook): sportsbook is string => Boolean(sportsbook))
     )
   ).sort((a, b) => a.localeCompare(b));
+  return ["all", ...options];
+}
+
+function discrepancySportsbookFilterOptions(items: LineDiscrepancy[]) {
+  const options = Array.from(new Set(items.map((item) => item.best_price.sportsbook).filter(Boolean))).sort((a, b) =>
+    a.localeCompare(b)
+  );
   return ["all", ...options];
 }
 
