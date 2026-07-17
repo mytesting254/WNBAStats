@@ -10,7 +10,7 @@ from .game_pregame_features import GAME_PREGAME_FEATURE_VERSION
 from .paths import get_segment_training_db_path
 
 
-SEGMENT_TRAINING_DB_VERSION = "v1"
+SEGMENT_TRAINING_DB_VERSION = "v2"
 _SEGMENT_TRAINING_DB_LOCK = threading.RLock()
 SEGMENT_EXTRA_FEATURE_NAMES = [
     "home_avg_q1_points",
@@ -29,6 +29,20 @@ SEGMENT_EXTRA_FEATURE_NAMES = [
     "away_recent_first_half_points",
     "home_recent_first_half_allowed",
     "away_recent_first_half_allowed",
+    "home_q1_points_split",
+    "away_q1_points_split",
+    "home_q1_allowed_split",
+    "away_q1_allowed_split",
+    "q1_recent_off_vs_def_delta",
+    "q1_recent_away_off_vs_home_def_delta",
+    "q1_avg_off_vs_def_delta",
+    "q1_avg_away_off_vs_home_def_delta",
+    "home_q1_points_volatility",
+    "away_q1_points_volatility",
+    "home_q1_allowed_volatility",
+    "away_q1_allowed_volatility",
+    "home_q1_fast_start_rate",
+    "away_q1_fast_start_rate",
 ]
 
 
@@ -247,8 +261,8 @@ def _rebuild_segment_training_examples(
         away_team_id = int(row["away_team_id"])
         home_context = gp._team_history_context(history.get(home_team_id))
         away_context = gp._team_history_context(history.get(away_team_id))
-        home_segment_context = _segment_history_context(segment_history.get(home_team_id))
-        away_segment_context = _segment_history_context(segment_history.get(away_team_id))
+        home_segment_context = _segment_history_context(segment_history.get(home_team_id), current_is_home=True)
+        away_segment_context = _segment_history_context(segment_history.get(away_team_id), current_is_home=False)
         exclusion_reason: str | None = None
 
         if _before_training_start(game_date, training_start):
@@ -311,6 +325,20 @@ def _rebuild_segment_training_examples(
             float(away_segment_context["recent_first_half_points"]),
             float(home_segment_context["recent_first_half_allowed"]),
             float(away_segment_context["recent_first_half_allowed"]),
+            float(home_segment_context["split_q1_points"]),
+            float(away_segment_context["split_q1_points"]),
+            float(home_segment_context["split_q1_allowed"]),
+            float(away_segment_context["split_q1_allowed"]),
+            float(home_segment_context["recent_q1_points"]) - float(away_segment_context["recent_q1_allowed"]),
+            float(away_segment_context["recent_q1_points"]) - float(home_segment_context["recent_q1_allowed"]),
+            float(home_segment_context["avg_q1_points"]) - float(away_segment_context["avg_q1_allowed"]),
+            float(away_segment_context["avg_q1_points"]) - float(home_segment_context["avg_q1_allowed"]),
+            float(home_segment_context["q1_points_volatility"]),
+            float(away_segment_context["q1_points_volatility"]),
+            float(home_segment_context["q1_allowed_volatility"]),
+            float(away_segment_context["q1_allowed_volatility"]),
+            float(home_segment_context["q1_fast_start_rate"]),
+            float(away_segment_context["q1_fast_start_rate"]),
         ]
 
         target_home_q1_points = float(row["home_q1_points"])
@@ -385,6 +413,7 @@ def _rebuild_segment_training_examples(
             segment_history,
             team_id=home_team_id,
             game_date=game_date,
+            is_home=True,
             q1_points=float(target_home_q1_points),
             q1_allowed=float(target_away_q1_points),
             first_half_points=float(target_home_1h_points),
@@ -394,6 +423,7 @@ def _rebuild_segment_training_examples(
             segment_history,
             team_id=away_team_id,
             game_date=game_date,
+            is_home=False,
             q1_points=float(target_away_q1_points),
             q1_allowed=float(target_home_q1_points),
             first_half_points=float(target_away_1h_points),
@@ -476,7 +506,7 @@ def _source_signature(conn: sqlite3.Connection) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
-def _segment_history_context(state: dict[str, object] | None) -> dict[str, float]:
+def _segment_history_context(state: dict[str, object] | None, *, current_is_home: bool) -> dict[str, float]:
     if not state:
         return {
             "games": 0.0,
@@ -488,12 +518,21 @@ def _segment_history_context(state: dict[str, object] | None) -> dict[str, float
             "avg_first_half_allowed": 40.0,
             "recent_first_half_points": 40.0,
             "recent_first_half_allowed": 40.0,
+            "split_q1_points": 20.0,
+            "split_q1_allowed": 20.0,
+            "q1_points_volatility": 4.0,
+            "q1_allowed_volatility": 4.0,
+            "q1_fast_start_rate": 0.5,
         }
     games = max(float(state["games"]), 1.0)
     recent_q1_points = state["recent_q1_points"]
     recent_q1_allowed = state["recent_q1_allowed"]
     recent_first_half_points = state["recent_first_half_points"]
     recent_first_half_allowed = state["recent_first_half_allowed"]
+    split_prefix = "home" if current_is_home else "away"
+    split_points = state[f"recent_{split_prefix}_q1_points"]
+    split_allowed = state[f"recent_{split_prefix}_q1_allowed"]
+    split_games = max(float(state[f"{split_prefix}_games"]), 1.0)
     return {
         "games": float(state["games"]),
         "avg_q1_points": float(state["q1_points_sum"]) / games,
@@ -512,6 +551,19 @@ def _segment_history_context(state: dict[str, object] | None) -> dict[str, float
             if recent_first_half_allowed
             else float(state["first_half_allowed_sum"]) / games
         ),
+        "split_q1_points": (
+            (sum(split_points) / len(split_points))
+            if split_points
+            else float(state[f"{split_prefix}_q1_points_sum"]) / split_games
+        ),
+        "split_q1_allowed": (
+            (sum(split_allowed) / len(split_allowed))
+            if split_allowed
+            else float(state[f"{split_prefix}_q1_allowed_sum"]) / split_games
+        ),
+        "q1_points_volatility": _series_stddev(recent_q1_points),
+        "q1_allowed_volatility": _series_stddev(recent_q1_allowed),
+        "q1_fast_start_rate": _fast_start_rate(recent_q1_points, float(state["q1_points_sum"]) / games),
     }
 
 
@@ -520,6 +572,7 @@ def _append_segment_history(
     *,
     team_id: int,
     game_date: str,
+    is_home: bool,
     q1_points: float,
     q1_allowed: float,
     first_half_points: float,
@@ -537,6 +590,16 @@ def _append_segment_history(
             "recent_q1_allowed": [],
             "recent_first_half_points": [],
             "recent_first_half_allowed": [],
+            "home_games": 0,
+            "home_q1_points_sum": 0.0,
+            "home_q1_allowed_sum": 0.0,
+            "recent_home_q1_points": [],
+            "recent_home_q1_allowed": [],
+            "away_games": 0,
+            "away_q1_points_sum": 0.0,
+            "away_q1_allowed_sum": 0.0,
+            "recent_away_q1_points": [],
+            "recent_away_q1_allowed": [],
             "last_game_date": None,
         },
     )
@@ -549,8 +612,33 @@ def _append_segment_history(
     state["recent_q1_allowed"].append(q1_allowed)
     state["recent_first_half_points"].append(first_half_points)
     state["recent_first_half_allowed"].append(first_half_allowed)
+    split_prefix = "home" if is_home else "away"
+    state[f"{split_prefix}_games"] += 1
+    state[f"{split_prefix}_q1_points_sum"] += q1_points
+    state[f"{split_prefix}_q1_allowed_sum"] += q1_allowed
+    state[f"recent_{split_prefix}_q1_points"].append(q1_points)
+    state[f"recent_{split_prefix}_q1_allowed"].append(q1_allowed)
     state["recent_q1_points"] = state["recent_q1_points"][-5:]
     state["recent_q1_allowed"] = state["recent_q1_allowed"][-5:]
     state["recent_first_half_points"] = state["recent_first_half_points"][-5:]
     state["recent_first_half_allowed"] = state["recent_first_half_allowed"][-5:]
+    state["recent_home_q1_points"] = state["recent_home_q1_points"][-5:]
+    state["recent_home_q1_allowed"] = state["recent_home_q1_allowed"][-5:]
+    state["recent_away_q1_points"] = state["recent_away_q1_points"][-5:]
+    state["recent_away_q1_allowed"] = state["recent_away_q1_allowed"][-5:]
     state["last_game_date"] = game_date
+
+
+def _series_stddev(values: list[float]) -> float:
+    if not values:
+        return 4.0
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return max(variance ** 0.5, 0.5)
+
+
+def _fast_start_rate(values: list[float], baseline: float) -> float:
+    if not values:
+        return 0.5
+    threshold = float(baseline)
+    return sum(1 for value in values if value >= threshold) / len(values)

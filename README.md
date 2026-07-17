@@ -92,6 +92,12 @@ The app is built around a provider-backed pregame workflow:
 - The current live matchup UI exposes:
   - `projected_q1_total`
   - `projected_first_half_total`
+- The current model selection is target-specific:
+  - `Q1` uses an opening-focused feature set plus a market anchor blend
+  - `1H` uses the narrower pre-expansion core feature set
+- Current mounted benchmark winner as of July 17, 2026:
+  - `Q1`: `ridge_q1_anchor`
+  - `1H`: `ridge_raw`
 - If those fields show `N/A`, check these in order:
   - `game_segment_results` has rows in the live runtime DB
   - the live segment training DB has non-zero `included_rows`
@@ -105,6 +111,16 @@ The app is built around a provider-backed pregame workflow:
   - possessions are halved from full-game possessions
   - pace references are computed on first-half scale
 - If runtime code accidentally feeds full-game team scoring into the segment model, `Q1` and `1H` totals can inflate to impossible values. Treat that as a feature-scale bug, not a model-quality issue.
+
+### Segment Feature Split
+
+- `Q1` and `1H` no longer share the exact same runtime/training feature subset.
+- `Q1` keeps the opening-specific additions:
+  - home/away `Q1` splits
+  - `Q1` offense-vs-defense interaction deltas
+  - `Q1` volatility
+  - `Q1` fast-start rate
+- `1H` currently excludes those `Q1`-specific additions because they improved `Q1` but degraded `1H` holdout performance.
 
 ### Roster Surface
 
