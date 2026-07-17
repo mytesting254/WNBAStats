@@ -63,9 +63,9 @@ select {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 28px;
-  min-width: 56px;
-  padding: 4px 8px;
+  min-height: 38px;
+  min-width: 96px;
+  padding: 5px 12px;
   border: 1px solid #d9dee7;
   border-radius: 8px;
   background: #fff;
@@ -73,9 +73,9 @@ select {
 }
 
 .sportsbook-badge.compact {
-  min-height: 24px;
-  min-width: 48px;
-  padding: 3px 7px;
+  min-height: 38px;
+  min-width: 88px;
+  padding: 5px 10px;
 }
 
 .sportsbook-badge.fallback {
@@ -87,15 +87,15 @@ select {
 
 .sportsbook-logo {
   display: block;
-  max-width: 82px;
-  max-height: 18px;
+  max-width: 128px;
+  max-height: 38px;
   width: auto;
   height: auto;
 }
 
 .sportsbook-badge.compact .sportsbook-logo {
-  max-width: 72px;
-  max-height: 16px;
+  max-width: 116px;
+  max-height: 38px;
 }
 
 .app-shell {
@@ -1686,14 +1686,14 @@ tbody tr.selected {
 }
 
 .book-line-list .sportsbook-badge {
-  min-height: 22px;
-  min-width: 44px;
-  padding: 2px 6px;
+  min-height: 38px;
+  min-width: 88px;
+  padding: 5px 10px;
 }
 
 .book-line-list .sportsbook-logo {
-  max-width: 64px;
-  max-height: 14px;
+  max-width: 116px;
+  max-height: 38px;
 }
 
 .candidate-card span,
