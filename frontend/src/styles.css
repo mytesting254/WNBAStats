@@ -59,6 +59,28 @@ select {
   flex-wrap: wrap;
 }
 
+.sportsbook-logo-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 38px;
+  min-width: 96px;
+  vertical-align: middle;
+}
+
+.sportsbook-logo-wrap.compact {
+  min-height: 34px;
+  min-width: 88px;
+}
+
+.sportsbook-logo-wrap.wide {
+  min-width: 124px;
+}
+
+.sportsbook-logo-wrap.compact.wide {
+  min-width: 112px;
+}
+
 .sportsbook-badge {
   display: inline-flex;
   align-items: center;
@@ -87,15 +109,24 @@ select {
 
 .sportsbook-logo {
   display: block;
-  max-width: 128px;
+  max-width: 136px;
   max-height: 38px;
   width: auto;
   height: auto;
 }
 
-.sportsbook-badge.compact .sportsbook-logo {
-  max-width: 116px;
-  max-height: 38px;
+.sportsbook-logo.wide {
+  max-width: 156px;
+}
+
+.sportsbook-logo-wrap.compact .sportsbook-logo {
+  max-width: 124px;
+  max-height: 34px;
+}
+
+.sportsbook-logo-wrap.compact .sportsbook-logo.wide {
+  max-width: 142px;
+  max-height: 34px;
 }
 
 .app-shell {
@@ -1691,9 +1722,23 @@ tbody tr.selected {
   padding: 5px 10px;
 }
 
+.book-line-list .sportsbook-logo-wrap {
+  min-height: 32px;
+  min-width: 82px;
+}
+
+.book-line-list .sportsbook-logo-wrap.wide {
+  min-width: 104px;
+}
+
 .book-line-list .sportsbook-logo {
-  max-width: 116px;
-  max-height: 38px;
+  max-width: 108px;
+  max-height: 32px;
+}
+
+.book-line-list .sportsbook-logo.wide {
+  max-width: 128px;
+  max-height: 32px;
 }
 
 .candidate-card span,

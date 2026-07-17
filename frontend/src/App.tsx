@@ -5079,6 +5079,7 @@ function SportsbookLogo({
   const [failed, setFailed] = useState(false);
   const label = String(name || "").trim() || "Unknown";
   const file = sportsbookLogoFile(label);
+  const wide = file === "fanduel" || file === "fanatics" || file === "caesars";
 
   useEffect(() => {
     setFailed(false);
@@ -5089,9 +5090,9 @@ function SportsbookLogo({
   }
 
   return (
-    <span className={`sportsbook-badge ${className}`.trim()} title={label}>
+    <span className={`sportsbook-logo-wrap ${wide ? "wide" : ""} ${className}`.trim()} title={label}>
       <img
-        className="sportsbook-logo"
+        className={`sportsbook-logo ${wide ? "wide" : ""}`.trim()}
         src={`/sportsbook-logos/${file}.svg`}
         alt={`${label} logo`}
         loading="lazy"
