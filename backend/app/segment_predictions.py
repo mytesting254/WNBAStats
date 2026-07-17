@@ -66,24 +66,8 @@ def project_game_segments(
     )
     q1_model = _train_segment_model_cached(conn, "q1_total")
     first_half_model = _train_segment_model_cached(conn, "first_half_total")
-    q1_prediction = (
-        _postprocess_segment_prediction(
-            "q1_total",
-            predict_segment_total(q1_model, segment_features),
-            segment_features,
-        )
-        if q1_model
-        else None
-    )
-    first_half_prediction = (
-        _postprocess_segment_prediction(
-            "first_half_total",
-            predict_segment_total(first_half_model, segment_features),
-            segment_features,
-        )
-        if first_half_model
-        else None
-    )
+    q1_prediction = predict_segment_total(q1_model, segment_features) if q1_model else None
+    first_half_prediction = predict_segment_total(first_half_model, segment_features) if first_half_model else None
     return {
         "projected_q1_total": round(q1_prediction, 1) if q1_prediction is not None else None,
         "projected_first_half_total": round(first_half_prediction, 1) if first_half_prediction is not None else None,
