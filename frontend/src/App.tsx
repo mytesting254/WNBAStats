@@ -2069,17 +2069,19 @@ function RosterView({
     return new Date(Math.max(...timestamps)).toISOString();
   }, [roster]);
   const rosterCapturedDate = latestCapturedAt ? latestCapturedAt.slice(0, 10) : null;
+  const rosterSlateMatchups = useMemo(() => {
+    const todaysSlate = matchups.filter((matchup) => matchup.game_date === todayIso);
+    const source = todaysSlate.length ? todaysSlate : matchups;
+    return [...source].sort((left, right) => new Date(left.start_time).getTime() - new Date(right.start_time).getTime());
+  }, [matchups, todayIso]);
   const todaysMatchupTeams = useMemo(() => {
     const currentTeams = new Set<string>();
-    for (const matchup of matchups) {
-      if (matchup.game_date !== todayIso) {
-        continue;
-      }
+    for (const matchup of rosterSlateMatchups) {
       currentTeams.add(matchup.home_team);
       currentTeams.add(matchup.away_team);
     }
     return Array.from(currentTeams).sort();
-  }, [matchups, todayIso]);
+  }, [rosterSlateMatchups]);
   const missingTodayTeams = useMemo(
     () => todaysMatchupTeams.filter((team) => !teams.includes(team)),
     [todaysMatchupTeams, teams]
@@ -2101,6 +2103,15 @@ function RosterView({
   const teamImpactPercent = teamSummary?.team_injury_factor != null
     ? (1 - teamSummary.team_injury_factor) * 100
     : null;
+  const teamMatchups = useMemo(() => {
+    const byTeam = new Map<string, Matchup>();
+    for (const matchup of rosterSlateMatchups) {
+      byTeam.set(normalizeTeamCode(matchup.home_team) ?? matchup.home_team, matchup);
+      byTeam.set(normalizeTeamCode(matchup.away_team) ?? matchup.away_team, matchup);
+    }
+    return byTeam;
+  }, [rosterSlateMatchups]);
+  const selectedTeamMatchup = selectedTeam ? teamMatchups.get(normalizeTeamCode(selectedTeam) ?? selectedTeam) ?? null : null;
 
   return (
     <section className="matchup-list">
@@ -2123,6 +2134,17 @@ function RosterView({
         {error && <div className="error">{error}</div>}
         {status && <div className="success">{status}</div>}
         {rosterFreshnessWarning && <div className="warning">{rosterFreshnessWarning}</div>}
+        {rosterSlateMatchups.length ? (
+          <div className="game-tabs" aria-label="Roster slate games">
+            {rosterSlateMatchups.map((matchup) => (
+              <button key={`roster-slate-${matchup.id}`} type="button">
+                <span>{formatDate(matchup.start_time || matchup.game_date)}</span>
+                <strong>{`${matchup.away_team} at ${matchup.home_team}`}</strong>
+                <em>{formatRosterMatchupMeta(matchup)}</em>
+              </button>
+            ))}
+          </div>
+        ) : null}
         <section className="roster-change-card" aria-live="polite">
           <div className="roster-change-card-header">
             <div>
@@ -2170,7 +2192,7 @@ function RosterView({
         <div className="game-tabs roster-tabs" aria-label="Roster team tabs">
           {teams.map((team) => (
             <button key={team} className={selectedTeam === team ? "active" : ""} onClick={() => setSelectedTeam(team)}>
-              <span>Team</span>
+              <span>{formatRosterTeamSchedule(team, teamMatchups.get(normalizeTeamCode(team) ?? team) ?? null)}</span>
               <strong>{team}</strong>
               <em>{roster.filter((item) => item.team === team).length} players</em>
             </button>
@@ -2178,6 +2200,11 @@ function RosterView({
         </div>
         {teamSummary ? (
           <section className="summary-grid roster-summary-grid">
+            <Metric
+              label="Matchup"
+              value={selectedTeam ? formatRosterTeamSchedule(selectedTeam, selectedTeamMatchup) : "N/A"}
+              className="metric-compact"
+            />
             <Metric label="Key absences" value={formatCount(teamSummary.team_missing_key_players)} className="metric-compact" />
             <Metric
               label="Team impact"
@@ -2208,7 +2235,9 @@ function RosterView({
                   <td>
                     <div className="roster-player-cell">
                       <PlayerLabel name={item.player_name} position={item.position} />
-                      <span className="roster-player-meta">{formatRosterPosition(item.position)} | {item.team}</span>
+                      <span className="roster-player-meta">
+                        {formatRosterPosition(item.position)} | {item.team} | {formatRosterTeamSchedule(item.team, teamMatchups.get(normalizeTeamCode(item.team) ?? item.team) ?? null)}
+                      </span>
                     </div>
                   </td>
                   <td>
@@ -2263,6 +2292,26 @@ function formatRosterRole(role?: string | null) {
 function formatRosterPosition(position?: string | null) {
   const value = String(position || "").trim().toUpperCase();
   return value || "POS N/A";
+}
+
+function formatRosterTeamSchedule(team: string, matchup: Matchup | null) {
+  if (!matchup) {
+    return "Off slate";
+  }
+  const normalizedTeam = normalizeTeamCode(team);
+  if (normalizedTeam && normalizedTeam === normalizeTeamCode(matchup.home_team)) {
+    return `vs ${matchup.away_team}`;
+  }
+  if (normalizedTeam && normalizedTeam === normalizeTeamCode(matchup.away_team)) {
+    return `at ${matchup.home_team}`;
+  }
+  return `${matchup.away_team} at ${matchup.home_team}`;
+}
+
+function formatRosterMatchupMeta(matchup: Matchup) {
+  const spread = matchup.spread_home != null ? `${matchup.home_team} ${formatSpread(matchup.spread_home)}` : "Spread N/A";
+  const total = matchup.game_total != null && matchup.game_total > 0 ? `Total ${matchup.game_total.toFixed(1)}` : "Total N/A";
+  return `${spread} | ${total}`;
 }
 
 function rosterStatusSeverity(status: string) {
