@@ -969,6 +969,11 @@ games for stabilization, and blends same-home/away plus scheduled-game
 ET-today run in about `1m 1s` for `3` prepared games, `79` candidates, and
 `79` fresh snapshots.
 
+The manual `Generate` action on the `Special Props` tab now follows the same
+near-term prep window as the scheduled prep helpers: by default it prepares
+today plus tomorrow only. It no longer snapshots every future scheduled game
+when run without explicit date or game filters.
+
 The `Special Props` tab now exposes calibration tables for both `2+ Stocks Prob`
 and `3+ Stocks Prob`. Each table shows settled count, hits, average predicted
 probability, and realized hit rate by probability bucket so the UI can compare

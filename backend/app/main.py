@@ -73,11 +73,11 @@ from .stocks_tracking import (
     get_tracking_db_path,
     list_game_board_summaries,
     list_special_stocks,
+    prepare_stocks_data,
     prune_special_snapshots,
     queue_prepare_stocks_games,
     settled_latest_special_rows,
     settle_stocks,
-    snapshot_stocks,
 )
 from .player_prop_model import (
     MODEL_VERSION,
@@ -2311,7 +2311,8 @@ def generate_special_stocks(request: Request) -> dict[str, int]:
 
 def _generate_special_stocks() -> dict[str, int]:
     with connect() as conn:
-        return {"generated": snapshot_stocks(conn)}
+        result = prepare_stocks_data(conn)
+    return {"generated": int(result.get("snapshots_written") or 0)}
 
 
 @app.get("/api/auth/me")
