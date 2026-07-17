@@ -2070,7 +2070,7 @@ function RosterView({
   }, [roster]);
   const rosterCapturedDate = latestCapturedAt ? latestCapturedAt.slice(0, 10) : null;
   const rosterSlateMatchups = useMemo(() => {
-    const todaysSlate = matchups.filter((matchup) => matchup.game_date === todayIso);
+    const todaysSlate = matchups.filter((matchup) => localIsoDate(new Date(matchup.start_time || matchup.game_date)) === todayIso);
     const source = todaysSlate.length ? todaysSlate : matchups;
     return [...source].sort((left, right) => new Date(left.start_time).getTime() - new Date(right.start_time).getTime());
   }, [matchups, todayIso]);
