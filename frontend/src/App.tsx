@@ -5078,22 +5078,23 @@ function SportsbookLogo({
 }) {
   const [failed, setFailed] = useState(false);
   const label = String(name || "").trim() || "Unknown";
-  const file = sportsbookLogoFile(label);
-  const wide = file === "fanduel" || file === "fanatics" || file === "caesars";
+  const asset = sportsbookLogoAsset(label);
+  const file = asset?.file ?? null;
+  const wide = file === "fanduel" || file === "fanatics" || file === "caesars" || file === "bet365" || file === "betrivers" || file === "thescore-bet";
 
   useEffect(() => {
     setFailed(false);
-  }, [file]);
+  }, [asset?.src]);
 
-  if (!file || failed) {
+  if (!asset || !file || failed) {
     return <span className={`sportsbook-badge fallback ${className}`.trim()}>{label}</span>;
   }
 
   return (
-    <span className={`sportsbook-logo-wrap ${wide ? "wide" : ""} ${className}`.trim()} title={label}>
+    <span className={`sportsbook-logo-wrap ${file} ${wide ? "wide" : ""} ${className}`.trim()} title={label}>
       <img
-        className={`sportsbook-logo ${wide ? "wide" : ""}`.trim()}
-        src={`/sportsbook-logos/${file}.svg`}
+        className={`sportsbook-logo ${file} ${wide ? "wide" : ""}`.trim()}
+        src={asset.src}
         alt={`${label} logo`}
         loading="lazy"
         onError={() => setFailed(true)}
@@ -5897,22 +5898,35 @@ function displaySportsbookName(item: { sportsbook: string; display_sportsbook?: 
   return item.display_sportsbook?.trim() || item.sportsbook?.trim() || "Unknown";
 }
 
-function sportsbookLogoFile(name: string) {
+function sportsbookLogoAsset(name: string): { file: string; src: string } | null {
   const normalized = name.trim().toLowerCase();
-  const aliases: Record<string, string> = {
-    "bet mgm": "betmgm",
-    betmgm: "betmgm",
-    caesars: "caesars",
-    "caesars sportsbook": "caesars",
-    draftkings: "draftkings",
-    "draft kings": "draftkings",
-    espnbet: "espn-bet",
-    "espn bet": "espn-bet",
-    fanduel: "fanduel",
-    fanatics: "fanatics",
-    "fanatics sportsbook": "fanatics"
+  const aliases: Record<string, { file: string; ext: string }> = {
+    "bet mgm": { file: "betmgm", ext: "jpg" },
+    betmgm: { file: "betmgm", ext: "jpg" },
+    bet365: { file: "bet365", ext: "jpg" },
+    "bet 365": { file: "bet365", ext: "jpg" },
+    betrivers: { file: "betrivers", ext: "jpg" },
+    "bet rivers": { file: "betrivers", ext: "jpg" },
+    "betrivers sportsbook": { file: "betrivers", ext: "jpg" },
+    caesars: { file: "caesars", ext: "png" },
+    "caesars sportsbook": { file: "caesars", ext: "png" },
+    draftkings: { file: "draftkings", ext: "png" },
+    "draft kings": { file: "draftkings", ext: "png" },
+    fanduel: { file: "fanduel", ext: "jpg" },
+    fanatics: { file: "fanatics", ext: "jpg" },
+    "fanatics sportsbook": { file: "fanatics", ext: "jpg" },
+    thescore: { file: "thescore-bet", ext: "jpg" },
+    "thescore bet": { file: "thescore-bet", ext: "jpg" },
+    "the score bet": { file: "thescore-bet", ext: "jpg" }
   };
-  return aliases[normalized] ?? null;
+  const asset = aliases[normalized];
+  if (!asset) {
+    return null;
+  }
+  return {
+    file: asset.file,
+    src: `/sportsbook-logos/${asset.file}.${asset.ext}`,
+  };
 }
 
 function sportsbookFilterOptions(items: Array<{ sportsbook: string; display_sportsbook?: string | null }>) {

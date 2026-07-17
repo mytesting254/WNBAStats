@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 230 40" role="img" aria-labelledby="title">
+  <title>BetRivers</title>
+  <g fill="none" stroke-linecap="round" stroke-width="4.5">
+    <path d="M16 29c10-14 19-14 29 0" stroke="#25c7a5"/>
+    <path d="M24 27c8-10 14-10 22 0" stroke="#39a4ff"/>
+    <path d="M31 25c5-6 9-6 14 0" stroke="#153c73"/>
+  </g>
+  <text x="54" y="27" font-family="Arial, Helvetica, sans-serif" font-size="24" font-weight="700" fill="#153c73">BetRivers</text>
+</svg>

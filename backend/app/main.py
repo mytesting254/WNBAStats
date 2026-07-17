@@ -3857,7 +3857,15 @@ def rebuild_game_predictions_live(
     safe_chunk_size = max(1, int(chunk_size))
     for start in range(0, len(rows), safe_chunk_size):
         batch_games = rows[start : start + safe_chunk_size]
-        batch_predictions = [project_game(conn, game) for game in batch_games]
+        batch_prediction_cache = _GamePredictionCache(
+            conn,
+            tuple(team_id for game in batch_games for team_id in (int(game["home_team_id"]), int(game["away_team_id"]))),
+        )
+        batch_predictions = []
+        for game in batch_games:
+            prediction = project_game(conn, game, runtime_cache=batch_prediction_cache)
+            prediction.update(project_game_segments(conn, game, runtime_cache=batch_prediction_cache))
+            batch_predictions.append(prediction)
         written += save_game_predictions(conn, batch_games, batch_predictions)
         if progress_callback is not None:
             processed = min(start + len(batch_games), total_games)
