@@ -10270,6 +10270,47 @@ def test_rotowire_lineup_parser_extracts_split_position_player_status_rows() -> 
     ]
 
 
+def test_rotowire_lineup_parser_stops_may_not_play_at_projected_minutes_break() -> None:
+    html = """
+    <section>
+      <div>8:00 PM ET</div>
+      <div><a>NYL</a></div>
+      <div><a>DAL</a></div>
+      <ul>
+        <li>Expected Lineup</li>
+        <li>G M. Johannes GTD</li>
+        <li>G S. Ionescu</li>
+        <li>G P. Astier</li>
+        <li>F B. Stewart</li>
+        <li>C Jonquel Jones</li>
+        <li>Projected Minutes</li>
+        <li>MAY NOT PLAY</li>
+        <li>G M. Johannes GTD</li>
+        <li>F L. Fiebich OUT</li>
+        <li>F Satou Sabally OUT</li>
+        <li>Expected Lineup</li>
+        <li>G A. Ogunbowale</li>
+        <li>G P. Bueckers</li>
+        <li>G Azzi Fudd</li>
+        <li>C Awak Kuier</li>
+        <li>C J. Shepard</li>
+        <li>Projected Minutes</li>
+        <li>MAY NOT PLAY</li>
+        <li>F Alanna Smith GTD</li>
+      </ul>
+    </section>
+    """
+
+    rows = _parse_lineup_injuries(html)
+
+    assert rows == [
+        {"team": "NYL", "player_name": "M. Johannes", "status": "GTD"},
+        {"team": "NYL", "player_name": "L. Fiebich", "status": "OUT"},
+        {"team": "NYL", "player_name": "Satou Sabally", "status": "OUT"},
+        {"team": "DAL", "player_name": "Alanna Smith", "status": "GTD"},
+    ]
+
+
 def test_rotowire_import_uses_cache_when_fresh(monkeypatch) -> None:
     cached_payload = {
         "captured_at": "2026-05-22T20:00:00+00:00",

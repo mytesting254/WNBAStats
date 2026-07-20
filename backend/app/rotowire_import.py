@@ -25,6 +25,15 @@ REQUEST_HEADERS = {
     "Connection": "close",
 }
 UNAVAILABLE_STATUSES = {"OUT", "GTD", "DOUBTFUL", "QUESTIONABLE"}
+LINEUP_SECTION_HEADERS = {
+    "PROJECTED MINUTES",
+    "PROJECTED STARTERS",
+    "STARTING LINEUPS",
+    "STARTING LINEUP",
+    "TICKETS",
+    "ALERT",
+    "ALERTS",
+}
 
 
 def import_rotowire_lineups(conn: sqlite3.Connection, force_refresh: bool = False) -> dict:
@@ -301,6 +310,11 @@ def _parse_lineup_injuries(page: str) -> list[dict[str, str]]:
         if in_may_not_play:
             if line in {"Confirmed Lineup", "Expected Lineup"}:
                 in_may_not_play = False
+                continue
+            normalized_line = re.sub(r"[^A-Z ]+", "", line.upper()).strip()
+            if normalized_line in LINEUP_SECTION_HEADERS:
+                in_may_not_play = False
+                i += 1
                 continue
             if _matchup_pair(line) or _is_time_line(line):
                 in_may_not_play = False

@@ -2074,31 +2074,19 @@ function RosterView({
     const source = todaysSlate.length ? todaysSlate : matchups;
     return [...source].sort((left, right) => new Date(left.start_time).getTime() - new Date(right.start_time).getTime());
   }, [matchups, todayIso]);
-  const todaysMatchupTeams = useMemo(() => {
-    const currentTeams = new Set<string>();
-    for (const matchup of rosterSlateMatchups) {
-      currentTeams.add(matchup.home_team);
-      currentTeams.add(matchup.away_team);
-    }
-    return Array.from(currentTeams).sort();
-  }, [rosterSlateMatchups]);
-  const missingTodayTeams = useMemo(
-    () => todaysMatchupTeams.filter((team) => !teams.includes(team)),
-    [todaysMatchupTeams, teams]
-  );
   const rosterFreshnessWarning = useMemo(() => {
-    if (!latestCapturedAt && missingTodayTeams.length) {
-      return `Rotowire roster feed has no current timestamp. Today's slate includes ${missingTodayTeams.join(", ")}, but those teams are missing from the roster feed.`;
+    if (!latestCapturedAt && roster.length) {
+      return "Rotowire roster feed has no current timestamp.";
     }
     const warningParts: string[] = [];
     if (latestCapturedAt && rosterCapturedDate && rosterCapturedDate < todayIso) {
       warningParts.push(`Rotowire roster feed last updated ${formatDateTime(latestCapturedAt)}.`);
     }
-    if (missingTodayTeams.length) {
-      warningParts.push(`Today's slate includes ${missingTodayTeams.join(", ")}, but those teams are missing from the roster feed.`);
+    if (latestCapturedAt && !roster.length) {
+      warningParts.push(`Rotowire roster feed last updated ${formatDateTime(latestCapturedAt)}, but no unavailable-player rows were published.`);
     }
     return warningParts.length ? warningParts.join(" ") : null;
-  }, [latestCapturedAt, missingTodayTeams, rosterCapturedDate, todayIso]);
+  }, [latestCapturedAt, roster.length, rosterCapturedDate, todayIso]);
   const teamSummary = visibleRows[0] ?? null;
   const teamImpactPercent = teamSummary?.team_injury_factor != null
     ? (1 - teamSummary.team_injury_factor) * 100
