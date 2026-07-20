@@ -2069,6 +2069,41 @@ def test_minutes_projection_tightens_stable_rotation_upside_without_vacancy(monk
     assert "learned blend 9%/33%" in note
 
 
+def test_minutes_stable_context_cap_tightens_quiet_rotation_slice() -> None:
+    role_state = _classify_minutes_role(
+        rotation_role="rotation",
+        recent_minutes_avg=22.0,
+        last_10_minutes_avg=21.5,
+        ewma_minutes=21.4,
+        minutes_trend=0.6,
+        minute_volatility=4.2,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        lineup_context=[0.15, 0.78, 0.31],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    capped, notes = player_prop_model_module._apply_minutes_stable_context_cap(
+        projected=25.1,
+        role_state=role_state,
+        recent_blend=(0.65 * 22.0) + (0.35 * 21.5),
+        recency_anchor=(0.65 * 22.0) + (0.25 * 21.5) + (0.10 * 21.4),
+        last_10_minutes_avg=21.5,
+        minutes_trend=0.6,
+        minute_volatility=4.2,
+        injury_status="available",
+        injury_delta=0.0,
+        recent_absence_days=None,
+        team_transition=[18.0, 0.0, 0.0, 0.82],
+        opportunity_context=[0.0, 0.0],
+    )
+
+    assert role_state.bucket == "rotation"
+    assert "stable-context rotation rise cap" in notes
+    assert capped == pytest.approx(22.625)
+
+
 def test_minutes_projection_uses_more_conservative_blend_for_unsupported_rotation_upside(monkeypatch) -> None:
     monkeypatch.setattr(
         "backend.app.player_prop_model.train_minutes_model",
@@ -2438,7 +2473,7 @@ def test_minutes_stable_context_cap_limits_stable_starter_rise() -> None:
 
     assert role_state.bucket == "starter_volatile"
     assert "stable-context starter rise cap" in notes
-    assert capped == pytest.approx(28.1)
+    assert capped == pytest.approx(27.8)
 
 
 def test_minutes_stable_context_cap_lifts_quiet_core_starter_floor() -> None:
@@ -2818,7 +2853,7 @@ def test_minutes_stable_context_cap_limits_stable_rotation_rise() -> None:
 
     assert role_state.bucket == "rotation"
     assert "stable-context rotation rise cap" in notes
-    assert capped == pytest.approx(21.38)
+    assert capped == pytest.approx(21.18)
 
 
 def test_minutes_stable_context_cap_limits_vacancy_rotation_rise() -> None:

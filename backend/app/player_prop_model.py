@@ -3342,6 +3342,10 @@ def _apply_minutes_stable_context_cap(
             rise_buffer = 1.5
             anchor_buffer = 1.0
             last10_buffer = 0.8
+        if minute_volatility < 5.8 and abs(minutes_trend) < 4.2:
+            rise_buffer = 1.2
+            anchor_buffer = 0.9
+            last10_buffer = 0.7
         stable_rise_cap = max(
             role_state.lower_bound,
             min(
@@ -3494,6 +3498,9 @@ def _apply_minutes_stable_context_cap(
         if minute_volatility >= 6.8:
             rise_buffer = 0.8
             last10_buffer = 0.5
+        elif minute_volatility < 5.6 and abs(minutes_trend) < 2.0:
+            rise_buffer = 0.8
+            last10_buffer = 0.45
         stable_rotation_rise_cap = max(
             role_state.lower_bound,
             min(
