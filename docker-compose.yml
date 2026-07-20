@@ -30,7 +30,7 @@ services:
       RATE_LIMIT_MUTATION_REFILL_PER_SEC: ${RATE_LIMIT_MUTATION_REFILL_PER_SEC:-0.5}
       RATE_LIMIT_REFRESH_CAPACITY: ${RATE_LIMIT_REFRESH_CAPACITY:-6}
       RATE_LIMIT_REFRESH_REFILL_PER_SEC: ${RATE_LIMIT_REFRESH_REFILL_PER_SEC:-0.33}
-      PORT: ${BACKEND_PORT_INTERNAL:-8010}
+      PORT: 8010
     command:
       - /bin/sh
       - -c
@@ -38,7 +38,7 @@ services:
     volumes:
       - wnba_data:/data
     expose:
-      - "${BACKEND_PORT_INTERNAL:-8010}"
+      - "8010"
     restart: unless-stopped
     init: true
     healthcheck:
@@ -67,9 +67,9 @@ services:
     depends_on:
       - backend
     ports:
-      - "${FRONTEND_PORT:-8082}:80"
+      - "8082:80"
     restart: unless-stopped
     init: true
 volumes:
   wnba_data:
-    name: ${WNBA_DOCKER_VOLUME_NAME:-wnbastats_wnba_data}
+    name: wnbastats_wnba_data
