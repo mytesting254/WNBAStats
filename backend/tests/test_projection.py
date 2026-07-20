@@ -11253,6 +11253,43 @@ def test_value_board_filters_low_confidence_unless_edge_is_high() -> None:
     assert ("Sonia Citron", "assists") in player_market
 
 
+def test_value_board_includes_strong_positive_ev_low_confidence_combo_props() -> None:
+    load_test_history()
+    with connect() as conn:
+        start_time = (datetime.now(timezone.utc) + timedelta(hours=3)).isoformat()
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (9915, '2026-05-23', ?, 10, 3, 'scheduled', 2, 2, -2.5, 161.5)
+            """,
+            (start_time,),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9916, 9915, 1001, 'DraftKings', 'points_assists', 22.5, -110, -110, ?)
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_predictions (
+                prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (9916, 'adaptive-context-v1', ?, 20.8, 'under', 0.57, 0.52, 0.042, 0.078, 'low', 'test')
+            """,
+            (datetime.now(timezone.utc).isoformat(),),
+        )
+
+        rows = main_module._value_board_payload(conn, 9915)
+
+    player_market = {(str(row["player"]), str(row["market"])) for row in rows}
+    assert ("Breanna Stewart", "points_assists") in player_market
+
+
 def test_value_board_preserves_prop_line_id() -> None:
     load_test_history()
     with connect() as conn:

@@ -8065,6 +8065,7 @@ def _include_value_board_pick(item: dict) -> bool:
     side = str(item.get("recommended_side") or "").strip().lower()
     try:
         edge = abs(float(item.get("edge") or 0.0))
+        ev = float(item.get("expected_value") or 0.0)
     except (TypeError, ValueError):
         return False
 
@@ -8090,6 +8091,8 @@ def _include_value_board_pick(item: dict) -> bool:
         return edge >= 0.08 and edge < LOW_CONFIDENCE_EDGE_MAX
     if market == "threes":
         return (edge >= 0.05 and edge < 0.08) or (edge >= 0.12 and edge < LOW_CONFIDENCE_EDGE_MAX)
+    if market in {"assists", "points_assists", "points_rebounds", "rebounds_assists", "points_rebounds_assists"}:
+        return ev >= 0.07 and edge >= 0.04 and edge < LOW_CONFIDENCE_EDGE_MAX
 
     return edge >= LOW_CONFIDENCE_EDGE_MIN and edge < LOW_CONFIDENCE_EDGE_MAX
 
