@@ -9059,6 +9059,58 @@ def test_odds_sync_reingest_updates_only_changed_prop_line_predictions(monkeypat
     assert rebound_row["under_odds"] == -118
 
 
+def test_odds_sync_rebuilds_touched_line_when_prediction_is_missing(monkeypatch) -> None:
+    load_test_history()
+    first_captured_at = datetime.now(timezone.utc).isoformat()
+    second_captured_at = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    rebuild_calls: list[list[int] | None] = []
+
+    def fake_rebuild_predictions(conn, game_ids=None, prop_line_ids=None, chunk_size=20, progress_callback=None):
+        rebuild_calls.append(list(prop_line_ids) if prop_line_ids is not None else None)
+        return projections_module.LiveRebuildResult(
+            projections=[],
+            attempted=len(prop_line_ids or []),
+            written=len(prop_line_ids or []),
+            skipped=0,
+            errors=[],
+        )
+
+    monkeypatch.setattr("backend.app.odds_import.rebuild_predictions_live", fake_rebuild_predictions)
+
+    with connect() as conn:
+        conn.execute("DELETE FROM prop_predictions")
+        conn.execute("DELETE FROM prop_lines")
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9751, 2010, 1001, 'DraftKings', 'points', 21.5, -110, -110, ?)
+            """,
+            (first_captured_at,),
+        )
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 21.5, -110, second_captured_at),
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 21.5, -110, second_captured_at),
+            ],
+        )
+
+        result = sync_prop_lines_from_sportsbook(conn, include_change_details=True)
+        row = conn.execute("SELECT * FROM prop_lines WHERE id = 9751").fetchone()
+
+    assert isinstance(result, SyncPropLinesResult)
+    assert result.changed_prop_line_ids == [9751]
+    assert rebuild_calls == [[9751]]
+    assert row is not None
+    assert row["captured_at"] == second_captured_at
+
+
 def test_odds_sync_matches_player_name_without_punctuation() -> None:
     load_test_history()
     captured_at = datetime.now(timezone.utc).isoformat()

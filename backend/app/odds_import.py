@@ -549,6 +549,19 @@ def sync_prop_lines_from_sportsbook(
         )
         not in tracked_keys
     }
+    existing_prediction_ids = {
+        int(row["prop_line_id"])
+        for row in conn.execute(
+            """
+            SELECT DISTINCT prop_line_id
+            FROM prop_predictions
+            WHERE prop_line_id IN (
+            """
+            + ",".join("?" for _ in existing_by_key)
+            + ")",
+            tuple(int(row["id"]) for row in existing_by_key.values()),
+        ).fetchall()
+    } if existing_by_key else set()
 
     delete_prop_line_ids = [
         int(row["id"])
@@ -575,6 +588,7 @@ def sync_prop_lines_from_sportsbook(
         existing = existing_by_key.get(key)
         if existing is None:
             continue
+        missing_prediction = int(existing["id"]) not in existing_prediction_ids
         sportsbook_changed = str(existing["sportsbook"]) != desired["sportsbook"]
         over_changed = int(existing["over_odds"]) != desired["over_odds"]
         under_changed = int(existing["under_odds"]) != desired["under_odds"]
@@ -590,7 +604,7 @@ def sync_prop_lines_from_sportsbook(
                 int(existing["id"]),
             )
         )
-        if over_changed or under_changed:
+        if over_changed or under_changed or missing_prediction:
             rebuild_prop_line_ids.append(int(existing["id"]))
 
     try:
