@@ -20,10 +20,12 @@ services:
       WNBA_SNAPSHOT_DIR: ${WNBA_SNAPSHOT_DIR:-/data/snapshots}
       TURSO_DATABASE_URL: ${TURSO_DATABASE_URL:-}
       TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
-      ENV: ${ENV:-prod}
+      ENV: ${ENV:-dev}
       API_KEY: ${API_KEY:-}
       EXPOSE_DEBUG_HEADERS: ${EXPOSE_DEBUG_HEADERS:-false}
       ODDS_API_KEY: ${ODDS_API_KEY:-}
+      SPORTSDATAIO_API_KEY: ${SPORTSDATAIO_API_KEY:-}
+      BALLDONTLIE_API_KEY: ${BALLDONTLIE_API_KEY:-}
       RATE_LIMIT_MUTATION_CAPACITY: ${RATE_LIMIT_MUTATION_CAPACITY:-10}
       RATE_LIMIT_MUTATION_REFILL_PER_SEC: ${RATE_LIMIT_MUTATION_REFILL_PER_SEC:-0.5}
       RATE_LIMIT_REFRESH_CAPACITY: ${RATE_LIMIT_REFRESH_CAPACITY:-6}
@@ -65,9 +67,9 @@ services:
     depends_on:
       - backend
     ports:
-      - "${FRONTEND_PORT:-8082}:80"
+      - "${FRONTEND_PORT:-8081}:80"
     restart: unless-stopped
     init: true
 volumes:
   wnba_data:
-    name: ${WNBA_DOCKER_VOLUME_NAME:-pqsez6mkr14y0bnlhmcdmikg_wnba-data}
+    name: ${WNBA_DOCKER_VOLUME_NAME:-wnbastats_wnba_data}
