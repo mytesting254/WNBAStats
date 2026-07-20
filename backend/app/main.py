@@ -4208,6 +4208,36 @@ def _run_current_slate_repair_job(target_game_ids: list[int] | None = None) -> d
     return result
 
 
+def _run_current_slate_repair_job_with_retry(
+    target_game_ids: list[int] | None = None,
+    *,
+    job_run_id: int | None = None,
+    max_attempts: int = 4,
+    retry_delay_seconds: float = 2.0,
+) -> dict[str, Any]:
+    attempt = 1
+    while True:
+        try:
+            return _run_current_slate_repair_job(target_game_ids)
+        except sqlite3.OperationalError as exc:
+            if not _is_sqlite_locked_error(exc) or attempt >= max_attempts:
+                raise
+            delay_seconds = retry_delay_seconds * attempt
+            message = (
+                f"Current slate repair hit a SQLite lock on attempt {attempt}/{max_attempts}; "
+                f"retrying in {delay_seconds:.1f}s."
+            )
+            _append_job_run_event(
+                job_run_id,
+                "job.retry",
+                message,
+                level="warning",
+                details={"attempt": attempt, "max_attempts": max_attempts, "delay_seconds": delay_seconds},
+            )
+            time.sleep(delay_seconds)
+            attempt += 1
+
+
 def _queue_current_slate_repair_job(
     target_game_ids: list[int] | None = None,
     *,
@@ -4237,9 +4267,9 @@ def _queue_current_slate_repair_job(
         try:
             _append_job_run_event(job_run_id, "job.running", "Current slate repair started.", details={"target_game_ids": normalized_target_game_ids})
             result = (
-                _run_current_slate_repair_job(normalized_target_game_ids)
+                _run_current_slate_repair_job_with_retry(normalized_target_game_ids, job_run_id=job_run_id)
                 if normalized_target_game_ids
-                else _run_current_slate_repair_job()
+                else _run_current_slate_repair_job_with_retry(job_run_id=job_run_id)
             )
             _mutate_prop_sync_state(
                 running=False,
