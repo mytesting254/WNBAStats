@@ -67,7 +67,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "${FRONTEND_PORT:-8081}:80"
+      - "${FRONTEND_PORT:-8082}:80"
     restart: unless-stopped
     init: true
 volumes:
