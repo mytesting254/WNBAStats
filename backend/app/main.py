@@ -1202,9 +1202,26 @@ def _recover_sqlite_lock() -> dict[str, Any]:
         conn = sqlite3.connect(db_path, timeout=1, isolation_level=None)
         try:
             conn.execute("PRAGMA busy_timeout = 1000")
-            conn.execute("BEGIN IMMEDIATE")
-            checkpoint = _sqlite_checkpoint_payload(conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
-            conn.execute("ROLLBACK")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                checkpoint = _sqlite_checkpoint_payload(conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
+                conn.execute("ROLLBACK")
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_locked_error(exc):
+                    raise
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                refreshed = _audit_sqlite_lock()
+                return {
+                    **refreshed,
+                    "status": "db_locked",
+                    "recovered": False,
+                    "checkpoint": None,
+                    "message": "SQLite is still locked by another writer. Stop the running write job or extra backend instance before retrying recovery.",
+                    "recovery_error": str(exc),
+                }
         finally:
             conn.close()
     finally:

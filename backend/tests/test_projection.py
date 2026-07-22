@@ -10572,6 +10572,52 @@ def test_rotowire_import_returns_db_locked_status_when_injury_write_is_busy(monk
     assert conn.rolled_back is True
 
 
+def test_recover_sqlite_lock_returns_db_locked_when_checkpoint_is_blocked(monkeypatch) -> None:
+    class DummyConn:
+        def execute(self, sql, params=()):
+            normalized = " ".join(str(sql).split()).lower()
+            if normalized == "pragma busy_timeout = 1000":
+                return None
+            if normalized == "begin immediate":
+                raise sqlite3.OperationalError("database table is locked")
+            if normalized == "rollback":
+                return None
+            raise AssertionError(f"Unexpected SQL: {sql}")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(main_module, "_audit_sqlite_lock", lambda: {"engine": "sqlite", "status": "ok", "locked": False})
+    monkeypatch.setattr(main_module, "get_db_path", lambda: "/tmp/test.sqlite")
+    monkeypatch.setattr(main_module.sqlite3, "connect", lambda *args, **kwargs: DummyConn())
+
+    result = main_module._recover_sqlite_lock()
+
+    assert result["status"] == "db_locked"
+    assert result["recovered"] is False
+    assert "still locked" in str(result["message"]).lower()
+    assert "database table is locked" in str(result["recovery_error"]).lower()
+
+
+def test_odds_sync_treats_database_table_locked_as_busy(monkeypatch) -> None:
+    class DummyConn:
+        def __init__(self) -> None:
+            self.rolled_back = False
+
+        def execute(self, sql, params=()):
+            raise sqlite3.OperationalError("database table is locked")
+
+        def rollback(self):
+            self.rolled_back = True
+
+    conn = DummyConn()
+
+    result = odds_import_module.sync_prop_lines_from_sportsbook(conn)
+
+    assert result == 0
+    assert conn.rolled_back is True
+
+
 def test_espn_boxscore_missing_only_skips_games_with_stats(monkeypatch) -> None:
     load_test_history()
     fetched_game_ids: list[int] = []

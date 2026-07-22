@@ -68,6 +68,10 @@ TEAM_ALIASES = {
 }
 
 
+def _is_sqlite_locked_error(exc: sqlite3.OperationalError) -> bool:
+    return "locked" in str(exc).lower()
+
+
 def _normalized_name_expr(column: str) -> str:
     return (
         "lower("
@@ -413,201 +417,201 @@ def sync_prop_lines_from_sportsbook(
 ) -> int | SyncPropLinesResult:
     if progress_callback is not None:
         progress_callback(0, 1, "Collecting sportsbook props.")
-    target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
-    game_filter = ""
-    game_filter_params: tuple[int, ...] = ()
-    if target_game_ids:
-        placeholders = ",".join("?" for _ in target_game_ids)
-        game_filter = f" AND spl.game_id IN ({placeholders})"
-        game_filter_params = tuple(target_game_ids)
-    rows = conn.execute(
-        """
-        SELECT
-            spl.game_id,
-            spl.player_name,
-            p.id AS player_id,
-            MAX(CASE WHEN spl.provider = 'covers' THEN 1 ELSE 0 END) AS from_covers,
-            CASE
-                WHEN COUNT(DISTINCT spl.sportsbook) = 1 THEN MAX(spl.sportsbook)
-                ELSE 'Best Available'
-            END AS sportsbook,
-            spl.market,
-            spl.line,
-            MAX(CASE WHEN spl.side = 'over' THEN spl.price END) AS over_odds,
-            MAX(CASE WHEN spl.side = 'under' THEN spl.price END) AS under_odds,
-            MAX(spl.captured_at) AS captured_at
-        FROM sportsbook_prop_lines spl
-        JOIN players p ON (
-            (spl.provider_player_id IS NOT NULL AND p.id = spl.provider_player_id)
-            OR """
-        + _player_name_match_clause("p.full_name", "spl.player_name")
-        + """
-        )
-        WHERE spl.game_id IS NOT NULL
-          AND EXISTS (
-              SELECT 1
-              FROM player_game_stats stats
-              WHERE stats.player_id = p.id
-          )
-        """
-        + game_filter
-        + """
-        GROUP BY spl.game_id, spl.player_name, p.id, spl.market, spl.line
-        HAVING over_odds IS NOT NULL AND under_odds IS NOT NULL
-        ORDER BY spl.game_id, spl.player_name, spl.market, spl.line
-        """,
-        game_filter_params,
-    ).fetchall()
-    preferred_covers_keys = {
-        (
-            int(row["game_id"]),
-            int(row["player_id"]),
-            str(row["market"]),
-        )
-        for row in rows
-        if int(row["from_covers"] or 0) == 1
-    }
-    candidate_rows = [
-        row
-        for row in rows
-        if not (
+    try:
+        target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+        game_filter = ""
+        game_filter_params: tuple[int, ...] = ()
+        if target_game_ids:
+            placeholders = ",".join("?" for _ in target_game_ids)
+            game_filter = f" AND spl.game_id IN ({placeholders})"
+            game_filter_params = tuple(target_game_ids)
+        rows = conn.execute(
+            """
+            SELECT
+                spl.game_id,
+                spl.player_name,
+                p.id AS player_id,
+                MAX(CASE WHEN spl.provider = 'covers' THEN 1 ELSE 0 END) AS from_covers,
+                CASE
+                    WHEN COUNT(DISTINCT spl.sportsbook) = 1 THEN MAX(spl.sportsbook)
+                    ELSE 'Best Available'
+                END AS sportsbook,
+                spl.market,
+                spl.line,
+                MAX(CASE WHEN spl.side = 'over' THEN spl.price END) AS over_odds,
+                MAX(CASE WHEN spl.side = 'under' THEN spl.price END) AS under_odds,
+                MAX(spl.captured_at) AS captured_at
+            FROM sportsbook_prop_lines spl
+            JOIN players p ON (
+                (spl.provider_player_id IS NOT NULL AND p.id = spl.provider_player_id)
+                OR """
+            + _player_name_match_clause("p.full_name", "spl.player_name")
+            + """
+            )
+            WHERE spl.game_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM player_game_stats stats
+                  WHERE stats.player_id = p.id
+              )
+            """
+            + game_filter
+            + """
+            GROUP BY spl.game_id, spl.player_name, p.id, spl.market, spl.line
+            HAVING over_odds IS NOT NULL AND under_odds IS NOT NULL
+            ORDER BY spl.game_id, spl.player_name, spl.market, spl.line
+            """,
+            game_filter_params,
+        ).fetchall()
+        preferred_covers_keys = {
             (
                 int(row["game_id"]),
                 int(row["player_id"]),
                 str(row["market"]),
             )
-            in preferred_covers_keys
-            and int(row["from_covers"] or 0) != 1
-        )
-    ]
-    tracked_keys = {
-        (
-            int(row["game_id"]),
-            int(row["player_id"]),
-            row["market"],
-            float(row["line"]),
-        )
-        for row in conn.execute(
-            """
-            SELECT pl.game_id, pl.player_id, pl.market, pl.line
-            FROM prop_lines pl
-            JOIN games g ON g.id = pl.game_id
-            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
-            WHERE sp.id IS NOT NULL
-               OR g.status <> 'scheduled'
-            """
-            + (
-                f" AND pl.game_id IN ({','.join('?' for _ in target_game_ids)})"
-                if target_game_ids
-                else ""
-            ),
-            tuple(target_game_ids) if target_game_ids else (),
-        ).fetchall()
-    }
-    desired_rows = {
-        (
-            int(row["game_id"]),
-            int(row["player_id"]),
-            str(row["market"]),
-            float(row["line"]),
-        ): {
-            "game_id": int(row["game_id"]),
-            "player_id": int(row["player_id"]),
-            "sportsbook": str(row["sportsbook"]),
-            "market": str(row["market"]),
-            "line": float(row["line"]),
-            "over_odds": int(row["over_odds"]),
-            "under_odds": int(row["under_odds"]),
-            "captured_at": row["captured_at"],
+            for row in rows
+            if int(row["from_covers"] or 0) == 1
         }
-        for row in candidate_rows
-        if (
-            int(row["game_id"]),
-            int(row["player_id"]),
-            str(row["market"]),
-            float(row["line"]),
-        )
-        not in tracked_keys
-    }
-    touched_game_ids = target_game_ids or sorted({int(row["game_id"]) for row in rows if row["game_id"] is not None})
-    if progress_callback is not None:
-        progress_callback(len(rows), max(len(rows), 1), f"Matched {len(rows)} sportsbook props across {len(touched_game_ids)} games.")
-    existing_rows = _open_scheduled_prop_line_rows(conn, touched_game_ids)
-    existing_by_key = {
-        (
-            int(row["game_id"]),
-            int(row["player_id"]),
-            str(row["market"]),
-            float(row["line"]),
-        ): row
-        for row in existing_rows
-        if (
-            int(row["game_id"]),
-            int(row["player_id"]),
-            str(row["market"]),
-            float(row["line"]),
-        )
-        not in tracked_keys
-    }
-    existing_prediction_ids = {
-        int(row["prop_line_id"])
-        for row in conn.execute(
-            """
-            SELECT DISTINCT prop_line_id
-            FROM prop_predictions
-            WHERE prop_line_id IN (
-            """
-            + ",".join("?" for _ in existing_by_key)
-            + ")",
-            tuple(int(row["id"]) for row in existing_by_key.values()),
-        ).fetchall()
-    } if existing_by_key else set()
-
-    delete_prop_line_ids = [
-        int(row["id"])
-        for key, row in existing_by_key.items()
-        if key not in desired_rows
-    ]
-    insert_rows = [
-        (
-            payload["game_id"],
-            payload["player_id"],
-            payload["sportsbook"],
-            payload["market"],
-            payload["line"],
-            payload["over_odds"],
-            payload["under_odds"],
-            payload["captured_at"],
-        )
-        for key, payload in desired_rows.items()
-        if key not in existing_by_key
-    ]
-    update_rows: list[tuple[str, int, int, str, int]] = []
-    rebuild_prop_line_ids: list[int] = []
-    for key, desired in desired_rows.items():
-        existing = existing_by_key.get(key)
-        if existing is None:
-            continue
-        missing_prediction = int(existing["id"]) not in existing_prediction_ids
-        sportsbook_changed = str(existing["sportsbook"]) != desired["sportsbook"]
-        over_changed = int(existing["over_odds"]) != desired["over_odds"]
-        under_changed = int(existing["under_odds"]) != desired["under_odds"]
-        captured_at_changed = str(existing["captured_at"] or "") != str(desired["captured_at"] or "")
-        if not (sportsbook_changed or over_changed or under_changed or captured_at_changed):
-            continue
-        update_rows.append(
-            (
-                desired["sportsbook"],
-                desired["over_odds"],
-                desired["under_odds"],
-                str(desired["captured_at"]),
-                int(existing["id"]),
+        candidate_rows = [
+            row
+            for row in rows
+            if not (
+                (
+                    int(row["game_id"]),
+                    int(row["player_id"]),
+                    str(row["market"]),
+                )
+                in preferred_covers_keys
+                and int(row["from_covers"] or 0) != 1
             )
-        )
-        if over_changed or under_changed or missing_prediction:
-            rebuild_prop_line_ids.append(int(existing["id"]))
+        ]
+        tracked_keys = {
+            (
+                int(row["game_id"]),
+                int(row["player_id"]),
+                row["market"],
+                float(row["line"]),
+            )
+            for row in conn.execute(
+                """
+                SELECT pl.game_id, pl.player_id, pl.market, pl.line
+                FROM prop_lines pl
+                JOIN games g ON g.id = pl.game_id
+                LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+                WHERE sp.id IS NOT NULL
+                   OR g.status <> 'scheduled'
+                """
+                + (
+                    f" AND pl.game_id IN ({','.join('?' for _ in target_game_ids)})"
+                    if target_game_ids
+                    else ""
+                ),
+                tuple(target_game_ids) if target_game_ids else (),
+            ).fetchall()
+        }
+        desired_rows = {
+            (
+                int(row["game_id"]),
+                int(row["player_id"]),
+                str(row["market"]),
+                float(row["line"]),
+            ): {
+                "game_id": int(row["game_id"]),
+                "player_id": int(row["player_id"]),
+                "sportsbook": str(row["sportsbook"]),
+                "market": str(row["market"]),
+                "line": float(row["line"]),
+                "over_odds": int(row["over_odds"]),
+                "under_odds": int(row["under_odds"]),
+                "captured_at": row["captured_at"],
+            }
+            for row in candidate_rows
+            if (
+                int(row["game_id"]),
+                int(row["player_id"]),
+                str(row["market"]),
+                float(row["line"]),
+            )
+            not in tracked_keys
+        }
+        touched_game_ids = target_game_ids or sorted({int(row["game_id"]) for row in rows if row["game_id"] is not None})
+        if progress_callback is not None:
+            progress_callback(len(rows), max(len(rows), 1), f"Matched {len(rows)} sportsbook props across {len(touched_game_ids)} games.")
+        existing_rows = _open_scheduled_prop_line_rows(conn, touched_game_ids)
+        existing_by_key = {
+            (
+                int(row["game_id"]),
+                int(row["player_id"]),
+                str(row["market"]),
+                float(row["line"]),
+            ): row
+            for row in existing_rows
+            if (
+                int(row["game_id"]),
+                int(row["player_id"]),
+                str(row["market"]),
+                float(row["line"]),
+            )
+            not in tracked_keys
+        }
+        existing_prediction_ids = {
+            int(row["prop_line_id"])
+            for row in conn.execute(
+                """
+                SELECT DISTINCT prop_line_id
+                FROM prop_predictions
+                WHERE prop_line_id IN (
+                """
+                + ",".join("?" for _ in existing_by_key)
+                + ")",
+                tuple(int(row["id"]) for row in existing_by_key.values()),
+            ).fetchall()
+        } if existing_by_key else set()
 
-    try:
+        delete_prop_line_ids = [
+            int(row["id"])
+            for key, row in existing_by_key.items()
+            if key not in desired_rows
+        ]
+        insert_rows = [
+            (
+                payload["game_id"],
+                payload["player_id"],
+                payload["sportsbook"],
+                payload["market"],
+                payload["line"],
+                payload["over_odds"],
+                payload["under_odds"],
+                payload["captured_at"],
+            )
+            for key, payload in desired_rows.items()
+            if key not in existing_by_key
+        ]
+        update_rows: list[tuple[str, int, int, str, int]] = []
+        rebuild_prop_line_ids: list[int] = []
+        for key, desired in desired_rows.items():
+            existing = existing_by_key.get(key)
+            if existing is None:
+                continue
+            missing_prediction = int(existing["id"]) not in existing_prediction_ids
+            sportsbook_changed = str(existing["sportsbook"]) != desired["sportsbook"]
+            over_changed = int(existing["over_odds"]) != desired["over_odds"]
+            under_changed = int(existing["under_odds"]) != desired["under_odds"]
+            captured_at_changed = str(existing["captured_at"] or "") != str(desired["captured_at"] or "")
+            if not (sportsbook_changed or over_changed or under_changed or captured_at_changed):
+                continue
+            update_rows.append(
+                (
+                    desired["sportsbook"],
+                    desired["over_odds"],
+                    desired["under_odds"],
+                    str(desired["captured_at"]),
+                    int(existing["id"]),
+                )
+            )
+            if over_changed or under_changed or missing_prediction:
+                rebuild_prop_line_ids.append(int(existing["id"]))
+
         with sqlite_write_lock():
             _begin_immediate_with_retry(
                 conn,
@@ -708,7 +712,7 @@ def sync_prop_lines_from_sportsbook(
                 )
             return len(candidate_rows)
     except sqlite3.OperationalError as exc:
-        if "database is locked" in str(exc).lower():
+        if _is_sqlite_locked_error(exc):
             try:
                 conn.rollback()
             except sqlite3.Error:
@@ -735,7 +739,7 @@ def _execute_with_lock_retry(
             return
         except sqlite3.OperationalError as exc:
             message = str(exc).lower()
-            if "database is locked" not in message:
+            if "locked" not in message:
                 raise
             last_error = exc
             if attempt == attempts - 1:
@@ -760,7 +764,7 @@ def _executemany_with_lock_retry(
             return
         except sqlite3.OperationalError as exc:
             message = str(exc).lower()
-            if "database is locked" not in message:
+            if "locked" not in message:
                 raise
             last_error = exc
             if attempt == attempts - 1:
@@ -785,7 +789,7 @@ def _begin_immediate_with_retry(
             return
         except sqlite3.OperationalError as exc:
             message = str(exc).lower()
-            if "database is locked" not in message:
+            if "locked" not in message:
                 raise
             last_error = exc
             if attempt == attempts - 1:
