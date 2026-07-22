@@ -3849,7 +3849,7 @@ function normalizeTeamCode(value: string | null | undefined) {
     WASHINGTONMYSTICS: "WSH",
     PHO: "PHX",
     LVA: "LV",
-    LAS: "LV",
+    LAS: "LA",
     PDX: "POR"
   };
   return aliases[cleaned] ?? cleaned;

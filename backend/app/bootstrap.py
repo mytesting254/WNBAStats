@@ -42,7 +42,7 @@ TEAM_ALIASES = {
     "wings": "DAL",
     "golden state": "GS",
     "lva": "LV",
-    "las": "LV",
+    "las": "LA",
     "valkyries": "GS",
     "indiana": "IND",
     "fever": "IND",

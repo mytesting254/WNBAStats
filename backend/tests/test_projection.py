@@ -915,12 +915,12 @@ def test_normalize_team_abbreviation_handles_covers_name_variants() -> None:
     assert normalize_team_abbreviation("Washington Mystics (W)") == "WSH"
     assert normalize_team_abbreviation("Connecticut Sun (10-4)") == "CON"
     assert normalize_team_abbreviation("P.H.O.") == "PHX"
-    assert normalize_team_abbreviation("LAS") == "LV"
+    assert normalize_team_abbreviation("LAS") == "LA"
     assert normalize_team_abbreviation("LVA") == "LV"
 
 
-def test_history_import_normalize_team_key_resolves_las_vegas_aliases() -> None:
-    assert normalize_team_key("LAS") == "LV"
+def test_history_import_normalize_team_key_resolves_las_and_lva_aliases() -> None:
+    assert normalize_team_key("LAS") == "LA"
     assert normalize_team_key("LVA") == "LV"
 
 
@@ -1147,7 +1147,7 @@ def test_resolve_roster_player_falls_back_to_unique_league_wide_name() -> None:
     assert player["rotation_role"] == "starter"
 
 
-def test_resolve_roster_player_display_fast_falls_back_to_unique_league_wide_name() -> None:
+def test_resolve_roster_player_display_fast_does_not_cross_team_match_by_name() -> None:
     load_test_history()
     with connect() as conn:
         la_team_id = int(
@@ -1180,12 +1180,10 @@ def test_resolve_roster_player_display_fast_falls_back_to_unique_league_wide_nam
         )
 
     assert display_fallback is None
-    assert player is not None
-    assert int(player["player_id"]) == 777151
-    assert player["rotation_role"] == "starter"
+    assert player is None
 
 
-def test_resolve_roster_player_display_fast_falls_back_to_unique_initial_last_name() -> None:
+def test_resolve_roster_player_display_fast_does_not_cross_team_match_by_initial_last() -> None:
     load_test_history()
     with connect() as conn:
         min_team_id = int(
@@ -1218,9 +1216,7 @@ def test_resolve_roster_player_display_fast_falls_back_to_unique_initial_last_na
         )
 
     assert display_fallback is None
-    assert player is not None
-    assert int(player["player_id"]) == 777161
-    assert player["position"] == "G"
+    assert player is None
 
 
 def test_resolve_roster_player_falls_back_to_unique_team_last_name() -> None:

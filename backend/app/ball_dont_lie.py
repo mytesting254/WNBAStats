@@ -27,7 +27,7 @@ TEAM_ALIASES = {
     "sea": "Seattle Storm",
     "tor": "Toronto Tempo",
     "wsh": "Washington Mystics",
-    "las": "Las Vegas Aces",
+    "las": "Los Angeles Sparks",
     "lva": "Las Vegas Aces",
 }
 
