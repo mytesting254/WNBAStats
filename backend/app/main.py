@@ -1873,6 +1873,22 @@ def _resolve_roster_player_display_fast(
     return player, None
 
 
+def _player_has_team_history(conn: Any, player_id: int, team_abbreviation: str) -> bool:
+    normalized_team = normalize_team_abbreviation(team_abbreviation) or team_abbreviation.upper()
+    row = conn.execute(
+        """
+        SELECT 1
+        FROM player_team_history h
+        JOIN teams t ON t.id = h.team_id
+        WHERE h.player_id = ?
+          AND upper(t.abbreviation) = ?
+        LIMIT 1
+        """,
+        (int(player_id), normalized_team),
+    ).fetchone()
+    return row is not None
+
+
 def _resolve_roster_player_display(
     conn: Any,
     team_abbreviation: str,
@@ -1881,8 +1897,25 @@ def _resolve_roster_player_display(
     player_rows: list[Any] | None = None,
     player_index: dict[str, dict[Any, list[dict[str, Any]]]] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    normalized_team = normalize_team_abbreviation(team_abbreviation) or team_abbreviation.upper()
     if player_index is not None:
-        return _resolve_roster_player_display_fast(team_abbreviation, player_name, player_index)
+        player, display_fallback = _resolve_roster_player_display_fast(team_abbreviation, player_name, player_index)
+        if player is not None:
+            return player, display_fallback
+        player = resolve_player_identity(
+            conn,
+            team_abbreviation,
+            player_name,
+            prefer_rich=True,
+            player_rows=player_rows,
+        )
+        if player is None:
+            return None, None
+        if str(player.get("team_abbreviation") or "").strip().upper() == normalized_team:
+            return player, None
+        if _player_has_team_history(conn, int(player["player_id"]), normalized_team):
+            return player, None
+        return None, None
     player = resolve_player_identity(
         conn,
         team_abbreviation,

@@ -1219,6 +1219,100 @@ def test_resolve_roster_player_display_fast_does_not_cross_team_match_by_initial
     assert player is None
 
 
+def test_resolve_roster_player_display_fast_falls_back_to_unique_league_wide_name() -> None:
+    load_test_history()
+    with connect() as conn:
+        chi_team_id = int(
+            conn.execute("SELECT id FROM teams WHERE abbreviation = 'CHI'").fetchone()[0]
+        )
+        wsh_team_id = int(
+            conn.execute("SELECT id FROM teams WHERE abbreviation = 'WSH'").fetchone()[0]
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (777171, "Ariel Atkins", wsh_team_id, "G", "starter"),
+        )
+        conn.execute(
+            """
+            INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (777171, chi_team_id, None, "test", 0.95, "2026-07-22T00:00:00Z"),
+        )
+        player_rows = conn.execute(
+            """
+            SELECT
+                p.id AS player_id,
+                p.full_name,
+                p.team_id,
+                t.abbreviation AS team_abbreviation,
+                p.rotation_role,
+                p.position
+            FROM players p
+            LEFT JOIN teams t ON t.id = p.team_id
+            """
+        ).fetchall()
+        player_index = main_module._build_roster_player_index(player_rows)
+        player, display_fallback = main_module._resolve_roster_player_display(
+            conn,
+            "CHI",
+            "Ariel Atkins",
+            player_rows=player_rows,
+            player_index=player_index,
+        )
+
+    assert display_fallback is None
+    assert player is not None
+    assert int(player["player_id"]) == 777171
+
+
+def test_resolve_roster_player_display_fast_falls_back_to_unique_league_wide_initial_last() -> None:
+    load_test_history()
+    with connect() as conn:
+        chi_team_id = int(
+            conn.execute("SELECT id FROM teams WHERE abbreviation = 'CHI'").fetchone()[0]
+        )
+        ny_team_id = int(
+            conn.execute("SELECT id FROM teams WHERE abbreviation = 'NY'").fetchone()[0]
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (777181, "Courtney Vandersloot", ny_team_id, "G", "starter"),
+        )
+        conn.execute(
+            """
+            INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (777181, chi_team_id, None, "test", 0.95, "2026-07-22T00:00:00Z"),
+        )
+        player_rows = conn.execute(
+            """
+            SELECT
+                p.id AS player_id,
+                p.full_name,
+                p.team_id,
+                t.abbreviation AS team_abbreviation,
+                p.rotation_role,
+                p.position
+            FROM players p
+            LEFT JOIN teams t ON t.id = p.team_id
+            """
+        ).fetchall()
+        player_index = main_module._build_roster_player_index(player_rows)
+        player, display_fallback = main_module._resolve_roster_player_display(
+            conn,
+            "CHI",
+            "C. Vandersloot",
+            player_rows=player_rows,
+            player_index=player_index,
+        )
+
+    assert display_fallback is None
+    assert player is not None
+    assert int(player["player_id"]) == 777181
+
+
 def test_resolve_roster_player_falls_back_to_unique_team_last_name() -> None:
     load_test_history()
     with connect() as conn:
