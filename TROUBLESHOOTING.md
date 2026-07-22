@@ -272,6 +272,8 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - this failure mode is not evidence that cron skipped the run
 - the repo now uses a shared `SETTLED_PROP_COLUMNS` tuple plus settlement-row width validation before `executemany`
 - the live container still needs a redeploy before it benefits from that safeguard
+- the `3am America/New_York` Odds API wrapper no longer decides based on local `/api/matchups`
+- it now prechecks The Odds API `events` endpoint and counts only same-day WNBA events in `America/New_York`, so empty-slate skips do not depend on whether local scheduled `games` rows already exist
 
 ## SQLite And Persistence Problems
 

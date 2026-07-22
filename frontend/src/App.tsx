@@ -1119,8 +1119,8 @@ export function App() {
       setMissingEspnGames(result.games ?? []);
       setOperationStatus(
         result.count
-          ? `Found ${result.count} missing completed ESPN game score rows across ${result.dates.length} date(s).`
-          : "No missing completed ESPN game scores found."
+          ? `Found ${result.count} incomplete completed ESPN game fill-ins across ${result.dates.length} date(s).`
+          : "No incomplete completed ESPN games found."
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to scan missing ESPN scores");
@@ -1621,9 +1621,17 @@ function DataView({
   const today = todayInputValue();
   const missingPriorDateGames = missingEspnGames.filter((game) => game.game_date < today).length;
   const missingTodayGames = missingEspnGames.length - missingPriorDateGames;
+  const missingReasonLabel = (reason: string) => {
+    if (reason === "player_stats") return "player stats";
+    if (reason === "team_boxscores") return "team boxscores";
+    return "team results";
+  };
+  const missingReasonSummary = Array.from(new Set(missingEspnGames.flatMap((game) => game.missing_reasons ?? [])))
+    .map(missingReasonLabel)
+    .join(", ");
   const missingSummary = !missingEspnGames.length
-    ? "No missing-score scan loaded yet."
-    : `Missing: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}`;
+    ? "No incomplete-fill scan loaded yet."
+    : `Missing fill-ins: ${missingEspnGames.length} games (${missingPriorDateGames} prior-date, ${missingTodayGames} today) on ${missingEspnDates.length} date(s): ${missingEspnDates.join(", ")}${missingReasonSummary ? ` · gaps: ${missingReasonSummary}` : ""}`;
   const isAdmin = Boolean(authState.authenticated && authState.user?.is_admin);
   const propSync = displayPropSync;
   const backendPipelineSync = activePipeline?.waitingForBackground
@@ -1872,8 +1880,8 @@ function DataView({
           <article className="operation-card">
             <div>
               <p className="eyebrow">targeted ESPN repair</p>
-              <h3>Missing Scores</h3>
-              <p>Find completed games with missing final score rows, then import only those dates instead of refreshing full seasons.</p>
+              <h3>Missing Fill-Ins</h3>
+              <p>Find completed games still missing team results, box scores, or player stats, then import only those dates instead of refreshing full seasons.</p>
               <p className="reason">{missingSummary}</p>
             </div>
             <div className="operation-actions">

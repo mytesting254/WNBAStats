@@ -499,6 +499,10 @@ Before treating a deployment as production-ready, verify all of the following:
   - stale proxy config
 - `2am America/New_York` cron logs can show `Internal Server Error` even when cron itself ran:
   - on Thursday, July 16, 2026, the actual failure was a bad `settled_props` insert shape during `settle_completed_props`, not a missing scheduled slate and not a skipped cron trigger
+- `3am America/New_York` Odds API refresh now prechecks The Odds API `events` endpoint instead of local `/api/matchups` rows:
+  - the precheck is quota-free and counts only WNBA events whose `commence_time` lands on the current date in `America/New_York`
+  - if the provider reports zero same-day WNBA events, the cron wrapper skips the live props refresh
+  - this avoids the old circular dependency where local scheduled games might not exist yet because the Odds API import itself is one of the flows that creates them
 - if the matchup card colors a strong defensive rank as bad, verify the frontend build includes the defensive-rank tone fix:
   - defensive ranks use the same ordinal direction as other ranks, so low numbers are good; for example `#3` season defense should render as positive, not negative
 - Covers refresh failures are often scraper/parser issues, not route issues.

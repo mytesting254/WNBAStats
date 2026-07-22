@@ -143,8 +143,11 @@ Use host cron for the daily prop workflow. The 2am Eastern job now refreshes
 recent ESPN finals and box scores, prunes unsettled Specials snapshots when the
 final-game box score shows the player missing or marked `didNotPlay`, settles
 completed props, and then waits for model training to finish. The Odds API
-refresh still runs at 3am Eastern only when `/api/matchups` has scheduled
-games, so the newly rebuilt props use the updated trained models.
+refresh still runs at 3am Eastern, but it now prechecks The Odds API `events`
+endpoint first and only requests live prop markets when the provider reports
+same-day WNBA events in `America/New_York`. That avoids spending credits on
+empty-slate days while also avoiding the old circular dependency on locally
+persisted `/api/matchups` rows.
 
 Install with `crontab -e` on the Docker/Coolify host:
 
@@ -159,6 +162,9 @@ environment. If cron runs from a different checkout path, adjust `cd`.
 Debian/Ubuntu cron does not support `CRON_TZ` for scheduling, so the hourly
 entries use `date` to run only when the current `America/New_York` hour is 2am
 or 3am. Keep the percent signs escaped when editing the crontab.
+`WNBA_APP_TIMEZONE` defaults to `America/New_York` inside the wrapper and is
+also used for the Odds API event-date precheck, so the run/skip decision stays
+aligned with Eastern time even if the host or container timezone differs.
 
 `settle-and-train` now runs this sequence inside the live backend container:
 

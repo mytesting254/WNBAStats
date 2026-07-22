@@ -1041,6 +1041,12 @@ export type MissingEspnGame = {
   away_team: string;
   espn_event_id?: number | null;
   has_team_results: boolean;
+  has_player_stats: boolean;
+  has_team_boxscores: boolean;
+  team_results_count: number;
+  player_stats_count: number;
+  team_boxscores_count: number;
+  missing_reasons: string[];
 };
 
 export async function fetchMissingEspnScores(limit = 30): Promise<{

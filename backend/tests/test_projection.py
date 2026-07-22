@@ -1741,7 +1741,7 @@ def test_rest_days_counts_yesterday_as_one_day() -> None:
     assert rest_days == 1
 
 
-def test_missing_espn_scores_payload_returns_past_scheduled_game() -> None:
+def test_missing_espn_scores_payload_returns_incomplete_final_game() -> None:
     with connect() as conn:
         team_home = int(conn.execute("SELECT id FROM teams WHERE abbreviation = 'PHX'").fetchone()["id"])
         team_away = int(conn.execute("SELECT id FROM teams WHERE abbreviation = 'LV'").fetchone()["id"])
@@ -1750,13 +1750,24 @@ def test_missing_espn_scores_payload_returns_past_scheduled_game() -> None:
             INSERT INTO games (
                 id, game_date, start_time, home_team_id, away_team_id, status,
                 rest_days_home, rest_days_away, spread_home, game_total, espn_event_id
-            ) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, NULL, NULL, ?)
+            ) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, NULL, NULL, ?)
             """,
             (990001, "2026-05-01", "2026-05-01T23:00:00Z", team_home, team_away, 990001),
         )
+        conn.execute(
+            """
+            INSERT INTO team_game_results (
+                team_id, game_id, is_home, points, opponent_points, possessions,
+                closing_spread, closing_total, ats_result, total_result
+            ) VALUES (?, ?, 1, 82, 79, 79.0, 0.0, 161.0, 'push', 'push')
+            """,
+            (team_home, 990001),
+        )
         payload = main_module._missing_espn_scores_payload(conn, limit=30)
-    assert payload["count"] >= 1
-    assert "2026-05-01" in payload["dates"]
+    assert payload["count"] == 1
+    assert payload["dates"] == ["2026-05-01"]
+    assert payload["games"][0]["id"] == 990001
+    assert payload["games"][0]["missing_reasons"] == ["team_results", "player_stats", "team_boxscores"]
 
 
 def test_fixture_builds_ranked_predictions() -> None:

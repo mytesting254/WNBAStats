@@ -6,6 +6,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 API_BASE="${WNBA_API_BASE:-${DEV_API_BASE:-http://127.0.0.1:8010}}"
 API_KEY="${WNBA_API_KEY:-${DEV_API_KEY:-${API_KEY:-}}}"
 USE_LIVE_CONTAINER="${WNBA_USE_LIVE_CONTAINER:-false}"
+APP_TIMEZONE="${WNBA_APP_TIMEZONE:-America/New_York}"
+ODDS_API_BASE_URL="${WNBA_ODDS_API_BASE_URL:-https://api.the-odds-api.com/v4}"
+ODDS_API_KEY_VALUE="${ODDS_API_KEY:-${THE_ODDS_API_KEY:-}}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -14,6 +17,8 @@ Usage: scripts/live_daily_props.sh refresh-results|prune-specials|settle|train-m
 Environment:
   WNBA_API_BASE  Backend base URL. Default: http://127.0.0.1:8010
   WNBA_API_KEY   Shared API key for protected mutation routes.
+  WNBA_APP_TIMEZONE
+                App-local timezone for slate decisions. Default: America/New_York
   WNBA_TRAIN_POLL_TIMEOUT_SECONDS
                 Max seconds to wait for background model training. Default: 1200
   WNBA_TRAIN_POLL_INTERVAL_SECONDS
@@ -31,6 +36,57 @@ EOF
 
 timestamp() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
+}
+
+odds_api_today_event_count() {
+  python3 - "$ODDS_API_BASE_URL" "$ODDS_API_KEY_VALUE" "$APP_TIMEZONE" <<'PY'
+import json
+import sys
+from datetime import datetime
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
+from zoneinfo import ZoneInfo
+
+base_url, api_key, tz_name = sys.argv[1:4]
+if not api_key:
+    sys.stderr.write("ODDS_API_KEY is empty; cannot precheck Odds API events.\n")
+    raise SystemExit(1)
+
+target_tz = ZoneInfo(tz_name)
+today_local = datetime.now(target_tz).date()
+url = f"{base_url}/sports/basketball_wnba/events?{urlencode({'apiKey': api_key, 'dateFormat': 'iso'})}"
+
+try:
+    with urlopen(url, timeout=120) as response:
+        payload = json.load(response)
+except HTTPError as exc:
+    body = exc.read().decode("utf-8", errors="replace")
+    if body:
+        sys.stderr.write(body)
+        if not body.endswith("\n"):
+            sys.stderr.write("\n")
+    raise SystemExit(1)
+except URLError as exc:
+    sys.stderr.write(f"{exc}\n")
+    raise SystemExit(1)
+
+count = 0
+for item in payload if isinstance(payload, list) else []:
+    commence_time = str(item.get("commence_time") or "").strip()
+    if not commence_time:
+        continue
+    try:
+        start = datetime.fromisoformat(commence_time.replace("Z", "+00:00"))
+    except ValueError:
+        continue
+    if start.tzinfo is None:
+        continue
+    if start.astimezone(target_tz).date() == today_local:
+        count += 1
+
+sys.stdout.write(str(count))
+PY
 }
 
 api_request() {
@@ -127,10 +183,6 @@ wait_for_model_training() {
   return 1
 }
 
-matchup_count() {
-  python3 -c 'import json, sys; payload = json.load(sys.stdin); print(len(payload) if isinstance(payload, list) else 0)'
-}
-
 require_api_key_for_prod_hint() {
   if [ -z "$API_KEY" ]; then
     echo "[$(timestamp)] WNBA_API_KEY is empty; this only works if the backend allows unauthenticated dev mutations." >&2
@@ -191,17 +243,18 @@ run_settle_and_train() {
 
 run_odds_if_matchups() {
   require_api_key_for_prod_hint
-  echo "[$(timestamp)] checking scheduled matchups"
-  local payload
-  payload="$(api_get "/api/matchups?force_refresh=true")"
+  if [ -z "$ODDS_API_KEY_VALUE" ]; then
+    echo "[$(timestamp)] ODDS_API_KEY is empty; cannot precheck or refresh Odds API props" >&2
+    return 1
+  fi
+  echo "[$(timestamp)] checking WNBA Odds API events for today in ${APP_TIMEZONE}"
   local count
-  count="$(printf '%s' "$payload" | matchup_count)"
+  count="$(odds_api_today_event_count)"
   if [ "$count" -le 0 ]; then
-    echo "[$(timestamp)] no scheduled matchups found; skipping Odds API refresh"
+    echo "[$(timestamp)] no WNBA events found for today in ${APP_TIMEZONE}; skipping Odds API refresh"
     return 0
   fi
-
-  echo "[$(timestamp)] found ${count} scheduled matchup(s); queueing fresh Odds API import"
+  echo "[$(timestamp)] found ${count} WNBA event(s) for today in ${APP_TIMEZONE}; queueing fresh Odds API import"
   api_post "/api/odds/import?force_refresh=true"
   echo
 }

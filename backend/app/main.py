@@ -6130,7 +6130,7 @@ def _import_missing_espn_history_impl(
             "missing_games": [],
             "missing_count": 0,
             "source": "espn",
-            "message": "No missing completed ESPN scores found.",
+            "message": "No incomplete completed ESPN games found.",
         }
     result = _import_espn_history_impl(
         force_refresh=force_refresh,
@@ -6707,7 +6707,9 @@ def _missing_espn_scores_payload(conn, limit: int = 30) -> dict:
             g.espn_event_id,
             home.abbreviation AS home_team,
             away.abbreviation AS away_team,
-            EXISTS(SELECT 1 FROM team_game_results r WHERE r.game_id = g.id) AS has_team_results
+            (SELECT COUNT(*) FROM team_game_results r WHERE r.game_id = g.id) AS team_results_count,
+            (SELECT COUNT(*) FROM player_game_stats s WHERE s.game_id = g.id) AS player_stats_count,
+            (SELECT COUNT(*) FROM team_game_boxscores b WHERE b.game_id = g.id) AS team_boxscores_count
         FROM games g
         JOIN teams home ON home.id = g.home_team_id
         JOIN teams away ON away.id = g.away_team_id
@@ -6719,6 +6721,16 @@ def _missing_espn_scores_payload(conn, limit: int = 30) -> dict:
     for row in rows:
         if not _is_missing_completed_score(row, cutoff):
             continue
+        team_results_count = int(row["team_results_count"] or 0)
+        player_stats_count = int(row["player_stats_count"] or 0)
+        team_boxscores_count = int(row["team_boxscores_count"] or 0)
+        missing_reasons: list[str] = []
+        if team_results_count < 2:
+            missing_reasons.append("team_results")
+        if player_stats_count <= 0:
+            missing_reasons.append("player_stats")
+        if team_boxscores_count < 2:
+            missing_reasons.append("team_boxscores")
         missing_games.append(
             {
                 "id": int(row["id"]),
@@ -6728,7 +6740,13 @@ def _missing_espn_scores_payload(conn, limit: int = 30) -> dict:
                 "home_team": row["home_team"],
                 "away_team": row["away_team"],
                 "espn_event_id": row["espn_event_id"],
-                "has_team_results": bool(row["has_team_results"]),
+                "has_team_results": team_results_count >= 2,
+                "has_player_stats": player_stats_count > 0,
+                "has_team_boxscores": team_boxscores_count >= 2,
+                "team_results_count": team_results_count,
+                "player_stats_count": player_stats_count,
+                "team_boxscores_count": team_boxscores_count,
+                "missing_reasons": missing_reasons,
             }
         )
     dates = []
@@ -6752,23 +6770,17 @@ def _missing_espn_scores_payload(conn, limit: int = 30) -> dict:
 
 def _is_missing_completed_score(row, cutoff: datetime) -> bool:
     start = _parse_game_start(row["start_time"])
-    game_day = _parse_game_date(row["game_date"])
-    today_local = datetime.now(LOCAL_TZ).date()
     if start is None:
-        if game_day is None:
-            return False
-        return game_day < today_local
+        return False
     if start >= cutoff:
         return False
     status = str(row["status"] or "").lower()
-    has_team_results = bool(row["has_team_results"])
-    if status == "final" and not has_team_results:
-        return True
-    # Avoid false positives from stale intraday schedule states. We only flag
-    # scheduled games once the local game date has passed.
-    if status == "scheduled" and game_day is not None and game_day < today_local:
-        return True
-    return False
+    if status != "final":
+        return False
+    team_results_count = int(row["team_results_count"] or 0)
+    player_stats_count = int(row["player_stats_count"] or 0)
+    team_boxscores_count = int(row["team_boxscores_count"] or 0)
+    return team_results_count < 2 or player_stats_count <= 0 or team_boxscores_count < 2
 
 
 @app.get("/api/sportsbook-props")
