@@ -49,6 +49,7 @@ from backend.app.history_expansion import audit_settled_prop_history_gaps, expan
 from backend.app.game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
 from backend.app.game_predictions import evaluate_game_residual_models, project_game
 from backend.app.history_import import determine_ats_result
+from backend.app.history_import import normalize_team_key
 from backend.app.main import app, import_espn_history as import_espn_history_endpoint, model_performance
 from backend.app import main as main_module
 from backend.app.minutes_training_db import ensure_minutes_training_db, load_minutes_training_examples
@@ -914,6 +915,13 @@ def test_normalize_team_abbreviation_handles_covers_name_variants() -> None:
     assert normalize_team_abbreviation("Washington Mystics (W)") == "WSH"
     assert normalize_team_abbreviation("Connecticut Sun (10-4)") == "CON"
     assert normalize_team_abbreviation("P.H.O.") == "PHX"
+    assert normalize_team_abbreviation("LAS") == "LV"
+    assert normalize_team_abbreviation("LVA") == "LV"
+
+
+def test_history_import_normalize_team_key_resolves_las_vegas_aliases() -> None:
+    assert normalize_team_key("LAS") == "LV"
+    assert normalize_team_key("LVA") == "LV"
 
 
 def test_ats_result_uses_home_spread_sign() -> None:

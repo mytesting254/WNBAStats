@@ -16,6 +16,10 @@ def normalize_team_key(team_name: str) -> Optional[str]:
     if not key:
         return None
 
+    alias = TEAM_ALIASES.get(key.lower())
+    if alias:
+        return alias
+
     normalized = key.upper()
     if len(normalized) <= 3:
         return normalized
