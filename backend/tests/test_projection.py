@@ -8971,6 +8971,63 @@ def test_run_odds_import_job_refreshes_covers_without_overwriting_game_markets(m
     assert ("rebuilding_predictions", 3, 6, 20, "Built 20 projections.") in progress_updates
 
 
+def test_run_odds_import_job_refreshes_covers_after_provider_failure(monkeypatch) -> None:
+    progress_updates: list[tuple[str | None, int | None, int | None, int | None, str | None]] = []
+    state_updates: list[dict[str, object]] = []
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(
+        main_module,
+        "_import_the_odds_api_provider_rows",
+        lambda conn, force_refresh=False, progress_callback=None: {
+            "status": "provider_error",
+            "message": "Odds API import failed for 1 request.",
+            "prop_sync_eligible": False,
+        },
+    )
+    monkeypatch.setattr(
+        main_module,
+        "import_covers_props",
+        lambda conn, selected_date=None, force_refresh=False, sync_props=True, update_game_markets=True: {
+            "status": "imported",
+            "message": "covers ok",
+            "imported": 12,
+        },
+    )
+    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"matchups": 1})
+    monkeypatch.setattr(main_module, "_mutate_prop_sync_state", lambda **kwargs: state_updates.append(kwargs))
+    monkeypatch.setattr(
+        main_module,
+        "_set_prop_sync_progress",
+        lambda *args, **kwargs: progress_updates.append(
+            (
+                kwargs.get("stage"),
+                kwargs.get("stage_index"),
+                kwargs.get("stage_total"),
+                kwargs.get("current"),
+                kwargs.get("message"),
+            )
+        ),
+    )
+
+    result = main_module._run_odds_import_job(True)
+
+    assert result["status"] == "provider_error"
+    assert result["covers_context"] == {"status": "imported", "message": "covers ok", "imported": 12}
+    assert result["published_payloads"] == {"matchups": 1}
+    assert ("refreshing_covers_context", 5, 6, 0, "Refreshing Covers matchup context for H2H and team history.") in progress_updates
+    assert ("publishing_payloads", 6, 6, 0, "Publishing refreshed odds payloads.") in progress_updates
+    assert state_updates and state_updates[-1]["status"] == "failed"
+    assert state_updates[-1]["last_error"] == "Odds API import failed for 1 request."
+
+
 def test_odds_sync_prefers_covers_lines_when_available() -> None:
     load_test_history()
     captured_at = datetime.now(timezone.utc).isoformat()
@@ -9833,6 +9890,83 @@ def test_covers_parser_extracts_player_prop_rows() -> None:
     assert rows[0][10] == "points"
     assert rows[0][11] == "Brittney Griner"
     assert rows[0][12] == "over"
+
+
+def test_covers_parser_extracts_player_prop_rows_from_current_table_markup() -> None:
+    html = """
+    <script type="application/ld+json">
+    {"startDate": "07/28/2026 23:30:00 &#x2B;00:00"}
+    </script>
+    <article id="908" class="card bg-white rounded rounded-2 shadow-sm p-3">
+      <h2 class="fs-9">Total Points and Rebounds</h2>
+      <a href="https://www.covers.com/sport/basketball/wnba/players/248305/olivia-nelson-ododa">
+        <div class="playerContainer d-flex flex-row align-items-center gap-3 mb-3 mb-lg-0">
+          <span class="category fw-bold text-nowrap">Olivia Nelson-Ododa</span>
+        </div>
+      </a>
+      <table class="w-100 m-0 bg-white">
+        <caption class="visually-hidden">Game Odds Connecticut Sun vs. Washington Mystics</caption>
+        <thead>
+          <tr>
+            <th scope="col" class="oddsHeader">OVER</th>
+            <th scope="col" class="oddsHeader">UNDER</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr scope="row">
+            <td class="ps-lg-2 pe-1 oddsCell">
+              <a>
+                <span class="fw-bold fs-12">o17.5</span>
+                <span class="fw-bold americanOdds fs-13">-112</span>
+              </a>
+              <img alt="Caesars logo" />
+            </td>
+            <td class="ps-1 oddsCell">
+              <a>
+                <span class="fw-bold fs-12">u17.5</span>
+                <span class="fw-bold americanOdds fs-13">-105</span>
+              </a>
+              <img alt="Fanatics Sportsbook logo" />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <button id="compare-odds-btn"></button>
+      <div class="compareOddsTable w-100 m-0">
+        <table class="w-100 m-0">
+          <tbody>
+            <tr>
+              <th scope="row" class="sportsbookLogoContainer">
+                <img alt="DraftKings logo" />
+              </th>
+              <td class="compareOddsSide">
+                <a>
+                  <span class="fw-bold fs-12">o17.5</span>
+                  <span class="fw-bold americanOdds fs-13">+100</span>
+                </a>
+              </td>
+              <td class="compareOddsSide ps-1">
+                <a>
+                  <span class="fw-bold fs-12">u17.5</span>
+                  <span class="fw-bold americanOdds fs-13">-130</span>
+                </a>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </article>
+    """
+
+    with connect() as conn:
+        metadata = _metadata_from_page(conn, CoversGame("374045", "https://example.test/odds"), html)
+        rows = _event_rows(metadata, html, "2026-07-28T16:56:41+00:00")
+
+    assert len(rows) == 4
+    assert rows[0][10] == "points_rebounds"
+    assert rows[0][11] == "Olivia Nelson-Ododa"
+    assert {row[8] for row in rows} == {"Caesars", "Fanatics Sportsbook", "DraftKings"}
+    assert {row[12] for row in rows} == {"over", "under"}
     assert rows[0][13] == 13.5
     assert rows[0][14] == 102
     assert rows[1][12] == "under"

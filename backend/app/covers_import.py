@@ -57,6 +57,15 @@ BOOK_NAMES = {
     "fanduel": "FanDuel",
     "fanatics_sportsbook": "Fanatics Sportsbook",
 }
+BOOK_NAME_ALIASES = {
+    "bet365": "bet365",
+    "betmgm": "betmgm",
+    "caesars": "caesars",
+    "draftkings": "draftkings",
+    "fanduel": "fanduel",
+    "fanatics sportsbook": "fanatics_sportsbook",
+    "fanatics": "fanatics_sportsbook",
+}
 
 COVERS_TEAM_ABBREVIATIONS = {
     "PHX": "PHO",
@@ -540,7 +549,7 @@ def _event_rows(metadata: CoversMetadata, page: str, captured_at: str) -> list[t
 
 
 def _article_sections(page: str) -> list[str]:
-    matches = list(re.finditer(r'<article id="\d+"', page))
+    matches = list(re.finditer(r'<article\b[^>]*\bid="[^"]+"', page))
     sections = []
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(page)
@@ -553,7 +562,9 @@ def _player_sections(article: str) -> list[str]:
     sections = []
     for index, match in enumerate(matches):
         end = matches[index + 1].start() if index + 1 < len(matches) else len(article)
-        start = max(article.rfind("<a ", 0, match.start()), 0)
+        start = article.rfind("<a ", 0, match.start())
+        if start < 0:
+            start = match.start()
         sections.append(article[start:end])
     return sections
 
@@ -610,7 +621,73 @@ def _odds_from_player(player_html: str, market_key: str) -> list[tuple[str, floa
         price = int(_clean_text(match.group("price")).replace("+", ""))
         book_key = match.group("book")
         rows.append((match.group("side"), line, price, book_key, BOOK_NAMES.get(book_key, _book_title(book_key))))
+    if rows:
+        return rows
+
+    rows.extend(_odds_from_visible_player_table(player_html))
+    rows.extend(_odds_from_compare_modal(player_html))
     return rows
+
+
+def _odds_from_visible_player_table(player_html: str) -> list[tuple[str, float, int, str, str]]:
+    rows = []
+    cells = re.findall(r'<td[^>]*class="[^"]*\boddsCell\b[^"]*"[^>]*>(.*?)</td>', player_html, re.I | re.S)
+    for side, cell in zip(("over", "under"), cells[:2]):
+        odds = _odds_from_cell(cell)
+        book = _book_from_html(cell)
+        if not odds or not book:
+            continue
+        rows.append((side, odds[0], odds[1], book[0], book[1]))
+    return rows
+
+
+def _odds_from_compare_modal(player_html: str) -> list[tuple[str, float, int, str, str]]:
+    rows = []
+    modal_match = re.search(
+        r'<div class="compareOddsTable[^"]*"[\s\S]*?<tbody>(?P<body>[\s\S]*?)</tbody>',
+        player_html,
+        re.I,
+    )
+    if not modal_match:
+        return rows
+    for row_html in re.findall(r"<tr[^>]*>(.*?)</tr>", modal_match.group("body"), re.I | re.S):
+        book = _book_from_html(row_html)
+        if not book:
+            continue
+        cells = re.findall(r'<td[^>]*class="[^"]*\bcompareOddsSide\b[^"]*"[^>]*>(.*?)</td>', row_html, re.I | re.S)
+        for side, cell in zip(("over", "under"), cells[:2]):
+            odds = _odds_from_cell(cell)
+            if not odds:
+                continue
+            rows.append((side, odds[0], odds[1], book[0], book[1]))
+    return rows
+
+
+def _odds_from_cell(cell_html: str) -> tuple[float, int] | None:
+    line_match = re.search(r'<span class="[^"]*\bfs-12\b[^"]*">(?P<line>[ou][0-9]+(?:\.[0-9]+)?)</span>', cell_html, re.I)
+    price_match = re.search(r'<span class="[^"]*\bamericanOdds\b[^"]*">(?P<price>[^<]+)</span>', cell_html, re.I)
+    if not line_match or not price_match:
+        return None
+    try:
+        line = float(line_match.group("line")[1:])
+        price = int(_clean_text(price_match.group("price")).replace("+", ""))
+    except ValueError:
+        return None
+    return line, price
+
+
+def _book_from_html(value: str) -> tuple[str, str] | None:
+    match = re.search(r'alt="(?P<name>[^"]+?) logo"', value, re.I)
+    if not match:
+        return None
+    title = _clean_text(match.group("name"))
+    book_key = _book_key_from_title(title)
+    return book_key, BOOK_NAMES.get(book_key, title)
+
+
+def _book_key_from_title(title: str) -> str:
+    normalized = re.sub(r"\s+", " ", title).strip().lower()
+    return BOOK_NAME_ALIASES.get(normalized, normalized.replace(" ", "_"))
 
 
 def _game_market_from_page(page: str, home_team: str, away_team: str) -> dict[str, float | None]:

@@ -222,6 +222,8 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - the cached event dates inside `sportsbook_props_raw.json` match the app's current local date if you expect `Load Saved Odds` to replay them
 - if player props load but matchup spread/total/moneyline do not, confirm the saved payload includes `h2h`, `spreads`, and `totals` markets and that those values were written onto `games`
 - if same-day Covers cache exists, verify matchup payloads are using Covers game markets only as fallback, not overwriting already-populated Odds API game fields
+- if `POST /api/covers/import?force_refresh=true` returns `Imported Covers matchup lines without player prop rows.`, inspect runtime `covers_pages_raw.json` before assuming the admin control failed
+  a current-day `covers_pages_raw.json` with no `covers_props_raw.json` means the refresh ran but the parser extracted zero player-prop rows
 - during an active sync, stage-local counts should only move forward inside the current stage; a pattern like `40/176 -> 20/146 -> 40/176` indicates the old backend code is still running
 - if the DB row in `prop_sync_jobs` has already advanced into `rebuilding_predictions` or `publishing_payloads` but the UI still shows `requesting_provider`, the deployed frontend/backend bundle is stale
 

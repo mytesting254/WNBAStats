@@ -4355,6 +4355,38 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
         )
     ingestion = build_odds_provider_ingestion(result)
     if ingestion.status in {"missing_api_key", "missing_cache", "stale_cache", "provider_error"}:
+        post_result = run_post_pipeline_steps(
+            connect_fn=connect,
+            policy=PropPostProcessPolicy(
+                refresh_covers_context=True,
+                publish_mode="full",
+                covers_refresh_start_message="Refreshing Covers matchup context for H2H and team history.",
+                covers_refresh_done_message="Covers matchup context refreshed.",
+                publish_start_message="Publishing refreshed odds payloads.",
+                publish_done_message=str(result.get("message") or "Odds import failed."),
+            ),
+            progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                stage=stage,
+                stage_index=5 if stage == "refreshing_covers_context" else 6,
+                stage_total=total_stages,
+                current=current,
+                total=total,
+                message=message,
+            ),
+            refresh_covers_context_fn=lambda conn: import_covers_props(
+                conn,
+                selected_date=_local_today_iso(),
+                force_refresh=True,
+                sync_props=False,
+                update_game_markets=False,
+            ),
+            publish_post_mutation_payloads_fn=lambda conn, _policy: _publish_post_mutation_read_payloads(conn),
+        )
+        result["published_payloads"] = post_result.published_payloads
+        if post_result.covers_context is not None:
+            result["covers_context"] = post_result.covers_context
+        if post_result.covers_context_error:
+            result["covers_context_error"] = post_result.covers_context_error
         message = str(ingestion.message or "Odds import failed.")
         _mutate_prop_sync_state(
             running=False,

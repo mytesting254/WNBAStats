@@ -556,6 +556,8 @@ Covers is used for matchup pages that publish WNBA pregame lines, totals, team r
 Cache behavior safeguards:
 
 - Covers cache is day-scoped by local date. When a new local day starts, stale Covers cache files are purged before import (`covers_props_raw.json` and `covers_pages_raw.json`).
+- A successful refresh can still return `status=imported_game_markets_only` when Covers publishes matchup/game markets but the player-prop parser extracts zero rows. In that state `covers_pages_raw.json` should still be updated for the current local day, while `covers_props_raw.json` will remain absent until at least one player-prop row is parsed.
+- Since Tuesday, July 28, 2026, the parser supports both the older Covers `data-linkcont` player-prop anchors and the newer over/under table plus compare-odds modal markup that uses sportsbook logo alt text instead of exposing the old link metadata.
 - Saved-cache no-op is date-aware. A cache load skips rewrite only when DB already has Covers rows for `game_date >= cache_date`; historical leftover rows no longer block loading today's cached slate.
 - When Covers write/sync hits SQLite lock contention, the API returns a `db_locked` status instead of crashing, so retries are safe.
 - Final `prop_lines` sync is Covers-first by player/game/market. If Covers and Odds API both exist for the same player market, Covers rows win and overlapping non-Covers rows are ignored.
@@ -569,6 +571,8 @@ POST /api/covers/import?force_refresh=true
 ```
 
 Loading saved Covers cache (`POST /api/covers/import` without `force_refresh`) also performs immediate prop-line sync so model props load without waiting for a background precompute.
+
+If a live refresh returns matchup context only, inspect the runtime `covers_pages_raw.json` first. That file preserves the fetched matchup page, odds page, and market fragments even when no player-prop rows are written, which makes parser drift easier to diagnose than relying on the API response alone.
 
 Backfill historical Covers lines over a date range (then recompute ATS/total results from those lines):
 
