@@ -313,7 +313,8 @@ export function App() {
   const [sideFilter, setSideFilter] = useState("all");
   const [confidence, setConfidence] = useState("all");
   const [sportsbookFilter, setSportsbookFilter] = useState("all");
-  const [modelProbabilityOrder, setModelProbabilityOrder] = useState<SortDirection>("desc");
+  const [propsSort, setPropsSort] = useState<CandidateSortField>("expected_value");
+  const [propsSortDirection, setPropsSortDirection] = useState<SortDirection>("desc");
   const [selected, setSelected] = useState<ValueProp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [operationStatus, setOperationStatus] = useState<string | null>(null);
@@ -715,12 +716,8 @@ export function App() {
         const sportsbookMatch = sportsbookFilter === "all" || displaySportsbookName(prop) === sportsbookFilter;
         return marketMatch && sideMatch && confidenceMatch && sportsbookMatch;
       })
-      .sort((a, b) =>
-        modelProbabilityOrder === "asc"
-          ? a.model_probability - b.model_probability
-          : b.model_probability - a.model_probability
-      );
-  }, [props, market, sideFilter, confidence, sportsbookFilter, modelProbabilityOrder]);
+      .sort((a, b) => compareCandidateProps(a, b, propsSort, propsSortDirection));
+  }, [props, market, sideFilter, confidence, sportsbookFilter, propsSort, propsSortDirection]);
   const gems = useMemo(() => buildGems(props, discrepancies), [props, discrepancies]);
   const activeTabLoading = activeTab === "props" ? loading : tabLoading[activeTab];
 
@@ -1357,13 +1354,15 @@ export function App() {
             sideFilter={sideFilter}
             confidence={confidence}
             sportsbookFilter={sportsbookFilter}
-            modelProbabilityOrder={modelProbabilityOrder}
+            propsSort={propsSort}
+            propsSortDirection={propsSortDirection}
             selected={selected}
             setMarket={setMarket}
             setSideFilter={setSideFilter}
             setConfidence={setConfidence}
             setSportsbookFilter={setSportsbookFilter}
-            setModelProbabilityOrder={setModelProbabilityOrder}
+            setPropsSort={setPropsSort}
+            setPropsSortDirection={setPropsSortDirection}
             setSelected={setSelected}
           />
         ) : activeTab === "gems" ? (
@@ -2700,13 +2699,15 @@ function PropsView({
   sideFilter,
   confidence,
   sportsbookFilter,
-  modelProbabilityOrder,
+  propsSort,
+  propsSortDirection,
   selected,
   setMarket,
   setSideFilter,
   setConfidence,
   setSportsbookFilter,
-  setModelProbabilityOrder,
+  setPropsSort,
+  setPropsSortDirection,
   setSelected
 }: {
   items: ValueProp[];
@@ -2718,13 +2719,15 @@ function PropsView({
   sideFilter: string;
   confidence: string;
   sportsbookFilter: string;
-  modelProbabilityOrder: SortDirection;
+  propsSort: CandidateSortField;
+  propsSortDirection: SortDirection;
   selected: ValueProp | null;
   setMarket: (market: string) => void;
   setSideFilter: (side: string) => void;
   setConfidence: (confidence: string) => void;
   setSportsbookFilter: (sportsbook: string) => void;
-  setModelProbabilityOrder: (order: SortDirection) => void;
+  setPropsSort: (field: CandidateSortField) => void;
+  setPropsSortDirection: (order: SortDirection) => void;
   setSelected: (prop: ValueProp) => void;
 }) {
   const sportsbookOptions = useMemo(
@@ -2791,13 +2794,35 @@ function PropsView({
             ))}
           </select>
           <select
-            value={modelProbabilityOrder}
-            onChange={(event) => setModelProbabilityOrder(event.target.value as SortDirection)}
-            aria-label="Model probability sort order"
+            value={propsSort}
+            onChange={(event) => setPropsSort(event.target.value as CandidateSortField)}
+            aria-label="Sort props"
           >
-            <option value="desc">Model prob: Descending</option>
-            <option value="asc">Model prob: Ascending</option>
+            <option value="expected_value">Sort by EV</option>
+            <option value="edge">Sort by edge</option>
+            <option value="projection">Sort by projection</option>
+            <option value="line">Sort by line</option>
+            <option value="projection_gap">Sort by proj gap</option>
+            <option value="model_probability">Sort by model probability</option>
+            <option value="confidence">Sort by confidence</option>
+            <option value="player">Sort by player</option>
           </select>
+          <div className="segmented candidate-tabs compact-tabs" aria-label="Props sort direction">
+            <button
+              className={propsSortDirection === "desc" ? "active" : ""}
+              type="button"
+              onClick={() => setPropsSortDirection("desc")}
+            >
+              Desc
+            </button>
+            <button
+              className={propsSortDirection === "asc" ? "active" : ""}
+              type="button"
+              onClick={() => setPropsSortDirection("asc")}
+            >
+              Asc
+            </button>
+          </div>
         </div>
 
         {error && <div className="error">{error}</div>}
