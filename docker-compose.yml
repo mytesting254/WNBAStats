@@ -18,8 +18,6 @@ services:
       WNBA_DB_PATH: ${WNBA_DB_PATH:-/data/wnba.sqlite}
       WNBA_CACHE_DIR: ${WNBA_CACHE_DIR:-/data/cache}
       WNBA_SNAPSHOT_DIR: ${WNBA_SNAPSHOT_DIR:-/data/snapshots}
-      TURSO_DATABASE_URL: ${TURSO_DATABASE_URL:-}
-      TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
       ENV: ${ENV:-dev}
       API_KEY: ${API_KEY:-}
       EXPOSE_DEBUG_HEADERS: ${EXPOSE_DEBUG_HEADERS:-false}
