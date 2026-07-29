@@ -21,7 +21,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from .ball_dont_lie import fetch_team_history
 from .accuracy_analysis import build_accuracy_report, build_accuracy_report_for_days
 from .auth import (
     SESSION_COOKIE_NAME,
@@ -6916,33 +6915,6 @@ def model_runs(response: Response) -> dict:
     )
     _set_observability_headers(response, MODEL_RUNS_CACHE_NAME, status, compute_ms)
     return payload
-
-
-@app.get("/api/ball_dont_lie/history")
-def ball_dont_lie_history(
-    team: str,
-    seasons: str | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    force_refresh: bool = False,
-) -> dict:
-    season_list: list[int] | None = None
-    if seasons:
-        try:
-            season_list = [int(value.strip()) for value in seasons.split(",") if value.strip()]
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid seasons value: {exc}")
-
-    try:
-        return fetch_team_history(
-            team=team,
-            seasons=season_list,
-            start_date=start_date,
-            end_date=end_date,
-            force_refresh=force_refresh,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.get("/api/matchups", dependencies=[Depends(_protect_force_refresh)])

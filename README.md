@@ -1002,27 +1002,6 @@ Safety:
 - Restore fails on checksum mismatch.
 - No auto-merge is performed between snapshots.
 
-## BallDontLie historical matchup API
-
-The app can now fetch historical WNBA game results from BallDontLie.
-
-Example request:
-
-```text
-GET /api/ball_dont_lie/history?team=NY&seasons=2025
-```
-
-Query parameters:
-
-- `team` (required): team abbreviation or full team name
-- `seasons` (optional): comma-separated season years
-- `start_date` / `end_date` (optional): date range in `YYYY-MM-DD`
-- `force_refresh` (optional): set to `true` to bypass cache and re-fetch from BallDontLie
-
-This endpoint returns BallDontLie game payloads for the requested team.
-
-BallDontLie responses are now cached locally in `data/cache/` for repeated requests, so the same team/date query will return cached results unless `force_refresh=true`.
-
 ## Data Model
 
 Important tables:
@@ -1086,7 +1065,6 @@ Use separate data providers:
 - Stats/history/final scores/player box scores: ESPN
 - Pregame matchup lines/totals/records/player props: Covers
 - Supplemental pregame player props: The Odds API
-- Historical matchup lookup: BALLDONTLIE WNBA
 
 The app should write raw API responses into `data/cache/` or `data/raw/`, then normalize into Turso. The React UI should read from our FastAPI backend, not directly from external APIs.
 

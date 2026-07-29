@@ -38,8 +38,6 @@ Optional provider keys:
 
 ```dotenv
 ODDS_API_KEY=
-SPORTSDATAIO_API_KEY=
-BALLDONTLIE_API_KEY=
 ```
 
 Important:
