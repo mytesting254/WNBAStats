@@ -3484,7 +3484,7 @@ function MatchupsView({
                   coversLast10Rows={selectedCoversRecords.home_last_10}
                 />
               </div>
-              <div className="prediction-strip matchup-prediction-strip">
+              <div className="prediction-strip">
                 <MiniStat label="Projected Score" value={formatProjectedScore(selectedMatchup)} />
                 <MiniStat label="Model Winner" value={selectedMatchup.winner_pick} />
                 <MiniStat label="ATS Pick" value={selectedMatchup.ats_pick} />
@@ -3512,7 +3512,6 @@ function MatchupsView({
 }
 
 function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
-  const [activeRecordsTab, setActiveRecordsTab] = useState<"h2h" | "away" | "home">("h2h");
   const records = normalizeCoversRecords(matchup.covers_records);
   const h2hSegments = matchup.h2h_segment_summary;
   const hasCovers = Boolean(records.head_to_head.length || records.away_last_10.length || records.home_last_10.length);
@@ -3582,106 +3581,20 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
           </div>
         </div>
       ) : null}
-      <div className="covers-records-list covers-records-list-wide">
-        <div className="covers-records-header">
-          <h4>Recent Records</h4>
-          <div className="covers-record-tabs" aria-label="Recent record views">
-            <button
-              type="button"
-              className={activeRecordsTab === "h2h" ? "active" : ""}
-              onClick={() => setActiveRecordsTab("h2h")}
-            >
-              H2H
-            </button>
-            <button
-              type="button"
-              className={activeRecordsTab === "away" ? "active" : ""}
-              onClick={() => setActiveRecordsTab("away")}
-            >
-              {matchup.away_team} L10
-            </button>
-            <button
-              type="button"
-              className={activeRecordsTab === "home" ? "active" : ""}
-              onClick={() => setActiveRecordsTab("home")}
-            >
-              {matchup.home_team} L10
-            </button>
-          </div>
-        </div>
-        {activeRecordsTab === "h2h" ? (
-          !h2hRows.length ? (
-            <p className="empty">No prior head-to-head meetings.</p>
-          ) : singleH2HRow ? (
-            <div className="board-panel compact-panel">
-              <p className="eyebrow">Only prior meeting</p>
-              <div className="prediction-strip matchup-prediction-strip matchup-inline-strip">
-                <MiniStat label="Date" value={singleH2HRow.date} />
-                <MiniStat label="Home" value={singleH2HRow.home ?? "N/A"} />
-                <MiniStat label="Score" value={singleH2HRow.score} />
-                <MiniStat label="ATS" value={singleH2HRow.ats} />
-                <MiniStat label="O/U" value={singleH2HRow.total} />
-              </div>
+      <div className="covers-records-list">
+        <h4>H2H Last 10</h4>
+        {!h2hRows.length ? (
+          <p className="empty">No prior head-to-head meetings.</p>
+        ) : singleH2HRow ? (
+          <div className="board-panel compact-panel">
+            <p className="eyebrow">Only prior meeting</p>
+            <div className="prediction-strip">
+              <MiniStat label="Date" value={singleH2HRow.date} />
+              <MiniStat label="Home" value={singleH2HRow.home ?? "N/A"} />
+              <MiniStat label="Score" value={singleH2HRow.score} />
+              <MiniStat label="ATS" value={singleH2HRow.ats} />
+              <MiniStat label="O/U" value={singleH2HRow.total} />
             </div>
-          ) : (
-            <div className="table-wrap covers-records-table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    <th>Home</th>
-                    <th>Result</th>
-                    <th>ATS</th>
-                    <th>O/U</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {h2hRows.map((row) => (
-                    <tr key={`h2h-${row.date}-${row.score}-${row.home ?? ""}`}>
-                      <td>{row.date}</td>
-                      <td>{coversRecordOpponent(row, "h2h", matchup)}</td>
-                      <td>
-                        <RecordResultCell row={row} matchup={matchup} winnerOnly />
-                      </td>
-                      <td>{row.ats}</td>
-                      <td>{row.total}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )
-        ) : activeRecordsTab === "away" ? (
-          <div className="table-wrap covers-records-table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Date</th>
-                  <th>vs</th>
-                  <th>Result</th>
-                  <th>ATS</th>
-                  <th>O/U</th>
-                </tr>
-              </thead>
-              <tbody>
-                {awayRows.slice(0, 10).map((row) => (
-                  <tr key={`away-${row.date}-${row.score}-${row.opponent ?? ""}`}>
-                    <td>{row.date}</td>
-                    <td>{coversRecordOpponent(row, "team", matchup)}</td>
-                    <td>
-                      <RecordResultCell row={row} matchup={matchup} teamCode={matchup.away_team} />
-                    </td>
-                    <td>{row.ats}</td>
-                    <td>{row.total}</td>
-                  </tr>
-                ))}
-                {!awayRows.length && (
-                  <tr>
-                    <td colSpan={5}>No away recent games available.</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
           </div>
         ) : (
           <div className="table-wrap covers-records-table-wrap">
@@ -3689,33 +3602,96 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
               <thead>
                 <tr>
                   <th>Date</th>
-                  <th>vs</th>
+                  <th>Home</th>
                   <th>Result</th>
                   <th>ATS</th>
                   <th>O/U</th>
                 </tr>
               </thead>
               <tbody>
-                {homeRows.slice(0, 10).map((row) => (
-                  <tr key={`home-${row.date}-${row.score}-${row.opponent ?? ""}`}>
+                {h2hRows.map((row) => (
+                  <tr key={`h2h-${row.date}-${row.score}-${row.home ?? ""}`}>
                     <td>{row.date}</td>
-                    <td>{coversRecordOpponent(row, "team", matchup)}</td>
+                    <td>{coversRecordOpponent(row, "h2h", matchup)}</td>
                     <td>
-                      <RecordResultCell row={row} matchup={matchup} teamCode={matchup.home_team} />
+                      <RecordResultCell row={row} matchup={matchup} winnerOnly />
                     </td>
                     <td>{row.ats}</td>
                     <td>{row.total}</td>
                   </tr>
                 ))}
-                {!homeRows.length && (
-                  <tr>
-                    <td colSpan={5}>No home recent games available.</td>
-                  </tr>
-                )}
               </tbody>
             </table>
           </div>
         )}
+      </div>
+      <div className="covers-records-list">
+        <h4>{matchup.away_team} Last 10</h4>
+        <div className="table-wrap covers-records-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>vs</th>
+                <th>Result</th>
+                <th>ATS</th>
+                <th>O/U</th>
+              </tr>
+            </thead>
+            <tbody>
+              {awayRows.slice(0, 10).map((row) => (
+                <tr key={`away-${row.date}-${row.score}-${row.opponent ?? ""}`}>
+                  <td>{row.date}</td>
+                  <td>{coversRecordOpponent(row, "team", matchup)}</td>
+                  <td>
+                    <RecordResultCell row={row} matchup={matchup} teamCode={matchup.away_team} />
+                  </td>
+                  <td>{row.ats}</td>
+                  <td>{row.total}</td>
+                </tr>
+              ))}
+              {!awayRows.length && (
+                <tr>
+                  <td colSpan={5}>No away recent games available.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <div className="covers-records-list">
+        <h4>{matchup.home_team} Last 10</h4>
+        <div className="table-wrap covers-records-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>vs</th>
+                <th>Result</th>
+                <th>ATS</th>
+                <th>O/U</th>
+              </tr>
+            </thead>
+            <tbody>
+              {homeRows.slice(0, 10).map((row) => (
+                <tr key={`home-${row.date}-${row.score}-${row.opponent ?? ""}`}>
+                  <td>{row.date}</td>
+                  <td>{coversRecordOpponent(row, "team", matchup)}</td>
+                  <td>
+                    <RecordResultCell row={row} matchup={matchup} teamCode={matchup.home_team} />
+                  </td>
+                  <td>{row.ats}</td>
+                  <td>{row.total}</td>
+                </tr>
+              ))}
+              {!homeRows.length && (
+                <tr>
+                  <td colSpan={5}>No home recent games available.</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
@@ -5159,7 +5135,6 @@ function TeamSummary({
   coversTeamRow?: { team: string; record: string; ats: string; ou: string; away: string; home: string };
   coversLast10Rows?: CoversRecordRow[];
 }) {
-  const [detailsOpen, setDetailsOpen] = useState(false);
   const coversDerived = summarizeCoversTeamRows(coversLast10Rows);
   const winsLosses = coversTeamRow?.record ?? coversDerived?.record ?? `${summary.wins}-${summary.losses}`;
   const ats = coversTeamRow?.ats ?? coversDerived?.ats ?? `${summary.ats_wins}-${summary.ats_losses}-${summary.ats_pushes}`;
@@ -5204,62 +5179,52 @@ function TeamSummary({
       <div className="points-row">
         <span>PF {summary.avg_points_for.toFixed(1)}</span>
         <span>PA {summary.avg_points_against.toFixed(1)}</span>
-        <button
-          type="button"
-          className="team-details-toggle"
-          onClick={() => setDetailsOpen((open) => !open)}
-          aria-expanded={detailsOpen}
-        >
-          {detailsOpen ? "Hide details" : "Show details"}
-        </button>
       </div>
-      <div className={`team-secondary-details ${detailsOpen ? "open" : ""}`}>
-        <div className="segment-summary-card">
-          <div className="segment-summary-header">
-            <strong>{context === "home" ? "Home" : "Away"} Segment Avg</strong>
-            <span>{segmentSampleLabel}</span>
-          </div>
-          <div className="segment-summary-grid">
-            <MiniStat label="Q1 For" value={formatSegmentTotal(segmentAverages?.avg_q1_points_for)} />
-            <MiniStat label="Q1 Ag" value={formatSegmentTotal(segmentAverages?.avg_q1_points_against)} />
-            <MiniStat label="Q1 Total" value={formatSegmentTotal(segmentAverages?.avg_q1_total)} />
-            <MiniStat label="1H For" value={formatSegmentTotal(segmentAverages?.avg_first_half_points_for)} />
-            <MiniStat label="1H Ag" value={formatSegmentTotal(segmentAverages?.avg_first_half_points_against)} />
-            <MiniStat label="1H Total" value={formatSegmentTotal(segmentAverages?.avg_first_half_total)} />
-          </div>
+      <div className="segment-summary-card">
+        <div className="segment-summary-header">
+          <strong>{context === "home" ? "Home" : "Away"} Segment Avg</strong>
+          <span>{segmentSampleLabel}</span>
         </div>
-        <div className="stat-strip ratings-strip">
-          <MiniStat
-            label="Season Net"
-            value={formatRatingWithRank(ratings?.season?.net_rating, ratings?.net_rank)}
-            className={rankTone(ratings?.net_rank)}
-          />
-          <MiniStat
-            label="Season Off"
-            value={formatRatingWithRank(ratings?.season?.off_rating, ratings?.off_rank)}
-            className={rankTone(ratings?.off_rank)}
-          />
-          <MiniStat
-            label="Season Def"
-            value={formatRatingWithRank(ratings?.season?.def_rating, ratings?.def_rank, true)}
-            className={rankTone(ratings?.def_rank, true)}
-          />
-          <MiniStat
-            label="L10 Net"
-            value={formatSignedNumber(ratings?.last_10?.net_rating)}
-            className={signedValueTone(ratings?.last_10?.net_rating)}
-          />
-          <MiniStat
-            label={context === "home" ? "Home Net" : "Away Net"}
-            value={formatSignedNumber(venueRatings?.net_rating)}
-            className={signedValueTone(venueRatings?.net_rating)}
-          />
-          <MiniStat
-            label="Pace"
-            value={<PaceSignal value={ratings?.season?.pace} rank={ratings?.pace_rank} />}
-            className={paceTone(ratings?.pace_rank)}
-          />
+        <div className="segment-summary-grid">
+          <MiniStat label="Q1 For" value={formatSegmentTotal(segmentAverages?.avg_q1_points_for)} />
+          <MiniStat label="Q1 Ag" value={formatSegmentTotal(segmentAverages?.avg_q1_points_against)} />
+          <MiniStat label="Q1 Total" value={formatSegmentTotal(segmentAverages?.avg_q1_total)} />
+          <MiniStat label="1H For" value={formatSegmentTotal(segmentAverages?.avg_first_half_points_for)} />
+          <MiniStat label="1H Ag" value={formatSegmentTotal(segmentAverages?.avg_first_half_points_against)} />
+          <MiniStat label="1H Total" value={formatSegmentTotal(segmentAverages?.avg_first_half_total)} />
         </div>
+      </div>
+      <div className="stat-strip ratings-strip">
+        <MiniStat
+          label="Season Net"
+          value={formatRatingWithRank(ratings?.season?.net_rating, ratings?.net_rank)}
+          className={rankTone(ratings?.net_rank)}
+        />
+        <MiniStat
+          label="Season Off"
+          value={formatRatingWithRank(ratings?.season?.off_rating, ratings?.off_rank)}
+          className={rankTone(ratings?.off_rank)}
+        />
+        <MiniStat
+          label="Season Def"
+          value={formatRatingWithRank(ratings?.season?.def_rating, ratings?.def_rank, true)}
+          className={rankTone(ratings?.def_rank, true)}
+        />
+        <MiniStat
+          label="L10 Net"
+          value={formatSignedNumber(ratings?.last_10?.net_rating)}
+          className={signedValueTone(ratings?.last_10?.net_rating)}
+        />
+        <MiniStat
+          label={context === "home" ? "Home Net" : "Away Net"}
+          value={formatSignedNumber(venueRatings?.net_rating)}
+          className={signedValueTone(venueRatings?.net_rating)}
+        />
+        <MiniStat
+          label="Pace"
+          value={<PaceSignal value={ratings?.season?.pace} rank={ratings?.pace_rank} />}
+          className={paceTone(ratings?.pace_rank)}
+        />
       </div>
     </div>
   );
