@@ -202,8 +202,7 @@ MARKET_OVERLAY_POLICY = {
         "recent_transfer_blend_weight": 0.10,
     },
     "points_rebounds": {
-        "mode": "blend",
-        "blend_weight": 0.15,
+        "mode": "component_only",
         "min_rows": 1800,
         "min_mae_improvement": 0.12,
         "min_rmse_improvement": 0.06,
@@ -213,8 +212,7 @@ MARKET_OVERLAY_POLICY = {
         "recent_transfer_blend_weight": 0.08,
     },
     "points_assists": {
-        "mode": "blend",
-        "blend_weight": 0.15,
+        "mode": "component_only",
         "min_rows": 1800,
         "min_mae_improvement": 0.12,
         "min_rmse_improvement": 0.06,
@@ -224,8 +222,7 @@ MARKET_OVERLAY_POLICY = {
         "recent_transfer_blend_weight": 0.08,
     },
     "rebounds_assists": {
-        "mode": "blend",
-        "blend_weight": 0.15,
+        "mode": "component_only",
         "min_rows": 1800,
         "min_mae_improvement": 0.08,
         "min_rmse_improvement": 0.04,
@@ -244,8 +241,7 @@ MARKET_OVERLAY_POLICY = {
         "recent_transfer_blend_weight": 0.05,
     },
     "threes": {
-        "mode": "blend",
-        "blend_weight": 0.15,
+        "mode": "component_only",
         "min_rows": 1500,
         "min_mae_improvement": 0.04,
         "min_rmse_improvement": 0.0,
@@ -648,6 +644,14 @@ def _market_overlay_decision(conn: sqlite3.Connection, market: str) -> dict[str,
                 ),
             }
     mode = str(policy["mode"])
+    if mode == "component_only":
+        return {
+            "mode": "component_only",
+            "note": (
+                f"market policy holds component baseline live ({rows} rows, MAE {float(mae_improvement):+.3f}, "
+                f"RMSE {float(rmse_improvement):+.3f})"
+            ),
+        }
     if mode == "blend":
         return {
             "mode": "blend",

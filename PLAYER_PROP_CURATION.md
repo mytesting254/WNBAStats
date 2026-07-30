@@ -76,6 +76,12 @@ Implemented:
   - `points`
   - `points_rebounds`
   using recent-transfer and sample-quality thresholds on `raw` and `residual` training rows
+- tightened live runtime fallback policy so weak learned markets stay on the component baseline:
+  - `points_rebounds`
+  - `points_assists`
+  - `rebounds_assists`
+  - `threes`
+- tightened thin-margin under gating for weak combo/scoring markets so marginal under edges are less likely to ship live
 
 Still not finished:
 

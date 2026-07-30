@@ -65,7 +65,8 @@ Pending work:
 - add a live inference fallback policy for recent-transfer players instead of only cleaning them in training experiments
 - decide whether line-relative training should remain a secondary residual layer or become a primary path for specific markets
 - measure residual side changes and blend impact by market before promoting broader residual usage
-- split artifact promotion by market so weak learned markets stay `component_only` while stronger ones can blend
+- keep reviewing market-specific promotion after the current weak-market fallback pass (`points_rebounds`, `points_assists`, `rebounds_assists`, `threes` held at `component_only`)
+- keep reviewing thin-margin under behavior after the current combo/scoring under-gating pass
 - add stronger promotion gates:
   - minimum support
   - baseline wins

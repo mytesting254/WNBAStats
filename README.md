@@ -1202,6 +1202,12 @@ Runtime behavior:
 - if uploaded cache files do not match the active live DB fingerprint, the backend retrains from the active runtime instead of silently downgrading prop predictions to `component`
 - full live training runs also prewarm current minutes, market, and residual artifacts into `/data/cache/model_artifacts`
 - `adaptive-context-v11-ratings-context` remains the current learned candidate version after deploy/restart, with uploaded cache files acting as a warm start rather than a hard dependency
+- weak settled player-prop markets currently stay on the component baseline even when the learned walk-forward gate passes:
+  - `points_rebounds`
+  - `points_assists`
+  - `rebounds_assists`
+  - `threes`
+- thin-margin player-prop under recommendations are gated more aggressively in weak combo/scoring markets before the side is written live
 
 Latest live mounted-volume run checked on `2026-07-16`:
 

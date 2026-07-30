@@ -1299,8 +1299,13 @@ def _over_min_margin(market: str) -> float:
 
 def _under_min_margin(market: str) -> float:
     by_market = {
-        "points": 0.90,
+        "points": 1.25,
         "rebounds": 0.90,
+        "threes": 0.35,
+        "points_rebounds": 1.50,
+        "points_assists": 1.50,
+        "rebounds_assists": 1.00,
+        "points_rebounds_assists": 2.25,
     }
     return by_market.get(market, 0.0)
 

@@ -4915,6 +4915,27 @@ def test_predict_player_prop_uses_component_only_when_market_policy_rejects_lear
     assert model_version == COMPONENT_MODEL_VERSION
 
 
+def test_market_overlay_decision_honors_component_only_policy_even_when_gate_passes(monkeypatch) -> None:
+    monkeypatch.setattr(
+        player_prop_model_module,
+        "_market_overlay_metrics",
+        lambda _conn: {
+            "points_rebounds": {
+                "rows": 2400,
+                "mae_improvement": 0.18,
+                "rmse_improvement": 0.09,
+                "bias": 0.02,
+            }
+        },
+    )
+
+    with connect() as conn:
+        decision = player_prop_model_module._market_overlay_decision(conn, "points_rebounds")
+
+    assert decision["mode"] == "component_only"
+    assert "market policy holds component baseline live" in str(decision["note"])
+
+
 def test_predict_player_prop_blends_component_and_learned_when_market_policy_passes(monkeypatch) -> None:
     feature_values = [0.0 for _ in FEATURE_NAMES]
     snapshot = FeatureSnapshot(values=feature_values, component_projection=18.0, reason="snapshot reason")
@@ -4946,6 +4967,40 @@ def test_predict_player_prop_blends_component_and_learned_when_market_policy_pas
     assert projection == pytest.approx(19.5)
     assert "learned/component blend 25%" in reason
     assert model_version == MODEL_VERSION
+
+
+def test_build_prop_projection_penalizes_thin_combo_under_recommendations(monkeypatch) -> None:
+    captured_at = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        projections_module,
+        "predict_player_prop",
+        lambda *_args, **_kwargs: (24.2, "base reason", "adaptive-context-v1"),
+    )
+    monkeypatch.setattr(projections_module, "_estimated_sigma", lambda *_args, **_kwargs: 3.0)
+    monkeypatch.setattr(
+        projections_module,
+        "_calibrated_probability",
+        lambda _conn, raw_probability, _market, _model_version, side: 0.59 if side == "over" else 0.57,
+    )
+
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (9921, "Combo Guard", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)",
+            (9921, "2026-06-21", "2026-06-21T19:00:00Z", 10, 3, -2.5, 159.5),
+        )
+        conn.execute(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (9921, 9921, 9921, "DraftKings", "points_rebounds", 25.0, -110, -110, captured_at),
+        )
+
+        projection = projections_module.build_prop_projection(conn, 9921)
+
+    assert projection.projection == 24.2
+    assert projection.recommended_side == "over"
 
 
 def test_predict_player_prop_uses_reduced_transfer_blend_when_transfer_slice_underperforms(monkeypatch) -> None:
