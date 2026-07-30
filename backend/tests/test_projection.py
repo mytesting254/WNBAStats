@@ -5003,6 +5003,108 @@ def test_build_prop_projection_penalizes_thin_combo_under_recommendations(monkey
     assert projection.recommended_side == "over"
 
 
+def test_build_prop_projection_penalizes_thin_pra_under_recommendations(monkeypatch) -> None:
+    captured_at = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        projections_module,
+        "predict_player_prop",
+        lambda *_args, **_kwargs: (29.1, "base reason", "adaptive-context-v1"),
+    )
+    monkeypatch.setattr(projections_module, "_estimated_sigma", lambda *_args, **_kwargs: 3.0)
+    monkeypatch.setattr(
+        projections_module,
+        "_calibrated_probability",
+        lambda _conn, raw_probability, _market, _model_version, side: 0.59 if side == "over" else 0.57,
+    )
+
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (9922, "PRA Wing", 10, "F", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)",
+            (9922, "2026-06-22", "2026-06-22T19:00:00Z", 10, 3, -2.5, 159.5),
+        )
+        conn.execute(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (9922, 9922, 9922, "DraftKings", "points_rebounds_assists", 30.0, -110, -110, captured_at),
+        )
+
+        projection = projections_module.build_prop_projection(conn, 9922)
+
+    assert projection.projection == 29.1
+    assert projection.recommended_side == "over"
+
+
+def test_build_prop_projection_penalizes_thin_threes_over_recommendations(monkeypatch) -> None:
+    captured_at = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        projections_module,
+        "predict_player_prop",
+        lambda *_args, **_kwargs: (2.7, "base reason", "adaptive-context-v1"),
+    )
+    monkeypatch.setattr(projections_module, "_estimated_sigma", lambda *_args, **_kwargs: 1.0)
+    monkeypatch.setattr(
+        projections_module,
+        "_calibrated_probability",
+        lambda _conn, raw_probability, _market, _model_version, side: 0.59 if side == "over" else 0.57,
+    )
+
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (9923, "Shooter Guard", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)",
+            (9923, "2026-06-23", "2026-06-23T19:00:00Z", 10, 3, -2.5, 159.5),
+        )
+        conn.execute(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (9923, 9923, 9923, "DraftKings", "threes", 2.5, -110, -110, captured_at),
+        )
+
+        projection = projections_module.build_prop_projection(conn, 9923)
+
+    assert projection.projection == 2.7
+    assert projection.recommended_side == "under"
+
+
+def test_build_prop_projection_penalizes_thin_rebounds_over_recommendations(monkeypatch) -> None:
+    captured_at = datetime.now(timezone.utc).isoformat()
+    monkeypatch.setattr(
+        projections_module,
+        "predict_player_prop",
+        lambda *_args, **_kwargs: (8.8, "base reason", "adaptive-context-v1"),
+    )
+    monkeypatch.setattr(projections_module, "_estimated_sigma", lambda *_args, **_kwargs: 2.0)
+    monkeypatch.setattr(
+        projections_module,
+        "_calibrated_probability",
+        lambda _conn, raw_probability, _market, _model_version, side: 0.58 if side == "over" else 0.57,
+    )
+
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (9924, "Board Forward", 10, "F", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'scheduled', 2, 2, ?, ?)",
+            (9924, "2026-06-24", "2026-06-24T19:00:00Z", 10, 3, -2.5, 159.5),
+        )
+        conn.execute(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (9924, 9924, 9924, "DraftKings", "rebounds", 8.5, -110, -110, captured_at),
+        )
+
+        projection = projections_module.build_prop_projection(conn, 9924)
+
+    assert projection.projection == 8.8
+    assert projection.recommended_side == "under"
+
+
 def test_predict_player_prop_uses_reduced_transfer_blend_when_transfer_slice_underperforms(monkeypatch) -> None:
     feature_values = [0.0 for _ in FEATURE_NAMES]
     snapshot = FeatureSnapshot(values=feature_values, component_projection=18.0, reason="snapshot reason")

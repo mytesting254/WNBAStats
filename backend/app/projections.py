@@ -251,12 +251,12 @@ def build_prop_projection(
     # Conservative over gating: avoid thin-margin over recommendations,
     # especially in markets where overs have underperformed historically.
     if projection > line and (projection - line) < _over_min_margin(prop["market"]):
-        edge_over -= 0.03
+        edge_over -= _thin_over_edge_penalty(prop["market"])
     edge_over -= _scoring_over_edge_penalty(prop["market"])
     # Conservative under gating for points/rebounds: avoid medium-quality
     # under calls that have historically been less stable.
     if projection < line and (line - projection) < _under_min_margin(prop["market"]):
-        edge_under -= 0.03
+        edge_under -= _thin_under_edge_penalty(prop["market"])
 
     # Let the calibrated market edge decide the recommendation. This avoids
     # forcing thin-margin overs when the opposite side prices better.
@@ -1308,6 +1308,25 @@ def _under_min_margin(market: str) -> float:
         "points_rebounds_assists": 2.25,
     }
     return by_market.get(market, 0.0)
+
+
+def _thin_over_edge_penalty(market: str) -> float:
+    by_market = {
+        "threes": 0.05,
+        "rebounds": 0.05,
+        "points_rebounds": 0.04,
+        "points_assists": 0.04,
+    }
+    return by_market.get(market, 0.03)
+
+
+def _thin_under_edge_penalty(market: str) -> float:
+    by_market = {
+        "points_rebounds": 0.04,
+        "points_assists": 0.04,
+        "points_rebounds_assists": 0.05,
+    }
+    return by_market.get(market, 0.03)
 
 
 def _market_calibration(
