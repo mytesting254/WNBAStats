@@ -3321,6 +3321,13 @@ def _build_matchup_payload_item(
         "home_team_ratings": home_team_ratings,
         "away_team_ratings": away_team_ratings,
         "rating_differentials": _matchup_rating_differentials(home_team_ratings, away_team_ratings),
+        "h2h_segment_summary": _h2h_segment_summary(
+            conn,
+            away_team_id=int(game["away_team_id"]),
+            home_team_id=int(game["home_team_id"]),
+            scheduled_start_time=str(game["start_time"] or ""),
+            scheduled_game_id=game_id,
+        ),
         "injury_source": injury_refresh.get("source"),
         "injury_captured_at": injury_refresh.get("captured_at"),
         "injury_from_cache": injury_refresh.get("from_cache"),
@@ -8344,6 +8351,84 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
             "away": _segment_average_payload(segment_buckets["away"]),
         },
         "recent_games": recent_games,
+    }
+
+
+def _h2h_segment_summary(
+    conn,
+    *,
+    away_team_id: int,
+    home_team_id: int,
+    scheduled_start_time: str,
+    scheduled_game_id: int,
+) -> dict[str, float | int | None] | None:
+    rows = conn.execute(
+        """
+        SELECT
+            g.id,
+            g.start_time,
+            g.home_team_id,
+            g.away_team_id,
+            segments.home_q1_points,
+            segments.away_q1_points,
+            segments.home_1h_points,
+            segments.away_1h_points
+        FROM games g
+        JOIN game_segment_results segments ON segments.game_id = g.id
+        WHERE (
+            (g.home_team_id = ? AND g.away_team_id = ?)
+            OR
+            (g.home_team_id = ? AND g.away_team_id = ?)
+        )
+          AND g.id != ?
+          AND COALESCE(g.start_time, '') < COALESCE(?, '')
+          AND segments.home_q1_points IS NOT NULL
+          AND segments.away_q1_points IS NOT NULL
+          AND segments.home_1h_points IS NOT NULL
+          AND segments.away_1h_points IS NOT NULL
+        ORDER BY g.start_time DESC
+        LIMIT 10
+        """,
+        (home_team_id, away_team_id, away_team_id, home_team_id, scheduled_game_id, scheduled_start_time),
+    ).fetchall()
+    if not rows:
+        return None
+
+    meeting_count = len(rows)
+    away_q1_points = 0.0
+    home_q1_points = 0.0
+    away_first_half_points = 0.0
+    home_first_half_points = 0.0
+    q1_total = 0.0
+    first_half_total = 0.0
+
+    for row in rows:
+        if int(row["away_team_id"]) == away_team_id:
+            away_game_q1 = float(row["away_q1_points"])
+            home_game_q1 = float(row["home_q1_points"])
+            away_game_first_half = float(row["away_1h_points"])
+            home_game_first_half = float(row["home_1h_points"])
+        else:
+            away_game_q1 = float(row["home_q1_points"])
+            home_game_q1 = float(row["away_q1_points"])
+            away_game_first_half = float(row["home_1h_points"])
+            home_game_first_half = float(row["away_1h_points"])
+
+        away_q1_points += away_game_q1
+        home_q1_points += home_game_q1
+        away_first_half_points += away_game_first_half
+        home_first_half_points += home_game_first_half
+        q1_total += away_game_q1 + home_game_q1
+        first_half_total += away_game_first_half + home_game_first_half
+
+    return {
+        "meetings": meeting_count,
+        "away_avg_q1_points": round(away_q1_points / meeting_count, 1),
+        "home_avg_q1_points": round(home_q1_points / meeting_count, 1),
+        "avg_q1_total": round(q1_total / meeting_count, 1),
+        "away_avg_first_half_points": round(away_first_half_points / meeting_count, 1),
+        "home_avg_first_half_points": round(home_first_half_points / meeting_count, 1),
+        "avg_first_half_total": round(first_half_total / meeting_count, 1),
     }
 
 

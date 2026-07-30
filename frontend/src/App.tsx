@@ -3513,6 +3513,7 @@ function MatchupsView({
 
 function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
   const records = normalizeCoversRecords(matchup.covers_records);
+  const h2hSegments = matchup.h2h_segment_summary;
   const hasCovers = Boolean(records.head_to_head.length || records.away_last_10.length || records.home_last_10.length);
   const h2hRows = records.head_to_head.length
     ? records.head_to_head.slice(0, 10)
@@ -3554,6 +3555,32 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         <span className="owner-record">{h2hOwner.record}</span>
         <span className="owner-record">H2H O/U {h2hSummary?.ou ?? "N/A"}</span>
       </div>
+      {h2hSegments ? (
+        <div className="h2h-segment-strip">
+          <div className="h2h-segment-strip-header">
+            <span>H2H Segments</span>
+            <strong>Last {h2hSegments.meetings} meetings</strong>
+          </div>
+          <div className="h2h-segment-grid">
+            <H2HSegmentGraphic
+              label="Q1"
+              awayTeam={matchup.away_team}
+              homeTeam={matchup.home_team}
+              awayValue={h2hSegments.away_avg_q1_points}
+              homeValue={h2hSegments.home_avg_q1_points}
+              totalValue={h2hSegments.avg_q1_total}
+            />
+            <H2HSegmentGraphic
+              label="1H"
+              awayTeam={matchup.away_team}
+              homeTeam={matchup.home_team}
+              awayValue={h2hSegments.away_avg_first_half_points}
+              homeValue={h2hSegments.home_avg_first_half_points}
+              totalValue={h2hSegments.avg_first_half_total}
+            />
+          </div>
+        </div>
+      ) : null}
       <div className="covers-records-list">
         <h4>H2H Last 10</h4>
         {!h2hRows.length ? (
@@ -3740,6 +3767,52 @@ function h2hMatchupOwner(rows: CoversRecordRow[], matchup: Matchup): { owner: st
     return { owner: matchup.home_team, record: `${homeWins}-${awayWins} in last ${rows.length}` };
   }
   return { owner: matchup.away_team, record: `${awayWins}-${homeWins} in last ${rows.length}` };
+}
+
+function H2HSegmentGraphic({
+  label,
+  awayTeam,
+  homeTeam,
+  awayValue,
+  homeValue,
+  totalValue,
+}: {
+  label: string;
+  awayTeam: string;
+  homeTeam: string;
+  awayValue: number | null | undefined;
+  homeValue: number | null | undefined;
+  totalValue: number | null | undefined;
+}) {
+  const away = typeof awayValue === "number" ? awayValue : null;
+  const home = typeof homeValue === "number" ? homeValue : null;
+  const total = typeof totalValue === "number" ? totalValue : null;
+  const combined = Math.max((away ?? 0) + (home ?? 0), 1);
+  const awayShare = away != null ? (away / combined) * 100 : 0;
+  const homeShare = home != null ? (home / combined) * 100 : 0;
+
+  return (
+    <div className="h2h-segment-card">
+      <div className="h2h-segment-card-top">
+        <strong>{label}</strong>
+        <span>Total {formatSegmentTotal(total)}</span>
+      </div>
+      <div className="h2h-segment-bar" aria-hidden="true">
+        <div className="h2h-segment-bar-away" style={{ width: `${awayShare}%` }} />
+        <div className="h2h-segment-bar-home" style={{ width: `${homeShare}%` }} />
+      </div>
+      <div className="h2h-segment-values">
+        <div>
+          <span>{awayTeam}</span>
+          <strong>{formatSegmentTotal(away)}</strong>
+        </div>
+        <div>
+          <span>{homeTeam}</span>
+          <strong>{formatSegmentTotal(home)}</strong>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function coversRecordOpponent(row: CoversRecordRow, mode: "h2h" | "team", matchup?: Matchup) {

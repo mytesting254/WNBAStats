@@ -2142,6 +2142,109 @@ tbody tr.selected {
   font-weight: 700;
 }
 
+.h2h-segment-strip {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(35, 100, 170, 0.16);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(243, 248, 255, 0.98), rgba(255, 255, 255, 0.98));
+}
+
+.h2h-segment-strip-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.h2h-segment-strip-header span {
+  color: #2364aa;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.h2h-segment-strip-header strong {
+  color: #344054;
+  font-size: 12px;
+}
+
+.h2h-segment-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.h2h-segment-card {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid rgba(15, 157, 138, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.92);
+}
+
+.h2h-segment-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.h2h-segment-card-top strong {
+  color: #12324f;
+  font-size: 14px;
+}
+
+.h2h-segment-card-top span {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.h2h-segment-bar {
+  display: flex;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(18, 50, 79, 0.08);
+}
+
+.h2h-segment-bar-away {
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+}
+
+.h2h-segment-bar-home {
+  background: linear-gradient(90deg, #0f766e, #14b8a6);
+}
+
+.h2h-segment-values {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.h2h-segment-values div {
+  display: grid;
+  gap: 4px;
+}
+
+.h2h-segment-values span {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.h2h-segment-values strong {
+  color: #1b1f29;
+  font-size: 16px;
+}
+
 .covers-records-list {
   min-width: 0;
   display: flex;
@@ -2357,6 +2460,10 @@ tbody tr.selected {
   .team-summary + .team-summary {
     border-top: 1px solid #eaecf0;
     border-left: 0;
+  }
+
+  .h2h-segment-grid {
+    grid-template-columns: 1fr;
   }
 
   .detail-panel {

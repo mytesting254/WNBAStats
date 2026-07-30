@@ -757,6 +757,15 @@ export type Matchup = {
     last_10_net_diff?: number | null;
     pace_diff?: number | null;
   } | null;
+  h2h_segment_summary?: {
+    meetings: number;
+    away_avg_q1_points: number | null;
+    home_avg_q1_points: number | null;
+    avg_q1_total: number | null;
+    away_avg_first_half_points: number | null;
+    home_avg_first_half_points: number | null;
+    avg_first_half_total: number | null;
+  } | null;
   covers_records?: CoversRecords | null;
   props: ValueProp[];
   sportsbook_props: SportsbookProp[];
