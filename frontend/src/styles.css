@@ -1643,6 +1643,33 @@ tbody tr.selected {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.28);
 }
 
+.matchup-prediction-strip {
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 6px;
+  padding: 12px;
+}
+
+.matchup-prediction-strip .mini-stat {
+  min-height: 50px;
+  padding: 8px;
+}
+
+.matchup-prediction-strip .mini-stat > span {
+  margin-bottom: 4px;
+  font-size: 10px;
+}
+
+.matchup-prediction-strip .mini-stat strong {
+  font-size: 16px;
+}
+
+.matchup-inline-strip {
+  padding: 0;
+  border-top: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
 .matchup-reason {
   margin: 0 16px 16px;
 }
@@ -2038,6 +2065,27 @@ tbody tr.selected {
   font-weight: 800;
 }
 
+.team-details-toggle {
+  margin-left: auto;
+  padding: 6px 10px;
+  border: 1px solid rgba(35, 100, 170, 0.18);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  color: #2364aa;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.team-secondary-details {
+  display: none;
+}
+
+.team-secondary-details.open {
+  display: block;
+}
+
 .segment-summary-card {
   margin-bottom: 12px;
   padding: 12px;
@@ -2145,8 +2193,8 @@ tbody tr.selected {
 .h2h-segment-strip {
   grid-column: 1 / -1;
   display: grid;
-  gap: 10px;
-  padding: 12px;
+  gap: 8px;
+  padding: 10px 12px;
   border: 1px solid rgba(35, 100, 170, 0.16);
   border-radius: 10px;
   background:
@@ -2175,13 +2223,13 @@ tbody tr.selected {
 .h2h-segment-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 8px;
 }
 
 .h2h-segment-card {
   display: grid;
-  gap: 8px;
-  padding: 12px;
+  gap: 6px;
+  padding: 10px;
   border: 1px solid rgba(15, 157, 138, 0.14);
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.92);
@@ -2256,6 +2304,18 @@ tbody tr.selected {
   height: 100%;
 }
 
+.covers-records-list-wide {
+  grid-column: 1 / -1;
+}
+
+.covers-records-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
 .covers-records-list h4 {
   margin: 0;
   color: #1b1f29;
@@ -2263,6 +2323,34 @@ tbody tr.selected {
   font-weight: 800;
   text-transform: uppercase;
   margin-bottom: 8px;
+}
+
+.covers-records-header h4 {
+  margin-bottom: 0;
+}
+
+.covers-record-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.covers-record-tabs button {
+  padding: 6px 10px;
+  border: 1px solid rgba(35, 100, 170, 0.18);
+  border-radius: 999px;
+  background: #ffffff;
+  color: #475467;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.covers-record-tabs button.active {
+  border-color: rgba(15, 157, 138, 0.3);
+  background: rgba(236, 253, 245, 0.9);
+  color: #0f766e;
 }
 
 .covers-records-table-wrap {
