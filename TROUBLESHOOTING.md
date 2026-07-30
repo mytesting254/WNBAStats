@@ -325,6 +325,12 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 
 - only one backend instance is running
 - multiple admins are not launching heavy write flows simultaneously
+- before any targeted live prop rewrite that may delete and recreate current
+  `prop_predictions`, snapshot the exact rows first:
+  - `python scripts/live_backend.py exec -- python scripts/audit_current_prop_predictions.py snapshot --output /tmp/prop-before.json --market points_rebounds_assists --market rebounds --market threes`
+  - rerun the rewrite
+  - `python scripts/live_backend.py exec -- python scripts/audit_current_prop_predictions.py snapshot --output /tmp/prop-after.json --market points_rebounds_assists --market rebounds --market threes`
+  - `python scripts/live_backend.py exec -- python scripts/audit_current_prop_predictions.py diff /tmp/prop-before.json /tmp/prop-after.json`
 
 ### Recommended Direction
 

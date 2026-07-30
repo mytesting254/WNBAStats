@@ -194,6 +194,18 @@ contains multiple WNBA SQLite files. It resolves the active backend container,
 prints the live mounted-volume DB summary, and compares it against repo-local
 `data/wnba.sqlite` and host `/data/wnba.sqlite`.
 
+When a live prop rewrite may flip current sides, capture an explicit before/after
+snapshot instead of relying on ad hoc SQL after rows are deleted:
+
+```bash
+python scripts/live_backend.py exec -- python scripts/audit_current_prop_predictions.py snapshot --output /tmp/prop-before.json --market points_rebounds_assists --market rebounds --market threes
+python scripts/live_backend.py exec -- python scripts/audit_current_prop_predictions.py snapshot --output /tmp/prop-after.json --market points_rebounds_assists --market rebounds --market threes
+python scripts/live_backend.py exec -- python scripts/audit_current_prop_predictions.py diff /tmp/prop-before.json /tmp/prop-after.json
+```
+
+That preserves exact `prop_line_id`, side, edge, and timestamp changes for the
+target markets even when the rewrite path deletes old `prop_predictions` rows.
+
 Docker Compose deployments now pin the persistent volume name to
 `wnbastats-data` by default. The repo checkout is code-only; runtime SQLite,
 cache, and snapshot state should live on the attached app volume, not under a
