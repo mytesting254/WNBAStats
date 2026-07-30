@@ -8202,13 +8202,30 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
             g.start_time,
             g.spread_home,
             g.game_total,
-            opponent.abbreviation AS opponent
+            opponent.abbreviation AS opponent,
+            CASE
+                WHEN g.home_team_id = r.team_id THEN segments.home_q1_points
+                ELSE segments.away_q1_points
+            END AS q1_points,
+            CASE
+                WHEN g.home_team_id = r.team_id THEN segments.away_q1_points
+                ELSE segments.home_q1_points
+            END AS q1_allowed,
+            CASE
+                WHEN g.home_team_id = r.team_id THEN segments.home_1h_points
+                ELSE segments.away_1h_points
+            END AS first_half_points,
+            CASE
+                WHEN g.home_team_id = r.team_id THEN segments.away_1h_points
+                ELSE segments.home_1h_points
+            END AS first_half_allowed
         FROM team_game_results r
         JOIN games g ON g.id = r.game_id
         JOIN teams opponent ON opponent.id = CASE
             WHEN g.home_team_id = r.team_id THEN g.away_team_id
             ELSE g.home_team_id
         END
+        LEFT JOIN game_segment_results segments ON segments.game_id = g.id
         WHERE r.team_id = ?
         ORDER BY g.game_date DESC, g.start_time DESC
         LIMIT 10
@@ -8228,6 +8245,11 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
     home_games = 0
     total_pts = 0
     total_opp_pts = 0
+    segment_buckets = {
+        "overall": {"games": 0, "q1_for": 0.0, "q1_against": 0.0, "first_half_for": 0.0, "first_half_against": 0.0},
+        "home": {"games": 0, "q1_for": 0.0, "q1_against": 0.0, "first_half_for": 0.0, "first_half_against": 0.0},
+        "away": {"games": 0, "q1_for": 0.0, "q1_against": 0.0, "first_half_for": 0.0, "first_half_against": 0.0},
+    }
 
     for row in rows:
         points = row["points"]
@@ -8262,6 +8284,46 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
         total_pts += points
         total_opp_pts += opponent_points
 
+        if (
+            row["q1_points"] is not None
+            and row["q1_allowed"] is not None
+            and row["first_half_points"] is not None
+            and row["first_half_allowed"] is not None
+        ):
+            bucket_key = "home" if row["is_home"] else "away"
+            for key in ("overall", bucket_key):
+                segment_buckets[key]["games"] += 1
+                segment_buckets[key]["q1_for"] += float(row["q1_points"])
+                segment_buckets[key]["q1_against"] += float(row["q1_allowed"])
+                segment_buckets[key]["first_half_for"] += float(row["first_half_points"])
+                segment_buckets[key]["first_half_against"] += float(row["first_half_allowed"])
+
+    def _segment_average_payload(bucket: dict[str, float]) -> dict[str, float | int | None]:
+        games = int(bucket["games"])
+        if games <= 0:
+            return {
+                "games": 0,
+                "avg_q1_points_for": None,
+                "avg_q1_points_against": None,
+                "avg_first_half_points_for": None,
+                "avg_first_half_points_against": None,
+                "avg_q1_total": None,
+                "avg_first_half_total": None,
+            }
+        avg_q1_for = round(bucket["q1_for"] / games, 1)
+        avg_q1_against = round(bucket["q1_against"] / games, 1)
+        avg_first_half_for = round(bucket["first_half_for"] / games, 1)
+        avg_first_half_against = round(bucket["first_half_against"] / games, 1)
+        return {
+            "games": games,
+            "avg_q1_points_for": avg_q1_for,
+            "avg_q1_points_against": avg_q1_against,
+            "avg_first_half_points_for": avg_first_half_for,
+            "avg_first_half_points_against": avg_first_half_against,
+            "avg_q1_total": round(avg_q1_for + avg_q1_against, 1),
+            "avg_first_half_total": round(avg_first_half_for + avg_first_half_against, 1),
+        }
+
     return {
         "games": count,
         "wins": wins,
@@ -8276,6 +8338,11 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
         "total_pushes": total_pushes,
         "avg_points_for": round(total_pts / count, 1) if count > 0 else 0,
         "avg_points_against": round(total_opp_pts / count, 1) if count > 0 else 0,
+        "segment_averages": {
+            "overall": _segment_average_payload(segment_buckets["overall"]),
+            "home": _segment_average_payload(segment_buckets["home"]),
+            "away": _segment_average_payload(segment_buckets["away"]),
+        },
         "recent_games": recent_games,
     }
 

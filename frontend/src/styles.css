@@ -2038,6 +2038,41 @@ tbody tr.selected {
   font-weight: 800;
 }
 
+.segment-summary-card {
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid rgba(15, 157, 138, 0.16);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(236, 253, 245, 0.72), rgba(255, 255, 255, 0.92));
+}
+
+.segment-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.segment-summary-header strong {
+  color: #10324d;
+  font-size: 13px;
+  text-transform: uppercase;
+}
+
+.segment-summary-header span {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.segment-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
 .recent-list {
   display: grid;
   gap: 8px;
@@ -2125,6 +2160,85 @@ tbody tr.selected {
   font-weight: 800;
   text-transform: uppercase;
   margin-bottom: 8px;
+}
+
+.h2h-graphic-card {
+  background:
+    radial-gradient(circle at top right, rgba(255, 183, 77, 0.16), transparent 42%),
+    linear-gradient(180deg, rgba(243, 248, 255, 0.98), rgba(255, 255, 255, 0.98));
+}
+
+.h2h-graphic {
+  display: grid;
+  gap: 12px;
+}
+
+.h2h-scoreboard {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+}
+
+.h2h-team {
+  display: grid;
+  gap: 6px;
+  justify-items: center;
+  padding: 12px 10px;
+  border: 1px solid rgba(35, 100, 170, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.h2h-team span {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.h2h-team strong {
+  color: #12324f;
+  font-size: 28px;
+  line-height: 1;
+}
+
+.h2h-scoreboard-divider {
+  color: #2364aa;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.h2h-bar-track {
+  display: flex;
+  height: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(18, 50, 79, 0.08);
+}
+
+.h2h-bar-away {
+  background: linear-gradient(90deg, #f59e0b, #fbbf24);
+}
+
+.h2h-bar-home {
+  background: linear-gradient(90deg, #0f766e, #14b8a6);
+}
+
+.h2h-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.h2h-meta-row span {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.86);
+  color: #344054;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .covers-records-table-wrap {

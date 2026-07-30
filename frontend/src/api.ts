@@ -603,6 +603,35 @@ export type TeamLast10 = {
   total_pushes: number;
   avg_points_for: number;
   avg_points_against: number;
+  segment_averages?: {
+    overall?: {
+      games: number;
+      avg_q1_points_for: number | null;
+      avg_q1_points_against: number | null;
+      avg_first_half_points_for: number | null;
+      avg_first_half_points_against: number | null;
+      avg_q1_total: number | null;
+      avg_first_half_total: number | null;
+    } | null;
+    home?: {
+      games: number;
+      avg_q1_points_for: number | null;
+      avg_q1_points_against: number | null;
+      avg_first_half_points_for: number | null;
+      avg_first_half_points_against: number | null;
+      avg_q1_total: number | null;
+      avg_first_half_total: number | null;
+    } | null;
+    away?: {
+      games: number;
+      avg_q1_points_for: number | null;
+      avg_q1_points_against: number | null;
+      avg_first_half_points_for: number | null;
+      avg_first_half_points_against: number | null;
+      avg_q1_total: number | null;
+      avg_first_half_total: number | null;
+    } | null;
+  } | null;
   recent_games: Array<{
     game_date: string;
     opponent: string;
