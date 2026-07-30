@@ -325,8 +325,11 @@ def project_game(
     total_edge = None
     total_pick = "N/A"
     if game_total is not None:
+        # Keep the O/U decision model aligned with the feature definition used
+        # in training: a pre-decision total edge against the market total.
+        decision_input_edge = projected_total - game_total
         total_edge = adjusted_total - game_total
-        market_total_edge = _predict_market_total_edge(conn, direct_features, total_edge, game_total)
+        market_total_edge = _predict_market_total_edge(conn, direct_features, decision_input_edge, game_total)
         if market_total_edge is not None:
             total_edge = market_total_edge.edge
             residual_notes.append(f"trained O/U decision blend {market_total_edge.weight:.0%} ({market_total_edge.rows} rows)")
@@ -955,12 +958,12 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                 adjusted_total_edge = adjusted_total - game_total_value
                 if len(total_market_training_rows) >= GAME_TOTAL_DECISION_MODEL_MIN_ROWS:
                     decision_model = _fit_direct_game_model("total_market", total_market_training_rows)
-                    decision_features = [*direct_features, adjusted_total_edge, game_total_value]
+                    decision_features = [*direct_features, baseline_total_edge, game_total_value]
                     predicted_total_edge = _predict_direct_model(decision_model, decision_features)
                     decision_weight = _direct_total_decision_blend_weight(decision_model.rows)
-                    adjusted_total_edge = ((1 - decision_weight) * adjusted_total_edge) + (decision_weight * predicted_total_edge)
+                    adjusted_total_edge = ((1 - decision_weight) * baseline_total_edge) + (decision_weight * predicted_total_edge)
                     if abs(adjusted_total_edge) < GAME_TOTAL_DECISION_MIN_EDGE:
-                        adjusted_total_edge = adjusted_total - game_total_value
+                        adjusted_total_edge = baseline_total_edge
                 if use_target_row:
                     total_records.append(
                         (

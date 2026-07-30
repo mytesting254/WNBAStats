@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -123,6 +124,95 @@ def _docker_exec(container: str, command: list[str], *, workdir: str = "/app") -
     return int(proc.returncode)
 
 
+def _db_summary(path: Path) -> dict[str, object]:
+    result: dict[str, object] = {
+        "path": str(path),
+        "exists": path.exists(),
+    }
+    if not path.exists():
+        return result
+
+    stat = path.stat()
+    result["size_bytes"] = int(stat.st_size)
+    result["modified_at"] = stat.st_mtime
+
+    try:
+        conn = sqlite3.connect(path)
+        try:
+            result["table_count"] = int(
+                conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0]
+            )
+            result["latest_final_game_date"] = conn.execute(
+                "SELECT MAX(game_date) FROM games WHERE status = 'final'"
+            ).fetchone()[0]
+            result["final_games"] = int(
+                conn.execute("SELECT COUNT(*) FROM games WHERE status = 'final'").fetchone()[0]
+            )
+            result["latest_team_boxscore_game_date"] = conn.execute(
+                "SELECT MAX(g.game_date) FROM team_game_boxscores t JOIN games g ON g.id = t.game_id"
+            ).fetchone()[0]
+            result["team_boxscore_rows"] = int(
+                conn.execute("SELECT COUNT(*) FROM team_game_boxscores").fetchone()[0]
+            )
+            result["latest_team_results_game_date"] = conn.execute(
+                "SELECT MAX(g.game_date) FROM team_game_results r JOIN games g ON g.id = r.game_id"
+            ).fetchone()[0]
+            result["team_results_rows"] = int(
+                conn.execute("SELECT COUNT(*) FROM team_game_results").fetchone()[0]
+            )
+            job_runs_table = conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='job_runs'"
+            ).fetchone()[0]
+            if job_runs_table:
+                row = conn.execute(
+                    "SELECT COUNT(*), MAX(started_at), MAX(finished_at) FROM job_runs"
+                ).fetchone()
+                result["job_runs"] = int(row[0])
+                result["latest_job_started"] = row[1]
+                result["latest_job_finished"] = row[2]
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def _comparison(label: str, candidate: dict[str, object], live: dict[str, object]) -> dict[str, object]:
+    output: dict[str, object] = {
+        "label": label,
+        "path": candidate["path"],
+        "exists": candidate["exists"],
+    }
+    if not candidate["exists"]:
+        output["status"] = "missing"
+        return output
+    if candidate.get("error"):
+        output["status"] = "error"
+        output["error"] = candidate["error"]
+        return output
+
+    mismatches: list[str] = []
+    for key in (
+        "latest_final_game_date",
+        "final_games",
+        "latest_team_boxscore_game_date",
+        "team_boxscore_rows",
+        "latest_team_results_game_date",
+        "team_results_rows",
+    ):
+        if candidate.get(key) != live.get(key):
+            mismatches.append(key)
+
+    if str(candidate["path"]) == str(live["path"]):
+        output["status"] = "live"
+    elif mismatches:
+        output["status"] = "different"
+        output["diff_keys"] = mismatches
+    else:
+        output["status"] = "matches_live"
+    return output
+
+
 def _cmd_container(args: argparse.Namespace) -> int:
     print(_select_container(args.container))
     return 0
@@ -142,6 +232,7 @@ def _cmd_runtime_info(args: argparse.Namespace) -> int:
     container = _select_container(args.container)
     mount = _runtime_mount(container)
     payload = {
+        "note": "This is the active deployed backend runtime. Prefer these resolved paths over host /data or repo-local data/ paths.",
         "container": container,
         "git_head": _git_head()[0],
         "host_runtime_root": mount["source"],
@@ -176,6 +267,7 @@ def _cmd_host_runtime_info(args: argparse.Namespace) -> int:
     container = _select_container(args.container)
     mount = _runtime_mount(container)
     payload = {
+        "note": "These host-side paths match the active backend container mount. Do not assume host /data/wnba.sqlite or repo-local data/wnba.sqlite is the live runtime DB.",
         "container": container,
         "git_head": _git_head()[0],
         "host_runtime_root": mount["source"],
@@ -220,6 +312,37 @@ def _cmd_recalculate(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    container = _select_container(args.container)
+    mount = _runtime_mount(container)
+    live_db = Path(mount["source"]) / "wnba.sqlite"
+    repo_local_db = ROOT / "data" / "wnba.sqlite"
+    host_data_db = Path("/data/wnba.sqlite")
+
+    live_summary = _db_summary(live_db)
+    repo_summary = _db_summary(repo_local_db)
+    host_summary = _db_summary(host_data_db)
+
+    payload = {
+        "note": "The active deployment source of truth is the mounted-volume DB behind the selected backend container.",
+        "container": container,
+        "git_head": _git_head()[0],
+        "live_runtime": {
+            "container_db_path": "/data/wnba.sqlite",
+            "host_runtime_root": mount["source"],
+            "mount_name": mount["name"],
+            "mount_type": mount["type"],
+            "summary": live_summary,
+        },
+        "comparisons": [
+            _comparison("repo_local", repo_summary, live_summary),
+            _comparison("host_data", host_summary, live_summary),
+        ],
+    }
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run maintenance commands inside the active deployed backend container.")
     parser.add_argument("--container", help="Override auto-detection and target a specific container name.")
@@ -242,6 +365,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print shell export lines for host-side commands that should target the active backend runtime volume.",
     )
     host_env_parser.set_defaults(func=_cmd_host_env)
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Compare the active live runtime DB against repo-local data/wnba.sqlite and host /data/wnba.sqlite.",
+    )
+    doctor_parser.set_defaults(func=_cmd_doctor)
 
     recalc_parser = subparsers.add_parser("recalculate", help="Run the backend recalculate path inside the active container.")
     recalc_parser.set_defaults(func=_cmd_recalculate)

@@ -174,6 +174,26 @@ Use `python scripts/live_backend.py host-runtime-info` to see the real mounted
 runtime root, or `source scripts/live_env.sh` before any host-side maintenance
 command that should target the live deployment.
 
+Three DB locations can exist on the same VM:
+
+- repo-local `data/wnba.sqlite`: local dev or copied snapshot data for this checkout
+- host `/data/wnba.sqlite`: an arbitrary host path that may belong to some older setup and may not be mounted into the active backend container
+- live runtime DB: whatever `python scripts/live_backend.py runtime-info` reports as `/data/wnba.sqlite` inside the active backend container, backed by the host path from `host-runtime-info`
+
+When checking production freshness, use one of these only:
+
+```bash
+python scripts/live_backend.py runtime-info
+python scripts/live_backend.py host-runtime-info
+python scripts/live_backend.py doctor
+python scripts/live_backend.py exec -- python -c "import sqlite3; conn=sqlite3.connect('/data/wnba.sqlite'); print(conn.execute(\"SELECT MAX(game_date) FROM games WHERE status='final'\").fetchone()[0])"
+```
+
+`python scripts/live_backend.py doctor` is the fastest sanity check when a VM
+contains multiple WNBA SQLite files. It resolves the active backend container,
+prints the live mounted-volume DB summary, and compares it against repo-local
+`data/wnba.sqlite` and host `/data/wnba.sqlite`.
+
 Docker Compose deployments now pin the persistent volume name to
 `wnbastats-data` by default. The repo checkout is code-only; runtime SQLite,
 cache, and snapshot state should live on the attached app volume, not under a
@@ -916,6 +936,7 @@ Inspect the live runtime first:
 ```bash
 python scripts/live_backend.py runtime-info
 python scripts/live_backend.py host-runtime-info
+python scripts/live_backend.py doctor
 ```
 
 Create a live snapshot on the app volume:
@@ -950,6 +971,20 @@ source scripts/live_env.sh
 That resolves `WNBA_DB_PATH`, `WNBA_CACHE_DIR`, and `WNBA_SNAPSHOT_DIR` to the active app-attached volume before you run maintenance commands.
 Curated training rebuilds follow the same pathing, so `wnba-training.sqlite` is written beside the active `WNBA_DB_PATH` on the mounted volume unless you override `WNBA_TRAINING_DB_PATH` explicitly.
 The admin Data Operations screen now also exposes these resolved runtime paths so the mounted-volume source of truth is visible without shell access.
+
+Do not substitute host `/data/wnba.sqlite` or repo `data/wnba.sqlite` into these commands unless `host-runtime-info` explicitly points there. The resolved mounted-volume path is the only production source of truth.
+
+## Game Totals Note
+
+The `component-game-v2` total-pick path had a train/infer mismatch in the
+`total_market` decision layer until Thursday, July 30, 2026. Training used the
+pre-decision `baseline_total - game_total` edge, while live inference had been
+feeding the post-adjustment `adjusted_total - game_total` edge. That mismatch
+materially degraded settled O/U accuracy, especially on `Under` calls.
+
+The runtime fix keeps the decision layer aligned with training by sending the
+same pre-decision edge definition through both paths. If game-total accuracy
+regresses again, check this before retuning residual weights or pace features.
 
 For automated production backups, prefer a host scheduler instead of an app-process watcher. Example systemd units are provided at:
 

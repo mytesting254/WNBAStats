@@ -20,15 +20,32 @@ Runtime defaults:
 - cache/artifacts: `/data/cache`
 - snapshots: `/data/snapshots`
 
+These are container-internal runtime paths. They only refer to the live deployment
+when you are operating inside the active backend container or when you have first
+resolved the matching host-side mount with `python scripts/live_backend.py host-runtime-info`
+or `source scripts/live_env.sh`.
+
 Current raw/derived split for team context:
 
 - raw ESPN team stats: `team_game_boxscores` in `wnba.sqlite`
 - derived team/game context: `team_game_results` in `wnba.sqlite`
 - derived curated examples: `*_training_examples` tables in `wnba-training.sqlite`
 
-Host path for the live mounted volume in the current deployment:
+Do not hardcode a host-side volume path in docs, scripts, or training flows.
+Coolify deployment IDs and Docker volume names can change across restores or
+redeploys. Always resolve the live host path dynamically:
 
-- `/var/lib/docker/volumes/pqsez6mkr14y0bnlhmcdmikg_wnba-data/_data`
+```bash
+python scripts/live_backend.py host-runtime-info
+source scripts/live_env.sh
+python scripts/live_backend.py doctor
+```
+
+On a VM with multiple WNBA-related files present, distinguish them explicitly:
+
+- repo-local `data/wnba.sqlite`: local validation only
+- host `/data/wnba.sqlite`: not authoritative unless `host-runtime-info` resolves to it
+- live mounted-volume `wnba.sqlite`: the DB behind the active backend container
 
 Do not make repo-local `data/*.sqlite` the default for new training flows.
 Repo-local SQLite files are only for temporary local validation.
