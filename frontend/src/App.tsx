@@ -3542,7 +3542,6 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
       }));
   const h2hOwner = h2hMatchupOwner(h2hRows, matchup);
   const h2hSummary = summarizeCoversTeamRows(h2hRows);
-  const h2hGraphic = buildH2HGraphic(h2hRows, matchup);
   if (!h2hRows.length && !awayRows.length && !homeRows.length) {
     return null;
   }
@@ -3554,32 +3553,6 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         <strong className="owner-team">{h2hOwner.owner}</strong>
         <span className="owner-record">{h2hOwner.record}</span>
         <span className="owner-record">H2H O/U {h2hSummary?.ou ?? "N/A"}</span>
-      </div>
-      <div className="covers-records-list h2h-graphic-card">
-        <h4>H2H Graphic</h4>
-        <div className="h2h-graphic">
-          <div className="h2h-scoreboard">
-            <div className="h2h-team">
-              <span>{matchup.away_team}</span>
-              <strong>{h2hGraphic.awayWins}</strong>
-            </div>
-            <div className="h2h-scoreboard-divider">Wins</div>
-            <div className="h2h-team">
-              <span>{matchup.home_team}</span>
-              <strong>{h2hGraphic.homeWins}</strong>
-            </div>
-          </div>
-          <div className="h2h-bar-track" aria-hidden="true">
-            <div className="h2h-bar-away" style={{ width: `${h2hGraphic.awayShare}%` }} />
-            <div className="h2h-bar-home" style={{ width: `${h2hGraphic.homeShare}%` }} />
-          </div>
-          <div className="h2h-meta-row">
-            <span>Meetings {h2hGraphic.meetings}</span>
-            <span>Over {h2hGraphic.overs}</span>
-            <span>Under {h2hGraphic.unders}</span>
-            <span>Push {h2hGraphic.pushes}</span>
-          </div>
-        </div>
       </div>
       <div className="covers-records-list">
         <h4>H2H Last 10</h4>
@@ -3767,39 +3740,6 @@ function h2hMatchupOwner(rows: CoversRecordRow[], matchup: Matchup): { owner: st
     return { owner: matchup.home_team, record: `${homeWins}-${awayWins} in last ${rows.length}` };
   }
   return { owner: matchup.away_team, record: `${awayWins}-${homeWins} in last ${rows.length}` };
-}
-
-function buildH2HGraphic(rows: CoversRecordRow[], matchup: Matchup) {
-  const awayCode = normalizeTeamCode(matchup.away_team);
-  const homeCode = normalizeTeamCode(matchup.home_team);
-  let awayWins = 0;
-  let homeWins = 0;
-  let overs = 0;
-  let unders = 0;
-  let pushes = 0;
-  for (const row of rows) {
-    const winner = normalizeTeamCode(row.winner);
-    if (winner === awayCode) {
-      awayWins += 1;
-    } else if (winner === homeCode) {
-      homeWins += 1;
-    }
-    const ouToken = (row.total ?? "").trim().charAt(0).toLowerCase();
-    if (ouToken === "o") overs += 1;
-    else if (ouToken === "u") unders += 1;
-    else if (ouToken === "p") pushes += 1;
-  }
-  const decidedMeetings = Math.max(awayWins + homeWins, 1);
-  return {
-    awayWins,
-    homeWins,
-    overs,
-    unders,
-    pushes,
-    meetings: rows.length,
-    awayShare: (awayWins / decidedMeetings) * 100,
-    homeShare: (homeWins / decidedMeetings) * 100,
-  };
 }
 
 function coversRecordOpponent(row: CoversRecordRow, mode: "h2h" | "team", matchup?: Matchup) {
