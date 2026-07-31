@@ -8320,13 +8320,11 @@ def test_game_projection_applies_total_residual_adjustment() -> None:
     assert "residual blend" in adjusted["game_reason"].lower()
 
 
-def test_game_projection_total_market_uses_predecision_edge(monkeypatch) -> None:
+def test_game_projection_total_pick_matches_displayed_projection(monkeypatch) -> None:
     load_test_history()
 
-    captured: dict[str, float] = {}
-
     def fake_project_team_points(*args, **kwargs) -> float:
-        return 80.0 if kwargs.get("is_home") else 70.0
+        return 85.0 if kwargs.get("is_home") else 80.0
 
     def fake_calibrate_total_projection(conn, projected_total: float, game_total: float | None) -> float:
         return projected_total + 5.0
@@ -8334,10 +8332,8 @@ def test_game_projection_total_market_uses_predecision_edge(monkeypatch) -> None
     def fake_apply_game_total_residual(conn, projected_total: float, game_total: float, rest_days_home: int, rest_days_away: int):
         return projected_total + 7.0, "test total residual"
 
-    def fake_predict_market_total_edge(conn, direct_features, baseline_edge: float, game_total: float):
-        captured["baseline_edge"] = baseline_edge
-        captured["game_total"] = game_total
-        return SimpleNamespace(rows=200, edge=baseline_edge, weight=0.5)
+    def fake_predict_market_total_edge(*args, **kwargs):
+        raise AssertionError("the separate market model must not override the displayed total")
 
     monkeypatch.setattr("backend.app.game_predictions._project_team_points", fake_project_team_points)
     monkeypatch.setattr("backend.app.game_predictions._calibrate_total_projection", fake_calibrate_total_projection)
@@ -8359,9 +8355,9 @@ def test_game_projection_total_market_uses_predecision_edge(monkeypatch) -> None
         ).fetchone()
         result = project_game(conn, game)
 
-    assert result["projected_total"] == 162.0
-    assert captured["game_total"] == 164.5
-    assert captured["baseline_edge"] == pytest.approx(150.0 - 164.5)
+    assert result["projected_total"] == 176.4
+    assert result["total_edge"] == 11.9
+    assert result["total_pick"] == "Over"
 
 
 def test_evaluate_game_residual_models_reports_baseline_and_blended_metrics() -> None:

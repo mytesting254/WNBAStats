@@ -325,14 +325,11 @@ def project_game(
     total_edge = None
     total_pick = "N/A"
     if game_total is not None:
-        # Keep the O/U decision model aligned with the feature definition used
-        # in training: a pre-decision total edge against the market total.
-        decision_input_edge = projected_total - game_total
+        # The public O/U recommendation must describe the projected total shown
+        # alongside it. A separate market-edge model can disagree with the score
+        # projection, which previously produced contradictory labels such as
+        # "Under 180.1" against a 177.5 total.
         total_edge = adjusted_total - game_total
-        market_total_edge = _predict_market_total_edge(conn, direct_features, decision_input_edge, game_total)
-        if market_total_edge is not None:
-            total_edge = market_total_edge.edge
-            residual_notes.append(f"trained O/U decision blend {market_total_edge.weight:.0%} ({market_total_edge.rows} rows)")
         total_pick = "Over" if total_edge > 0 else "Under"
 
     winner = game["home_team"] if adjusted_margin >= 0 else game["away_team"]
