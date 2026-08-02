@@ -639,6 +639,27 @@ Historical game-market backfill now has two paths:
 - Covers backfill is useful when archived matchup pages still expose visible pregame spread/total context.
 - The Odds API backfill is the preferred bulk repair path for completed game markets because it can backfill spreads, totals, moneylines, and market prices in one pass and keep a dated raw cache for replay/audit.
 
+For spread/total-only repairs that should not fetch player-prop pages or consume Odds API credits, use the focused Covers matchup-page backfill:
+
+```bash
+PYTHONPATH=. .venv/bin/python scripts/backfill_covers_game_lines.py \
+  --db-path /data/wnba.sqlite \
+  --start-date 2024-05-01 \
+  --end-date 2024-10-31 \
+  --workers 6 \
+  --all-final-dates
+```
+
+Without `--all-final-dates`, the script repairs only missing final games that already have model prop lines. With the flag, it also repairs games that contribute player/minutes training rows but have no historical prop offer. It fetches only Covers matchup pages, updates canonical `games` market fields, and does not create sportsbook prop rows. Recompute team ATS results and rerun prop settlement after a live repair so `team_game_results` and `settled_props.team_spread` remain aligned.
+
+The live market-context repair completed on `2026-08-02` without paid API calls:
+
+- all regular-season 2024 and 2025 final games now have spread and total context
+- all games with historical prop lines have spreads
+- all `4,748` settled 2024 props and all `6,811` settled 2025 props have `team_spread`
+- the only deliberately unresolved rows are 10 2024 preseason games, two 2025 preseason games, and the 2025 All-Star game
+- pre-repair and intermediate safety snapshots were written before mutating the mounted runtime database
+
 On app load, Covers records shown in matchups are read from `data/cache/covers_props_raw.json` only when `cache_date` matches the current local date. If the cache date is stale, that cache file is deleted and Covers records are not displayed until a fresh Covers import runs.
 
 Covers team abbreviations can differ from the app's canonical team codes. The importer normalizes those provider-only codes before reading game lines, including Phoenix `PHO`, Portland `PDX`, and Washington `WAS`.
@@ -1197,6 +1218,21 @@ adaptive-context-v11-ratings-context
 Each training action saves both runs to `model_runs` with rows, markets, MAE, RMSE, bias, and directional accuracy. Learned-run payloads now also include game residual evaluation rows (`game_ats`, `game_total`, and `game_overall`) with both baseline and blended metrics so saved game predictions can be compared before and after the residual layer. The Model Lab now shows those game residual deltas directly alongside the existing player-market training tables. The comparison table shows the latest run for each model version side by side.
 
 Learned player, minutes, residual, and game-model training defaults to a rolling previous-season window: January 1 of the prior Eastern calendar year through the latest ingested history. For example, 2026 runs train on rows dated `2025-01-01` or later. Set `WNBA_TRAINING_START_DATE=YYYY-MM-DD` for a one-off override. The resolved training start date is part of the model cache key and `model_runs` data signature, so changing the window cannot reuse stale cached models or stale Model Lab results.
+
+In-place game-market repairs also participate in player-model invalidation. The model fingerprint includes populated-row counts and aggregate values for both `games.spread_home` and `games.game_total`, so a spread/total repair rebuilds derived training examples instead of silently reusing examples generated while that context was missing.
+
+Historical-window audit completed on `2026-08-02` after repairing regular-season 2024-2025 market context. Two isolated, freshly derived runs used the same repaired production snapshot and compared their common 2026 holdout:
+
+| Layer | 2025-2026 window | 2024-2026 window | Expanded-window change |
+| --- | ---: | ---: | ---: |
+| Raw MAE | `3.234` | `3.238` | `+0.004` worse |
+| Raw directional accuracy | `56.3%` | `56.0%` | `-0.3 pp` |
+| Line-aware final MAE | `3.950` | `3.970` | `+0.020` worse |
+| Line-aware final directional accuracy | `55.8%` | `55.0%` | `-0.8 pp` |
+| Market-residual MAE | `3.917` | `3.872` | `-0.045` better |
+| Market-residual directional accuracy | `52.7%` | `54.8%` | `+2.1 pp` |
+
+The repaired default run evaluated `81,059` rows; the expanded run evaluated `126,665`. The wider window clearly helped the residual layer, but it slightly reduced the quality of the actual final line-aware output. Production therefore remains on the rolling 2025-2026 window. Do not buy/import 2023 prop history solely to widen the global window until a residual-only or recency-weighted experiment demonstrates an improvement in final 2026 holdout metrics.
 
 PowerShell local/server workflow:
 

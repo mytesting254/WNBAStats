@@ -242,8 +242,10 @@ Current source docs:
 
 Pending work:
 
-- confirm whether older pre-2025 seasons can be imported cleanly enough for safe training use
-- re-audit final settled-prop counts by season after all historical imports settle
+- keep the production training start at `2025-01-01`; the repaired 2024-2026 window slightly worsened final 2026 MAE and directional accuracy even though the residual layer improved
+- evaluate a residual-only 2024 window and/or nonzero recency weighting before spending Odds API credits on 2023 props
+- keep the completed 2024-2025 market-context repair healthy: all regular-season games and all prop games have spreads, while only preseason/All-Star rows remain intentionally unresolved
+- re-audit final settled-prop counts after future historical imports; the `2026-08-02` audit confirmed `4,748/4,748` 2024 and `6,811/6,811` 2025 settlements have `team_spread`
 - run a fresh settled-accuracy review on the current branch state
 - decide whether to restore more of the deeper older evaluation/reporting tooling
 - keep validating that curated signatures actually invalidate stale cached runs when feature/data shape changes

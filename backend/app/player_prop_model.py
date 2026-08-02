@@ -4519,7 +4519,14 @@ def _model_fingerprint(conn: sqlite3.Connection) -> str:
         _table_signature(
             conn,
             "games",
-            "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, COALESCE(MAX(game_date), '') AS max_game_date",
+            (
+                "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, "
+                "COALESCE(MAX(game_date), '') AS max_game_date, "
+                "SUM(CASE WHEN spread_home IS NOT NULL THEN 1 ELSE 0 END) AS spread_rows, "
+                "ROUND(COALESCE(SUM(spread_home), 0), 3) AS spread_sum, "
+                "SUM(CASE WHEN game_total IS NOT NULL THEN 1 ELSE 0 END) AS total_rows, "
+                "ROUND(COALESCE(SUM(game_total), 0), 3) AS total_sum"
+            ),
         ),
         _table_signature(
             conn,

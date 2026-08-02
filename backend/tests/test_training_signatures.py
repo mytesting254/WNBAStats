@@ -94,6 +94,19 @@ def test_player_model_fingerprint_changes_after_team_boxscore_ingest() -> None:
     assert second != first
 
 
+def test_player_model_fingerprint_changes_after_game_market_repair() -> None:
+    with connect() as conn:
+        _seed_final_game(conn)
+        first = player_prop_model_module._model_fingerprint(conn)
+        conn.execute(
+            "UPDATE games SET spread_home = ?, game_total = ? WHERE id = ?",
+            (-5.5, 168.5, 1001),
+        )
+        second = player_prop_model_module._model_fingerprint(conn)
+
+    assert second != first
+
+
 def _seed_final_game(conn) -> None:
     conn.execute(
         """
