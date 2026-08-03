@@ -787,22 +787,27 @@ def _game_context(conn: sqlite3.Connection, player_id: int, game_id: int | None)
             g.rest_days_away,
             g.spread_home,
             g.game_total,
-            COALESCE(
-                (
-                    SELECT h.team_id
-                    FROM player_team_history h
-                    LEFT JOIN games hg ON hg.id = h.game_id
-                    WHERE h.player_id = p.id
-                      AND (
-                        h.game_id IS NULL
-                        OR hg.game_date IS NULL
-                        OR hg.game_date <= g.game_date
-                      )
-                    ORDER BY hg.game_date DESC, h.id DESC
-                    LIMIT 1
-                ),
-                p.team_id
-            ) AS resolved_team_id
+            CASE
+                WHEN lower(COALESCE(g.status, 'scheduled')) != 'final'
+                     AND p.team_id IN (g.home_team_id, g.away_team_id)
+                THEN p.team_id
+                ELSE COALESCE(
+                    (
+                        SELECT h.team_id
+                        FROM player_team_history h
+                        LEFT JOIN games hg ON hg.id = h.game_id
+                        WHERE h.player_id = p.id
+                          AND (
+                            h.game_id IS NULL
+                            OR hg.game_date IS NULL
+                            OR hg.game_date <= g.game_date
+                          )
+                        ORDER BY hg.game_date DESC, h.id DESC
+                        LIMIT 1
+                    ),
+                    p.team_id
+                )
+            END AS resolved_team_id
         FROM players p
         JOIN games g ON g.id = ?
         WHERE p.id = ?

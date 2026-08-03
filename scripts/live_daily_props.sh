@@ -12,7 +12,7 @@ ODDS_API_KEY_VALUE="${ODDS_API_KEY:-${THE_ODDS_API_KEY:-}}"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/live_daily_props.sh refresh-results|prune-specials|settle|train-model|settle-and-train|odds-if-matchups
+Usage: scripts/live_daily_props.sh refresh-rosters|refresh-results|prune-specials|settle|train-model|settle-and-train|odds-if-matchups
 
 Environment:
   WNBA_API_BASE  Backend base URL. Default: http://127.0.0.1:8010
@@ -196,6 +196,16 @@ run_settle() {
   echo
 }
 
+run_refresh_rosters() {
+  require_api_key_for_prod_hint
+  echo "[$(timestamp)] refreshing cached ESPN team rosters"
+  if ! api_post "/api/roster/import/espn"; then
+    echo
+    return 1
+  fi
+  echo
+}
+
 run_refresh_completed_results() {
   require_api_key_for_prod_hint
   # ESPN occasionally publishes a final score or box score later than the next
@@ -236,6 +246,9 @@ run_train_model() {
 
 run_settle_and_train() {
   run_refresh_completed_results
+  if ! run_refresh_rosters; then
+    echo "[$(timestamp)] ESPN roster refresh failed; continuing with the last saved assignments" >&2
+  fi
   run_prune_specials
   run_settle
   run_train_model
@@ -266,6 +279,9 @@ main() {
   fi
 
   case "${1:-}" in
+    refresh-rosters)
+      run_refresh_rosters
+      ;;
     refresh-results)
       run_refresh_completed_results
       ;;

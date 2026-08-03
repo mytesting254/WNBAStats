@@ -20,6 +20,7 @@ from starlette.requests import Request
 from backend.app import covers_import as covers_import_module
 from backend.app import cache as cache_module
 from backend.app import espn_history as espn_history_module
+from backend.app import espn_roster as espn_roster_module
 from backend.app import game_training_db as game_training_db_module
 from backend.app import minutes_training_db as minutes_training_db_module
 from backend.app import odds_import as odds_import_module
@@ -120,6 +121,75 @@ def test_training_start_date_defaults_to_previous_eastern_year(monkeypatch) -> N
     monkeypatch.delenv("WNBA_TRAINING_START_DATE", raising=False)
 
     assert player_prop_model_module._training_start_date(date(2026, 7, 5)) == "2025-01-01"
+
+
+def test_espn_roster_sync_moves_player_and_scheduled_projection_uses_new_team(monkeypatch) -> None:
+    def fake_fetch(team_abbreviation: str) -> dict:
+        athletes = []
+        if team_abbreviation == "TOR":
+            athletes = [
+                {
+                    "id": "4684384",
+                    "fullName": "Aneesah Morrow",
+                    "position": {"abbreviation": "F"},
+                    "status": {"type": "active"},
+                }
+            ]
+        return {"athletes": athletes}
+
+    monkeypatch.setattr(espn_roster_module, "fetch_espn_team_roster", fake_fetch)
+    with connect() as conn:
+        team_ids = {
+            str(row["abbreviation"]): int(row["id"])
+            for row in conn.execute("SELECT id, abbreviation FROM teams").fetchall()
+        }
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (4684384, "Aneesah Morrow", team_ids["CON"], "F", "starter"),
+        )
+        conn.execute(
+            """
+            INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status)
+            VALUES (9001, '2026-07-30', '2026-07-30T23:00:00Z', ?, ?, 'final')
+            """,
+            (team_ids["CON"], team_ids["ATL"]),
+        )
+        conn.execute(
+            """
+            INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at)
+            VALUES (4684384, ?, 9001, 'espn_boxscore', 0.95, '2026-07-31T00:00:00Z')
+            """,
+            (team_ids["CON"],),
+        )
+        conn.execute(
+            """
+            INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status)
+            VALUES (9002, '2026-08-04', '2026-08-04T23:00:00Z', ?, ?, 'scheduled')
+            """,
+            (team_ids["TOR"], team_ids["NY"]),
+        )
+        conn.commit()
+
+        result = espn_roster_module.sync_espn_rosters(conn)
+        player = conn.execute("SELECT team_id, rotation_role FROM players WHERE id = 4684384").fetchone()
+        current_history = conn.execute(
+            """
+            SELECT team_id FROM player_team_history
+            WHERE player_id = 4684384 AND game_id IS NULL AND source = 'espn_roster_current'
+            """
+        ).fetchone()
+        context = projections_module._game_context(conn, 4684384, 9002)
+
+        assert int(player["team_id"]) == team_ids["TOR"]
+        assert player["rotation_role"] == "starter"
+        assert int(current_history["team_id"]) == team_ids["TOR"]
+        assert result["moved_players"][0]["from_team_id"] == team_ids["CON"]
+        assert context["team_id"] == team_ids["TOR"]
+        assert context["opponent_id"] == team_ids["NY"]
+
+        unchanged = espn_roster_module.sync_espn_rosters(conn)
+        assert unchanged["changed_player_ids"] == []
+        assert unchanged["moved_players"] == []
 
 
 def test_training_start_date_uses_valid_override(monkeypatch) -> None:

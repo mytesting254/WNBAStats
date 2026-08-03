@@ -701,6 +701,40 @@ GET /api/roster
 
 `/api/roster` reads the Rotowire lineup pull/cache rows and returns `team`, `player_name`, `status`, and `captured_at` so team tabs can render current lineup status even when ESPN player IDs are not yet present.
 
+Current player/team assignments are synchronized separately from ESPN by the
+overnight cron flow:
+
+```text
+POST /api/roster/import/espn
+```
+
+That protected mutation queries each WNBA team once, updates
+`players.team_id`, records changed assignments as `espn_roster_current`
+observations in `player_team_history`, and writes
+`data/cache/espn_wnba_rosters_current.json`. Normal `GET /api/roster` requests
+remain cache/database reads and never call ESPN. The 2am ET
+`settle-and-train` cron flow invokes this roster sync immediately after
+importing completed results, ensuring the current roster assignment wins over
+the player's last completed box score and is available before settlement and
+training.
+
+If a manual ESPN roster sync changes assignments after the current slate has
+already been projected, rebuild the slate once after the sync:
+
+```text
+POST /api/props/repair-current-slate
+```
+
+Do not delete or settle those predictions manually. The repair replaces the
+scheduled projections while preserving their sportsbook lines. Model retraining
+is not required for a roster-only change. The normal 3am ET odds refresh also
+rebuilds the current slate when same-day WNBA events are available.
+
+The roster sync is resilient to provider outages: a complete ESPN failure
+leaves the last successful database assignments and snapshot in place, and the
+overnight settlement/training flow continues. A partial response updates the
+successful teams and retains cached snapshot rows for failed teams.
+
 Roster enrichment still attempts to match those provider names back to local player profiles for `position`, `rotation_role`, and impact metrics. Team normalization is shared with ESPN imports, and player matching now tolerates abbreviated first names plus accent/punctuation differences so provider naming drift is less likely to produce `N/A` roster metadata.
 
 Important failure mode: if the live Rotowire fetch fails, the importer falls back to the last saved raw lineup cache when one exists. That keeps the roster endpoint non-fatal, but it also means the roster tab can show stale provider data even when the API read cache itself is fresh. The roster UI now warns when the latest Rotowire timestamp predates today or when today's matchup teams are missing from the roster feed.

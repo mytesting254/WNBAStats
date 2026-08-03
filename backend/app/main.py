@@ -36,6 +36,7 @@ from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, import_covers_props
 from .db import connect, init_db, sqlite_write_lock, using_turso
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
+from .espn_roster import sync_espn_rosters
 from .game_prediction_tracking import save_game_prediction, save_game_predictions, settle_completed_game_predictions
 from .game_predictions import _GamePredictionCache, _team_injury_impact, project_game
 from .odds_import import (
@@ -5946,6 +5947,22 @@ def _import_rotowire_injuries_impl(*, request: Request | None, force_refresh: bo
         }
     )
     result["predictions"] = 0
+    return result
+
+
+@app.post("/api/roster/import/espn", dependencies=[Depends(_protect_mutation)])
+def import_espn_rosters(request: Request) -> dict[str, Any]:
+    return _run_audited_mutation(request, "roster.espn.import", _import_espn_rosters_impl)
+
+
+def _import_espn_rosters_impl() -> dict[str, Any]:
+    with connect() as conn:
+        result = sync_espn_rosters(conn)
+        result["affected_game_ids"] = _scheduled_game_ids_for_teams(
+            conn,
+            result.get("changed_team_ids", []),
+        )
+    _invalidate_read_caches()
     return result
 
 
