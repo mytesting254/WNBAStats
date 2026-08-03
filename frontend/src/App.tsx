@@ -2967,7 +2967,6 @@ function renderH2HFormWithMinutes(
   }
   return (
     <div className="prop-l5-strip prop-h2h-strip" aria-label={`Last head-to-head results against ${prop.h2h_opponent ?? "opponent"} and minutes`}>
-      <span className="prop-l5-label">vs {prop.h2h_opponent ?? "OPP"}</span>
       {prop.h2h_values.slice(0, 5).map((value, idx) => {
         const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
         return (

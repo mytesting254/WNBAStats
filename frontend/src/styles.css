@@ -729,8 +729,14 @@ th,
 td {
   padding: 14px 18px;
   border-bottom: 1px solid #eaecf0;
+  border-right: 1px solid rgba(130, 157, 183, 0.14);
   text-align: left;
   white-space: nowrap;
+}
+
+th:last-child,
+td:last-child {
+  border-right: 0;
 }
 
 th {
