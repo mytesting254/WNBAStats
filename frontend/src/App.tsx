@@ -2850,7 +2850,6 @@ function PropsView({
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
-                        <span>{prop.team}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-l5`)}
                       </div>
                     </div>
@@ -4297,7 +4296,6 @@ function WatchlistView({
                           <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                           <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
-                        <span>{prop.team}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-watch-l5`)}
                           </div>
                         </div>
@@ -4724,7 +4722,7 @@ function SpecialStocksView({
                             />
                             <div>
                               <PlayerLabel name={snapshot.player_name} position={snapshot.position} />
-                              <span>{`${snapshot.team ?? "—"} | ${snapshot.data_quality === "model_only" ? "Model only" : snapshot.data_quality}`}</span>
+                              <span>{snapshot.data_quality === "model_only" ? "Model only" : snapshot.data_quality}</span>
                               {renderRecentOutcomesWithMinutes(snapshot, `special-${snapshot.id}`)}
                             </div>
                           </div>
@@ -5027,7 +5025,6 @@ function MatchupProps({
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
                       <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
-                        <span>{prop.team}</span>
                         {renderRecentFormWithMinutes(prop, `${prop.id}-matchup-l5`)}
                       </div>
                     </div>
