@@ -7601,6 +7601,15 @@ def _value_board_payload(
             game_id=int(item["game_id"]),
             limit=5,
         )
+        h2h_history = _recent_h2h_market_history(
+            conn,
+            player_id=int(item["player_id"]),
+            market=str(item["market"]),
+            game_id=int(item["game_id"]),
+            resolved_team_id=int(item["resolved_team_id"]),
+            limit=5,
+        )
+        item.update(h2h_history)
         item["increased_role"] = _has_increased_role(reason=item.get("reason"))
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))
         fallback_payload.append(item)
@@ -7655,6 +7664,85 @@ def _recent_minutes_played(conn, *, player_id: int, game_id: int, limit: int = 5
         (int(game_id), int(player_id), int(limit)),
     ).fetchall()
     return [round(float(row["minutes"] or 0.0), 1) for row in rows]
+
+
+def _recent_h2h_market_history(
+    conn,
+    *,
+    player_id: int,
+    market: str,
+    game_id: int,
+    resolved_team_id: int,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """Return the player's prior market results against the target opponent."""
+    opponent = conn.execute(
+        """
+        SELECT
+            CASE WHEN g.home_team_id = ? THEN g.away_team_id ELSE g.home_team_id END AS opponent_id,
+            CASE WHEN g.home_team_id = ? THEN away.abbreviation ELSE home.abbreviation END AS opponent
+        FROM games g
+        JOIN teams home ON home.id = g.home_team_id
+        JOIN teams away ON away.id = g.away_team_id
+        WHERE g.id = ?
+          AND ? IN (g.home_team_id, g.away_team_id)
+        """,
+        (int(resolved_team_id), int(resolved_team_id), int(game_id), int(resolved_team_id)),
+    ).fetchone()
+    if opponent is None:
+        return {"h2h_opponent": None, "h2h_values": [], "h2h_minutes": []}
+
+    rows = conn.execute(
+        """
+        SELECT
+            s.points,
+            s.rebounds,
+            s.assists,
+            s.threes,
+            s.steals,
+            s.blocks,
+            s.minutes
+        FROM player_game_stats s
+        JOIN games g ON g.id = s.game_id
+        JOIN games target ON target.id = ?
+        WHERE s.player_id = ?
+          AND (g.game_date < target.game_date OR (g.game_date = target.game_date AND s.game_id < target.id))
+          AND ? IN (g.home_team_id, g.away_team_id)
+          AND COALESCE(
+              (
+                  SELECT h.team_id
+                  FROM player_team_history h
+                  WHERE h.player_id = s.player_id AND h.game_id = s.game_id
+                  ORDER BY h.confidence DESC, h.id DESC
+                  LIMIT 1
+              ),
+              ?
+          ) != ?
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT ?
+        """,
+        (
+            int(game_id),
+            int(player_id),
+            int(opponent["opponent_id"]),
+            int(resolved_team_id),
+            int(opponent["opponent_id"]),
+            int(limit),
+        ),
+    ).fetchall()
+    values: list[float] = []
+    minutes: list[float] = []
+    for row in rows:
+        value = _market_value_from_stats_row(row, market)
+        if value is None:
+            continue
+        values.append(round(float(value), 1))
+        minutes.append(round(float(row["minutes"] or 0.0), 1))
+    return {
+        "h2h_opponent": str(opponent["opponent"]),
+        "h2h_values": values,
+        "h2h_minutes": minutes,
+    }
 
 
 def _special_target_pair_params(pairs: list[tuple[int, int]]) -> tuple[str, tuple[int, ...]]:
@@ -8096,6 +8184,16 @@ def _watchlist_payload(conn, min_ev: float = 0.02, min_edge: float = 0.05, limit
             player_id=int(item["player_id"]),
             game_id=int(item["game_id"]),
             limit=5,
+        )
+        item.update(
+            _recent_h2h_market_history(
+                conn,
+                player_id=int(item["player_id"]),
+                market=str(item["market"]),
+                game_id=int(item["game_id"]),
+                resolved_team_id=int(item["resolved_team_id"]),
+                limit=5,
+            )
         )
         item["increased_role"] = _has_increased_role(reason=item.get("reason"))
         item.update(_blowout_display(item["team_spread"], item["rotation_role"]))

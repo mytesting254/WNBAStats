@@ -2832,6 +2832,7 @@ function PropsView({
             <thead>
               <tr>
                 <th>Player</th>
+                <th>Line H2H</th>
                 <th>Market</th>
                 <th className="props-best-col">Best</th>
                 <th>Side</th>
@@ -2854,6 +2855,7 @@ function PropsView({
                       </div>
                     </div>
                   </td>
+                  <td>{renderH2HFormWithMinutes(prop, `${prop.id}-h2h`)}</td>
                   <td>{marketLabel(prop.market)}</td>
                   <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(prop)} className="compact props-best-logo" /></td>
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
@@ -2947,6 +2949,42 @@ function renderRecentFormWithMinutes(
               className="min-chip"
               title={`Minutes played: ${minutes.toFixed(1)}`}
             >
+              {minutes.toFixed(1)}
+            </span>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function renderH2HFormWithMinutes(
+  prop: Pick<ValueProp, "id" | "h2h_opponent" | "h2h_values" | "h2h_minutes" | "recommended_side" | "line">,
+  keyPrefix: string
+) {
+  if (!Array.isArray(prop.h2h_values) || prop.h2h_values.length === 0) {
+    return <span className="empty-inline">No H2H</span>;
+  }
+  return (
+    <div className="prop-l5-strip prop-h2h-strip" aria-label={`Last head-to-head results against ${prop.h2h_opponent ?? "opponent"} and minutes`}>
+      <span className="prop-l5-label">vs {prop.h2h_opponent ?? "OPP"}</span>
+      {prop.h2h_values.slice(0, 5).map((value, idx) => {
+        const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
+        return (
+          <span
+            key={`${keyPrefix}-${idx}`}
+            className={hit ? "hit" : "miss"}
+            title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
+          >
+            {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+          </span>
+        );
+      })}
+      {Array.isArray(prop.h2h_minutes) && prop.h2h_minutes.length > 0 && (
+        <>
+          <span className="l5-separator" title="Head-to-head minutes distribution">|</span>
+          {prop.h2h_minutes.slice(0, 5).map((minutes, idx) => (
+            <span key={`${keyPrefix}-min-${idx}`} className="min-chip" title={`Minutes played: ${minutes.toFixed(1)}`}>
               {minutes.toFixed(1)}
             </span>
           ))}
@@ -3116,6 +3154,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
             <thead>
               <tr>
                 <th>Player</th>
+                <th>Line H2H</th>
                 <th>Pick</th>
                 <th className="props-best-col">Best</th>
                 <th>Edge</th>
@@ -3135,6 +3174,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                     <span>{g.team} | {marketLabel(g.market)}</span>
                     {renderRecentFormWithMinutes(g, `${g.id}-gem-flat-l5`)}
                   </td>
+                  <td>{renderH2HFormWithMinutes(g, `${g.id}-gem-flat-h2h`)}</td>
                   <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
                   <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(g)} className="compact props-best-logo" /></td>
                   <td>{formatPercent(g.edge)}</td>
@@ -3154,7 +3194,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
               ))}
               {!shown.length && (
                 <tr>
-                  <td colSpan={10}>No gems pass the {preset} preset right now.</td>
+                  <td colSpan={11}>No gems pass the {preset} preset right now.</td>
                 </tr>
               )}
             </tbody>
@@ -3206,6 +3246,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                     <thead>
                       <tr>
                         <th>Player</th>
+                        <th>Line H2H</th>
                         <th>Pick</th>
                         <th className="props-best-col">Best</th>
                         <th>Edge</th>
@@ -3222,6 +3263,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                             <span>{g.team} | {marketLabel(g.market)}</span>
                             {renderRecentFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-l5`)}
                           </td>
+                          <td>{renderH2HFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-h2h`)}</td>
                           <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
                           <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(g)} className="compact props-best-logo" /></td>
                           <td>{formatPercent(g.edge)}</td>
@@ -4235,6 +4277,7 @@ function WatchlistView({
                 <thead>
                   <tr>
                     <th>Player</th>
+                    <th>Line H2H</th>
                     <th>Market</th>
                     <th>Side</th>
                     <th className="props-best-col">Best</th>
@@ -4260,6 +4303,7 @@ function WatchlistView({
                           </div>
                         </div>
                       </td>
+                      <td>{renderH2HFormWithMinutes(prop, `${prop.id}-watch-h2h`)}</td>
                       <td>{marketLabel(prop.market)}</td>
                       <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
                       <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(prop)} className="compact props-best-logo" /></td>
@@ -4274,7 +4318,7 @@ function WatchlistView({
                   ))}
                   {!filtered.length && (
                     <tr>
-                      <td colSpan={11}>No watchlist props match current filters.</td>
+                      <td colSpan={12}>No watchlist props match current filters.</td>
                     </tr>
                   )}
                 </tbody>
@@ -4963,6 +5007,7 @@ function MatchupProps({
             <thead>
               <tr>
                 <th>Player</th>
+                <th>Line H2H</th>
                 <th>Market</th>
                 <th>Side</th>
                 <th className="props-best-col">Best</th>
@@ -4988,6 +5033,7 @@ function MatchupProps({
                       </div>
                     </div>
                   </td>
+                  <td>{renderH2HFormWithMinutes(prop, `${prop.id}-matchup-h2h`)}</td>
                   <td>{marketLabel(prop.market)}</td>
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
                   <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(prop)} className="compact props-best-logo" /></td>
@@ -5002,7 +5048,7 @@ function MatchupProps({
               ))}
               {!visibleProps.length && (
                 <tr>
-                  <td colSpan={11}>No modeled parlay candidates match these filters.</td>
+                  <td colSpan={12}>No modeled parlay candidates match these filters.</td>
                 </tr>
               )}
             </tbody>

@@ -123,6 +123,68 @@ def test_training_start_date_defaults_to_previous_eastern_year(monkeypatch) -> N
     assert player_prop_model_module._training_start_date(date(2026, 7, 5)) == "2025-01-01"
 
 
+def test_recent_h2h_market_history_returns_only_games_against_target_opponent() -> None:
+    with connect() as conn:
+        team_ids = {
+            abbreviation: int(conn.execute("SELECT id FROM teams WHERE abbreviation = ?", (abbreviation,)).fetchone()["id"])
+            for abbreviation in ("ATL", "NY", "CHI", "LA", "CON")
+        }
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position) VALUES (90001, 'H2H Player', ?, 'G')",
+            (team_ids["ATL"],),
+        )
+        games = [
+            (90001, "2026-05-01", team_ids["ATL"], team_ids["NY"]),
+            (90002, "2026-05-10", team_ids["CHI"], team_ids["NY"]),
+            (90003, "2026-05-20", team_ids["ATL"], team_ids["CON"]),
+            (90004, "2026-05-30", team_ids["NY"], team_ids["LA"]),
+            (90005, "2026-08-03", team_ids["ATL"], team_ids["NY"]),
+        ]
+        conn.executemany(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status) VALUES (?, ?, ?, ?, ?, 'final')",
+            [(game_id, game_date, f"{game_date}T19:00:00Z", home_id, away_id) for game_id, game_date, home_id, away_id in games],
+        )
+        history_teams = {
+            90001: team_ids["ATL"],
+            90002: team_ids["CHI"],
+            90003: team_ids["ATL"],
+            90004: team_ids["NY"],
+        }
+        conn.executemany(
+            "INSERT INTO player_team_history (player_id, team_id, game_id, source, confidence, observed_at) VALUES (90001, ?, ?, 'test', 1.0, '2026-08-03T00:00:00Z')",
+            [(team_id, game_id) for game_id, team_id in history_teams.items()],
+        )
+        stats = {
+            90001: (18, 31.5),
+            90002: (24, 33.0),
+            90003: (40, 35.0),
+            90004: (50, 36.0),
+        }
+        conn.executemany(
+            """
+            INSERT INTO player_game_stats (
+                player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers
+            ) VALUES (90001, ?, ?, ?, 0, 0, 0, 0, 0, 0)
+            """,
+            [(game_id, minutes, points) for game_id, (points, minutes) in stats.items()],
+        )
+
+        history = main_module._recent_h2h_market_history(
+            conn,
+            player_id=90001,
+            market="points",
+            game_id=90005,
+            resolved_team_id=team_ids["ATL"],
+            limit=5,
+        )
+
+    assert history == {
+        "h2h_opponent": "NY",
+        "h2h_values": [24.0, 18.0],
+        "h2h_minutes": [33.0, 31.5],
+    }
+
+
 def test_espn_roster_sync_moves_player_and_scheduled_projection_uses_new_team(monkeypatch) -> None:
     def fake_fetch(team_abbreviation: str) -> dict:
         athletes = []

@@ -343,11 +343,11 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 
 ## App Tabs
 
-- `Pregame Props`: ranked prop predictions with projection, line, model probability, edge, EV, and confidence.
-- `Gems`: ranked high-value props combining model edge, EV, and discrepancy signals with conservative/balanced/aggressive presets, optional matchup grouping, and per-matchup caps.
-- `Watchlist`: low-confidence props that still clear minimum EV/edge thresholds for optional tracking. If one matchup drops out after settlement, the view automatically falls forward to the next remaining game tab instead of staying pinned to the removed game.
+- `Pregame Props`: ranked prop predictions with projection, line, model probability, edge, EV, confidence, and recent opponent history.
+- `Gems`: ranked high-value props combining model edge, EV, and discrepancy signals with conservative/balanced/aggressive presets, optional matchup grouping, per-matchup caps, and recent opponent history.
+- `Watchlist`: low-confidence props that still clear minimum EV/edge thresholds for optional tracking. Player rows include recent opponent history, and if one matchup drops out after settlement, the view automatically falls forward to the next remaining game tab instead of staying pinned to the removed game.
 - `Matchups`: active upcoming games only, with projected score, spread edge, total edge, and confidence.
-- `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Player rows include an `L5` strip (last 5 market outcomes) with hit/miss color coding against the current side+line. Completed games are removed from this view after the stale-game grace window.
+- `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Player rows include an `L5` strip (last 5 market outcomes) and a `Line H2H` strip (up to 5 prior market outcomes against the current opponent). Both use hit/miss color coding against the current side+line; the H2H strip also shows minutes from those same games. Completed games are removed from this view after the stale-game grace window.
 - `Discrepancies`: cross-book line gaps and price gaps.
 - `Roster`: Rotowire lineup statuses grouped by team, with a manual `Refresh Roster` pull.
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history. This tab is only shown to authenticated admins.
@@ -363,6 +363,8 @@ Operational expectations:
 - `Model Lab` is admin-only. If a non-admin loses auth while on that view, the frontend returns to `Pregame Props`.
 
 `Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
+
+Modeled prop payloads expose `h2h_opponent`, `h2h_values`, and `h2h_minutes`. The UI displays them in a `Line H2H` column between Player and Market/Pick across Pregame Props, Gems, Watchlist, and matchup/parlay tables. Head-to-head history follows the player across team changes while excluding games in which the player represented the current opponent; rows without prior meetings display `No H2H`.
 
 Any table with a dedicated `Best` column uses the same fixed-width logo slot so sportsbook marks stay aligned across `Pregame Props`, `Gems`, `Watchlist`, `Parlays`, and discrepancy tables.
 
