@@ -535,6 +535,8 @@ def _should_cache_app_response(request: Request) -> bool:
         "/api/cache/events",
         "/api/props/sync-status",
         "/api/matchups",
+        "/api/value-board",
+        "/api/watchlist",
         "/api/special/stocks",
         "/api/special/stats",
         "/api/roster",

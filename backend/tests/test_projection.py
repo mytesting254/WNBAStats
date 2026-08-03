@@ -921,8 +921,8 @@ async def test_app_response_cache_serves_fresh_payload_before_calling_backend(tm
             "type": "http",
             "http_version": "1.1",
             "method": "GET",
-            "path": "/api/watchlist",
-            "raw_path": b"/api/watchlist",
+            "path": "/api/model-performance",
+            "raw_path": b"/api/model-performance",
             "query_string": b"",
             "headers": [],
             "client": ("testclient", 123),
@@ -948,13 +948,14 @@ async def test_app_response_cache_serves_fresh_payload_before_calling_backend(tm
     assert json.loads(second.body.decode("utf-8")) == [{"id": 1, "player_name": "Cached"}]
 
 
-def test_roster_endpoint_bypasses_app_response_cache() -> None:
+@pytest.mark.parametrize("path", ["/api/roster", "/api/value-board", "/api/watchlist"])
+def test_read_through_cached_endpoints_bypass_app_response_cache(path: str) -> None:
     request = Request(
         {
             "type": "http",
             "method": "GET",
-            "path": "/api/roster",
-            "raw_path": b"/api/roster",
+            "path": path,
+            "raw_path": path.encode("utf-8"),
             "query_string": b"",
             "headers": [],
         }

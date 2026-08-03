@@ -366,6 +366,8 @@ Operational expectations:
 
 Modeled prop payloads expose `h2h_opponent`, `h2h_values`, and `h2h_minutes`. The UI displays them in a `Line H2H` column between Player and Market/Pick across Pregame Props, Gems, Watchlist, and matchup/parlay tables. Head-to-head history follows the player across team changes while excluding games in which the player represented the current opponent; rows without prior meetings display `No H2H`.
 
+`/api/value-board` and `/api/watchlist` use their dedicated short-lived read-through caches and bypass the generic app-response cache. This prevents an older whole-response payload from masking newly published prop fields such as H2H history after a deployment.
+
 Any table with a dedicated `Best` column uses the same fixed-width logo slot so sportsbook marks stay aligned across `Pregame Props`, `Gems`, `Watchlist`, `Parlays`, and discrepancy tables.
 
 Minutes projections are computed from a hybrid path:
