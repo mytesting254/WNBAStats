@@ -11818,6 +11818,37 @@ def test_line_discrepancies_group_books() -> None:
     assert rows[0]["best_price"]["sportsbook"] == "FanDuel"
 
 
+def test_line_discrepancies_use_canonical_game_matchup_labels() -> None:
+    load_test_history()
+    with connect() as conn:
+        start_time = "2026-05-08T19:30:00Z"
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (2099, '2026-05-08', ?, 10, 3, 'scheduled', 1, 1, -3.5, 163.5)
+            """,
+            (start_time,),
+        )
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("test", "evt-stale", 2099, "2026-05-08", start_time, "Phoenix Mercury", "Seattle Storm", "dk", "DraftKings", "player_points", "points", "Test Player", "over", 18.5, -110, "now"),
+                ("test", "evt-stale", 2099, "2026-05-08", start_time, "Phoenix Mercury", "Seattle Storm", "fd", "FanDuel", "player_points", "points", "Test Player", "over", 19.5, 105, "now"),
+            ],
+        )
+
+        rows = line_discrepancies(conn, 2099)
+
+    assert rows[0]["matchup"] == "CON at NY"
+
+
 def test_value_board_filters_low_confidence_unless_edge_is_high() -> None:
     load_test_history()
     with connect() as conn:

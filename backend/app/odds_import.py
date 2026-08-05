@@ -1229,9 +1229,29 @@ def list_sportsbook_props(conn: sqlite3.Connection, game_id: int | None = None) 
     params = (game_id,) if game_id is not None else ()
     rows = conn.execute(
         f"""
-        SELECT spl.*
+        SELECT
+            spl.id,
+            spl.game_id,
+            spl.provider,
+            spl.provider_event_id,
+            COALESCE(g.start_time, spl.commence_time) AS commence_time,
+            away.abbreviation AS away_team,
+            home.abbreviation AS home_team,
+            spl.bookmaker_key,
+            spl.sportsbook,
+            spl.market_key,
+            spl.market,
+            spl.player_name,
+            spl.side,
+            spl.line,
+            spl.price,
+            spl.captured_at,
+            spl.provider_player_id,
+            spl.game_date
         FROM sportsbook_prop_lines spl
         LEFT JOIN games g ON g.id = spl.game_id
+        LEFT JOIN teams home ON home.id = g.home_team_id
+        LEFT JOIN teams away ON away.id = g.away_team_id
         WHERE NOT EXISTS (
             SELECT 1
             FROM prop_lines pl
