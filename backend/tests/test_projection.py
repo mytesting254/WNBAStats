@@ -11933,6 +11933,31 @@ def test_line_discrepancies_use_canonical_game_matchup_labels() -> None:
     assert rows[0]["matchup"] == "CON at NY"
 
 
+def test_line_discrepancies_payload_includes_recent_and_h2h_lines() -> None:
+    load_test_history()
+    with connect() as conn:
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at, provider_player_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("test", "evt-history", 2010, "2026-05-08", "2026-05-08T19:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 18.5, -110, "now", 1001),
+                ("test", "evt-history", 2010, "2026-05-08", "2026-05-08T19:30:00Z", "New York Liberty", "Connecticut Sun", "fd", "FanDuel", "player_points", "points", "Breanna Stewart", "over", 19.5, 105, "now", 1001),
+            ],
+        )
+
+        rows = main_module._line_discrepancies_payload(conn, 2010)
+
+    assert rows
+    assert rows[0]["recent_values"]
+    assert isinstance(rows[0]["recent_values"][0], float)
+    assert "h2h_values" in rows[0]
+    assert "h2h_opponent" in rows[0]
+
+
 def test_value_board_filters_low_confidence_unless_edge_is_high() -> None:
     load_test_history()
     with connect() as conn:

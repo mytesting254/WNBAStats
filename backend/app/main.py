@@ -3607,7 +3607,7 @@ def _publish_current_read_payloads(
 
     payload_builders = [
         (WATCHLIST_CACHE_NAME, WATCHLIST_TTL_SECONDS, lambda: _watchlist_payload(conn)),
-        (LINE_DISCREPANCIES_CACHE_NAME, LINE_DISCREPANCIES_TTL_SECONDS, lambda: line_discrepancies(conn, None)),
+        (LINE_DISCREPANCIES_CACHE_NAME, LINE_DISCREPANCIES_TTL_SECONDS, lambda: _line_discrepancies_payload(conn, None)),
     ]
     if include_roster:
         payload_builders.append((ROSTER_CACHE_NAME, ROSTER_TTL_SECONDS, lambda: _roster_payload(conn, refresh_lineups=False)))
@@ -6888,21 +6888,21 @@ def discrepancies(response: Response, game_id: int | None = None, force_refresh:
     if game_id is not None:
         started = datetime.now(timezone.utc)
         with connect() as conn:
-            payload = line_discrepancies(conn, game_id)
+            payload = _line_discrepancies_payload(conn, game_id)
         compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
         _set_observability_headers(response, f"{LINE_DISCREPANCIES_CACHE_NAME}:game_id={game_id}", "BYPASS", round(compute_ms, 2))
         return payload
     if force_refresh:
         started = datetime.now(timezone.utc)
         with connect() as conn:
-            payload = line_discrepancies(conn, None)
+            payload = _line_discrepancies_payload(conn, None)
         compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
         write_json_cache(LINE_DISCREPANCIES_CACHE_NAME, _cache_envelope(payload, LINE_DISCREPANCIES_TTL_SECONDS))
         _set_observability_headers(response, LINE_DISCREPANCIES_CACHE_NAME, "BYPASS", round(compute_ms, 2))
         return payload
     def compute() -> list[dict]:
         with connect() as conn:
-            return line_discrepancies(conn, None)
+            return _line_discrepancies_payload(conn, None)
     payload, status, compute_ms = _read_through_cache_with_meta(
         LINE_DISCREPANCIES_CACHE_NAME,
         LINE_DISCREPANCIES_TTL_SECONDS,
@@ -7329,10 +7329,165 @@ def _sportsbook_props_for_games(conn, game_ids: list[int]) -> list[dict]:
     return sorted(payload, key=lambda item: (item["commence_time"], item["player_name"], item["market"], item["side"], item["sportsbook"]))
 
 
+def _resolve_player_team_for_game(conn, *, player_id: int, game_id: int) -> int | None:
+    row = conn.execute(
+        """
+        SELECT COALESCE(
+            (
+                SELECT h.team_id
+                FROM player_team_history h
+                LEFT JOIN games hg ON hg.id = h.game_id
+                WHERE h.player_id = p.id
+                  AND h.team_id IN (g.home_team_id, g.away_team_id)
+                  AND h.game_id IS NOT NULL
+                  AND hg.game_date IS NOT NULL
+                  AND hg.game_date <= g.game_date
+                ORDER BY hg.game_date DESC, h.id DESC
+                LIMIT 1
+            ),
+            (
+                SELECT CASE
+                    WHEN SUM(CASE WHEN recent.home_team_id = g.home_team_id OR recent.away_team_id = g.home_team_id THEN 1 ELSE 0 END)
+                       > SUM(CASE WHEN recent.home_team_id = g.away_team_id OR recent.away_team_id = g.away_team_id THEN 1 ELSE 0 END)
+                    THEN g.home_team_id
+                    WHEN SUM(CASE WHEN recent.home_team_id = g.home_team_id OR recent.away_team_id = g.home_team_id THEN 1 ELSE 0 END)
+                       < SUM(CASE WHEN recent.home_team_id = g.away_team_id OR recent.away_team_id = g.away_team_id THEN 1 ELSE 0 END)
+                    THEN g.away_team_id
+                    ELSE NULL
+                END
+                FROM (
+                    SELECT rg.home_team_id, rg.away_team_id
+                    FROM player_game_stats s2
+                    JOIN games rg ON rg.id = s2.game_id
+                    WHERE s2.player_id = p.id
+                      AND (rg.game_date < g.game_date OR (rg.game_date = g.game_date AND s2.game_id < g.id))
+                    ORDER BY rg.game_date DESC, s2.game_id DESC
+                    LIMIT 8
+                ) recent
+            ),
+            (
+                SELECT h.team_id
+                FROM player_team_history h
+                LEFT JOIN games hg ON hg.id = h.game_id
+                WHERE h.player_id = p.id
+                  AND h.team_id IN (g.home_team_id, g.away_team_id)
+                  AND h.game_id IS NOT NULL
+                  AND hg.game_date IS NOT NULL
+                ORDER BY hg.game_date DESC, h.id DESC
+                LIMIT 1
+            ),
+            CASE
+                WHEN p.team_id IN (g.home_team_id, g.away_team_id) THEN p.team_id
+                ELSE NULL
+            END,
+            g.home_team_id
+        ) AS resolved_team_id
+        FROM players p
+        JOIN games g ON g.id = ?
+        WHERE p.id = ?
+        """,
+        (int(game_id), int(player_id)),
+    ).fetchone()
+    if row is None or row["resolved_team_id"] is None:
+        return None
+    return int(row["resolved_team_id"])
+
+
+def _resolve_discrepancy_player_context(
+    conn,
+    *,
+    game_id: int,
+    player_name: str,
+) -> tuple[int | None, int | None]:
+    player_rows = conn.execute(
+        """
+        SELECT DISTINCT spl.provider_player_id AS player_id
+        FROM sportsbook_prop_lines spl
+        WHERE spl.game_id = ?
+          AND lower(spl.player_name) = lower(?)
+          AND spl.provider_player_id IS NOT NULL
+        """,
+        (int(game_id), str(player_name)),
+    ).fetchall()
+    player_ids = [int(row["player_id"]) for row in player_rows if row["player_id"] is not None]
+    player_id: int | None = None
+    if len(player_ids) == 1:
+        player_id = player_ids[0]
+    else:
+        candidate_rows = conn.execute(
+            """
+            SELECT DISTINCT p.id, p.full_name
+            FROM players p
+            JOIN games g ON g.id = ?
+            WHERE p.team_id IN (g.home_team_id, g.away_team_id)
+              AND EXISTS (
+                  SELECT 1
+                  FROM player_game_stats stats
+                  WHERE stats.player_id = p.id
+              )
+            ORDER BY p.id
+            """,
+            (int(game_id),),
+        ).fetchall()
+        fuzzy_matches = [
+            int(row["id"])
+            for row in candidate_rows
+            if _fuzzy_player_name_match(str(row["full_name"] or ""), str(player_name or ""))
+        ]
+        if len(fuzzy_matches) == 1:
+            player_id = fuzzy_matches[0]
+    if player_id is None:
+        return None, None
+    return player_id, _resolve_player_team_for_game(conn, player_id=player_id, game_id=game_id)
+
+
+def _line_discrepancies_payload(conn, game_id: int | None) -> list[dict]:
+    payload = line_discrepancies(conn, game_id)
+    context_cache: dict[tuple[int, str], tuple[int | None, int | None]] = {}
+    for item in payload:
+        item["recent_values"] = []
+        item["h2h_opponent"] = None
+        item["h2h_values"] = []
+        resolved_game_id = item.get("game_id")
+        if resolved_game_id is None:
+            continue
+        cache_key = (int(resolved_game_id), str(item.get("player_name") or ""))
+        player_id, resolved_team_id = context_cache.get(cache_key, (None, None))
+        if cache_key not in context_cache:
+            player_id, resolved_team_id = _resolve_discrepancy_player_context(
+                conn,
+                game_id=int(resolved_game_id),
+                player_name=str(item.get("player_name") or ""),
+            )
+            context_cache[cache_key] = (player_id, resolved_team_id)
+        if player_id is None:
+            continue
+        item["recent_values"] = _recent_market_values(
+            conn,
+            player_id=player_id,
+            market=str(item["market"]),
+            game_id=int(resolved_game_id),
+            limit=5,
+        )
+        if resolved_team_id is None:
+            continue
+        item.update(
+            _recent_h2h_market_history(
+                conn,
+                player_id=player_id,
+                market=str(item["market"]),
+                game_id=int(resolved_game_id),
+                resolved_team_id=int(resolved_team_id),
+                limit=5,
+            )
+        )
+    return payload
+
+
 def _line_discrepancies_for_games(conn, game_ids: list[int]) -> list[dict]:
     payload = []
     for game_id in game_ids:
-        payload.extend(line_discrepancies(conn, game_id))
+        payload.extend(_line_discrepancies_payload(conn, game_id))
     return sorted(payload, key=lambda item: (item["line_gap"], item["price_gap"]), reverse=True)
 
 

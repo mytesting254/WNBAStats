@@ -2920,7 +2920,7 @@ function PropsView({
 }
 
 function renderRecentFormWithMinutes(
-  prop: Pick<ValueProp, "id" | "recent_values" | "recent_minutes" | "recommended_side" | "line">,
+  prop: Pick<ValueProp, "recent_values" | "recent_minutes" | "recommended_side" | "line">,
   keyPrefix: string
 ) {
   if (!Array.isArray(prop.recent_values) || prop.recent_values.length === 0) {
@@ -2959,7 +2959,7 @@ function renderRecentFormWithMinutes(
 }
 
 function renderH2HFormWithMinutes(
-  prop: Pick<ValueProp, "id" | "h2h_opponent" | "h2h_values" | "h2h_minutes" | "recommended_side" | "line">,
+  prop: Pick<ValueProp, "h2h_opponent" | "h2h_values" | "h2h_minutes" | "recommended_side" | "line">,
   keyPrefix: string
 ) {
   if (!Array.isArray(prop.h2h_values) || prop.h2h_values.length === 0) {
@@ -3370,6 +3370,7 @@ function DiscrepanciesView({
               <tr>
                 <th>Matchup</th>
                 <th>Player</th>
+                <th>Line H2H</th>
                 <th>Market</th>
                 <th>Side</th>
                 <th>Gap</th>
@@ -3384,7 +3385,32 @@ function DiscrepanciesView({
                     <strong>{item.matchup}</strong>
                     <span>{formatDate(item.commence_time)}</span>
                   </td>
-                  <td>{item.player_name}</td>
+                  <td>
+                    <div>
+                      <strong>{item.player_name}</strong>
+                      {renderRecentFormWithMinutes(
+                        {
+                          recent_values: item.recent_values,
+                          recent_minutes: undefined,
+                          recommended_side: item.side,
+                          line: item.best_price.line
+                        },
+                        `${item.matchup}-${item.player_name}-${item.market}-${item.side}-l5`
+                      )}
+                    </div>
+                  </td>
+                  <td>
+                    {renderH2HFormWithMinutes(
+                      {
+                        h2h_opponent: item.h2h_opponent,
+                        h2h_values: item.h2h_values,
+                        h2h_minutes: undefined,
+                        recommended_side: item.side,
+                        line: item.best_price.line
+                      },
+                      `${item.matchup}-${item.player_name}-${item.market}-${item.side}-h2h`
+                    )}
+                  </td>
                   <td>{marketLabel(item.market)}</td>
                   <td><span className={`side ${item.side}`}>{item.side}</span></td>
                   <td>
@@ -3409,7 +3435,7 @@ function DiscrepanciesView({
               ))}
               {!filtered.length && (
                 <tr>
-                  <td colSpan={7}>{selectedGroup ? "No line discrepancies match the selected filters." : "No line discrepancies found."}</td>
+                  <td colSpan={8}>{selectedGroup ? "No line discrepancies match the selected filters." : "No line discrepancies found."}</td>
                 </tr>
               )}
             </tbody>
