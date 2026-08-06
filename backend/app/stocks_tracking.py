@@ -17,6 +17,7 @@ from .player_prop_model import (
     _historical_blowout_weight,
     _prune_extreme_blowout_history_rows,
     _rest_factor,
+    _shared_projection_context,
     _winsorize_history_values,
     feature_snapshot,
 )
@@ -124,6 +125,16 @@ def ensure_tracking_schema() -> Path:
                     recent_hit_rate_2_plus REAL,
                     rest_days INTEGER NOT NULL DEFAULT 2,
                     is_home INTEGER,
+                    projected_minutes REAL NOT NULL DEFAULT 0,
+                    minute_volatility REAL NOT NULL DEFAULT 0,
+                    injury_status TEXT NOT NULL DEFAULT 'available',
+                    injury_availability_factor REAL NOT NULL DEFAULT 1,
+                    injury_usage_multiplier REAL NOT NULL DEFAULT 1,
+                    injury_minutes_delta REAL NOT NULL DEFAULT 0,
+                    opportunity_unavailable REAL NOT NULL DEFAULT 0,
+                    opportunity_key_outs REAL NOT NULL DEFAULT 0,
+                    opportunity_persistence REAL NOT NULL DEFAULT 0,
+                    opportunity_competition REAL NOT NULL DEFAULT 0,
                     built_at TEXT NOT NULL,
                     PRIMARY KEY (game_id, player_id, market)
                 );
@@ -146,6 +157,8 @@ def ensure_tracking_schema() -> Path:
                     stocks_allowed_guard_factor REAL NOT NULL DEFAULT 1,
                     stocks_allowed_wing_factor REAL NOT NULL DEFAULT 1,
                     stocks_allowed_big_factor REAL NOT NULL DEFAULT 1,
+                    team_turnover_rate_factor REAL NOT NULL DEFAULT 1,
+                    forced_turnover_rate_factor REAL NOT NULL DEFAULT 1,
                     turnover_pressure_factor REAL NOT NULL DEFAULT 1,
                     built_at TEXT NOT NULL,
                     PRIMARY KEY (game_id, team_id)
@@ -220,6 +233,9 @@ def ensure_tracking_schema() -> Path:
             board_summary_columns = {
                 str(row[1]) for row in conn.execute("PRAGMA table_info(game_board_summaries)").fetchall()
             }
+            player_prep_columns = {
+                str(row[1]) for row in conn.execute("PRAGMA table_info(player_prep_features)").fetchall()
+            }
             if "candidate_threshold" not in board_summary_columns:
                 try:
                     conn.execute(
@@ -232,6 +248,27 @@ def ensure_tracking_schema() -> Path:
                 try:
                     conn.execute(
                         "ALTER TABLE game_board_summaries ADD COLUMN candidate_count_threshold INTEGER NOT NULL DEFAULT 0"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            for column_name, column_sql in (
+                ("projected_minutes", "REAL NOT NULL DEFAULT 0"),
+                ("minute_volatility", "REAL NOT NULL DEFAULT 0"),
+                ("injury_status", "TEXT NOT NULL DEFAULT 'available'"),
+                ("injury_availability_factor", "REAL NOT NULL DEFAULT 1"),
+                ("injury_usage_multiplier", "REAL NOT NULL DEFAULT 1"),
+                ("injury_minutes_delta", "REAL NOT NULL DEFAULT 0"),
+                ("opportunity_unavailable", "REAL NOT NULL DEFAULT 0"),
+                ("opportunity_key_outs", "REAL NOT NULL DEFAULT 0"),
+                ("opportunity_persistence", "REAL NOT NULL DEFAULT 0"),
+                ("opportunity_competition", "REAL NOT NULL DEFAULT 0"),
+            ):
+                if column_name in player_prep_columns:
+                    continue
+                try:
+                    conn.execute(
+                        f"ALTER TABLE player_prep_features ADD COLUMN {column_name} {column_sql}"
                     )
                 except sqlite3.OperationalError as exc:
                     if "duplicate column name" not in str(exc).lower():
@@ -249,6 +286,8 @@ def ensure_tracking_schema() -> Path:
                 "stocks_allowed_guard_factor",
                 "stocks_allowed_wing_factor",
                 "stocks_allowed_big_factor",
+                "team_turnover_rate_factor",
+                "forced_turnover_rate_factor",
             ):
                 if column_name in team_context_columns:
                     continue
@@ -546,6 +585,94 @@ def _stocks_turnover_pressure_factor(conn: sqlite3.Connection, opponent_id: int)
     return _clamp(opponent_turnovers / league_turnovers, 0.90, 1.12)
 
 
+def _stocks_team_turnover_rate_factor(conn: sqlite3.Connection, team_id: int) -> float:
+    team_rate = _stocks_avg_scalar(
+        conn,
+        """
+        SELECT AVG(
+            COALESCE(
+                b.total_turnovers,
+                COALESCE(b.turnovers, 0) + COALESCE(b.team_turnovers, 0),
+                b.turnovers,
+                b.team_turnovers
+            ) / NULLIF(r.possessions, 0)
+        )
+        FROM team_game_results r
+        JOIN team_game_boxscores b ON b.game_id = r.game_id AND b.team_id = r.team_id
+        WHERE r.team_id = ?
+        """,
+        (int(team_id),),
+    )
+    league_rate = _stocks_avg_scalar(
+        conn,
+        """
+        SELECT AVG(
+            COALESCE(
+                b.total_turnovers,
+                COALESCE(b.turnovers, 0) + COALESCE(b.team_turnovers, 0),
+                b.turnovers,
+                b.team_turnovers
+            ) / NULLIF(r.possessions, 0)
+        )
+        FROM team_game_results r
+        JOIN team_game_boxscores b ON b.game_id = r.game_id AND b.team_id = r.team_id
+        """
+    )
+    if team_rate is None or league_rate is None or league_rate <= 0:
+        return 1.0
+    return _clamp(team_rate / league_rate, 0.90, 1.12)
+
+
+def _stocks_forced_turnover_rate_factor(conn: sqlite3.Connection, opponent_id: int) -> float:
+    opponent_forced_rate = _stocks_avg_scalar(
+        conn,
+        """
+        SELECT AVG(
+            COALESCE(
+                b.total_turnovers,
+                COALESCE(b.turnovers, 0) + COALESCE(b.team_turnovers, 0),
+                b.turnovers,
+                b.team_turnovers
+            ) / NULLIF(opp.possessions, 0)
+        )
+        FROM team_game_results opp
+        JOIN games g ON g.id = opp.game_id
+        JOIN team_game_results team_result
+          ON team_result.game_id = opp.game_id
+         AND team_result.team_id != opp.team_id
+        JOIN team_game_boxscores b
+          ON b.game_id = team_result.game_id
+         AND b.team_id = team_result.team_id
+        WHERE opp.team_id = ?
+        """,
+        (int(opponent_id),),
+    )
+    league_forced_rate = _stocks_avg_scalar(
+        conn,
+        """
+        SELECT AVG(
+            COALESCE(
+                b.total_turnovers,
+                COALESCE(b.turnovers, 0) + COALESCE(b.team_turnovers, 0),
+                b.turnovers,
+                b.team_turnovers
+            ) / NULLIF(opp.possessions, 0)
+        )
+        FROM team_game_results opp
+        JOIN games g ON g.id = opp.game_id
+        JOIN team_game_results team_result
+          ON team_result.game_id = opp.game_id
+         AND team_result.team_id != opp.team_id
+        JOIN team_game_boxscores b
+          ON b.game_id = team_result.game_id
+         AND b.team_id = team_result.team_id
+        """
+    )
+    if opponent_forced_rate is None or league_forced_rate is None or league_forced_rate <= 0:
+        return 1.0
+    return _clamp(opponent_forced_rate / league_forced_rate, 0.90, 1.12)
+
+
 def _role_specific_context_factor(
     context: sqlite3.Row | dict[str, object] | None,
     *,
@@ -577,12 +704,16 @@ def _stocks_matchup_context_multiplier(
     steals_allowed_factor = _role_specific_context_factor(context, base_column="steals_allowed", role_bucket=role_bucket)
     blocks_allowed_factor = _role_specific_context_factor(context, base_column="blocks_allowed", role_bucket=role_bucket)
     stocks_allowed_factor = _role_specific_context_factor(context, base_column="stocks_allowed", role_bucket=role_bucket)
+    team_turnover_rate_factor = float(context["team_turnover_rate_factor"] or 1.0)
+    forced_turnover_rate_factor = float(context["forced_turnover_rate_factor"] or 1.0)
     turnover_pressure_factor = float(context["turnover_pressure_factor"] or 1.0)
     if market == "steals":
         return _clamp(
             (0.50 * steals_allowed_factor)
-            + (0.25 * turnover_pressure_factor)
-            + (0.25 * pace_factor),
+            + (0.20 * turnover_pressure_factor)
+            + (0.15 * team_turnover_rate_factor)
+            + (0.10 * forced_turnover_rate_factor)
+            + (0.05 * pace_factor),
             0.90,
             1.12,
         )
@@ -594,10 +725,13 @@ def _stocks_matchup_context_multiplier(
             1.12,
         )
     return _clamp(
-        (0.45 * stocks_allowed_factor)
-        + (0.20 * steals_allowed_factor)
-        + (0.20 * blocks_allowed_factor)
-        + (0.15 * pace_factor),
+        (0.35 * stocks_allowed_factor)
+        + (0.18 * steals_allowed_factor)
+        + (0.17 * blocks_allowed_factor)
+        + (0.10 * turnover_pressure_factor)
+        + (0.10 * team_turnover_rate_factor)
+        + (0.05 * forced_turnover_rate_factor)
+        + (0.05 * pace_factor),
         0.90,
         1.12,
     )
@@ -1537,6 +1671,8 @@ def rebuild_team_prep_context(
                         _stocks_opponent_allowed_factor(conn, opponent_id, "blocks_steals", role_bucket="guard"),
                         _stocks_opponent_allowed_factor(conn, opponent_id, "blocks_steals", role_bucket="wing"),
                         _stocks_opponent_allowed_factor(conn, opponent_id, "blocks_steals", role_bucket="big"),
+                        _stocks_team_turnover_rate_factor(conn, team_id),
+                        _stocks_forced_turnover_rate_factor(conn, opponent_id),
                         _stocks_turnover_pressure_factor(conn, opponent_id),
                         built_at,
                     )
@@ -1572,9 +1708,11 @@ def rebuild_team_prep_context(
                         stocks_allowed_guard_factor,
                         stocks_allowed_wing_factor,
                         stocks_allowed_big_factor,
+                        team_turnover_rate_factor,
+                        forced_turnover_rate_factor,
                         turnover_pressure_factor,
                         built_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     context_rows,
                 )
@@ -1625,6 +1763,28 @@ def rebuild_player_prep_features(
             player_name = str(row["player_name"])
             team_id = int(row["team_id"]) if row["team_id"] is not None else None
             matchup_context = _team_prep_context_for_game(tracking, game_id=game_id, team_id=team_id)
+            shared_context = _shared_projection_context(
+                conn,
+                player_id=player_id,
+                game_id=game_id,
+                before_game_date=None,
+                allow_training=False,
+                use_injury_context=True,
+                use_live_minutes_context=True,
+                runtime_cache=shared_runtime_cache,
+            )
+            injury = dict(shared_context.get("injury") or {})
+            opportunity_context = list(shared_context.get("opportunity_context") or [0.0, 0.0, 0.0, 0.0])
+            projected_minutes = float(shared_context.get("projected_minutes") or 0.0)
+            minute_volatility = float(shared_context.get("minute_volatility") or 0.0)
+            injury_status = str(injury.get("status") or "available")
+            injury_availability_factor = float(injury.get("availability_factor") or 1.0)
+            injury_usage_multiplier = float(injury.get("usage_multiplier") or 1.0)
+            injury_minutes_delta = float(injury.get("minutes_delta") or 0.0)
+            opportunity_unavailable = float(opportunity_context[0] if len(opportunity_context) >= 1 else 0.0)
+            opportunity_key_outs = float(opportunity_context[1] if len(opportunity_context) >= 2 else 0.0)
+            opportunity_persistence = float(opportunity_context[2] if len(opportunity_context) >= 3 else 0.0)
+            opportunity_competition = float(opportunity_context[3] if len(opportunity_context) >= 4 else 0.0)
             for market in ("steals", "blocks", "blocks_steals"):
                 cache_key = (player_id, market, game_id)
                 snapshot = component_snapshot_cache.get(cache_key)
@@ -1669,6 +1829,16 @@ def rebuild_player_prep_features(
                         ),
                         int(bundle["rest_days"] or 2),
                         bundle["is_home"],
+                        projected_minutes,
+                        minute_volatility,
+                        injury_status,
+                        injury_availability_factor,
+                        injury_usage_multiplier,
+                        injury_minutes_delta,
+                        opportunity_unavailable,
+                        opportunity_key_outs,
+                        opportunity_persistence,
+                        opportunity_competition,
                         built_at,
                     )
                 )
@@ -1699,8 +1869,18 @@ def rebuild_player_prep_features(
                         recent_hit_rate_2_plus,
                         rest_days,
                         is_home,
+                        projected_minutes,
+                        minute_volatility,
+                        injury_status,
+                        injury_availability_factor,
+                        injury_usage_multiplier,
+                        injury_minutes_delta,
+                        opportunity_unavailable,
+                        opportunity_key_outs,
+                        opportunity_persistence,
+                        opportunity_competition,
                         built_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     prep_rows,
                 )

@@ -1079,9 +1079,16 @@ The current Specials prep path reads scheduled games from canonical
 then runs a fast component-based stocks estimator over the copied slate. The
 current live prep estimator uses a last-`10`-game recent window, up to `20`
 games for stabilization, and blends same-home/away plus scheduled-game
-`rest_days` context. Mounted-runtime validation on `2026-07-13` completed an
-ET-today run in about `1m 1s` for `3` prepared games, `79` candidates, and
-`79` fresh snapshots.
+`rest_days` context. Scheduled prep now also persists richer player-side
+Specials inputs in `player_prep_features`, including projected minutes,
+minute volatility, injury status/usage deltas, and opportunity context, so
+future calibration work can use them without re-querying the live runtime.
+Those fields are intentionally prep-only for now: the live Specials scoring
+path still uses the simpler validated projection blend after the August 6,
+2026 backtest showed that a direct multiplier on those fields improved recent
+candidate hit rate but regressed full-history probability calibration.
+Mounted-runtime validation on `2026-07-13` completed an ET-today run in about
+`1m 1s` for `3` prepared games, `79` candidates, and `79` fresh snapshots.
 
 The manual `Generate` action on the `Special Props` tab now follows the same
 near-term prep window as the scheduled prep helpers: by default it prepares

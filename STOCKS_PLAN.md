@@ -48,6 +48,7 @@ Current implementation notes:
 - the fast prep estimator now uses a `12`-game recent window with a `24`-game stabilizing window
 - the fast prep estimator blends same-home/away history and scheduled-game `rest_days` into the component baseline without re-enabling the expensive learned/minutes path
 - scheduled prep now materializes `player_prep_features` per game/player/market so snapshot generation can reuse cached contextual projections and recent `2+ stocks` hit-rate inputs
+- `player_prep_features` now also persists projected minutes, minute volatility, and injury/opportunity-side prep context so future calibration work can train against those fields without re-querying the live runtime
 - scheduled prep now materializes `team_prep_context` per game/team so all candidates on one side share the same cached pace, opponent-allowed, and turnover-pressure context
 - scheduled prep now materializes `game_board_summaries` per game so matchup-level counts and top-board metrics are precomputed for tomorrow reads
 - the Specials read path now batches active-prop, matchup-context, and recent-history lookups instead of issuing per-player N+1 queries
@@ -150,6 +151,8 @@ Current status:
 - scheduled prep now builds `team_prep_context` rows per game/team
 - cached context currently includes pace, opponent steals allowed, opponent blocks allowed, combined stocks allowed, and turnover-pressure factors
 - `player_prep_features` now consumes that cached matchup context, and snapshot fallback paths reuse it when available
+- `player_prep_features` now persists projected minutes, minute volatility, injury availability/usage deltas, and opportunity context as prep-only fields
+- the August 6, 2026 full-history backtest kept those richer player fields out of the live scoring multiplier because recent-hit-rate gains came with worse probability calibration over the broader settled sample
 
 ### 3. Richer Candidate Inclusion Logic
 

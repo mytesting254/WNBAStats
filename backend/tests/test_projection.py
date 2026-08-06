@@ -6412,7 +6412,17 @@ def test_rebuild_player_prep_features_populates_tracking_cache(monkeypatch, tmp_
                 player_id,
                 market,
                 contextual_projection,
-                rest_days
+                rest_days,
+                projected_minutes,
+                minute_volatility,
+                injury_status,
+                injury_availability_factor,
+                injury_usage_multiplier,
+                injury_minutes_delta,
+                opportunity_unavailable,
+                opportunity_key_outs,
+                opportunity_persistence,
+                opportunity_competition
             FROM player_prep_features
             ORDER BY game_id, player_id, market
             LIMIT 1
@@ -6425,6 +6435,16 @@ def test_rebuild_player_prep_features_populates_tracking_cache(monkeypatch, tmp_
     assert str(row["market"]) in {"steals", "blocks", "blocks_steals"}
     assert float(row["contextual_projection"]) >= 0.0
     assert int(row["rest_days"]) >= 0
+    assert float(row["projected_minutes"]) >= 0.0
+    assert float(row["minute_volatility"]) >= 0.0
+    assert str(row["injury_status"])
+    assert float(row["injury_availability_factor"]) > 0.0
+    assert float(row["injury_usage_multiplier"]) > 0.0
+    assert abs(float(row["injury_minutes_delta"])) < 20.0
+    assert float(row["opportunity_unavailable"]) >= 0.0
+    assert float(row["opportunity_key_outs"]) >= 0.0
+    assert float(row["opportunity_persistence"]) >= 0.0
+    assert float(row["opportunity_competition"]) >= 0.0
 
 
 def test_rebuild_team_prep_context_populates_tracking_cache(monkeypatch, tmp_path) -> None:
@@ -6449,6 +6469,8 @@ def test_rebuild_team_prep_context_populates_tracking_cache(monkeypatch, tmp_pat
                 steals_allowed_factor,
                 blocks_allowed_factor,
                 stocks_allowed_factor,
+                team_turnover_rate_factor,
+                forced_turnover_rate_factor,
                 turnover_pressure_factor
             FROM team_prep_context
             ORDER BY game_id, team_id
@@ -6464,6 +6486,8 @@ def test_rebuild_team_prep_context_populates_tracking_cache(monkeypatch, tmp_pat
     assert float(row["steals_allowed_factor"]) > 0.0
     assert float(row["blocks_allowed_factor"]) > 0.0
     assert float(row["stocks_allowed_factor"]) > 0.0
+    assert float(row["team_turnover_rate_factor"]) > 0.0
+    assert float(row["forced_turnover_rate_factor"]) > 0.0
     assert float(row["turnover_pressure_factor"]) > 0.0
 
 
@@ -6785,6 +6809,8 @@ def test_stocks_matchup_multiplier_uses_role_specific_allowed_factors() -> None:
         "stocks_allowed_guard_factor": 1.09,
         "stocks_allowed_wing_factor": 0.99,
         "stocks_allowed_big_factor": 1.04,
+        "team_turnover_rate_factor": 1.08,
+        "forced_turnover_rate_factor": 1.06,
         "turnover_pressure_factor": 1.04,
     }
 
@@ -6804,9 +6830,19 @@ def test_stocks_matchup_multiplier_uses_role_specific_allowed_factors() -> None:
         role_bucket="wing",
     )
 
-    assert guard_steals == pytest.approx((0.50 * 1.10) + (0.25 * 1.04) + (0.25 * 1.00))
+    assert guard_steals == pytest.approx(
+        (0.50 * 1.10) + (0.20 * 1.04) + (0.15 * 1.08) + (0.10 * 1.06) + (0.05 * 1.00)
+    )
     assert big_blocks == pytest.approx((0.65 * 1.08) + (0.35 * 1.00))
-    assert wing_stocks == pytest.approx((0.45 * 0.99) + (0.20 * 0.97) + (0.20 * 1.02) + (0.15 * 1.00))
+    assert wing_stocks == pytest.approx(
+        (0.35 * 0.99)
+        + (0.18 * 0.97)
+        + (0.17 * 1.02)
+        + (0.10 * 1.04)
+        + (0.10 * 1.08)
+        + (0.05 * 1.06)
+        + (0.05 * 1.00)
+    )
 
 
 def test_stocks_tracking_schema_adds_role_aware_context_columns(monkeypatch, tmp_path) -> None:
@@ -6848,6 +6884,54 @@ def test_stocks_tracking_schema_adds_role_aware_context_columns(monkeypatch, tmp
     assert "stocks_allowed_guard_factor" in columns
     assert "stocks_allowed_wing_factor" in columns
     assert "stocks_allowed_big_factor" in columns
+    assert "team_turnover_rate_factor" in columns
+    assert "forced_turnover_rate_factor" in columns
+
+
+def test_stocks_tracking_schema_adds_player_prep_context_columns(monkeypatch, tmp_path) -> None:
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with sqlite3.connect(tracking_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE player_prep_features (
+                game_id INTEGER NOT NULL,
+                player_id INTEGER NOT NULL,
+                player_name TEXT NOT NULL,
+                game_date TEXT NOT NULL,
+                market TEXT NOT NULL,
+                base_projection REAL NOT NULL DEFAULT 0,
+                contextual_projection REAL NOT NULL DEFAULT 0,
+                recent_avg REAL NOT NULL DEFAULT 0,
+                stability_avg REAL NOT NULL DEFAULT 0,
+                same_venue_avg REAL NOT NULL DEFAULT 0,
+                same_venue_games INTEGER NOT NULL DEFAULT 0,
+                recent_hit_rate_2_plus REAL,
+                rest_days INTEGER NOT NULL DEFAULT 2,
+                is_home INTEGER,
+                built_at TEXT NOT NULL,
+                PRIMARY KEY (game_id, player_id, market)
+            )
+            """
+        )
+        conn.commit()
+
+    stocks_tracking_module.ensure_tracking_schema()
+
+    with sqlite3.connect(tracking_path) as conn:
+        columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(player_prep_features)").fetchall()}
+
+    assert "projected_minutes" in columns
+    assert "minute_volatility" in columns
+    assert "injury_status" in columns
+    assert "injury_availability_factor" in columns
+    assert "injury_usage_multiplier" in columns
+    assert "injury_minutes_delta" in columns
+    assert "opportunity_unavailable" in columns
+    assert "opportunity_key_outs" in columns
+    assert "opportunity_persistence" in columns
+    assert "opportunity_competition" in columns
 
 
 def test_delete_unavailable_special_snapshots_from_espn_removes_missing_and_dnp(monkeypatch, tmp_path) -> None:
