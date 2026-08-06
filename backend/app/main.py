@@ -40,6 +40,7 @@ from .espn_roster import sync_espn_rosters
 from .game_prediction_tracking import save_game_prediction, save_game_predictions, settle_completed_game_predictions
 from .game_predictions import _GamePredictionCache, _team_injury_impact, project_game
 from .odds_import import (
+    _fuzzy_player_name_match,
     import_historical_odds_api_game_markets,
     RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME,
     SyncPropLinesResult,
