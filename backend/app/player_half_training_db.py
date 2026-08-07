@@ -15,10 +15,30 @@ _PLAYER_HALF_TRAINING_DB_LOCK = threading.RLock()
 DEFAULT_TEAM_FIRST_HALF_SHARE = float(os.getenv("WNBA_DEFAULT_TEAM_FIRST_HALF_SHARE", "0.5"))
 
 
-def ensure_player_half_training_db(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, object]:
+def ensure_player_half_training_db(
+    conn: sqlite3.Connection,
+    *,
+    force: bool = False,
+    allow_rebuild: bool = True,
+) -> dict[str, object]:
     training_db_path = get_player_half_training_db_path()
     training_db_path.parent.mkdir(parents=True, exist_ok=True)
     expected_signature = _source_signature(conn)
+
+    if not training_db_path.exists():
+        if not allow_rebuild:
+            return {
+                "path": str(training_db_path),
+                "rebuilt": False,
+                "player_rows": 0,
+                "prop_rows": 0,
+                "candidate_player_rows": 0,
+                "candidate_prop_rows": 0,
+                "built_at": None,
+                "source_signature": expected_signature,
+                "stale": True,
+                "missing": True,
+            }
 
     with _PLAYER_HALF_TRAINING_DB_LOCK:
         with _connect_training_db(training_db_path) as training_conn:
@@ -41,6 +61,20 @@ def ensure_player_half_training_db(conn: sqlite3.Connection, *, force: bool = Fa
                     "candidate_prop_rows": int(metadata.get("candidate_prop_rows") or 0),
                     "built_at": metadata.get("built_at"),
                     "source_signature": expected_signature,
+                }
+
+            if not allow_rebuild:
+                return {
+                    "path": str(training_db_path),
+                    "rebuilt": False,
+                    "player_rows": current_player_rows,
+                    "prop_rows": current_prop_rows,
+                    "candidate_player_rows": int(metadata.get("candidate_player_rows") or 0),
+                    "candidate_prop_rows": int(metadata.get("candidate_prop_rows") or 0),
+                    "built_at": metadata.get("built_at"),
+                    "source_signature": str(metadata.get("source_signature") or ""),
+                    "stale": True,
+                    "missing": False,
                 }
 
             _rebuild_player_half_training_examples(
@@ -66,28 +100,34 @@ def load_player_half_prop_examples(
     *,
     market: str | None = None,
     force_rebuild: bool = False,
+    allow_rebuild: bool = True,
 ) -> tuple[list[sqlite3.Row], dict[str, object]]:
-    info = ensure_player_half_training_db(conn, force=force_rebuild)
+    info = ensure_player_half_training_db(conn, force=force_rebuild, allow_rebuild=allow_rebuild)
     training_db_path = Path(str(info["path"]))
+    if not training_db_path.exists():
+        return [], info
     with _connect_training_db(training_db_path) as training_conn:
-        if market:
-            rows = training_conn.execute(
-                """
-                SELECT *
-                FROM player_half_prop_examples
-                WHERE market = ?
-                ORDER BY game_date ASC, source_prop_line_id ASC
-                """,
-                (str(market),),
-            ).fetchall()
-        else:
-            rows = training_conn.execute(
-                """
-                SELECT *
-                FROM player_half_prop_examples
-                ORDER BY game_date ASC, source_prop_line_id ASC
-                """
-            ).fetchall()
+        try:
+            if market:
+                rows = training_conn.execute(
+                    """
+                    SELECT *
+                    FROM player_half_prop_examples
+                    WHERE market = ?
+                    ORDER BY game_date ASC, source_prop_line_id ASC
+                    """,
+                    (str(market),),
+                ).fetchall()
+            else:
+                rows = training_conn.execute(
+                    """
+                    SELECT *
+                    FROM player_half_prop_examples
+                    ORDER BY game_date ASC, source_prop_line_id ASC
+                    """
+                ).fetchall()
+        except sqlite3.OperationalError:
+            return [], info
     return rows, info
 
 

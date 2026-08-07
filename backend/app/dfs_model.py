@@ -211,12 +211,12 @@ def _predict_current_half_estimate(
     runtime_cache: dict[str, dict[tuple, object]] | None,
 ) -> DfsHalfEstimate | None:
     market = str(row["market"] or "").strip().lower()
-    model = train_dfs_half_market_model(conn, market)
+    model = train_dfs_half_market_model(conn, market, allow_training=False)
     if model is None:
         return None
     player_id = int(row["player_id"])
     game_id = int(row["game_id"])
-    snapshot = feature_snapshot(conn, player_id, market, game_id, runtime_cache=runtime_cache, allow_training=True)
+    snapshot = feature_snapshot(conn, player_id, market, game_id, runtime_cache=runtime_cache, allow_training=False)
     if len(snapshot.values) != len(FEATURE_NAMES):
         return None
     line_value = float(row["line"] or 0.0)
@@ -279,9 +279,16 @@ def train_dfs_half_market_model(
     market: str,
     *,
     config: ModelTuningConfig | None = None,
+    allow_training: bool = True,
 ) -> RidgeModel | None:
     tuning = config or ModelTuningConfig()
     db_path = str(conn.execute("PRAGMA database_list").fetchone()["file"] or "")
+    cache_key = _dfs_half_model_cache_key(db_path, market, tuning)
+    cached = _load_cached_dfs_half_model(cache_key)
+    if cached is not None:
+        return cached
+    if not allow_training:
+        return None
     return _train_dfs_half_market_model_cached(db_path, market, tuning)
 
 
@@ -293,10 +300,6 @@ def _train_dfs_half_market_model_cached(
 ) -> RidgeModel | None:
     if not db_path:
         return None
-    cache_key = _dfs_half_model_cache_key(db_path, market, config)
-    cached = _load_cached_dfs_half_model(cache_key)
-    if cached is not None:
-        return cached
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
@@ -338,13 +341,23 @@ def pretrain_dfs_half_models(
 def _dfs_half_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
     from .player_prop_training_db import load_player_prop_final_projection_samples
 
-    final_samples, _diagnostics = load_player_prop_final_projection_samples(conn, market=market, force_rebuild=False)
+    final_samples, _diagnostics = load_player_prop_final_projection_samples(
+        conn,
+        market=market,
+        force_rebuild=False,
+        allow_rebuild=False,
+    )
     final_map = {
         int(sample.source_prop_line_id): sample
         for sample in final_samples
         if sample.source_prop_line_id is not None
     }
-    half_rows, _info = load_player_half_prop_examples(conn, market=market, force_rebuild=False)
+    half_rows, _info = load_player_half_prop_examples(
+        conn,
+        market=market,
+        force_rebuild=False,
+        allow_rebuild=False,
+    )
     rows: list[tuple[list[float], float]] = []
     for half_row in half_rows:
         sample = final_map.get(int(half_row["source_prop_line_id"]))
