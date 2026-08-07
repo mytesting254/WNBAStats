@@ -110,7 +110,7 @@ def build_current_dfs_first_half_estimates(
     recent_minutes_fn,
     recent_h2h_fn,
 ) -> list[dict]:
-    evaluation = evaluate_dfs_half_models(conn)
+    evaluation = evaluate_dfs_half_models(conn, allow_recompute=False)
     eligible_markets = {
         market
         for market, report in (evaluation.get("markets") or {}).items()
@@ -416,6 +416,7 @@ def evaluate_dfs_half_models(
     config: ModelTuningConfig | None = None,
     min_history_rows: int = DFS_HALF_EVAL_MIN_HISTORY_ROWS,
     min_segment_rows: int = DFS_HALF_EVAL_MIN_SEGMENT_ROWS,
+    allow_recompute: bool = True,
 ) -> dict[str, object]:
     tuning = config or ModelTuningConfig()
     db_path = str(conn.execute("PRAGMA database_list").fetchone()["file"] or "")
@@ -428,6 +429,23 @@ def evaluate_dfs_half_models(
     cached = _load_cached_dfs_half_eval(cache_key)
     if cached is not None:
         return cached
+    if not allow_recompute:
+        return {
+            "model_family": DFS_HALF_EVAL_VERSION,
+            "markets": {},
+            "overall": {"rows": 0, "mae": None, "rmse": None, "side_accuracy": None},
+            "min_history_rows": int(min_history_rows),
+            "min_segment_rows": int(min_segment_rows),
+            "gating": {
+                "min_rows": DFS_HALF_MARKET_MIN_ROWS,
+                "min_segments": DFS_HALF_MARKET_MIN_SEGMENTS,
+                "min_side_accuracy": DFS_HALF_MARKET_MIN_SIDE_ACCURACY,
+                "min_mae_vs_half_line": DFS_HALF_MARKET_MIN_MAE_EDGE,
+                "min_mae_vs_component_share": DFS_HALF_MARKET_MIN_COMPONENT_EDGE,
+                "shipped_markets": [],
+                "cache_miss": True,
+            },
+        }
 
     metrics: dict[str, object] = {}
     overall_rows = 0
