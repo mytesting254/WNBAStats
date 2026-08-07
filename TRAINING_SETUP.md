@@ -17,6 +17,7 @@ Runtime defaults:
 
 - app DB: `/data/wnba.sqlite`
 - shared training DB: `/data/wnba-training.sqlite`
+- player first-half training DB: `/data/wnba-player-half-training.sqlite`
 - cache/artifacts: `/data/cache`
 - snapshots: `/data/snapshots`
 
@@ -30,6 +31,12 @@ Current raw/derived split for team context:
 - raw ESPN team stats: `team_game_boxscores` in `wnba.sqlite`
 - derived team/game context: `team_game_results` in `wnba.sqlite`
 - derived curated examples: `*_training_examples` tables in `wnba-training.sqlite`
+
+Current raw/derived split for DFS first-half player modeling:
+
+- raw ESPN summary/play-by-play events: `espn_play_by_play_events` in `wnba.sqlite`
+- observed first-half player actuals: `player_first_half_stats` in `wnba.sqlite`
+- curated DFS first-half examples and cached models: `wnba-player-half-training.sqlite`
 
 Do not hardcode a host-side volume path in docs, scripts, or training flows.
 Coolify deployment IDs and Docker volume names can change across restores or
@@ -75,6 +82,9 @@ Examples:
 - game:
   - `game_training_metadata`
   - `game_training_examples`
+- player first-half:
+  - `player_half_training_metadata`
+  - `player_half_training_examples`
 
 If a future model needs multiple example tables, keep the metadata table singular and namespace the example tables clearly.
 
@@ -141,6 +151,12 @@ Every new model family should have:
 
 - `scripts/build_<model>_training_db.py`
 - `scripts/inspect_<model>_training_db.py`
+
+The current DFS first-half flow uses:
+
+- `backend/app/player_half_training_db.py`
+- `scripts/build_player_half_training_db.py`
+- `scripts/pretrain_dfs_first_half_models.py`
 
 Build script responsibilities:
 
@@ -209,6 +225,18 @@ Build game training DB on the live mounted volume:
 python scripts/live_backend.py exec -- /bin/sh -c 'PYTHONPATH=/app python /app/scripts/build_game_training_db.py --force'
 ```
 
+Build player first-half training DB on the live mounted volume:
+
+```bash
+python scripts/live_backend.py exec -- /bin/sh -c 'PYTHONPATH=/app python /app/scripts/build_player_half_training_db.py --force'
+```
+
+Pretrain DFS first-half market models on the live mounted volume:
+
+```bash
+python scripts/live_backend.py exec -- /bin/sh -c 'PYTHONPATH=/app python /app/scripts/pretrain_dfs_first_half_models.py'
+```
+
 Inspect the shared training DB from inside the live container:
 
 ```bash
@@ -227,6 +255,18 @@ Verify game-training row counts on the live mounted volume:
 python scripts/live_backend.py exec -- python -c "import sqlite3, json; conn=sqlite3.connect('/data/wnba-training.sqlite'); print(json.dumps({'game_training_examples': conn.execute(\"SELECT COUNT(*) FROM game_training_examples\").fetchone()[0], 'game_training_clean': conn.execute(\"SELECT COUNT(*) FROM game_training_examples WHERE is_clean = 1\").fetchone()[0], 'game_training_excluded': conn.execute(\"SELECT COUNT(*) FROM game_training_examples WHERE is_clean = 0\").fetchone()[0]}, indent=2))"
 ```
 
+Verify player first-half training metadata on the live mounted volume:
+
+```bash
+python scripts/live_backend.py exec -- python -c "import sqlite3, json; conn=sqlite3.connect('/data/wnba-player-half-training.sqlite'); conn.row_factory=sqlite3.Row; print(json.dumps([dict(r) for r in conn.execute(\"SELECT key, value FROM player_half_training_metadata ORDER BY key\").fetchall()], indent=2))"
+```
+
+Verify player first-half row counts on the live mounted volume:
+
+```bash
+python scripts/live_backend.py exec -- python -c \"import sqlite3, json; conn=sqlite3.connect('/data/wnba-player-half-training.sqlite'); print(json.dumps({'player_half_training_examples': conn.execute(\\\"SELECT COUNT(*) FROM player_half_training_examples\\\").fetchone()[0], 'player_half_training_clean': conn.execute(\\\"SELECT COUNT(*) FROM player_half_training_examples WHERE is_clean = 1\\\").fetchone()[0], 'player_half_training_excluded': conn.execute(\\\"SELECT COUNT(*) FROM player_half_training_examples WHERE is_clean = 0\\\").fetchone()[0]}, indent=2))\"
+```
+
 Live verification baseline from July 16, 2026:
 
 - `game_training_examples`: `794`
@@ -236,6 +276,19 @@ Live verification baseline from July 16, 2026:
 - `minutes_training_examples`: `15,324`
 - `minutes_training_clean`: `9,202`
 - `player_prop_training_examples`: `41,748`
+- live first-half observed rows verified on Friday, August 7, 2026:
+  - `player_first_half_stats`: `13,723`
+  - observed games: `784`
+  - `espn_play_by_play_events`: `149,718`
+- mounted-volume DFS first-half model pretrain verified on Friday, August 7, 2026:
+  - `points`: `1,550`
+  - `rebounds`: `1,199`
+  - `assists`: `216`
+  - `points_rebounds`: `1,218`
+  - `points_assists`: `931`
+  - `rebounds_assists`: `706`
+  - `points_rebounds_assists`: `266`
+  - `threes`: `858`
 - latest successful mounted-volume training/prewarm run:
   - `model_version`: `adaptive-context-v11-ratings-context`
   - `run_type`: `walk_forward_segments`

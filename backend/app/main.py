@@ -35,6 +35,7 @@ from .bootstrap import ensure_teams, normalize_team_abbreviation
 from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, import_covers_props
 from .db import connect, init_db, sqlite_write_lock, using_turso
+from .dfs_model import build_current_dfs_first_half_estimates
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .espn_roster import sync_espn_rosters
 from .game_prediction_tracking import save_game_prediction, save_game_predictions, settle_completed_game_predictions
@@ -4747,6 +4748,210 @@ def watchlist(response: Response) -> list[dict]:
         compute,
     )
     _set_observability_headers(response, WATCHLIST_CACHE_NAME, status, compute_ms)
+    return payload
+
+
+@app.get("/api/dfs/first-half")
+def dfs_first_half(response: Response) -> list[dict[str, Any]]:
+    started = datetime.now(timezone.utc)
+    with connect() as conn:
+        payload = build_current_dfs_first_half_estimates(
+            conn,
+            recent_values_fn=_recent_market_values,
+            recent_minutes_fn=_recent_minutes_played,
+        )
+    compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
+    _set_observability_headers(response, "dfs_first_half.json", "BYPASS", round(compute_ms, 2))
+    return payload
+
+
+@app.get("/api/player-first-half-history")
+def player_first_half_history(
+    player_name: str = Query(..., min_length=2),
+    team: str | None = Query(None),
+    opponent_team: str | None = Query(None),
+    limit: int = Query(20, ge=1, le=100),
+) -> list[dict[str, Any]]:
+    with connect() as conn:
+        params: list[Any] = [f"%{player_name.strip().lower()}%"]
+        clauses = ["LOWER(p.full_name) LIKE ?"]
+        if team:
+            normalized_team = normalize_team_abbreviation(team)
+            if normalized_team:
+                clauses.append("upper(t.abbreviation) = ?")
+                params.append(normalized_team.upper())
+        if opponent_team:
+            normalized_opponent = normalize_team_abbreviation(opponent_team)
+            if normalized_opponent:
+                clauses.append("upper(opp.abbreviation) = ?")
+                params.append(normalized_opponent.upper())
+        params.append(limit)
+        rows = conn.execute(
+            f"""
+            SELECT
+                g.game_date,
+                g.id AS game_id,
+                p.id AS player_id,
+                p.full_name AS player,
+                t.abbreviation AS team,
+                opp.abbreviation AS opponent_team,
+                pfh.first_half_points,
+                pfh.first_half_rebounds,
+                pfh.first_half_assists,
+                pfh.first_half_threes,
+                pfh.first_half_steals,
+                pfh.first_half_blocks,
+                pfh.first_half_turnovers,
+                pfh.first_half_minutes,
+                pfh.minutes_source,
+                (
+                    SELECT json_group_array(
+                        json_object(
+                            'market', pl.market,
+                            'line', pl.line,
+                            'sportsbook', pl.sportsbook,
+                            'actual_result', sp.actual_result,
+                            'winning_side', sp.winning_side
+                        )
+                    )
+                    FROM settled_props sp
+                    JOIN prop_lines pl ON pl.id = sp.prop_line_id
+                    WHERE pl.game_id = pfh.game_id
+                      AND pl.player_id = pfh.player_id
+                ) AS settled_lines_json
+            FROM player_first_half_stats pfh
+            JOIN players p ON p.id = pfh.player_id
+            JOIN games g ON g.id = pfh.game_id
+            JOIN teams t ON t.id = pfh.team_id
+            JOIN teams opp ON opp.id = pfh.opponent_team_id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY g.game_date DESC, pfh.first_half_points DESC, pfh.player_id ASC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    payload: list[dict[str, Any]] = []
+    for row in rows:
+        payload.append(
+            {
+                "game_date": row["game_date"],
+                "game_id": int(row["game_id"]),
+                "player_id": int(row["player_id"]),
+                "player": str(row["player"]),
+                "team": str(row["team"]),
+                "opponent_team": str(row["opponent_team"]),
+                "first_half_points": int(row["first_half_points"] or 0),
+                "first_half_rebounds": int(row["first_half_rebounds"] or 0),
+                "first_half_assists": int(row["first_half_assists"] or 0),
+                "first_half_threes": int(row["first_half_threes"] or 0),
+                "first_half_steals": int(row["first_half_steals"] or 0),
+                "first_half_blocks": int(row["first_half_blocks"] or 0),
+                "first_half_turnovers": int(row["first_half_turnovers"] or 0),
+                "first_half_minutes": float(row["first_half_minutes"] or 0.0),
+                "minutes_source": str(row["minutes_source"] or ""),
+                "settled_lines": json.loads(row["settled_lines_json"]) if row["settled_lines_json"] else [],
+            }
+        )
+    return payload
+
+
+@app.get("/api/player-first-half-lines")
+def player_first_half_lines(limit: int = Query(200, ge=1, le=1000)) -> list[dict[str, Any]]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                g.game_date,
+                g.id AS game_id,
+                p.id AS player_id,
+                p.full_name AS player,
+                p.position,
+                t.abbreviation AS team,
+                t.logo_url AS team_logo_url,
+                opp.abbreviation AS opponent_team,
+                pl.sportsbook,
+                pl.market,
+                pl.line,
+                sp.actual_result,
+                sp.winning_side,
+                pfh.first_half_points,
+                pfh.first_half_rebounds,
+                pfh.first_half_assists,
+                pfh.first_half_threes,
+                pfh.first_half_steals,
+                pfh.first_half_blocks,
+                pfh.first_half_turnovers,
+                pfh.first_half_minutes,
+                pfh.minutes_source
+            FROM settled_props sp
+            JOIN prop_lines pl ON pl.id = sp.prop_line_id
+            JOIN games g ON g.id = pl.game_id
+            JOIN players p ON p.id = pl.player_id
+            JOIN player_first_half_stats pfh
+              ON pfh.game_id = pl.game_id
+             AND pfh.player_id = pl.player_id
+            JOIN teams t ON t.id = pfh.team_id
+            JOIN teams opp ON opp.id = pfh.opponent_team_id
+            WHERE g.status = 'final'
+            ORDER BY g.game_date DESC, pfh.first_half_points DESC, pl.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    payload: list[dict[str, Any]] = []
+    for row in rows:
+        market = str(row["market"] or "").strip().lower()
+        first_half_result = (
+            float(row["first_half_points"] or 0.0) if market == "points"
+            else float(row["first_half_rebounds"] or 0.0) if market == "rebounds"
+            else float(row["first_half_assists"] or 0.0) if market == "assists"
+            else float(row["first_half_threes"] or 0.0) if market == "threes"
+            else float(row["first_half_steals"] or 0.0) if market == "steals"
+            else float(row["first_half_blocks"] or 0.0) if market == "blocks"
+            else float(row["first_half_blocks"] or 0.0) + float(row["first_half_steals"] or 0.0) if market == "blocks_steals"
+            else float(row["first_half_points"] or 0.0) + float(row["first_half_rebounds"] or 0.0) if market == "points_rebounds"
+            else float(row["first_half_points"] or 0.0) + float(row["first_half_assists"] or 0.0) if market == "points_assists"
+            else float(row["first_half_rebounds"] or 0.0) + float(row["first_half_assists"] or 0.0) if market == "rebounds_assists"
+            else float(row["first_half_points"] or 0.0) + float(row["first_half_rebounds"] or 0.0) + float(row["first_half_assists"] or 0.0) if market == "points_rebounds_assists"
+            else None
+        )
+        if first_half_result is None:
+            continue
+        line = float(row["line"] or 0.0)
+        expected_halfway_line = line * 0.5
+        pace_ratio = first_half_result / expected_halfway_line if abs(expected_halfway_line) > 1e-9 else None
+        halftime_margin_to_line = first_half_result - expected_halfway_line
+        payload.append(
+            {
+                "game_date": row["game_date"],
+                "game_id": int(row["game_id"]),
+                "player_id": int(row["player_id"]),
+                "player": str(row["player"]),
+                "position": str(row["position"]) if row["position"] is not None else None,
+                "team": str(row["team"]),
+                "team_logo_url": str(row["team_logo_url"]) if row["team_logo_url"] is not None else None,
+                "opponent_team": str(row["opponent_team"]),
+                "sportsbook": str(row["sportsbook"]),
+                "market": market,
+                "line": line,
+                "actual_result": float(row["actual_result"] or 0.0),
+                "winning_side": str(row["winning_side"] or ""),
+                "first_half_result": float(first_half_result),
+                "expected_halfway_line": expected_halfway_line,
+                "pace_ratio": pace_ratio,
+                "halftime_margin_to_line": halftime_margin_to_line,
+                "on_track_by_half": bool(pace_ratio is not None and pace_ratio >= 1.0),
+                "first_half_points": int(row["first_half_points"] or 0),
+                "first_half_rebounds": int(row["first_half_rebounds"] or 0),
+                "first_half_assists": int(row["first_half_assists"] or 0),
+                "first_half_threes": int(row["first_half_threes"] or 0),
+                "first_half_steals": int(row["first_half_steals"] or 0),
+                "first_half_blocks": int(row["first_half_blocks"] or 0),
+                "first_half_turnovers": int(row["first_half_turnovers"] or 0),
+                "first_half_minutes": float(row["first_half_minutes"] or 0.0),
+                "minutes_source": str(row["minutes_source"] or ""),
+            }
+        )
     return payload
 
 

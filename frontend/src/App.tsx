@@ -1,6 +1,8 @@
 ﻿import { BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
 import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import {
+  fetchDfsFirstHalf,
+  fetchPlayerFirstHalfLines,
   fetchAuthState,
   fetchUnsettledPropAudit,
   voidDnpProps,
@@ -41,6 +43,7 @@ import {
   type CacheViewStatus,
   type CoversRecordRow,
   type DbLockAudit,
+  type DfsFirstHalfEstimate,
   type GemPerformance,
   type LineDiscrepancy,
   type Matchup,
@@ -48,6 +51,7 @@ import {
   type ModelPerformance,
   type ModelRun,
   type OpsHealth,
+  type PlayerFirstHalfLine,
   type PropSyncHealth,
   type RosterPlayer,
   type SpecialStocksSnapshot,
@@ -95,7 +99,7 @@ const WNBA_TEAM_LOGOS: Record<string, string> = {
   PDX: "/team-logos/por.png"
 };
 
-type DashboardTab = "props" | "gems" | "watchlist" | "matchups" | "parlays" | "special" | "discrepancies" | "roster" | "models" | "data";
+type DashboardTab = "props" | "dfs" | "gems" | "watchlist" | "matchups" | "parlays" | "special" | "discrepancies" | "roster" | "models" | "data";
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SpecialStocksSortField =
@@ -131,6 +135,7 @@ const INITIAL_LOAD_TIMEOUT_MS = 45000;
 const AUTH_LOAD_TIMEOUT_MS = 15000;
 const INITIAL_TAB_LOADING: TabLoadingState = {
   props: false,
+  dfs: false,
   gems: false,
   watchlist: false,
   matchups: false,
@@ -143,6 +148,7 @@ const INITIAL_TAB_LOADING: TabLoadingState = {
 };
 const CACHE_NAMES_BY_TAB: Record<DashboardTab, string[]> = {
   props: ["current_value_board.json"],
+  dfs: [],
   gems: ["current_value_board.json", "current_matchups.json", "line_discrepancies.json", "gem_performance.json"],
   watchlist: ["current_watchlist.json", "watchlist_performance.json"],
   matchups: ["current_matchups.json"],
@@ -282,6 +288,8 @@ class DashboardErrorBoundary extends Component<
 
 export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
+  const [dfsFirstHalf, setDfsFirstHalf] = useState<DfsFirstHalfEstimate[]>([]);
+  const [playerFirstHalfLines, setPlayerFirstHalfLines] = useState<PlayerFirstHalfLine[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
   const [specialStocks, setSpecialStocks] = useState<SpecialStocksSnapshot[]>([]);
@@ -330,6 +338,7 @@ export function App() {
   const [tabLoading, setTabLoading] = useState<TabLoadingState>(INITIAL_TAB_LOADING);
   const [loadedTabs, setLoadedTabs] = useState<Record<DashboardTab, boolean>>({
     props: false,
+    dfs: false,
     gems: false,
     watchlist: false,
     matchups: false,
@@ -457,6 +466,13 @@ export function App() {
         setMatchups(nextMatchups);
         setDiscrepancies(nextDiscrepancies);
         setGemPerformance(nextPerformance);
+      } else if (tab === "dfs") {
+        const [nextDfs, nextFirstHalfLines] = await Promise.all([
+          withTimeout(fetchDfsFirstHalf(), INITIAL_LOAD_TIMEOUT_MS, "DFS first-half estimates"),
+          withTimeout(fetchPlayerFirstHalfLines(250), INITIAL_LOAD_TIMEOUT_MS, "player first-half line history")
+        ]);
+        setDfsFirstHalf(nextDfs);
+        setPlayerFirstHalfLines(nextFirstHalfLines);
       } else if (tab === "watchlist") {
         const [nextWatchlist, nextPerformance] = await Promise.all([
           withTimeout(fetchWatchlist(), INITIAL_LOAD_TIMEOUT_MS, "watchlist"),
@@ -1279,6 +1295,10 @@ export function App() {
           <TrendingUp size={18} />
           Props
         </button>
+        <button className={activeTab === "dfs" ? "active" : ""} onClick={() => setActiveTab("dfs")}>
+          <BrainCircuit size={18} />
+          DFS
+        </button>
         <button className={activeTab === "gems" ? "active" : ""} onClick={() => setActiveTab("gems")}>
           <TrendingUp size={18} />
           Gems
@@ -1321,12 +1341,12 @@ export function App() {
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "special" ? "Special props" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups, props).toString() : activeTab === "special" ? specialStocks.length.toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "dfs" ? "1H estimates" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "special" ? "Special props" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "dfs" ? dfsFirstHalf.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups, props).toString() : activeTab === "special" ? specialStocks.length.toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
         />
         <Metric
-          label={activeTab === "props" ? "Best EV" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "special" ? "Top stocks" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups, props).toString() : activeTab === "special" ? formatNumber(topSpecialStocks) : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          label={activeTab === "props" ? "Best EV" : activeTab === "dfs" ? "Top 1H pace" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "special" ? "Top stocks" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "dfs" ? formatNumber(dfsFirstHalf[0]?.pace_ratio ?? null) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups, props).toString() : activeTab === "special" ? formatNumber(topSpecialStocks) : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={(performance?.total_settled ?? performance?.settled ?? 0).toString()} />
         <Metric
@@ -1365,6 +1385,8 @@ export function App() {
             setPropsSortDirection={setPropsSortDirection}
             setSelected={setSelected}
           />
+        ) : activeTab === "dfs" ? (
+          <DfsView estimates={dfsFirstHalf} history={playerFirstHalfLines} loading={tabLoading.dfs} error={error} />
         ) : activeTab === "gems" ? (
           <GemsView gems={gems} matchups={matchups} loading={tabLoading.gems} error={error} />
         ) : activeTab === "watchlist" ? (
@@ -4356,6 +4378,219 @@ function WatchlistView({
   );
 }
 
+function DfsView({
+  estimates,
+  history,
+  loading,
+  error,
+}: {
+  estimates: DfsFirstHalfEstimate[];
+  history: PlayerFirstHalfLine[];
+  loading: boolean;
+  error: string | null;
+}) {
+  const [selectedView, setSelectedView] = useState<"estimates" | "history">("estimates");
+  const [marketFilter, setMarketFilter] = useState("all");
+  const [sportsbookFilter, setSportsbookFilter] = useState("all");
+  const estimateRows = useMemo(
+    () =>
+      [...estimates].sort(
+        (a, b) =>
+          (b.pace_ratio ?? -Infinity) - (a.pace_ratio ?? -Infinity)
+          || (b.halftime_margin_to_line ?? -Infinity) - (a.halftime_margin_to_line ?? -Infinity)
+      ),
+    [estimates]
+  );
+  const historyRows = useMemo(
+    () =>
+      [...history].sort(
+        (a, b) =>
+          b.game_date.localeCompare(a.game_date)
+          || (b.pace_ratio ?? -Infinity) - (a.pace_ratio ?? -Infinity)
+      ),
+    [history]
+  );
+  const filteredEstimateRows = useMemo(
+    () =>
+      estimateRows.filter((item) => {
+        const marketMatch = marketFilter === "all" || item.market === marketFilter;
+        const sportsbookMatch = sportsbookFilter === "all" || displaySportsbookName(item) === sportsbookFilter;
+        return marketMatch && sportsbookMatch;
+      }),
+    [estimateRows, marketFilter, sportsbookFilter]
+  );
+  const filteredHistoryRows = useMemo(
+    () =>
+      historyRows.filter((item) => {
+        const marketMatch = marketFilter === "all" || item.market === marketFilter;
+        const sportsbookMatch = sportsbookFilter === "all" || item.sportsbook === sportsbookFilter;
+        return marketMatch && sportsbookMatch;
+      }),
+    [historyRows, marketFilter, sportsbookFilter]
+  );
+  const sportsbookOptions = useMemo(
+    () => selectedView === "estimates"
+      ? sportsbookFilterOptions(estimateRows)
+      : ["all", ...Array.from(new Set(historyRows.map((item) => item.sportsbook).filter(Boolean))).sort((a, b) => a.localeCompare(b))],
+    [estimateRows, historyRows, selectedView]
+  );
+
+  return (
+    <section className="matchup-list">
+      <div className="board-panel">
+        <div className="panel-header">
+          <div>
+            <h2>DFS First Half</h2>
+            <p>{loading ? "Loading first-half estimates and observed halftime pace" : "Current 1H estimates and observed halftime pace against full-game prop lines"}</p>
+          </div>
+          <BrainCircuit size={20} />
+        </div>
+        {error ? <div className="error">{error}</div> : null}
+        <div className="game-tabs" aria-label="DFS halftime views">
+          <button className={selectedView === "estimates" ? "active" : ""} onClick={() => setSelectedView("estimates")}>
+            <span>Current board</span>
+            <strong>1H Estimates</strong>
+            <em>{`${estimates.length} live rows`}</em>
+          </button>
+          <button className={selectedView === "history" ? "active" : ""} onClick={() => setSelectedView("history")}>
+            <span>Observed history</span>
+            <strong>Halftime vs Line</strong>
+            <em>{`${history.length} settled rows`}</em>
+          </button>
+        </div>
+        <div className="parlay-tab-content">
+          <div className="matchup-props">
+            <div className="candidate-filters" aria-label="DFS filters">
+              <div className="segmented candidate-tabs" aria-label="Market filter">
+                {markets.map((item) => (
+                  <button
+                    key={`dfs-market-${item.id}`}
+                    className={marketFilter === item.id ? "active" : ""}
+                    type="button"
+                    onClick={() => setMarketFilter(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              <select
+                aria-label="DFS sportsbook filter"
+                value={sportsbookFilter}
+                onChange={(event) => setSportsbookFilter(event.target.value)}
+              >
+                {sportsbookOptions.map((sportsbook) => (
+                  <option key={`dfs-book-${sportsbook}`} value={sportsbook}>
+                    {sportsbook === "all" ? "All books" : sportsbook}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="table-wrap">
+              {selectedView === "estimates" ? (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Player</th>
+                      <th>Market</th>
+                      <th className="props-best-col">Book</th>
+                      <th>FG Line</th>
+                      <th>1H Est</th>
+                      <th>Halfway</th>
+                      <th>Pace</th>
+                      <th>1H Edge</th>
+                      <th>1H Min%</th>
+                      <th>Track</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredEstimateRows.slice(0, 100).map((item) => (
+                      <tr key={`dfs-est-${item.prop_line_id}`}>
+                        <td>
+                          <div className="player-cell">
+                            <TeamLogo src={item.team_logo_url} alt={`${item.team} logo`} />
+                            <div>
+                              <PlayerLabel name={item.player} position={item.position} />
+                              <span>{item.team}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>{marketLabel(item.market)}</td>
+                        <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
+                        <td>{item.line.toFixed(1)}</td>
+                        <td>{formatNumber(item.estimated_first_half_result)}</td>
+                        <td>{formatNumber(item.expected_halfway_line)}</td>
+                        <td>{formatNumber(item.pace_ratio ?? null)}</td>
+                        <td>{formatSigned(item.halftime_margin_to_line ?? null)}</td>
+                        <td>{formatPercent(item.estimated_first_half_minutes_share)}</td>
+                        <td><span className={`side ${item.recommended_side}`}>{(item.pace_ratio ?? 0) >= 1 ? "on pace" : "behind"}</span></td>
+                      </tr>
+                    ))}
+                    {!filteredEstimateRows.length ? (
+                      <tr>
+                        <td colSpan={10}>No current first-half estimates available for these filters.</td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              ) : (
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Player</th>
+                      <th>Opp</th>
+                      <th>Market</th>
+                      <th className="props-best-col">Book</th>
+                      <th>FG Line</th>
+                      <th>1H Actual</th>
+                      <th>Halfway</th>
+                      <th>Pace</th>
+                      <th>1H Edge</th>
+                      <th>1H Min</th>
+                      <th>Final</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredHistoryRows.slice(0, 150).map((item) => (
+                      <tr key={`dfs-hist-${item.game_id}-${item.player_id}-${item.market}-${item.line}-${item.sportsbook}`}>
+                        <td>{formatGameDateShort(item.game_date)}</td>
+                        <td>
+                          <div className="player-cell">
+                            <TeamLogo src={item.team_logo_url} alt={`${item.team} logo`} />
+                            <div>
+                              <PlayerLabel name={item.player} position={item.position} />
+                              <span>{item.team}</span>
+                            </div>
+                          </div>
+                        </td>
+                        <td>{item.opponent_team}</td>
+                        <td>{marketLabel(item.market)}</td>
+                        <td className="props-best-book"><SportsbookLogo name={item.sportsbook} className="compact props-best-logo" /></td>
+                        <td>{item.line.toFixed(1)}</td>
+                        <td>{formatNumber(item.first_half_result)}</td>
+                        <td>{formatNumber(item.expected_halfway_line)}</td>
+                        <td>{formatNumber(item.pace_ratio ?? null)}</td>
+                        <td>{formatSigned(item.halftime_margin_to_line ?? null)}</td>
+                        <td>{formatNumber(item.first_half_minutes)}</td>
+                        <td><span className={`side ${item.winning_side === "over" ? "over" : "under"}`}>{formatNumber(item.actual_result)}</span></td>
+                      </tr>
+                    ))}
+                    {!filteredHistoryRows.length ? (
+                      <tr>
+                        <td colSpan={12}>No observed halftime line rows available for these filters.</td>
+                      </tr>
+                    ) : null}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function ParlayCandidatesView({
   matchups,
   props,
@@ -5804,6 +6039,7 @@ function sortModelMetrics(metrics: ModelRun["metrics"]) {
 function tabTitle(tab: DashboardTab) {
   const titles = {
     props: "Prop Value Board",
+    dfs: "DFS First Half",
     gems: "Gem Finder",
     watchlist: "Prop Watchlist",
     matchups: "Pregame Matchups",

@@ -394,6 +394,64 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS espn_play_by_play_events (
+                id INTEGER PRIMARY KEY,
+                game_id INTEGER NOT NULL,
+                espn_event_id INTEGER NOT NULL,
+                event_index INTEGER NOT NULL,
+                period_number INTEGER NOT NULL,
+                clock_seconds_remaining INTEGER,
+                clock_display TEXT,
+                home_score INTEGER,
+                away_score INTEGER,
+                team_id INTEGER,
+                player_id INTEGER,
+                secondary_player_id INTEGER,
+                event_type TEXT NOT NULL,
+                event_text TEXT NOT NULL,
+                stat_json TEXT,
+                source TEXT NOT NULL DEFAULT 'espn_playbyplay',
+                captured_at TEXT NOT NULL,
+                FOREIGN KEY (game_id) REFERENCES games(id),
+                FOREIGN KEY (team_id) REFERENCES teams(id),
+                FOREIGN KEY (player_id) REFERENCES players(id),
+                FOREIGN KEY (secondary_player_id) REFERENCES players(id),
+                UNIQUE(game_id, event_index)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS player_first_half_stats (
+                game_id INTEGER NOT NULL,
+                player_id INTEGER NOT NULL,
+                team_id INTEGER NOT NULL,
+                opponent_team_id INTEGER NOT NULL,
+                first_half_points INTEGER NOT NULL DEFAULT 0,
+                first_half_rebounds INTEGER NOT NULL DEFAULT 0,
+                first_half_assists INTEGER NOT NULL DEFAULT 0,
+                first_half_threes INTEGER NOT NULL DEFAULT 0,
+                first_half_steals INTEGER NOT NULL DEFAULT 0,
+                first_half_blocks INTEGER NOT NULL DEFAULT 0,
+                first_half_turnovers INTEGER NOT NULL DEFAULT 0,
+                first_half_field_goals_made INTEGER NOT NULL DEFAULT 0,
+                first_half_field_goals_attempted INTEGER NOT NULL DEFAULT 0,
+                first_half_free_throws_made INTEGER NOT NULL DEFAULT 0,
+                first_half_free_throws_attempted INTEGER NOT NULL DEFAULT 0,
+                first_half_minutes REAL,
+                minutes_source TEXT,
+                source TEXT NOT NULL DEFAULT 'espn_playbyplay',
+                captured_at TEXT NOT NULL,
+                PRIMARY KEY (game_id, player_id),
+                FOREIGN KEY (game_id) REFERENCES games(id),
+                FOREIGN KEY (player_id) REFERENCES players(id),
+                FOREIGN KEY (team_id) REFERENCES teams(id),
+                FOREIGN KEY (opponent_team_id) REFERENCES teams(id)
+            )
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS sportsbook_prop_lines (
                 id INTEGER PRIMARY KEY,
                 provider TEXT NOT NULL,
@@ -1062,6 +1120,58 @@ CREATE TABLE IF NOT EXISTS game_segment_results (
     source TEXT NOT NULL DEFAULT 'espn_summary',
     captured_at TEXT NOT NULL,
     FOREIGN KEY (game_id) REFERENCES games(id)
+);
+
+CREATE TABLE IF NOT EXISTS espn_play_by_play_events (
+    id INTEGER PRIMARY KEY,
+    game_id INTEGER NOT NULL,
+    espn_event_id INTEGER NOT NULL,
+    event_index INTEGER NOT NULL,
+    period_number INTEGER NOT NULL,
+    clock_seconds_remaining INTEGER,
+    clock_display TEXT,
+    home_score INTEGER,
+    away_score INTEGER,
+    team_id INTEGER,
+    player_id INTEGER,
+    secondary_player_id INTEGER,
+    event_type TEXT NOT NULL,
+    event_text TEXT NOT NULL,
+    stat_json TEXT,
+    source TEXT NOT NULL DEFAULT 'espn_playbyplay',
+    captured_at TEXT NOT NULL,
+    FOREIGN KEY (game_id) REFERENCES games(id),
+    FOREIGN KEY (team_id) REFERENCES teams(id),
+    FOREIGN KEY (player_id) REFERENCES players(id),
+    FOREIGN KEY (secondary_player_id) REFERENCES players(id),
+    UNIQUE(game_id, event_index)
+);
+
+CREATE TABLE IF NOT EXISTS player_first_half_stats (
+    game_id INTEGER NOT NULL,
+    player_id INTEGER NOT NULL,
+    team_id INTEGER NOT NULL,
+    opponent_team_id INTEGER NOT NULL,
+    first_half_points INTEGER NOT NULL DEFAULT 0,
+    first_half_rebounds INTEGER NOT NULL DEFAULT 0,
+    first_half_assists INTEGER NOT NULL DEFAULT 0,
+    first_half_threes INTEGER NOT NULL DEFAULT 0,
+    first_half_steals INTEGER NOT NULL DEFAULT 0,
+    first_half_blocks INTEGER NOT NULL DEFAULT 0,
+    first_half_turnovers INTEGER NOT NULL DEFAULT 0,
+    first_half_field_goals_made INTEGER NOT NULL DEFAULT 0,
+    first_half_field_goals_attempted INTEGER NOT NULL DEFAULT 0,
+    first_half_free_throws_made INTEGER NOT NULL DEFAULT 0,
+    first_half_free_throws_attempted INTEGER NOT NULL DEFAULT 0,
+    first_half_minutes REAL,
+    minutes_source TEXT,
+    source TEXT NOT NULL DEFAULT 'espn_playbyplay',
+    captured_at TEXT NOT NULL,
+    PRIMARY KEY (game_id, player_id),
+    FOREIGN KEY (game_id) REFERENCES games(id),
+    FOREIGN KEY (player_id) REFERENCES players(id),
+    FOREIGN KEY (team_id) REFERENCES teams(id),
+    FOREIGN KEY (opponent_team_id) REFERENCES teams(id)
 );
 
 CREATE TABLE IF NOT EXISTS injuries (

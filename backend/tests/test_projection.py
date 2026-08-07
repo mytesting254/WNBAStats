@@ -54,6 +54,7 @@ from backend.app.history_import import normalize_team_key
 from backend.app.main import app, import_espn_history as import_espn_history_endpoint, model_performance
 from backend.app import main as main_module
 from backend.app.minutes_training_db import ensure_minutes_training_db, load_minutes_training_examples
+from backend.app.player_half_training_db import ensure_player_half_training_db, load_player_half_prop_examples
 
 INIT_DB_SCRIPT = str(paths_module.ROOT_DIR / "scripts" / "init_db.py")
 from backend.app.odds import american_to_implied_probability, expected_value
@@ -8710,6 +8711,50 @@ def test_odds_import_loads_saved_json_without_api_key(monkeypatch) -> None:
     assert result["source"] == "cache"
     assert result["imported"] == 2
     assert len(rows) == 2
+
+
+def test_player_half_training_db_builds_curated_prop_examples() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO game_segment_results (game_id, home_q1_points, away_q1_points, home_q2_points, away_q2_points, home_1h_points, away_1h_points, source, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (100, 21, 18, 20, 17, 41, 35, "test", captured_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (900001, 100, 1001, "DraftKings", "points", 18.5, -110, -110, captured_at),
+        )
+        conn.execute(
+            """
+            INSERT INTO settled_props (
+                prop_line_id, actual_result, winning_side, margin, player_minutes, game_margin, team_margin, team_spread,
+                blowout_result, blowout_threshold, team_points, opponent_points, team_possessions, opponent_possessions,
+                pace, team_off_rating, opponent_off_rating, net_rating, team_possessions_source, opponent_possessions_source, settled_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                900001, 19.0, "over", 0.5, 32.0, 6.0, 6.0, -4.5,
+                "no_blowout", 15.0, 82.0, 76.0, 78.0, 78.0,
+                78.0, 105.1, 97.4, 7.7, "test", "test", captured_at,
+            ),
+        )
+        conn.commit()
+
+        info = ensure_player_half_training_db(conn, force=True)
+        rows, _ = load_player_half_prop_examples(conn, market="points")
+
+    assert info["player_rows"] > 0
+    assert info["prop_rows"] == 1
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["market"] == "points"
+    assert float(row["estimated_first_half_result"]) > 0.0
+    assert row["line_progress_ratio"] is not None
 
 
 def test_odds_import_backfills_provider_player_ids(monkeypatch) -> None:

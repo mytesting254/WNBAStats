@@ -130,6 +130,46 @@ The app is built around a provider-backed pregame workflow:
   - `Q1` fast-start rate
 - `1H` currently excludes those `Q1`-specific additions because they improved `Q1` but degraded `1H` holdout performance.
 
+### DFS First-Half Props
+
+- Current DFS first-half estimates are built from full-game prop lines plus curated first-half history.
+- Historical first-half player actuals now persist in:
+  - `espn_play_by_play_events`
+  - `player_first_half_stats`
+- ESPN summary/play-by-play imports populate observed first-half stats including:
+  - first-half points, rebounds, assists, threes, steals, blocks, turnovers
+  - estimated first-half minutes from substitution events when available
+- The curated first-half training DB lives beside the runtime DB:
+  - default path: `data/wnba-player-half-training.sqlite`
+  - override: `WNBA_PLAYER_HALF_TRAINING_DB_PATH`
+- DFS first-half estimates currently expose:
+  - `GET /api/dfs/first-half`
+  - `GET /api/player-first-half-history`
+  - `GET /api/player-first-half-lines`
+- The DFS UI depends on current `prop_lines`. Without current prop ingestion, the DFS first-half tab has no live slate to estimate against.
+- For current slates, the fastest recovery path is:
+  1. load the saved odds cache into the live runtime
+  2. sync sportsbook rows into `prop_lines`
+  3. rebuild/publish live prediction payloads
+- If the live VM already has saved raw odds under the active runtime cache, use the mounted runtime context instead of repo-local `data/cache`.
+
+### Live Cached Prop Imports
+
+- Saved raw prop caches are runtime-scoped, not repo-scoped.
+- On deployed Docker/Coolify setups, do not assume repo-local `data/cache` is the live cache used by the running backend.
+- Resolve the active runtime first:
+  - `python scripts/live_backend.py runtime-info`
+  - `python scripts/live_backend.py host-runtime-info`
+- The live odds import path can load saved raw cache without a provider refresh:
+  - `POST /api/odds/import` with `force_refresh=false`
+- That path:
+  - loads saved Odds API JSON from the active runtime cache
+  - refreshes `sportsbook_prop_lines`
+  - syncs changed rows into `prop_lines`
+  - rebuilds current predictions
+  - republishes current read payloads
+- If live data is present in the DB but new routes return `404`, treat that as a deploy/runtime mismatch. The mounted volume may be current while the served backend image is still old.
+
 ### Segment Tracking And Backfill
 
 - Segment projections are tracked only when `game_predictions` rows are written.
@@ -187,6 +227,13 @@ python scripts/live_backend.py runtime-info
 python scripts/live_backend.py host-runtime-info
 python scripts/live_backend.py doctor
 python scripts/live_backend.py exec -- python -c "import sqlite3; conn=sqlite3.connect('/data/wnba.sqlite'); print(conn.execute(\"SELECT MAX(game_date) FROM games WHERE status='final'\").fetchone()[0])"
+```
+
+To confirm today’s live prop sync against the active runtime DB:
+
+```bash
+python scripts/live_backend.py exec -- python -c "import sqlite3; conn=sqlite3.connect('/data/wnba.sqlite'); print(conn.execute(\"SELECT COUNT(*) FROM prop_lines pl JOIN games g ON g.id = pl.game_id WHERE g.game_date = '2026-08-07'\").fetchone()[0])"
+python scripts/live_backend.py exec -- python -c "import sqlite3; conn=sqlite3.connect('/data/wnba.sqlite'); print(conn.execute(\"SELECT COUNT(*) FROM prop_predictions pp JOIN prop_lines pl ON pl.id = pp.prop_line_id JOIN games g ON g.id = pl.game_id WHERE g.game_date = '2026-08-07'\").fetchone()[0])"
 ```
 
 `python scripts/live_backend.py doctor` is the fastest sanity check when a VM

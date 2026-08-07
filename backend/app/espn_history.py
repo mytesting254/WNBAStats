@@ -11,6 +11,7 @@ from urllib.request import Request, urlopen
 
 from .bootstrap import ensure_team, ensure_teams, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
+from .espn_playbyplay import fetch_playbyplay, upsert_player_first_half_stats
 from .game_resolver import resolve_or_create_game
 from .player_identity import repair_shadow_player_identities
 from .timezone_utils import APP_TIMEZONE
@@ -192,6 +193,7 @@ def import_espn_player_boxscores(
     missing_only: bool = False,
     selected_date: str | None = None,
     max_workers: int = 8,
+    include_playbyplay: bool = True,
 ) -> dict:
     ensure_teams(conn)
     date_filter = "AND game_date = ?" if selected_date else "AND game_date >= ? AND game_date < ?"
@@ -228,20 +230,28 @@ def import_espn_player_boxscores(
     updated_team_game_results = 0
     updated_team_game_boxscores = 0
     updated_game_segment_results = 0
+    updated_player_first_half_stats = 0
     existing_player_ids = {
         int(row["id"])
         for row in conn.execute("SELECT id FROM players").fetchall()
     }
 
-    def fetch_game(game) -> tuple[int, int, dict[str, Any] | None]:
+    def fetch_game(game) -> tuple[int, int, dict[str, Any] | None, dict[str, Any] | None]:
         game_id = int(game["id"])
         summary_event_id = int(game["summary_event_id"])
         try:
-            return game_id, summary_event_id, fetch_summary(summary_event_id, force_refresh=force_refresh)
+            summary_payload = fetch_summary(summary_event_id, force_refresh=force_refresh)
         except Exception:
-            return game_id, summary_event_id, None
+            return game_id, summary_event_id, None, None
+        playbyplay_payload = None
+        if include_playbyplay:
+            try:
+                playbyplay_payload = fetch_playbyplay(summary_event_id, force_refresh=force_refresh)
+            except Exception:
+                playbyplay_payload = None
+        return game_id, summary_event_id, summary_payload, playbyplay_payload
 
-    fetched_games: list[tuple[int, int, dict[str, Any] | None]] = []
+    fetched_games: list[tuple[int, int, dict[str, Any] | None, dict[str, Any] | None]] = []
     workers = max(1, min(max_workers, len(games) or 1))
     game_order = {int(game["id"]): index for index, game in enumerate(games)}
     if workers == 1:
@@ -259,8 +269,9 @@ def import_espn_player_boxscores(
     availability_rows: list[tuple] = []
     team_history_rows: set[tuple[int, int, int, str, float, str]] = set()
     game_ids_to_replace = []
+    first_half_inputs: list[tuple[int, int, dict[str, Any], dict[str, Any] | None]] = []
 
-    for game_id, _summary_event_id, payload in fetched_games:
+    for game_id, summary_event_id, payload, playbyplay_payload in fetched_games:
         if payload is None:
             skipped_games += 1
             continue
@@ -268,6 +279,7 @@ def import_espn_player_boxscores(
         updated_team_game_boxscores += _upsert_team_game_boxscores(conn, game_id, payload)
         updated_team_game_results += _update_team_game_result_possessions(conn, game_id, payload)
         updated_game_segment_results += _upsert_game_segment_results(conn, game_id, payload)
+        first_half_inputs.append((game_id, summary_event_id, payload, playbyplay_payload))
         player_rows = _player_stat_rows(conn, game_id, payload)
         injury_rows = _injury_availability_rows(conn, game_id, payload, player_rows)
         if not player_rows and not injury_rows:
@@ -361,6 +373,16 @@ def import_espn_player_boxscores(
             """,
             sorted(team_history_rows),
         )
+        for game_id, summary_event_id, payload, playbyplay_payload in first_half_inputs:
+            updated_player_first_half_stats += int(
+                upsert_player_first_half_stats(
+                    conn,
+                    game_id=game_id,
+                    event_id=summary_event_id,
+                    summary_payload=payload,
+                    playbyplay_payload=playbyplay_payload,
+                ).get("players", 0)
+            )
         repair_shadow_player_identities(conn)
         inserted_stats = len(stat_rows)
         deleted_dnp_prop_lines = _delete_explicit_dnp_prop_lines(conn, game_ids_to_replace)
@@ -379,6 +401,7 @@ def import_espn_player_boxscores(
         "updated_team_game_results": updated_team_game_results,
         "updated_team_game_boxscores": updated_team_game_boxscores,
         "updated_game_segment_results": updated_game_segment_results,
+        "updated_player_first_half_stats": updated_player_first_half_stats,
         "deleted_dnp_prop_lines": deleted_dnp_prop_lines,
         "missing_only": missing_only,
         "source": "espn_summary",

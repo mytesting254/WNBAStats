@@ -45,6 +45,68 @@ export type WatchlistProp = ValueProp & {
   home_team?: string;
 };
 
+export type DfsFirstHalfEstimate = {
+  prop_line_id: number;
+  game_id: number;
+  player_id: number;
+  player: string;
+  position?: string | null;
+  team: string;
+  team_logo_url?: string | null;
+  sportsbook: string;
+  market: string;
+  line: number;
+  over_odds: number;
+  under_odds: number;
+  full_game_projection: number;
+  estimated_first_half_result: number;
+  expected_halfway_line: number;
+  pace_ratio?: number | null;
+  halftime_margin_to_line?: number | null;
+  on_track_probability?: number | null;
+  recommended_side: "over" | "under";
+  model_version: string;
+  model_rows: number;
+  team_first_half_share: number;
+  estimated_first_half_minutes_share: number;
+  projected_first_half_total?: number | null;
+  game_total?: number | null;
+  start_time?: string | null;
+  confidence: "low" | "medium" | "high";
+  recent_values?: number[];
+  recent_minutes?: number[];
+};
+
+export type PlayerFirstHalfLine = {
+  game_date: string;
+  game_id: number;
+  player_id: number;
+  player: string;
+  position?: string | null;
+  team: string;
+  team_logo_url?: string | null;
+  opponent_team: string;
+  sportsbook: string;
+  market: string;
+  line: number;
+  actual_result: number;
+  winning_side: string;
+  first_half_result: number;
+  expected_halfway_line: number;
+  pace_ratio?: number | null;
+  halftime_margin_to_line?: number | null;
+  on_track_by_half: boolean;
+  first_half_points: number;
+  first_half_rebounds: number;
+  first_half_assists: number;
+  first_half_threes: number;
+  first_half_steals: number;
+  first_half_blocks: number;
+  first_half_turnovers: number;
+  first_half_minutes: number;
+  minutes_source?: string | null;
+};
+
 export type SpecialStocksSnapshot = {
   id: number;
   game_id: number;
@@ -889,6 +951,22 @@ export async function fetchWatchlist(): Promise<WatchlistProp[]> {
   const response = await apiFetch("/api/watchlist");
   if (!response.ok) {
     throw new Error("Failed to load watchlist");
+  }
+  return response.json();
+}
+
+export async function fetchDfsFirstHalf(): Promise<DfsFirstHalfEstimate[]> {
+  const response = await apiFetch("/api/dfs/first-half");
+  if (!response.ok) {
+    throw new Error("Failed to load DFS first-half estimates");
+  }
+  return response.json();
+}
+
+export async function fetchPlayerFirstHalfLines(limit = 200): Promise<PlayerFirstHalfLine[]> {
+  const response = await apiFetch(`/api/player-first-half-lines?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error("Failed to load player first-half line history");
   }
   return response.json();
 }
