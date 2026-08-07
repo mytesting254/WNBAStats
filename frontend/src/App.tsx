@@ -467,12 +467,14 @@ export function App() {
         setDiscrepancies(nextDiscrepancies);
         setGemPerformance(nextPerformance);
       } else if (tab === "dfs") {
-        const [nextDfs, nextFirstHalfLines] = await Promise.all([
+        const [nextDfs, nextFirstHalfLines, nextMatchups] = await Promise.all([
           withTimeout(fetchDfsFirstHalf(), INITIAL_LOAD_TIMEOUT_MS, "DFS first-half estimates"),
-          withTimeout(fetchPlayerFirstHalfLines(250), INITIAL_LOAD_TIMEOUT_MS, "player first-half line history")
+          withTimeout(fetchPlayerFirstHalfLines(250), INITIAL_LOAD_TIMEOUT_MS, "player first-half line history"),
+          withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups")
         ]);
         setDfsFirstHalf(nextDfs);
         setPlayerFirstHalfLines(nextFirstHalfLines);
+        setMatchups(nextMatchups);
       } else if (tab === "watchlist") {
         const [nextWatchlist, nextPerformance] = await Promise.all([
           withTimeout(fetchWatchlist(), INITIAL_LOAD_TIMEOUT_MS, "watchlist"),
