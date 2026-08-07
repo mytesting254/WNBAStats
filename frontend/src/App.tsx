@@ -4392,6 +4392,7 @@ function DfsView({
   error: string | null;
 }) {
   const [selectedView, setSelectedView] = useState<"estimates" | "history">("estimates");
+  const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const [marketFilter, setMarketFilter] = useState("all");
   const [sportsbookFilter, setSportsbookFilter] = useState("all");
   const estimateRows = useMemo(
@@ -4450,6 +4451,7 @@ function DfsView({
       }))
       .sort((a, b) => (a.startTime ?? "").localeCompare(b.startTime ?? ""));
   }, [filteredEstimateRows, matchupByGameId]);
+  const selectedEstimateGroup = groupedEstimateRows.find((group) => group.gameId === selectedGameId) ?? groupedEstimateRows[0] ?? null;
   const sportsbookOptions = useMemo(
     () => selectedView === "estimates"
       ? sportsbookFilterOptions(estimateRows)
@@ -4480,6 +4482,21 @@ function DfsView({
             <em>{`${history.length} settled rows`}</em>
           </button>
         </div>
+        {selectedView === "estimates" ? (
+          <div className="game-tabs" aria-label="DFS matchup tabs">
+            {groupedEstimateRows.map((group) => (
+              <button
+                key={`dfs-tab-${group.gameId}`}
+                className={(selectedEstimateGroup?.gameId ?? null) === group.gameId ? "active" : ""}
+                onClick={() => setSelectedGameId(group.gameId)}
+              >
+                <span>{group.startTime ? formatDate(group.startTime) : "Slate"}</span>
+                <strong>{group.matchup ? `${group.matchup.away_team} at ${group.matchup.home_team}` : `Game ${group.gameId}`}</strong>
+                <em>{`${group.rows.length} props`}</em>
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="parlay-tab-content">
           <div className="matchup-props">
             <div className="candidate-filters" aria-label="DFS filters">
@@ -4509,64 +4526,47 @@ function DfsView({
             </div>
             <div className="table-wrap">
               {selectedView === "estimates" ? (
-                groupedEstimateRows.length ? (
-                  <div className="matchup-list">
-                    {groupedEstimateRows.map((group) => (
-                      <div className="board-panel" key={`dfs-group-${group.gameId}`}>
-                        <div className="panel-header">
-                          <div>
-                            <h3>{group.matchup ? `${group.matchup.away_team} at ${group.matchup.home_team}` : `Game ${group.gameId}`}</h3>
-                            <p>
-                              {group.startTime ? formatGameDateShort(group.startTime) : "Current slate"}
-                              {` • ${group.rows.length} props`}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="table-wrap">
-                          <table>
-                            <thead>
-                              <tr>
-                                <th>Player</th>
-                                <th>Market</th>
-                                <th className="props-best-col">Book</th>
-                                <th>FG Line</th>
-                                <th>1H Est</th>
-                                <th>Halfway</th>
-                                <th>Pace</th>
-                                <th>1H Edge</th>
-                                <th>1H Min%</th>
-                                <th>Track</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {group.rows.map((item) => (
-                                <tr key={`dfs-est-${item.prop_line_id}`}>
-                                  <td>
-                                    <div className="player-cell">
-                                      <TeamLogo src={item.team_logo_url} alt={`${item.team} logo`} />
-                                      <div>
-                                        <PlayerLabel name={item.player} position={item.position} />
-                                        <span>{item.team}</span>
-                                      </div>
-                                    </div>
-                                  </td>
-                                  <td>{marketLabel(item.market)}</td>
-                                  <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
-                                  <td>{item.line.toFixed(1)}</td>
-                                  <td>{formatNumber(item.estimated_first_half_result)}</td>
-                                  <td>{formatNumber(item.expected_halfway_line)}</td>
-                                  <td>{formatNumber(item.pace_ratio ?? null)}</td>
-                                  <td>{formatSigned(item.halftime_margin_to_line ?? null)}</td>
-                                  <td>{formatPercent(item.estimated_first_half_minutes_share)}</td>
-                                  <td><span className={`side ${item.recommended_side}`}>{(item.pace_ratio ?? 0) >= 1 ? "on pace" : "behind"}</span></td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                selectedEstimateGroup ? (
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Player</th>
+                        <th>Market</th>
+                        <th className="props-best-col">Book</th>
+                        <th>FG Line</th>
+                        <th>1H Est</th>
+                        <th>Halfway</th>
+                        <th>Pace</th>
+                        <th>1H Edge</th>
+                        <th>1H Min%</th>
+                        <th>Track</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedEstimateGroup.rows.map((item) => (
+                        <tr key={`dfs-est-${item.prop_line_id}`}>
+                          <td>
+                            <div className="player-cell">
+                              <TeamLogo src={item.team_logo_url} alt={`${item.team} logo`} />
+                              <div>
+                                <PlayerLabel name={item.player} position={item.position} />
+                                <span>{item.team}</span>
+                              </div>
+                            </div>
+                          </td>
+                          <td>{marketLabel(item.market)}</td>
+                          <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
+                          <td>{item.line.toFixed(1)}</td>
+                          <td>{formatNumber(item.estimated_first_half_result)}</td>
+                          <td>{formatNumber(item.expected_halfway_line)}</td>
+                          <td>{formatNumber(item.pace_ratio ?? null)}</td>
+                          <td>{formatSigned(item.halftime_margin_to_line ?? null)}</td>
+                          <td>{formatPercent(item.estimated_first_half_minutes_share)}</td>
+                          <td><span className={`side ${item.recommended_side}`}>{(item.pace_ratio ?? 0) >= 1 ? "on pace" : "behind"}</span></td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 ) : (
                   <table>
                     <tbody>
