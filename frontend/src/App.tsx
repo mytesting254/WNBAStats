@@ -1386,7 +1386,7 @@ export function App() {
             setSelected={setSelected}
           />
         ) : activeTab === "dfs" ? (
-          <DfsView estimates={dfsFirstHalf} history={playerFirstHalfLines} loading={tabLoading.dfs} error={error} />
+          <DfsView estimates={dfsFirstHalf} history={playerFirstHalfLines} matchups={matchups} loading={tabLoading.dfs} error={error} />
         ) : activeTab === "gems" ? (
           <GemsView gems={gems} matchups={matchups} loading={tabLoading.gems} error={error} />
         ) : activeTab === "watchlist" ? (
@@ -4430,7 +4430,7 @@ function DfsView({
       }),
     [historyRows, marketFilter, sportsbookFilter]
   );
-  const matchupByGameId = useMemo(() => new Map(matchups.map((item) => [item.game_id, item])), [matchups]);
+  const matchupByGameId = useMemo(() => new Map(matchups.map((item) => [item.id, item])), [matchups]);
   const groupedEstimateRows = useMemo(() => {
     const groups = new Map<number, DfsFirstHalfEstimate[]>();
     for (const item of filteredEstimateRows.slice(0, 100)) {
