@@ -8016,7 +8016,14 @@ def _recent_market_values(conn, *, player_id: int, market: str, game_id: int, li
     return values
 
 
-def _recent_first_half_market_values(conn, *, player_id: int, market: str, game_id: int, limit: int = 5) -> list[float]:
+def _recent_first_half_market_values(
+    conn,
+    *,
+    player_id: int,
+    market: str,
+    game_id: int,
+    limit: int = 5,
+) -> list[float]:
     rows = conn.execute(
         """
         SELECT
@@ -8062,7 +8069,13 @@ def _recent_minutes_played(conn, *, player_id: int, game_id: int, limit: int = 5
     return [round(float(row["minutes"] or 0.0), 1) for row in rows]
 
 
-def _recent_first_half_minutes_played(conn, *, player_id: int, game_id: int, limit: int = 5) -> list[float]:
+def _recent_first_half_minutes_played(
+    conn,
+    *,
+    player_id: int,
+    game_id: int,
+    limit: int = 5,
+) -> list[float]:
     rows = conn.execute(
         """
         SELECT pfh.first_half_minutes

@@ -2943,20 +2943,22 @@ function PropsView({
 
 function renderRecentFormWithMinutes(
   prop: Pick<ValueProp, "recent_values" | "recent_minutes" | "recommended_side" | "line">,
-  keyPrefix: string
+  keyPrefix: string,
+  comparisonLine?: number
 ) {
   if (!Array.isArray(prop.recent_values) || prop.recent_values.length === 0) {
     return null;
   }
+  const targetLine = comparisonLine ?? prop.line;
   return (
     <div className="prop-l5-strip" aria-label="Last 5 results and minutes">
       {prop.recent_values.slice(0, 5).map((value, idx) => {
-        const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
+        const hit = prop.recommended_side === "over" ? value > targetLine : value < targetLine;
         return (
           <span
             key={`${keyPrefix}-${idx}`}
             className={hit ? "hit" : "miss"}
-            title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
+            title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${targetLine.toFixed(1)}`}
           >
             {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
           </span>
@@ -2982,20 +2984,22 @@ function renderRecentFormWithMinutes(
 
 function renderH2HFormWithMinutes(
   prop: Pick<ValueProp, "h2h_opponent" | "h2h_values" | "h2h_minutes" | "recommended_side" | "line">,
-  keyPrefix: string
+  keyPrefix: string,
+  comparisonLine?: number
 ) {
   if (!Array.isArray(prop.h2h_values) || prop.h2h_values.length === 0) {
     return <span className="empty-inline">No H2H</span>;
   }
+  const targetLine = comparisonLine ?? prop.line;
   return (
     <div className="prop-l5-strip prop-h2h-strip" aria-label={`Last head-to-head results against ${prop.h2h_opponent ?? "opponent"} and minutes`}>
       {prop.h2h_values.slice(0, 5).map((value, idx) => {
-        const hit = prop.recommended_side === "over" ? value > prop.line : value < prop.line;
+        const hit = prop.recommended_side === "over" ? value > targetLine : value < targetLine;
         return (
           <span
             key={`${keyPrefix}-${idx}`}
             className={hit ? "hit" : "miss"}
-            title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${prop.line.toFixed(1)}`}
+            title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${targetLine.toFixed(1)}`}
           >
             {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
           </span>
@@ -4552,11 +4556,11 @@ function DfsView({
                               <div>
                                 <PlayerLabel name={item.player} position={item.position} />
                                 <span>{item.team}</span>
-                                {renderRecentFormWithMinutes(item, `dfs-${item.prop_line_id}-l5`)}
+                                {renderRecentFormWithMinutes(item, `dfs-${item.prop_line_id}-l5`, item.expected_halfway_line)}
                               </div>
                             </div>
                           </td>
-                          <td>{renderH2HFormWithMinutes(item, `dfs-${item.prop_line_id}-h2h`)}</td>
+                          <td>{renderH2HFormWithMinutes(item, `dfs-${item.prop_line_id}-h2h`, item.expected_halfway_line)}</td>
                           <td>{marketLabel(item.market)}</td>
                           <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
                           <td>{item.line.toFixed(1)}</td>

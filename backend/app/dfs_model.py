@@ -4,9 +4,11 @@ import hashlib
 import json
 import math
 import sqlite3
+from collections import defaultdict
 from dataclasses import asdict
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 
 from .cache import read_json_cache, write_json_cache
 from .odds import american_to_implied_probability
@@ -26,7 +28,16 @@ from .player_prop_model import (
 
 DFS_HALF_MODEL_VERSION = "dfs-first-half-ridge-v2"
 DFS_HALF_MODEL_CACHE_PREFIX = "dfs_first_half_model"
+DFS_HALF_EVAL_CACHE_PREFIX = "dfs_first_half_eval"
+DFS_HALF_EVAL_VERSION = "dfs-first-half-walk-forward-v1"
 DFS_HALF_REQUIRE_OBSERVED_TARGETS = True
+DFS_HALF_EVAL_MIN_HISTORY_ROWS = 200
+DFS_HALF_EVAL_MIN_SEGMENT_ROWS = 10
+DFS_HALF_MARKET_MIN_ROWS = 750
+DFS_HALF_MARKET_MIN_SEGMENTS = 5
+DFS_HALF_MARKET_MIN_SIDE_ACCURACY = 0.54
+DFS_HALF_MARKET_MIN_MAE_EDGE = 0.005
+DFS_HALF_MARKET_MIN_COMPONENT_EDGE = -0.02
 DFS_HALF_EXTRA_FEATURES = [
     "line_value",
     "over_implied_probability",
@@ -81,6 +92,17 @@ class DfsHalfEstimate:
     confidence: str
 
 
+@dataclass(frozen=True)
+class DfsHalfEvalSample:
+    segment: str
+    game_date: str
+    features: list[float]
+    target: float
+    line_value: float
+    component_projection: float
+    team_first_half_share: float
+
+
 def build_current_dfs_first_half_estimates(
     conn: sqlite3.Connection,
     *,
@@ -88,6 +110,12 @@ def build_current_dfs_first_half_estimates(
     recent_minutes_fn,
     recent_h2h_fn,
 ) -> list[dict]:
+    evaluation = evaluate_dfs_half_models(conn)
+    eligible_markets = {
+        market
+        for market, report in (evaluation.get("markets") or {}).items()
+        if isinstance(report, dict) and bool(report.get("ships"))
+    }
     rows = conn.execute(
         """
         WITH raw_props AS (
@@ -184,6 +212,8 @@ def build_current_dfs_first_half_estimates(
     for row in rows:
         market = str(row["market"] or "").strip().lower()
         if market not in DFS_HALF_MARKETS:
+            continue
+        if eligible_markets and market not in eligible_markets:
             continue
         estimate = _predict_current_half_estimate(conn, row, runtime_cache=runtime_cache)
         if estimate is None:
@@ -380,6 +410,266 @@ def pretrain_dfs_half_models(
     }
 
 
+def evaluate_dfs_half_models(
+    conn: sqlite3.Connection,
+    *,
+    config: ModelTuningConfig | None = None,
+    min_history_rows: int = DFS_HALF_EVAL_MIN_HISTORY_ROWS,
+    min_segment_rows: int = DFS_HALF_EVAL_MIN_SEGMENT_ROWS,
+) -> dict[str, object]:
+    tuning = config or ModelTuningConfig()
+    db_path = str(conn.execute("PRAGMA database_list").fetchone()["file"] or "")
+    cache_key = _dfs_half_eval_cache_key(
+        db_path,
+        tuning,
+        min_history_rows=min_history_rows,
+        min_segment_rows=min_segment_rows,
+    )
+    cached = _load_cached_dfs_half_eval(cache_key)
+    if cached is not None:
+        return cached
+
+    metrics: dict[str, object] = {}
+    overall_rows = 0
+    overall_abs_error_sum = 0.0
+    overall_squared_error_sum = 0.0
+    overall_side_hits = 0.0
+    shipped_markets: list[str] = []
+
+    for market in DFS_HALF_MARKETS:
+        report = _evaluate_dfs_half_market_walk_forward(
+            conn,
+            market=market,
+            config=tuning,
+            min_history_rows=min_history_rows,
+            min_segment_rows=min_segment_rows,
+        )
+        ships = _dfs_half_market_passes_quality_gate(report)
+        report["ships"] = ships
+        metrics[market] = report
+        if ships:
+            shipped_markets.append(market)
+        rows = int(report.get("rows") or 0)
+        mae = report.get("mae")
+        rmse = report.get("rmse")
+        side_accuracy = report.get("side_accuracy")
+        if rows > 0 and mae is not None and rmse is not None and side_accuracy is not None:
+            overall_rows += rows
+            overall_abs_error_sum += float(mae) * rows
+            overall_squared_error_sum += (float(rmse) ** 2) * rows
+            overall_side_hits += float(side_accuracy) * rows
+
+    payload = {
+        "model_family": DFS_HALF_EVAL_VERSION,
+        "markets": metrics,
+        "overall": {
+            "rows": overall_rows,
+            "mae": round(overall_abs_error_sum / overall_rows, 3) if overall_rows else None,
+            "rmse": round(math.sqrt(overall_squared_error_sum / overall_rows), 3) if overall_rows else None,
+            "side_accuracy": round(overall_side_hits / overall_rows, 3) if overall_rows else None,
+        },
+        "min_history_rows": int(min_history_rows),
+        "min_segment_rows": int(min_segment_rows),
+        "gating": {
+            "min_rows": DFS_HALF_MARKET_MIN_ROWS,
+            "min_segments": DFS_HALF_MARKET_MIN_SEGMENTS,
+            "min_side_accuracy": DFS_HALF_MARKET_MIN_SIDE_ACCURACY,
+            "min_mae_vs_half_line": DFS_HALF_MARKET_MIN_MAE_EDGE,
+            "min_mae_vs_component_share": DFS_HALF_MARKET_MIN_COMPONENT_EDGE,
+            "shipped_markets": shipped_markets,
+        },
+    }
+    _store_cached_dfs_half_eval(cache_key, payload)
+    return payload
+
+
+def _evaluate_dfs_half_market_walk_forward(
+    conn: sqlite3.Connection,
+    *,
+    market: str,
+    config: ModelTuningConfig,
+    min_history_rows: int,
+    min_segment_rows: int,
+) -> dict[str, object]:
+    samples = _dfs_half_eval_samples(conn, market)
+    if len(samples) < min_history_rows + min_segment_rows:
+        return {
+            "rows": 0,
+            "segments_evaluated": 0,
+            "segments_skipped": 0,
+            "mae": None,
+            "rmse": None,
+            "bias": None,
+            "side_accuracy": None,
+            "half_line_baseline_mae": None,
+            "component_share_baseline_mae": None,
+            "notes": "not_enough_rows",
+        }
+
+    grouped: dict[str, list[DfsHalfEvalSample]] = defaultdict(list)
+    for sample in sorted(samples, key=lambda item: (item.segment, item.game_date)):
+        grouped[sample.segment].append(sample)
+
+    history: list[DfsHalfEvalSample] = []
+    errors: list[float] = []
+    half_line_errors: list[float] = []
+    component_errors: list[float] = []
+    side_hits = 0
+    segments_evaluated = 0
+    segments_skipped = 0
+    segment_reports: list[dict[str, object]] = []
+
+    for segment in sorted(grouped):
+        segment_samples = grouped[segment]
+        if len(history) < min_history_rows:
+            history.extend(segment_samples)
+            segments_skipped += 1
+            continue
+        model = _fit_model_from_rows(
+            f"dfs_1h_eval:{market}",
+            [(row.features, row.target) for row in history],
+            config=config,
+        )
+        if model is None:
+            history.extend(segment_samples)
+            segments_skipped += 1
+            continue
+
+        segment_errors: list[float] = []
+        segment_side_hits = 0
+        for sample in segment_samples:
+            prediction = max(0.0, _predict(model, sample.features))
+            expected_halfway_line = sample.line_value * 0.5
+            component_half = sample.component_projection * sample.team_first_half_share
+            actual_side_over = sample.target >= expected_halfway_line
+            predicted_side_over = prediction >= expected_halfway_line
+            error = prediction - sample.target
+            errors.append(error)
+            segment_errors.append(error)
+            half_line_errors.append(expected_halfway_line - sample.target)
+            component_errors.append(component_half - sample.target)
+            if actual_side_over == predicted_side_over:
+                side_hits += 1
+                segment_side_hits += 1
+
+        rows = len(segment_samples)
+        segments_evaluated += 1
+        segment_reports.append(
+            {
+                "segment": segment,
+                "rows": rows,
+                "mae": round(sum(abs(value) for value in segment_errors) / rows, 3),
+                "bias": round(sum(segment_errors) / rows, 3),
+                "side_accuracy": round(segment_side_hits / rows, 3),
+            }
+        )
+        history.extend(segment_samples)
+
+    rows = len(errors)
+    if rows < min_segment_rows:
+        return {
+            "rows": 0,
+            "segments_evaluated": segments_evaluated,
+            "segments_skipped": segments_skipped,
+            "mae": None,
+            "rmse": None,
+            "bias": None,
+            "side_accuracy": None,
+            "half_line_baseline_mae": None,
+            "component_share_baseline_mae": None,
+            "notes": "not_enough_evaluated_rows",
+        }
+
+    mae = sum(abs(value) for value in errors) / rows
+    rmse = math.sqrt(sum(value * value for value in errors) / rows)
+    bias = sum(errors) / rows
+    half_line_mae = sum(abs(value) for value in half_line_errors) / rows
+    component_mae = sum(abs(value) for value in component_errors) / rows
+    return {
+        "rows": rows,
+        "segments_evaluated": segments_evaluated,
+        "segments_skipped": segments_skipped,
+        "mae": round(mae, 3),
+        "rmse": round(rmse, 3),
+        "bias": round(bias, 3),
+        "side_accuracy": round(side_hits / rows, 3),
+        "half_line_baseline_mae": round(half_line_mae, 3),
+        "component_share_baseline_mae": round(component_mae, 3),
+        "mae_vs_half_line": round(half_line_mae - mae, 3),
+        "mae_vs_component_share": round(component_mae - mae, 3),
+        "segments": segment_reports,
+    }
+
+
+def _dfs_half_market_passes_quality_gate(report: dict[str, object]) -> bool:
+    rows = int(report.get("rows") or 0)
+    segments = int(report.get("segments_evaluated") or 0)
+    side_accuracy = report.get("side_accuracy")
+    mae_vs_half_line = report.get("mae_vs_half_line")
+    mae_vs_component_share = report.get("mae_vs_component_share")
+    if rows < DFS_HALF_MARKET_MIN_ROWS or segments < DFS_HALF_MARKET_MIN_SEGMENTS:
+        return False
+    if side_accuracy is None or float(side_accuracy) < DFS_HALF_MARKET_MIN_SIDE_ACCURACY:
+        return False
+    if mae_vs_half_line is None or float(mae_vs_half_line) < DFS_HALF_MARKET_MIN_MAE_EDGE:
+        return False
+    if mae_vs_component_share is None or float(mae_vs_component_share) < DFS_HALF_MARKET_MIN_COMPONENT_EDGE:
+        return False
+    return True
+
+
+def _dfs_half_eval_samples(conn: sqlite3.Connection, market: str) -> list[DfsHalfEvalSample]:
+    from .player_prop_training_db import load_player_prop_final_projection_samples
+
+    final_samples, _diagnostics = load_player_prop_final_projection_samples(
+        conn,
+        market=market,
+        force_rebuild=False,
+        allow_rebuild=False,
+    )
+    final_map = {
+        int(sample.source_prop_line_id): sample
+        for sample in final_samples
+        if sample.source_prop_line_id is not None
+    }
+    half_rows, _info = load_player_half_prop_examples(
+        conn,
+        market=market,
+        force_rebuild=False,
+        allow_rebuild=False,
+    )
+    samples: list[DfsHalfEvalSample] = []
+    for half_row in half_rows:
+        if DFS_HALF_REQUIRE_OBSERVED_TARGETS and not _half_row_has_observed_target(half_row):
+            continue
+        sample = final_map.get(int(half_row["source_prop_line_id"]))
+        if sample is None:
+            continue
+        team_first_half_share = float(half_row["team_first_half_share"] or 0.5)
+        samples.append(
+            DfsHalfEvalSample(
+                segment=str(half_row["game_date"] or "")[:7],
+                game_date=str(half_row["game_date"] or ""),
+                features=_dfs_half_feature_row(
+                    base_features=list(sample.features),
+                    component_projection=float(sample.component_projection),
+                    line_value=float(half_row["line_value"] or 0.0),
+                    over_odds=int(half_row["over_odds"] or 0),
+                    under_odds=int(half_row["under_odds"] or 0),
+                    sample_count=int(sample.sample_count),
+                    avg_minutes=float(sample.avg_minutes),
+                    team_first_half_share=team_first_half_share,
+                    estimated_first_half_minutes_share=float(half_row["estimated_first_half_minutes_share"] or 0.5),
+                ),
+                target=float(half_row["estimated_first_half_result"] or 0.0),
+                line_value=float(half_row["line_value"] or 0.0),
+                component_projection=float(sample.component_projection),
+                team_first_half_share=team_first_half_share,
+            )
+        )
+    return samples
+
+
 def _dfs_half_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
     from .player_prop_training_db import load_player_prop_final_projection_samples
 
@@ -483,6 +773,40 @@ def _dfs_half_model_cache_key(
     return f"{DFS_HALF_MODEL_CACHE_PREFIX}-{market}-{db_marker}-{half_marker}-{config_marker}-{version_marker}.json"
 
 
+def _dfs_half_eval_cache_key(
+    db_path: str,
+    config: ModelTuningConfig,
+    *,
+    min_history_rows: int,
+    min_segment_rows: int,
+) -> str:
+    db_marker = _path_fingerprint(db_path)
+    half_marker = _path_fingerprint(str(get_player_half_training_db_path()))
+    config_marker = hashlib.sha1(
+        json.dumps(config.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:12]
+    threshold_marker = hashlib.sha1(
+        json.dumps(
+            {
+                "min_history_rows": int(min_history_rows),
+                "min_segment_rows": int(min_segment_rows),
+                "min_rows": DFS_HALF_MARKET_MIN_ROWS,
+                "min_segments": DFS_HALF_MARKET_MIN_SEGMENTS,
+                "min_side_accuracy": DFS_HALF_MARKET_MIN_SIDE_ACCURACY,
+                "min_mae_edge": DFS_HALF_MARKET_MIN_MAE_EDGE,
+                "min_component_edge": DFS_HALF_MARKET_MIN_COMPONENT_EDGE,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()[:12]
+    version_marker = hashlib.sha1(DFS_HALF_EVAL_VERSION.encode("utf-8")).hexdigest()[:8]
+    return (
+        f"{DFS_HALF_EVAL_CACHE_PREFIX}-{db_marker}-{half_marker}-"
+        f"{config_marker}-{threshold_marker}-{version_marker}.json"
+    )
+
+
 def _load_cached_dfs_half_model(cache_key: str) -> RidgeModel | None:
     payload = read_json_cache(cache_key)
     if not isinstance(payload, dict):
@@ -522,3 +846,28 @@ def _store_cached_dfs_half_model(
         )
     except OSError:
         return
+
+
+def _load_cached_dfs_half_eval(cache_key: str) -> dict[str, object] | None:
+    payload = read_json_cache(cache_key)
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("model_family") or "") != DFS_HALF_EVAL_VERSION:
+        return None
+    return payload
+
+
+def _store_cached_dfs_half_eval(cache_key: str, payload: dict[str, object]) -> None:
+    try:
+        write_json_cache(cache_key, payload)
+    except OSError:
+        return
+
+
+def _path_fingerprint(raw_path: str) -> str:
+    try:
+        stat = Path(raw_path).stat()
+        payload = f"{Path(raw_path)}:{stat.st_size}:{stat.st_mtime_ns}"
+    except OSError:
+        payload = str(raw_path)
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]

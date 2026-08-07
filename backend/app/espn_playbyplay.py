@@ -64,7 +64,7 @@ def upsert_player_first_half_stats(
 ) -> dict[str, int]:
     if not isinstance(summary_payload, dict):
         return {"events": 0, "players": 0}
-    payload = playbyplay_payload if isinstance(playbyplay_payload, dict) else summary_payload
+    payload = _preferred_play_payload(summary_payload, playbyplay_payload)
 
     player_context = _player_context_from_summary(conn, game_id, summary_payload)
     plays = _normalized_plays(payload)
@@ -80,6 +80,8 @@ def upsert_player_first_half_stats(
         player_context=player_context,
         captured_at=captured_at,
     )
+    conn.execute("DELETE FROM espn_play_by_play_events WHERE game_id = ?", (game_id,))
+    conn.execute("DELETE FROM player_first_half_stats WHERE game_id = ?", (game_id,))
     if raw_rows:
         conn.executemany(
             """
@@ -137,6 +139,23 @@ def upsert_player_first_half_stats(
             player_rows,
         )
     return {"events": len(raw_rows), "players": len(player_rows)}
+
+
+def _preferred_play_payload(
+    summary_payload: dict[str, Any],
+    playbyplay_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    candidates = [summary_payload]
+    if isinstance(playbyplay_payload, dict):
+        candidates.append(playbyplay_payload)
+    return max(candidates, key=_payload_play_count)
+
+
+def _payload_play_count(payload: dict[str, Any] | None) -> int:
+    if not isinstance(payload, dict):
+        return 0
+    plays = payload.get("plays") or payload.get("items") or []
+    return len(plays) if isinstance(plays, list) else 0
 
 
 def _player_context_from_summary(conn: sqlite3.Connection, game_id: int, payload: dict[str, Any]) -> dict[str, Any]:
@@ -385,6 +404,13 @@ def _derive_play_stats(
         }
         primary_player_id = player_in_id
         secondary_player_id = player_out_id
+    elif "technical free throw" in clean_text.lower():
+        event_type = "made_free_throw" if "makes" in clean_text.lower() else "missed_free_throw"
+        if primary_player_id is not None:
+            if "makes" in clean_text.lower():
+                _add_stat(increments, primary_player_id, "points", 1)
+                _add_stat(increments, primary_player_id, "free_throws_made", 1)
+            _add_stat(increments, primary_player_id, "free_throws_attempted", 1)
     elif "makes free throw" in clean_text.lower():
         event_type = "made_free_throw"
         if primary_player_id is not None:
@@ -410,8 +436,12 @@ def _derive_play_stats(
             _add_stat(increments, shot_player_id, "field_goals_attempted", 1)
     elif "steal" in clean_text.lower() or "steal" in type_key:
         event_type = "steal"
-        steal_player_id = secondary_player_id if "steal by" in clean_text.lower() and secondary_player_id is not None else primary_player_id
-        turnover_player_id = primary_player_id if steal_player_id != primary_player_id else secondary_player_id
+        turnover_player_id, steal_player_id = _parse_turnover_steal_players(
+            normalized_text,
+            player_context,
+            default_primary=primary_player_id,
+            default_secondary=secondary_player_id,
+        )
         if steal_player_id is not None:
             _add_stat(increments, steal_player_id, "steals", 1)
         if turnover_player_id is not None and "turnover" in clean_text.lower():
@@ -429,7 +459,7 @@ def _derive_play_stats(
     elif "makes" in clean_text.lower() or "shot" in type_key:
         event_type = "made_field_goal"
         if primary_player_id is not None:
-            made_points = 3 if _is_three_point_text(clean_text) else 2
+            made_points = _made_shot_points(clean_text)
             _add_stat(increments, primary_player_id, "points", made_points)
             _add_stat(increments, primary_player_id, "field_goals_made", 1)
             _add_stat(increments, primary_player_id, "field_goals_attempted", 1)
@@ -479,6 +509,23 @@ def _parse_substitution_players(text: str, player_context: dict[str, Any]) -> tu
     )
 
 
+def _parse_turnover_steal_players(
+    text: str,
+    player_context: dict[str, Any],
+    *,
+    default_primary: int | None,
+    default_secondary: int | None,
+) -> tuple[int | None, int | None]:
+    match = re.search(r"(.+?) turnover\s*\((.+?) steals\)", text)
+    if match:
+        turnover_player_id = _player_id_from_name_fragment(match.group(1), player_context)
+        steal_player_id = _player_id_from_name_fragment(match.group(2), player_context, exclude=turnover_player_id)
+        return turnover_player_id, steal_player_id
+    if "steal by" in text:
+        return default_primary, default_secondary
+    return default_primary, default_secondary
+
+
 def _player_id_from_name_fragment(fragment: str, player_context: dict[str, Any], *, exclude: int | None = None) -> int | None:
     normalized = normalize_player_lookup_name(fragment)
     if not normalized:
@@ -526,7 +573,24 @@ def _add_stat(increments: dict[int, dict[str, float]], player_id: int, key: str,
 
 def _is_three_point_text(text: str) -> bool:
     lowered = str(text or "").lower()
-    return any(term in lowered for term in THREE_POINT_TERMS)
+    if "two point" in lowered:
+        return False
+    if any(term in lowered for term in THREE_POINT_TERMS):
+        return True
+    feet_match = re.search(r"(\d+)-foot", lowered)
+    if feet_match:
+        try:
+            return int(feet_match.group(1)) >= 22
+        except ValueError:
+            return False
+    return False
+
+
+def _made_shot_points(text: str) -> int:
+    lowered = str(text or "").lower()
+    if "free throw" in lowered:
+        return 1
+    return 3 if _is_three_point_text(text) else 2
 
 
 def _parse_period_number(play: dict[str, Any]) -> int | None:
