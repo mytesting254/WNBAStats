@@ -4757,8 +4757,9 @@ def dfs_first_half(response: Response) -> list[dict[str, Any]]:
     with connect() as conn:
         payload = build_current_dfs_first_half_estimates(
             conn,
-            recent_values_fn=_recent_market_values,
-            recent_minutes_fn=_recent_minutes_played,
+            recent_values_fn=_recent_first_half_market_values,
+            recent_minutes_fn=_recent_first_half_minutes_played,
+            recent_h2h_fn=_recent_first_half_h2h_market_history,
         )
     compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
     _set_observability_headers(response, "dfs_first_half.json", "BYPASS", round(compute_ms, 2))
@@ -8012,6 +8013,35 @@ def _recent_market_values(conn, *, player_id: int, market: str, game_id: int, li
     return values
 
 
+def _recent_first_half_market_values(conn, *, player_id: int, market: str, game_id: int, limit: int = 5) -> list[float]:
+    rows = conn.execute(
+        """
+        SELECT
+            pfh.first_half_points AS points,
+            pfh.first_half_rebounds AS rebounds,
+            pfh.first_half_assists AS assists,
+            pfh.first_half_threes AS threes,
+            pfh.first_half_steals AS steals,
+            pfh.first_half_blocks AS blocks,
+            pfh.first_half_turnovers AS turnovers
+        FROM player_first_half_stats pfh
+        JOIN games g ON g.id = pfh.game_id
+        JOIN games target ON target.id = ?
+        WHERE pfh.player_id = ?
+          AND (g.game_date < target.game_date OR (g.game_date = target.game_date AND pfh.game_id < target.id))
+        ORDER BY g.game_date DESC, pfh.game_id DESC
+        LIMIT ?
+        """,
+        (int(game_id), int(player_id), int(limit)),
+    ).fetchall()
+    values: list[float] = []
+    for row in rows:
+        value = _market_value_from_first_half_row(row, market)
+        if value is not None:
+            values.append(round(float(value), 1))
+    return values
+
+
 def _recent_minutes_played(conn, *, player_id: int, game_id: int, limit: int = 5) -> list[float]:
     rows = conn.execute(
         """
@@ -8027,6 +8057,23 @@ def _recent_minutes_played(conn, *, player_id: int, game_id: int, limit: int = 5
         (int(game_id), int(player_id), int(limit)),
     ).fetchall()
     return [round(float(row["minutes"] or 0.0), 1) for row in rows]
+
+
+def _recent_first_half_minutes_played(conn, *, player_id: int, game_id: int, limit: int = 5) -> list[float]:
+    rows = conn.execute(
+        """
+        SELECT pfh.first_half_minutes
+        FROM player_first_half_stats pfh
+        JOIN games g ON g.id = pfh.game_id
+        JOIN games target ON target.id = ?
+        WHERE pfh.player_id = ?
+          AND (g.game_date < target.game_date OR (g.game_date = target.game_date AND pfh.game_id < target.id))
+        ORDER BY g.game_date DESC, pfh.game_id DESC
+        LIMIT ?
+        """,
+        (int(game_id), int(player_id), int(limit)),
+    ).fetchall()
+    return [round(float(row["first_half_minutes"] or 0.0), 1) for row in rows]
 
 
 def _recent_h2h_market_history(
@@ -8097,6 +8144,75 @@ def _recent_h2h_market_history(
     minutes: list[float] = []
     for row in rows:
         value = _market_value_from_stats_row(row, market)
+        if value is None:
+            continue
+        values.append(round(float(value), 1))
+        minutes.append(round(float(row["minutes"] or 0.0), 1))
+    return {
+        "h2h_opponent": str(opponent["opponent"]),
+        "h2h_values": values,
+        "h2h_minutes": minutes,
+    }
+
+
+def _recent_first_half_h2h_market_history(
+    conn,
+    *,
+    player_id: int,
+    market: str,
+    game_id: int,
+    resolved_team_id: int,
+    limit: int = 5,
+) -> dict[str, Any]:
+    opponent = conn.execute(
+        """
+        SELECT
+            CASE WHEN g.home_team_id = ? THEN g.away_team_id ELSE g.home_team_id END AS opponent_id,
+            CASE WHEN g.home_team_id = ? THEN away.abbreviation ELSE home.abbreviation END AS opponent
+        FROM games g
+        JOIN teams home ON home.id = g.home_team_id
+        JOIN teams away ON away.id = g.away_team_id
+        WHERE g.id = ?
+          AND ? IN (g.home_team_id, g.away_team_id)
+        """,
+        (int(resolved_team_id), int(resolved_team_id), int(game_id), int(resolved_team_id)),
+    ).fetchone()
+    if opponent is None:
+        return {"h2h_opponent": None, "h2h_values": [], "h2h_minutes": []}
+
+    rows = conn.execute(
+        """
+        SELECT
+            pfh.first_half_points AS points,
+            pfh.first_half_rebounds AS rebounds,
+            pfh.first_half_assists AS assists,
+            pfh.first_half_threes AS threes,
+            pfh.first_half_steals AS steals,
+            pfh.first_half_blocks AS blocks,
+            pfh.first_half_turnovers AS turnovers,
+            pfh.first_half_minutes AS minutes
+        FROM player_first_half_stats pfh
+        JOIN games g ON g.id = pfh.game_id
+        JOIN games target ON target.id = ?
+        WHERE pfh.player_id = ?
+          AND (g.game_date < target.game_date OR (g.game_date = target.game_date AND pfh.game_id < target.id))
+          AND ? IN (g.home_team_id, g.away_team_id)
+          AND pfh.team_id != ?
+        ORDER BY g.game_date DESC, pfh.game_id DESC
+        LIMIT ?
+        """,
+        (
+            int(game_id),
+            int(player_id),
+            int(opponent["opponent_id"]),
+            int(opponent["opponent_id"]),
+            int(limit),
+        ),
+    ).fetchall()
+    values: list[float] = []
+    minutes: list[float] = []
+    for row in rows:
+        value = _market_value_from_first_half_row(row, market)
         if value is None:
             continue
         values.append(round(float(value), 1))
@@ -8327,6 +8443,32 @@ def _market_value_from_stats_row(row, market: str) -> float | None:
         "threes": threes,
         "steals": steals,
         "blocks": blocks,
+        "points_rebounds": points + rebounds,
+        "points_assists": points + assists,
+        "rebounds_assists": rebounds + assists,
+        "points_rebounds_assists": points + rebounds + assists,
+        "blocks_steals": blocks + steals,
+    }
+    return mapping.get(key)
+
+
+def _market_value_from_first_half_row(row, market: str) -> float | None:
+    key = str(market or "").strip().lower()
+    points = float(row["points"] or 0.0)
+    rebounds = float(row["rebounds"] or 0.0)
+    assists = float(row["assists"] or 0.0)
+    threes = float(row["threes"] or 0.0)
+    steals = float(row["steals"] or 0.0)
+    blocks = float(row["blocks"] or 0.0)
+    turnovers = float(row["turnovers"] or 0.0) if "turnovers" in row.keys() else 0.0
+    mapping = {
+        "points": points,
+        "rebounds": rebounds,
+        "assists": assists,
+        "threes": threes,
+        "steals": steals,
+        "blocks": blocks,
+        "turnovers": turnovers,
         "points_rebounds": points + rebounds,
         "points_assists": points + assists,
         "rebounds_assists": rebounds + assists,

@@ -86,6 +86,7 @@ def build_current_dfs_first_half_estimates(
     *,
     recent_values_fn,
     recent_minutes_fn,
+    recent_h2h_fn,
 ) -> list[dict]:
     rows = conn.execute(
         """
@@ -95,6 +96,26 @@ def build_current_dfs_first_half_estimates(
                 pp.prop_line_id,
                 pl.game_id,
                 pl.player_id,
+                (
+                    SELECT COALESCE(
+                        (
+                            SELECT h.team_id
+                            FROM player_team_history h
+                            LEFT JOIN games hg ON hg.id = h.game_id
+                            WHERE h.player_id = p.id
+                              AND h.team_id IN (g.home_team_id, g.away_team_id)
+                              AND h.game_id IS NOT NULL
+                              AND hg.game_date IS NOT NULL
+                              AND hg.game_date <= g.game_date
+                            ORDER BY hg.game_date DESC, h.id DESC
+                            LIMIT 1
+                        ),
+                        CASE
+                            WHEN p.team_id IN (g.home_team_id, g.away_team_id) THEN p.team_id
+                            ELSE g.home_team_id
+                        END
+                    )
+                ) AS resolved_team_id,
                 p.full_name AS player,
                 p.position,
                 p.rotation_role,
@@ -116,7 +137,7 @@ def build_current_dfs_first_half_estimates(
                     LIMIT 1
                 ) AS projected_first_half_total,
                 ROW_NUMBER() OVER (
-                    PARTITION BY pl.game_id, pl.player_id, pl.market, pl.line
+                    PARTITION BY pl.game_id, pl.player_id, pl.market
                     ORDER BY
                         CASE
                             WHEN pp.recommended_side = 'over' THEN pl.over_odds
@@ -207,6 +228,14 @@ def build_current_dfs_first_half_estimates(
                     conn,
                     player_id=estimate.player_id,
                     game_id=estimate.game_id,
+                    limit=5,
+                ),
+                **recent_h2h_fn(
+                    conn,
+                    player_id=estimate.player_id,
+                    market=estimate.market,
+                    game_id=estimate.game_id,
+                    resolved_team_id=int(row["resolved_team_id"]),
                     limit=5,
                 ),
             }

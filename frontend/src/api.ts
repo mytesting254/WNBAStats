@@ -75,6 +75,9 @@ export type DfsFirstHalfEstimate = {
   confidence: "low" | "medium" | "high";
   recent_values?: number[];
   recent_minutes?: number[];
+  h2h_opponent?: string | null;
+  h2h_values?: number[];
+  h2h_minutes?: number[];
 };
 
 export type PlayerFirstHalfLine = {

@@ -4531,6 +4531,7 @@ function DfsView({
                     <thead>
                       <tr>
                         <th>Player</th>
+                        <th>Line H2H</th>
                         <th>Market</th>
                         <th className="props-best-col">Book</th>
                         <th>FG Line</th>
@@ -4551,9 +4552,11 @@ function DfsView({
                               <div>
                                 <PlayerLabel name={item.player} position={item.position} />
                                 <span>{item.team}</span>
+                                {renderRecentFormWithMinutes(item, `dfs-${item.prop_line_id}-l5`)}
                               </div>
                             </div>
                           </td>
+                          <td>{renderH2HFormWithMinutes(item, `dfs-${item.prop_line_id}-h2h`)}</td>
                           <td>{marketLabel(item.market)}</td>
                           <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
                           <td>{item.line.toFixed(1)}</td>
@@ -4571,7 +4574,7 @@ function DfsView({
                   <table>
                     <tbody>
                       <tr>
-                        <td colSpan={10}>No current first-half estimates available for these filters.</td>
+                        <td colSpan={11}>No current first-half estimates available for these filters.</td>
                       </tr>
                     </tbody>
                   </table>
