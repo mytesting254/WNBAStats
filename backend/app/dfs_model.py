@@ -300,6 +300,7 @@ def _train_dfs_half_market_model_cached(
 ) -> RidgeModel | None:
     if not db_path:
         return None
+    cache_key = _dfs_half_model_cache_key(db_path, market, config)
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
