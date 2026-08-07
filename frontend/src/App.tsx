@@ -4381,11 +4381,13 @@ function WatchlistView({
 function DfsView({
   estimates,
   history,
+  matchups,
   loading,
   error,
 }: {
   estimates: DfsFirstHalfEstimate[];
   history: PlayerFirstHalfLine[];
+  matchups: Matchup[];
   loading: boolean;
   error: string | null;
 }) {
@@ -4428,6 +4430,26 @@ function DfsView({
       }),
     [historyRows, marketFilter, sportsbookFilter]
   );
+  const matchupByGameId = useMemo(() => new Map(matchups.map((item) => [item.game_id, item])), [matchups]);
+  const groupedEstimateRows = useMemo(() => {
+    const groups = new Map<number, DfsFirstHalfEstimate[]>();
+    for (const item of filteredEstimateRows.slice(0, 100)) {
+      const rows = groups.get(item.game_id);
+      if (rows) {
+        rows.push(item);
+      } else {
+        groups.set(item.game_id, [item]);
+      }
+    }
+    return Array.from(groups.entries())
+      .map(([gameId, rows]) => ({
+        gameId,
+        rows,
+        matchup: matchupByGameId.get(gameId) ?? null,
+        startTime: rows[0]?.start_time ?? null,
+      }))
+      .sort((a, b) => (a.startTime ?? "").localeCompare(b.startTime ?? ""));
+  }, [filteredEstimateRows, matchupByGameId]);
   const sportsbookOptions = useMemo(
     () => selectedView === "estimates"
       ? sportsbookFilterOptions(estimateRows)
@@ -4487,51 +4509,73 @@ function DfsView({
             </div>
             <div className="table-wrap">
               {selectedView === "estimates" ? (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Player</th>
-                      <th>Market</th>
-                      <th className="props-best-col">Book</th>
-                      <th>FG Line</th>
-                      <th>1H Est</th>
-                      <th>Halfway</th>
-                      <th>Pace</th>
-                      <th>1H Edge</th>
-                      <th>1H Min%</th>
-                      <th>Track</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filteredEstimateRows.slice(0, 100).map((item) => (
-                      <tr key={`dfs-est-${item.prop_line_id}`}>
-                        <td>
-                          <div className="player-cell">
-                            <TeamLogo src={item.team_logo_url} alt={`${item.team} logo`} />
-                            <div>
-                              <PlayerLabel name={item.player} position={item.position} />
-                              <span>{item.team}</span>
-                            </div>
+                groupedEstimateRows.length ? (
+                  <div className="matchup-list">
+                    {groupedEstimateRows.map((group) => (
+                      <div className="board-panel" key={`dfs-group-${group.gameId}`}>
+                        <div className="panel-header">
+                          <div>
+                            <h3>{group.matchup ? `${group.matchup.away_team} at ${group.matchup.home_team}` : `Game ${group.gameId}`}</h3>
+                            <p>
+                              {group.startTime ? formatGameDateShort(group.startTime) : "Current slate"}
+                              {` • ${group.rows.length} props`}
+                            </p>
                           </div>
-                        </td>
-                        <td>{marketLabel(item.market)}</td>
-                        <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
-                        <td>{item.line.toFixed(1)}</td>
-                        <td>{formatNumber(item.estimated_first_half_result)}</td>
-                        <td>{formatNumber(item.expected_halfway_line)}</td>
-                        <td>{formatNumber(item.pace_ratio ?? null)}</td>
-                        <td>{formatSigned(item.halftime_margin_to_line ?? null)}</td>
-                        <td>{formatPercent(item.estimated_first_half_minutes_share)}</td>
-                        <td><span className={`side ${item.recommended_side}`}>{(item.pace_ratio ?? 0) >= 1 ? "on pace" : "behind"}</span></td>
-                      </tr>
+                        </div>
+                        <div className="table-wrap">
+                          <table>
+                            <thead>
+                              <tr>
+                                <th>Player</th>
+                                <th>Market</th>
+                                <th className="props-best-col">Book</th>
+                                <th>FG Line</th>
+                                <th>1H Est</th>
+                                <th>Halfway</th>
+                                <th>Pace</th>
+                                <th>1H Edge</th>
+                                <th>1H Min%</th>
+                                <th>Track</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {group.rows.map((item) => (
+                                <tr key={`dfs-est-${item.prop_line_id}`}>
+                                  <td>
+                                    <div className="player-cell">
+                                      <TeamLogo src={item.team_logo_url} alt={`${item.team} logo`} />
+                                      <div>
+                                        <PlayerLabel name={item.player} position={item.position} />
+                                        <span>{item.team}</span>
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td>{marketLabel(item.market)}</td>
+                                  <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
+                                  <td>{item.line.toFixed(1)}</td>
+                                  <td>{formatNumber(item.estimated_first_half_result)}</td>
+                                  <td>{formatNumber(item.expected_halfway_line)}</td>
+                                  <td>{formatNumber(item.pace_ratio ?? null)}</td>
+                                  <td>{formatSigned(item.halftime_margin_to_line ?? null)}</td>
+                                  <td>{formatPercent(item.estimated_first_half_minutes_share)}</td>
+                                  <td><span className={`side ${item.recommended_side}`}>{(item.pace_ratio ?? 0) >= 1 ? "on pace" : "behind"}</span></td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
                     ))}
-                    {!filteredEstimateRows.length ? (
+                  </div>
+                ) : (
+                  <table>
+                    <tbody>
                       <tr>
                         <td colSpan={10}>No current first-half estimates available for these filters.</td>
                       </tr>
-                    ) : null}
-                  </tbody>
-                </table>
+                    </tbody>
+                  </table>
+                )
               ) : (
                 <table>
                   <thead>

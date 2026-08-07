@@ -12,10 +12,29 @@ PLAYER_PROP_TRAINING_DB_VERSION = "v4"
 MARKET_SAMPLE_CURATION_POLICY: dict[str, dict[str, dict[str, float | bool]]] = {}
 
 
-def ensure_player_prop_training_db(conn: sqlite3.Connection, *, force: bool = False) -> dict[str, object]:
+def ensure_player_prop_training_db(
+    conn: sqlite3.Connection,
+    *,
+    force: bool = False,
+    allow_rebuild: bool = True,
+) -> dict[str, object]:
     training_db_path = get_training_db_path()
     training_db_path.parent.mkdir(parents=True, exist_ok=True)
     expected_signature = _source_signature(conn)
+
+    if not training_db_path.exists():
+        if not allow_rebuild:
+            return {
+                "path": str(training_db_path),
+                "rebuilt": False,
+                "included_rows": 0,
+                "candidate_rows": 0,
+                "excluded_rows": 0,
+                "built_at": None,
+                "source_signature": expected_signature,
+                "stale": True,
+                "missing": True,
+            }
 
     with sqlite3.connect(training_db_path) as training_conn:
         training_conn.row_factory = sqlite3.Row
@@ -36,6 +55,19 @@ def ensure_player_prop_training_db(conn: sqlite3.Connection, *, force: bool = Fa
                 "excluded_rows": int(metadata.get("excluded_rows") or 0),
                 "built_at": metadata.get("built_at"),
                 "source_signature": expected_signature,
+            }
+
+        if not allow_rebuild:
+            return {
+                "path": str(training_db_path),
+                "rebuilt": False,
+                "included_rows": current_row_count,
+                "candidate_rows": int(metadata.get("candidate_rows") or 0),
+                "excluded_rows": int(metadata.get("excluded_rows") or 0),
+                "built_at": metadata.get("built_at"),
+                "source_signature": str(metadata.get("source_signature") or ""),
+                "stale": True,
+                "missing": False,
             }
 
         _rebuild_player_prop_training_examples(
@@ -61,24 +93,30 @@ def load_player_prop_training_samples(
     market: str,
     sample_kind: str,
     force_rebuild: bool = False,
+    allow_rebuild: bool = True,
 ) -> tuple[list[object], object]:
     from .player_prop_model import TrainingSample, TrainingSampleDiagnostics
 
-    info = ensure_player_prop_training_db(conn, force=force_rebuild)
+    info = ensure_player_prop_training_db(conn, force=force_rebuild, allow_rebuild=allow_rebuild)
     training_db_path = Path(str(info["path"]))
+    if not training_db_path.exists():
+        return [], TrainingSampleDiagnostics()
     with sqlite3.connect(training_db_path) as training_conn:
         training_conn.row_factory = sqlite3.Row
-        rows = training_conn.execute(
-            """
-            SELECT *
-            FROM player_prop_training_examples
-            WHERE market = ?
-              AND sample_kind = ?
-            ORDER BY game_date ASC, source_game_id ASC, id ASC
-            """,
-            (str(market), str(sample_kind)),
-        ).fetchall()
-        metadata = _read_metadata(training_conn)
+        try:
+            rows = training_conn.execute(
+                """
+                SELECT *
+                FROM player_prop_training_examples
+                WHERE market = ?
+                  AND sample_kind = ?
+                ORDER BY game_date ASC, source_game_id ASC, id ASC
+                """,
+                (str(market), str(sample_kind)),
+            ).fetchall()
+            metadata = _read_metadata(training_conn)
+        except sqlite3.OperationalError:
+            return [], TrainingSampleDiagnostics()
 
     diagnostics_by_market = json.loads(metadata.get("diagnostics_by_market") or "{}")
     diag_payload = diagnostics_by_market.get(str(market), {}).get(str(sample_kind), {})
@@ -117,24 +155,30 @@ def load_player_prop_final_projection_samples(
     *,
     market: str,
     force_rebuild: bool = False,
+    allow_rebuild: bool = True,
 ) -> tuple[list[object], object]:
     from .player_prop_model import FinalProjectionSample, TrainingSampleDiagnostics
 
-    info = ensure_player_prop_training_db(conn, force=force_rebuild)
+    info = ensure_player_prop_training_db(conn, force=force_rebuild, allow_rebuild=allow_rebuild)
     training_db_path = Path(str(info["path"]))
+    if not training_db_path.exists():
+        return [], TrainingSampleDiagnostics()
     with sqlite3.connect(training_db_path) as training_conn:
         training_conn.row_factory = sqlite3.Row
-        rows = training_conn.execute(
-            """
-            SELECT *
-            FROM player_prop_training_examples
-            WHERE market = ?
-              AND sample_kind = 'final'
-            ORDER BY game_date ASC, source_game_id ASC, id ASC
-            """,
-            (str(market),),
-        ).fetchall()
-        metadata = _read_metadata(training_conn)
+        try:
+            rows = training_conn.execute(
+                """
+                SELECT *
+                FROM player_prop_training_examples
+                WHERE market = ?
+                  AND sample_kind = 'final'
+                ORDER BY game_date ASC, source_game_id ASC, id ASC
+                """,
+                (str(market),),
+            ).fetchall()
+            metadata = _read_metadata(training_conn)
+        except sqlite3.OperationalError:
+            return [], TrainingSampleDiagnostics()
 
     diagnostics_by_market = json.loads(metadata.get("diagnostics_by_market") or "{}")
     diag_payload = diagnostics_by_market.get(str(market), {}).get("final", {})
