@@ -157,6 +157,8 @@ The current DFS first-half flow uses:
 - `backend/app/player_half_training_db.py`
 - `scripts/build_player_half_training_db.py`
 - `scripts/pretrain_dfs_first_half_models.py`
+- live model fitting should use observed halftime player actuals only
+  - share-derived fallback halftime rows can stay in the curated DB for diagnostics and pace analysis
 
 Build script responsibilities:
 

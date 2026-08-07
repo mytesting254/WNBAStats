@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from backend.app.db import connect, init_db
 from backend.app.paths import get_db_path, get_player_half_training_db_path

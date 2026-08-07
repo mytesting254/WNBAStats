@@ -24,8 +24,9 @@ from .player_prop_model import (
 )
 
 
-DFS_HALF_MODEL_VERSION = "dfs-first-half-ridge-v1"
+DFS_HALF_MODEL_VERSION = "dfs-first-half-ridge-v2"
 DFS_HALF_MODEL_CACHE_PREFIX = "dfs_first_half_model"
+DFS_HALF_REQUIRE_OBSERVED_TARGETS = True
 DFS_HALF_EXTRA_FEATURES = [
     "line_value",
     "over_implied_probability",
@@ -332,10 +333,12 @@ def pretrain_dfs_half_models(
     per_market: dict[str, dict[str, object]] = {}
     trained = 0
     for market in DFS_HALF_MARKETS:
+        training_rows = _dfs_half_training_rows(conn, market)
         model = _train_dfs_half_market_model_cached(db_path, market, tuning)
         per_market[market] = {
             "trained": model is not None,
             "rows": int(model.rows) if model is not None else 0,
+            "eligible_rows": len(training_rows),
             "cache_key": _dfs_half_model_cache_key(db_path, market, tuning),
         }
         if model is not None:
@@ -370,6 +373,8 @@ def _dfs_half_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple
     )
     rows: list[tuple[list[float], float]] = []
     for half_row in half_rows:
+        if DFS_HALF_REQUIRE_OBSERVED_TARGETS and not _half_row_has_observed_target(half_row):
+            continue
         sample = final_map.get(int(half_row["source_prop_line_id"]))
         if sample is None:
             continue
@@ -390,6 +395,17 @@ def _dfs_half_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple
             )
         )
     return rows
+
+
+def _half_row_has_observed_target(row: sqlite3.Row) -> bool:
+    raw_details = row["share_details_json"] if "share_details_json" in row.keys() else None
+    if raw_details is None:
+        return False
+    try:
+        payload = json.loads(str(raw_details))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return False
+    return not bool(payload.get("derived"))
 
 
 def _dfs_half_feature_row(

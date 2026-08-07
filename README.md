@@ -142,6 +142,8 @@ The app is built around a provider-backed pregame workflow:
 - The curated first-half training DB lives beside the runtime DB:
   - default path: `data/wnba-player-half-training.sqlite`
   - override: `WNBA_PLAYER_HALF_TRAINING_DB_PATH`
+- DFS first-half model training now fits only rows with observed halftime player stats.
+  - fallback share-derived halftime estimates remain in the curated DB for analysis, but are excluded from model fitting
 - DFS first-half estimates currently expose:
   - `GET /api/dfs/first-half`
   - `GET /api/player-first-half-history`
