@@ -70,14 +70,12 @@ const markets = [
   { id: "points", label: "PTS" },
   { id: "rebounds", label: "REB" },
   { id: "assists", label: "AST" },
+  { id: "turnovers", label: "TO" },
   { id: "points_rebounds", label: "P+R" },
   { id: "points_assists", label: "P+A" },
   { id: "rebounds_assists", label: "R+A" },
   { id: "points_rebounds_assists", label: "PRA" },
-  { id: "threes", label: "3PM" },
-  { id: "steals", label: "STL" },
-  { id: "blocks", label: "BLK" },
-  { id: "blocks_steals", label: "STL+BLK" }
+  { id: "threes", label: "3PM" }
 ];
 
 const WNBA_TEAM_LOGOS: Record<string, string> = {
@@ -6270,6 +6268,7 @@ function marketLabel(market: string) {
     points: "PTS",
     rebounds: "REB",
     assists: "AST",
+    turnovers: "TO",
     points_rebounds: "P+R",
     points_assists: "P+A",
     rebounds_assists: "R+A",

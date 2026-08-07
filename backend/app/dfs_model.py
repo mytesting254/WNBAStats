@@ -17,7 +17,6 @@ from .player_prop_model import (
     FEATURE_NAMES,
     ModelTuningConfig,
     RidgeModel,
-    TRAINING_MARKETS,
     _fit_model_from_rows,
     _player_sample_quality,
     _predict,
@@ -37,7 +36,17 @@ DFS_HALF_EXTRA_FEATURES = [
     "team_first_half_share",
     "estimated_first_half_minutes_share",
 ]
-DFS_HALF_MARKETS = list(TRAINING_MARKETS)
+DFS_HALF_MARKETS = [
+    "points",
+    "rebounds",
+    "assists",
+    "turnovers",
+    "points_rebounds",
+    "points_assists",
+    "rebounds_assists",
+    "points_rebounds_assists",
+    "threes",
+]
 
 
 @dataclass(frozen=True)

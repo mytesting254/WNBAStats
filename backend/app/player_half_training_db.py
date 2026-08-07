@@ -595,6 +595,7 @@ def _estimated_market_value(player_row: dict[str, object], market: str) -> float
         "points": player_row["estimated_first_half_points"],
         "rebounds": player_row["estimated_first_half_rebounds"],
         "assists": player_row["estimated_first_half_assists"],
+        "turnovers": player_row["estimated_first_half_turnovers"],
         "threes": player_row["estimated_first_half_threes"],
         "steals": player_row["estimated_first_half_steals"],
         "blocks": player_row["estimated_first_half_blocks"],
