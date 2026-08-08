@@ -33,6 +33,10 @@ GAME_DIRECT_BLEND_MAX = 0.72
 GAME_TOTAL_DECISION_BLEND_MAX = 0.68
 GAME_TOTAL_DECISION_MODEL_MIN_ROWS = 120
 GAME_TOTAL_DECISION_MIN_EDGE = 1.0
+GAME_TOTAL_DECISION_SIGN_DISAGREEMENT_SOFTEN = 0.6
+GAME_TOTAL_DECISION_BALANCED_MARKET_SOFTEN = 0.78
+GAME_TOTAL_DECISION_BALANCED_PRICE_GAP_MAX = 8.0
+GAME_TOTAL_DECISION_BALANCED_VIG_PROB_GAP_MAX = 0.02
 GAME_DIRECT_FEATURE_NAMES = [
     "home_recent_points",
     "away_recent_points",
@@ -117,6 +121,7 @@ GAME_TOTAL_FEATURE_NAMES = [
     "rest_days_home",
     "rest_days_away",
 ]
+GAME_DIRECT_FEATURE_INDEX = {name: idx for idx, name in enumerate(GAME_DIRECT_FEATURE_NAMES)}
 
 
 @dataclass(frozen=True)
@@ -911,11 +916,57 @@ def _predict_market_total_edge(
         return None
     features = [*direct_features, baseline_edge, game_total]
     predicted_edge = _predict_direct_model(model, features)
-    weight = _direct_total_decision_blend_weight(model.rows)
+    edge, weight = _stabilize_total_market_edge(
+        direct_features=direct_features,
+        baseline_edge=baseline_edge,
+        predicted_edge=predicted_edge,
+        rows=model.rows,
+    )
+    return _MarketTotalDecision(rows=model.rows, edge=edge, weight=weight)
+
+
+def _stabilize_total_market_edge(
+    *,
+    direct_features: list[float],
+    baseline_edge: float,
+    predicted_edge: float,
+    rows: int,
+) -> tuple[float, float]:
+    weight = _direct_total_decision_blend_weight(rows)
     edge = ((1 - weight) * baseline_edge) + (weight * predicted_edge)
+
+    # If the learned edge flips the baseline side, soften it unless it is
+    # clearly stronger than baseline conviction.
+    if (baseline_edge * predicted_edge) < 0:
+        baseline_abs = abs(float(baseline_edge))
+        predicted_abs = abs(float(predicted_edge))
+        if predicted_abs <= (baseline_abs + 1.0):
+            edge = (GAME_TOTAL_DECISION_SIGN_DISAGREEMENT_SOFTEN * edge) + (
+                (1.0 - GAME_TOTAL_DECISION_SIGN_DISAGREEMENT_SOFTEN) * baseline_edge
+            )
+
+    total_price_gap = abs(_direct_feature_value(direct_features, "total_price_gap"))
+    vig_free_over_prob = _direct_feature_value(direct_features, "vig_free_over_prob", default=0.5)
+    if (
+        total_price_gap <= GAME_TOTAL_DECISION_BALANCED_PRICE_GAP_MAX
+        and abs(vig_free_over_prob - 0.5) <= GAME_TOTAL_DECISION_BALANCED_VIG_PROB_GAP_MAX
+        and abs(edge) < (GAME_TOTAL_DECISION_MIN_EDGE * 2.5)
+    ):
+        edge *= GAME_TOTAL_DECISION_BALANCED_MARKET_SOFTEN
+
     if abs(edge) < GAME_TOTAL_DECISION_MIN_EDGE:
         edge = baseline_edge
-    return _MarketTotalDecision(rows=model.rows, edge=edge, weight=weight)
+    return edge, weight
+
+
+def _direct_feature_value(features: list[float], name: str, default: float = 0.0) -> float:
+    idx = GAME_DIRECT_FEATURE_INDEX.get(name)
+    if idx is None or idx >= len(features):
+        return float(default)
+    try:
+        return float(features[idx])
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _direct_game_blend_weight(rows: int) -> float:
@@ -1218,10 +1269,12 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                 if decision_model is not None:
                     decision_features = [*direct_features, baseline_total_edge, game_total_value]
                     predicted_total_edge = _predict_direct_model(decision_model, decision_features)
-                    decision_weight = _direct_total_decision_blend_weight(decision_model.rows)
-                    adjusted_total_edge = ((1 - decision_weight) * baseline_total_edge) + (decision_weight * predicted_total_edge)
-                    if abs(adjusted_total_edge) < GAME_TOTAL_DECISION_MIN_EDGE:
-                        adjusted_total_edge = baseline_total_edge
+                    adjusted_total_edge, _decision_weight = _stabilize_total_market_edge(
+                        direct_features=direct_features,
+                        baseline_edge=baseline_total_edge,
+                        predicted_edge=predicted_total_edge,
+                        rows=decision_model.rows,
+                    )
                 if use_target_row:
                     total_records.append(
                         (
