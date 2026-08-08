@@ -339,6 +339,9 @@ def project_game(
             game_total,
             int(game["rest_days_home"] or 2),
             int(game["rest_days_away"] or 2),
+            over_price=_coerce_float(_row_value(game, "over_price")),
+            under_price=_coerce_float(_row_value(game, "under_price")),
+            spread_home=spread_home,
         )
         if total_note:
             residual_notes.append(total_note)
@@ -959,22 +962,58 @@ def _apply_game_total_residual(
     game_total: float,
     rest_days_home: int,
     rest_days_away: int,
+    *,
+    over_price: float | None = None,
+    under_price: float | None = None,
+    spread_home: float | None = None,
 ) -> tuple[float, str | None]:
     model = _train_game_edge_model(conn, "total")
     if model is None:
         return projected_total, None
-    features = [
-        projected_total,
-        projected_total - game_total,
-        game_total,
-        float(rest_days_home),
-        float(rest_days_away),
-    ]
+    features = _game_total_residual_features(
+        projected_total=projected_total,
+        game_total=game_total,
+        rest_days_home=rest_days_home,
+        rest_days_away=rest_days_away,
+        over_price=over_price,
+        under_price=under_price,
+        spread_home=spread_home,
+    )
     predicted_edge = _predict_game_edge(model, features)
     total_from_model = game_total + predicted_edge
     weight = _game_edge_blend_weight(model.rows, "total")
     adjusted = ((1 - weight) * projected_total) + (weight * total_from_model)
     return adjusted, f"total residual blend {weight:.0%} ({model.rows} settled rows)"
+
+
+def _game_total_residual_features(
+    *,
+    projected_total: float,
+    game_total: float,
+    rest_days_home: int,
+    rest_days_away: int,
+    over_price: float | None,
+    under_price: float | None,
+    spread_home: float | None,
+) -> list[float]:
+    projected_edge = float(projected_total) - float(game_total)
+    over_implied = _moneyline_implied_probability(over_price) or 0.5
+    under_implied = _moneyline_implied_probability(under_price) or 0.5
+    vig_free_over = _vig_free_probability(over_price, under_price) or 0.5
+    return [
+        float(projected_total),
+        projected_edge,
+        float(game_total),
+        float(rest_days_home),
+        float(rest_days_away),
+        float(over_price or 0.0),
+        float(under_price or 0.0),
+        float(over_price or 0.0) - float(under_price or 0.0),
+        over_implied,
+        under_implied,
+        vig_free_over,
+        abs(float(spread_home or 0.0)),
+    ]
 
 
 def _train_game_edge_model(conn: sqlite3.Connection, edge_type: str) -> _GameEdgeModel | None:
@@ -1269,6 +1308,9 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
             gp.game_total,
             gp.home_rest_days,
             gp.away_rest_days,
+            g.spread_home,
+            g.over_price,
+            g.under_price,
             sgp.actual_total
         FROM settled_game_predictions sgp
         JOIN game_predictions gp ON gp.id = sgp.game_prediction_id
@@ -1285,13 +1327,15 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
             continue
         projected_total = float(row["projected_total"])
         game_total = float(row["game_total"])
-        features = [
-            projected_total,
-            projected_total - game_total,
-            game_total,
-            float(row["home_rest_days"] or 2),
-            float(row["away_rest_days"] or 2),
-        ]
+        features = _game_total_residual_features(
+            projected_total=projected_total,
+            game_total=game_total,
+            rest_days_home=int(row["home_rest_days"] or 2),
+            rest_days_away=int(row["away_rest_days"] or 2),
+            over_price=_coerce_float(row["over_price"]),
+            under_price=_coerce_float(row["under_price"]),
+            spread_home=_coerce_float(row["spread_home"]),
+        )
         samples.append((features, float(row["actual_total"]) - game_total))
     return samples
 
