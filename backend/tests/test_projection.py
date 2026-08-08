@@ -1905,7 +1905,7 @@ def test_rotowire_refresh_route_skips_prediction_rebuild_and_only_republishes_ro
         "_publish_roster_cache_async",
         lambda: {"status": "queued", "started_at": "2026-05-08T00:00:00+00:00"},
     )
-    monkeypatch.setattr(main_module, "_roster_payload_lightweight", lambda: roster_payload)
+    monkeypatch.setattr(main_module, "_roster_payload", lambda conn, refresh_lineups=False: roster_payload)
     monkeypatch.setattr(
         main_module,
         "_queue_current_slate_repair_job",
@@ -1959,7 +1959,7 @@ def test_rotowire_refresh_route_skips_repair_when_roster_snapshot_is_unchanged(m
         "_publish_roster_cache_async",
         lambda: {"status": "queued", "started_at": "2026-05-08T00:00:00+00:00"},
     )
-    monkeypatch.setattr(main_module, "_roster_payload_lightweight", lambda: roster_payload)
+    monkeypatch.setattr(main_module, "_roster_payload", lambda conn, refresh_lineups=False: roster_payload)
 
     repair_called = False
 
