@@ -4515,6 +4515,10 @@ def _market_price_nudge(market: str) -> float:
 
 
 def _model_fingerprint(conn: sqlite3.Connection) -> str:
+    cache = _connection_training_cache_bucket(conn, "model_fingerprint")
+    cached = cache.get(("current",))
+    if isinstance(cached, str) and cached:
+        return cached
     parts = [
         _table_signature(
             conn,
@@ -4576,7 +4580,9 @@ def _model_fingerprint(conn: sqlite3.Connection) -> str:
             "COUNT(*) AS row_count, COALESCE(MAX(id), 0) AS max_id, COALESCE(MAX(team_id), 0) AS max_team_id",
         ),
     ]
-    return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+    fingerprint = hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
+    cache[("current",)] = fingerprint
+    return fingerprint
 
 
 def _table_signature(conn: sqlite3.Connection, table: str, select_sql: str) -> str:
@@ -4598,11 +4604,22 @@ def _model_cache_key(
     *,
     kind: str,
 ) -> str:
+    cache = _connection_training_cache_bucket(conn, "model_cache_key")
     db_marker = hashlib.sha1(str(db_path).encode("utf-8")).hexdigest()[:12]
     safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name)
     training_marker = hashlib.sha1(_training_start_date().encode("utf-8")).hexdigest()[:8]
     version_marker = hashlib.sha1(MODEL_VERSION.encode("utf-8")).hexdigest()[:8]
-    return f"{MODEL_CACHE_PREFIX}-{kind}-{safe_name}-{db_marker}-{_model_fingerprint(conn)}-{_config_fingerprint(config)}-{training_marker}-{version_marker}.json"
+    config_marker = _config_fingerprint(config)
+    cache_key = (str(db_path), str(name), str(kind), config_marker, training_marker, version_marker)
+    cached = cache.get(cache_key)
+    if isinstance(cached, str) and cached:
+        return cached
+    resolved = (
+        f"{MODEL_CACHE_PREFIX}-{kind}-{safe_name}-{db_marker}-{_model_fingerprint(conn)}-"
+        f"{config_marker}-{training_marker}-{version_marker}.json"
+    )
+    cache[cache_key] = resolved
+    return resolved
 
 
 def _load_cached_model(cache_key: str) -> RidgeModel | None:

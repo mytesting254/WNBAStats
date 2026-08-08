@@ -3670,7 +3670,6 @@ function MatchupsView({
                   className={signedValueTone(selectedMatchup.rating_differentials?.season_net_diff)}
                 />
               </div>
-              {selectedMatchup.total_reason ? <p className="reason">{selectedMatchup.total_reason}</p> : null}
               <CoversRecordsPanel matchup={selectedMatchup} />
             </article>
           ) : (
