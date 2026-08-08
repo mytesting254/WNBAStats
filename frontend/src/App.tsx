@@ -2,7 +2,6 @@
 import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import {
   fetchDfsFirstHalf,
-  fetchPlayerFirstHalfLines,
   fetchAuthState,
   fetchUnsettledPropAudit,
   voidDnpProps,
@@ -51,7 +50,6 @@ import {
   type ModelPerformance,
   type ModelRun,
   type OpsHealth,
-  type PlayerFirstHalfLine,
   type PropSyncHealth,
   type RosterPlayer,
   type SpecialStocksSnapshot,
@@ -287,7 +285,6 @@ class DashboardErrorBoundary extends Component<
 export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
   const [dfsFirstHalf, setDfsFirstHalf] = useState<DfsFirstHalfEstimate[]>([]);
-  const [playerFirstHalfLines, setPlayerFirstHalfLines] = useState<PlayerFirstHalfLine[]>([]);
   const [watchlist, setWatchlist] = useState<WatchlistProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
   const [specialStocks, setSpecialStocks] = useState<SpecialStocksSnapshot[]>([]);
@@ -465,13 +462,11 @@ export function App() {
         setDiscrepancies(nextDiscrepancies);
         setGemPerformance(nextPerformance);
       } else if (tab === "dfs") {
-        const [nextDfs, nextFirstHalfLines, nextMatchups] = await Promise.all([
+        const [nextDfs, nextMatchups] = await Promise.all([
           withTimeout(fetchDfsFirstHalf(), INITIAL_LOAD_TIMEOUT_MS, "DFS first-half estimates"),
-          withTimeout(fetchPlayerFirstHalfLines(250), INITIAL_LOAD_TIMEOUT_MS, "player first-half line history"),
           withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups")
         ]);
         setDfsFirstHalf(nextDfs);
-        setPlayerFirstHalfLines(nextFirstHalfLines);
         setMatchups(nextMatchups);
       } else if (tab === "watchlist") {
         const [nextWatchlist, nextPerformance] = await Promise.all([
@@ -1386,7 +1381,7 @@ export function App() {
             setSelected={setSelected}
           />
         ) : activeTab === "dfs" ? (
-          <DfsView estimates={dfsFirstHalf} history={playerFirstHalfLines} matchups={matchups} loading={tabLoading.dfs} error={error} />
+          <DfsView estimates={dfsFirstHalf} matchups={matchups} loading={tabLoading.dfs} error={error} />
         ) : activeTab === "gems" ? (
           <GemsView gems={gems} matchups={matchups} loading={tabLoading.gems} error={error} />
         ) : activeTab === "watchlist" ? (
@@ -4461,18 +4456,15 @@ function WatchlistView({
 
 function DfsView({
   estimates,
-  history,
   matchups,
   loading,
   error,
 }: {
   estimates: DfsFirstHalfEstimate[];
-  history: PlayerFirstHalfLine[];
   matchups: Matchup[];
   loading: boolean;
   error: string | null;
 }) {
-  const [selectedView, setSelectedView] = useState<"estimates" | "history">("estimates");
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
   const [marketFilter, setMarketFilter] = useState("all");
   const [sportsbookFilter, setSportsbookFilter] = useState("all");
@@ -4485,15 +4477,6 @@ function DfsView({
       ),
     [estimates]
   );
-  const historyRows = useMemo(
-    () =>
-      [...history].sort(
-        (a, b) =>
-          b.game_date.localeCompare(a.game_date)
-          || (b.pace_ratio ?? -Infinity) - (a.pace_ratio ?? -Infinity)
-      ),
-    [history]
-  );
   const filteredEstimateRows = useMemo(
     () =>
       estimateRows.filter((item) => {
@@ -4502,15 +4485,6 @@ function DfsView({
         return marketMatch && sportsbookMatch;
       }),
     [estimateRows, marketFilter, sportsbookFilter]
-  );
-  const filteredHistoryRows = useMemo(
-    () =>
-      historyRows.filter((item) => {
-        const marketMatch = marketFilter === "all" || item.market === marketFilter;
-        const sportsbookMatch = sportsbookFilter === "all" || item.sportsbook === sportsbookFilter;
-        return marketMatch && sportsbookMatch;
-      }),
-    [historyRows, marketFilter, sportsbookFilter]
   );
   const matchupByGameId = useMemo(() => new Map(matchups.map((item) => [item.id, item])), [matchups]);
   const groupedEstimateRows = useMemo(() => {
@@ -4533,12 +4507,7 @@ function DfsView({
       .sort((a, b) => (a.startTime ?? "").localeCompare(b.startTime ?? ""));
   }, [filteredEstimateRows, matchupByGameId]);
   const selectedEstimateGroup = groupedEstimateRows.find((group) => group.gameId === selectedGameId) ?? groupedEstimateRows[0] ?? null;
-  const sportsbookOptions = useMemo(
-    () => selectedView === "estimates"
-      ? sportsbookFilterOptions(estimateRows)
-      : ["all", ...Array.from(new Set(historyRows.map((item) => item.sportsbook).filter(Boolean))).sort((a, b) => a.localeCompare(b))],
-    [estimateRows, historyRows, selectedView]
-  );
+  const sportsbookOptions = useMemo(() => sportsbookFilterOptions(estimateRows), [estimateRows]);
 
   return (
     <section className="matchup-list">
@@ -4546,38 +4515,23 @@ function DfsView({
         <div className="panel-header">
           <div>
             <h2>DFS First Half</h2>
-            <p>{loading ? "Loading first-half estimates and observed halftime pace" : "Current 1H estimates and observed halftime pace against full-game prop lines"}</p>
+            <p>{loading ? "Loading first-half estimates" : "Current 1H estimates against full-game prop lines"}</p>
           </div>
           <BrainCircuit size={20} />
         </div>
         {error ? <div className="error">{error}</div> : null}
-        <div className="game-tabs" aria-label="DFS halftime views">
-          <button className={selectedView === "estimates" ? "active" : ""} onClick={() => setSelectedView("estimates")}>
-            <span>Current board</span>
-            <strong>1H Estimates</strong>
-            <em>{`${estimates.length} live rows`}</em>
-          </button>
-          <button className={selectedView === "history" ? "active" : ""} onClick={() => setSelectedView("history")}>
-            <span>Observed history</span>
-            <strong>Halftime vs Line</strong>
-            <em>{`${history.length} settled rows`}</em>
-          </button>
+        <div className="game-tabs" aria-label="DFS matchup tabs">
+          {groupedEstimateRows.map((group) => (
+            <button
+              key={`dfs-tab-${group.gameId}`}
+              className={(selectedEstimateGroup?.gameId ?? null) === group.gameId ? "active" : ""}
+              onClick={() => setSelectedGameId(group.gameId)}
+            >
+              <span>{group.startTime ? formatDate(group.startTime) : "Slate"}</span>
+              <strong>{group.matchup ? `${group.matchup.away_team} at ${group.matchup.home_team}` : `Game ${group.gameId}`}</strong>
+            </button>
+          ))}
         </div>
-        {selectedView === "estimates" ? (
-          <div className="game-tabs" aria-label="DFS matchup tabs">
-            {groupedEstimateRows.map((group) => (
-              <button
-                key={`dfs-tab-${group.gameId}`}
-                className={(selectedEstimateGroup?.gameId ?? null) === group.gameId ? "active" : ""}
-                onClick={() => setSelectedGameId(group.gameId)}
-              >
-                <span>{group.startTime ? formatDate(group.startTime) : "Slate"}</span>
-                <strong>{group.matchup ? `${group.matchup.away_team} at ${group.matchup.home_team}` : `Game ${group.gameId}`}</strong>
-                <em>{`${group.rows.length} props`}</em>
-              </button>
-            ))}
-          </div>
-        ) : null}
         <div className="parlay-tab-content">
           <div className="matchup-props">
             <div className="candidate-filters" aria-label="DFS filters">
@@ -4606,108 +4560,56 @@ function DfsView({
               </select>
             </div>
             <div className="table-wrap">
-              {selectedView === "estimates" ? (
-                selectedEstimateGroup ? (
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Player</th>
-                        <th>Line H2H</th>
-                        <th>Market</th>
-                        <th className="props-best-col">Book</th>
-                        <th>FG Line</th>
-                        <th>1H Est</th>
-                        <th>Halfway</th>
-                        <th>Pace</th>
-                        <th>1H Edge</th>
-                        <th>1H Min%</th>
-                        <th>Track</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {selectedEstimateGroup.rows.map((item) => (
-                        <tr key={`dfs-est-${item.prop_line_id}`}>
-                          <td>
-                            <div className="player-cell">
-                              <TeamLogo src={item.team_logo_url} alt={`${item.team} logo`} />
-                              <div>
-                                <PlayerLabel name={item.player} position={item.position} />
-                                <span>{item.team}</span>
-                                {renderRecentFormWithMinutes(item, `dfs-${item.prop_line_id}-l5`, item.expected_halfway_line)}
-                              </div>
-                            </div>
-                          </td>
-                          <td>{renderH2HFormWithMinutes(item, `dfs-${item.prop_line_id}-h2h`, item.expected_halfway_line)}</td>
-                          <td>{marketLabel(item.market)}</td>
-                          <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
-                          <td>{item.line.toFixed(1)}</td>
-                          <td>{formatNumber(item.estimated_first_half_result)}</td>
-                          <td>{formatNumber(item.expected_halfway_line)}</td>
-                          <td>{formatNumber(item.pace_ratio ?? null)}</td>
-                          <td>{formatSigned(item.halftime_margin_to_line ?? null)}</td>
-                          <td>{formatPercent(item.estimated_first_half_minutes_share)}</td>
-                          <td><span className={`side ${item.recommended_side}`}>{(item.pace_ratio ?? 0) >= 1 ? "on pace" : "behind"}</span></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                ) : (
-                  <table>
-                    <tbody>
-                      <tr>
-                        <td colSpan={11}>No current first-half estimates available for these filters.</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                )
-              ) : (
+              {selectedEstimateGroup ? (
                 <table>
                   <thead>
                     <tr>
-                      <th>Date</th>
                       <th>Player</th>
-                      <th>Opp</th>
+                      <th>Line H2H</th>
                       <th>Market</th>
                       <th className="props-best-col">Book</th>
                       <th>FG Line</th>
-                      <th>1H Actual</th>
+                      <th>1H Est</th>
                       <th>Halfway</th>
                       <th>Pace</th>
                       <th>1H Edge</th>
-                      <th>1H Min</th>
-                      <th>Final</th>
+                      <th>1H Min%</th>
+                      <th>Track</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {filteredHistoryRows.slice(0, 150).map((item) => (
-                      <tr key={`dfs-hist-${item.game_id}-${item.player_id}-${item.market}-${item.line}-${item.sportsbook}`}>
-                        <td>{formatGameDateShort(item.game_date)}</td>
+                    {selectedEstimateGroup.rows.map((item) => (
+                      <tr key={`dfs-est-${item.prop_line_id}`}>
                         <td>
                           <div className="player-cell">
                             <TeamLogo src={item.team_logo_url} alt={`${item.team} logo`} />
                             <div>
                               <PlayerLabel name={item.player} position={item.position} />
                               <span>{item.team}</span>
+                              {renderRecentFormWithMinutes(item, `dfs-${item.prop_line_id}-l5`, item.expected_halfway_line)}
                             </div>
                           </div>
                         </td>
-                        <td>{item.opponent_team}</td>
+                        <td>{renderH2HFormWithMinutes(item, `dfs-${item.prop_line_id}-h2h`, item.expected_halfway_line)}</td>
                         <td>{marketLabel(item.market)}</td>
-                        <td className="props-best-book"><SportsbookLogo name={item.sportsbook} className="compact props-best-logo" /></td>
+                        <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
                         <td>{item.line.toFixed(1)}</td>
-                        <td>{formatNumber(item.first_half_result)}</td>
+                        <td>{formatNumber(item.estimated_first_half_result)}</td>
                         <td>{formatNumber(item.expected_halfway_line)}</td>
                         <td>{formatNumber(item.pace_ratio ?? null)}</td>
                         <td>{formatSigned(item.halftime_margin_to_line ?? null)}</td>
-                        <td>{formatNumber(item.first_half_minutes)}</td>
-                        <td><span className={`side ${item.winning_side === "over" ? "over" : "under"}`}>{formatNumber(item.actual_result)}</span></td>
+                        <td>{formatPercent(item.estimated_first_half_minutes_share)}</td>
+                        <td><span className={`side ${item.recommended_side}`}>{(item.pace_ratio ?? 0) >= 1 ? "on pace" : "behind"}</span></td>
                       </tr>
                     ))}
-                    {!filteredHistoryRows.length ? (
-                      <tr>
-                        <td colSpan={12}>No observed halftime line rows available for these filters.</td>
-                      </tr>
-                    ) : null}
+                  </tbody>
+                </table>
+              ) : (
+                <table>
+                  <tbody>
+                    <tr>
+                      <td colSpan={11}>No current first-half estimates available for these filters.</td>
+                    </tr>
                   </tbody>
                 </table>
               )}
