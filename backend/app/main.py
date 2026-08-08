@@ -7396,60 +7396,95 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
     )
     _append_job_run_event(job_run_id, "job.queued", "Background prop sync queued.", details={"source": source})
 
-    def _run() -> None:
-        try:
-            _append_job_run_event(job_run_id, "job.running", "Background prop sync started.", details={"source": source})
-            with connect() as conn:
-                pipeline_result = run_prop_sync_pipeline(
-                    conn,
-                    request_source=source,
-                    sync_props=True,
-                    rebuild_mode="changed_props",
-                    skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
-                    sync_props_fn=sync_prop_lines_from_sportsbook,
-                    rebuild_predictions_fn=rebuild_predictions_live,
-                    snapshot_dfs_fn=_snapshot_current_dfs_first_half,
+    def _run_background_prop_sync_job_with_retry(
+        *,
+        max_attempts: int = 4,
+        retry_delay_seconds: float = 2.0,
+    ) -> tuple[PropPipelineResult, list[int], dict[str, Any]]:
+        attempt = 1
+        while True:
+            try:
+                with connect() as conn:
+                    pipeline_result = run_prop_sync_pipeline(
+                        conn,
+                        request_source=source,
+                        sync_props=True,
+                        rebuild_mode="changed_props",
+                        skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
+                        sync_props_fn=sync_prop_lines_from_sportsbook,
+                        rebuild_predictions_fn=rebuild_predictions_live,
+                        snapshot_dfs_fn=_snapshot_current_dfs_first_half,
+                        progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                            stage=stage,
+                            stage_index=1 if stage == "syncing_props" else 2,
+                            stage_total=3,
+                            current=current,
+                            total=total,
+                            message=message,
+                        ),
+                    )
+                    touched_game_ids = list(pipeline_result.target_game_ids)
+                    _set_prop_sync_progress(
+                        scope=source,
+                        target_game_ids=touched_game_ids,
+                    )
+                _invalidate_read_caches()
+                post_result = run_post_pipeline_steps(
+                    connect_fn=connect,
+                    policy=PropPostProcessPolicy(
+                        publish_mode="targeted",
+                        matchup_game_ids=touched_game_ids,
+                        full_matchup_refresh=False,
+                        include_performance=False,
+                        publish_start_message="Publishing synced payloads.",
+                        publish_done_message="Background prop sync finished.",
+                    ),
                     progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
                         stage=stage,
-                        stage_index=1 if stage == "syncing_props" else 2,
+                        stage_index=3,
                         stage_total=3,
                         current=current,
                         total=total,
                         message=message,
                     ),
+                    publish_post_mutation_payloads_fn=lambda conn, policy: _publish_post_mutation_read_payloads(
+                        conn,
+                        matchup_game_ids=list(policy.matchup_game_ids or []),
+                        full_matchup_refresh=policy.full_matchup_refresh,
+                        include_performance=policy.include_performance,
+                    ),
                 )
-                touched_game_ids = list(pipeline_result.target_game_ids)
+                return pipeline_result, touched_game_ids, dict(post_result.published_payloads or {})
+            except sqlite3.OperationalError as exc:
+                if not _is_sqlite_locked_error(exc) or attempt >= max_attempts:
+                    raise
+                delay_seconds = retry_delay_seconds * attempt
+                message = (
+                    f"Background prop sync hit a SQLite lock on attempt {attempt}/{max_attempts}; "
+                    f"retrying in {delay_seconds:.1f}s."
+                )
+                _append_job_run_event(
+                    job_run_id,
+                    "job.retry",
+                    message,
+                    level="warning",
+                    details={
+                        "source": source,
+                        "attempt": attempt,
+                        "max_attempts": max_attempts,
+                        "delay_seconds": delay_seconds,
+                    },
+                )
                 _set_prop_sync_progress(
-                    scope=source,
-                    target_game_ids=touched_game_ids,
-                )
-            _invalidate_read_caches()
-            post_result = run_post_pipeline_steps(
-                connect_fn=connect,
-                policy=PropPostProcessPolicy(
-                    publish_mode="targeted",
-                    matchup_game_ids=touched_game_ids,
-                    full_matchup_refresh=False,
-                    include_performance=False,
-                    publish_start_message="Publishing synced payloads.",
-                    publish_done_message="Background prop sync finished.",
-                ),
-                progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
-                    stage=stage,
-                    stage_index=3,
-                    stage_total=3,
-                    current=current,
-                    total=total,
                     message=message,
-                ),
-                publish_post_mutation_payloads_fn=lambda conn, policy: _publish_post_mutation_read_payloads(
-                    conn,
-                    matchup_game_ids=list(policy.matchup_game_ids or []),
-                    full_matchup_refresh=policy.full_matchup_refresh,
-                    include_performance=policy.include_performance,
-                ),
-            )
-            published_payloads = post_result.published_payloads or {}
+                )
+                time.sleep(delay_seconds)
+                attempt += 1
+
+    def _run() -> None:
+        try:
+            _append_job_run_event(job_run_id, "job.running", "Background prop sync started.", details={"source": source})
+            pipeline_result, touched_game_ids, published_payloads = _run_background_prop_sync_job_with_retry()
             _mutate_prop_sync_state(
                 running=False,
                 finished_at=datetime.now(timezone.utc).isoformat(),

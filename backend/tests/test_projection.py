@@ -8092,6 +8092,84 @@ def test_start_prop_sync_if_needed_tracks_progress(monkeypatch) -> None:
     }
 
 
+def test_start_prop_sync_if_needed_retries_sqlite_lock(monkeypatch) -> None:
+    thread_starts = 0
+    attempts = {"count": 0}
+    job_events: list[tuple[str, str, str, dict | None]] = []
+    finished: list[tuple[str, str | None]] = []
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    class ImmediateThread:
+        def __init__(self, *args, **kwargs):
+            self.target = kwargs.get("target")
+
+        def start(self):
+            nonlocal thread_starts
+            thread_starts += 1
+            if self.target is not None:
+                self.target()
+
+    def fake_pipeline(*args, **kwargs):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return SimpleNamespace(
+            target_game_ids=[9910],
+            scanned_props=6,
+            synced_props=3,
+            rebuilt_predictions=3,
+            attempted_predictions=3,
+            skipped_predictions=0,
+            dfs_snapshot={"inserted": 3, "updated": 0, "skipped": 0},
+        )
+
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
+    monkeypatch.setattr(main_module, "run_prop_sync_pipeline", fake_pipeline)
+    monkeypatch.setattr(main_module, "run_post_pipeline_steps", lambda **kwargs: SimpleNamespace(published_payloads={"watchlist.json": 1}))
+    monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
+    monkeypatch.setattr(main_module, "_begin_prop_sync_job", lambda source: "job-1")
+    monkeypatch.setattr(main_module, "_create_job_run", lambda *args, **kwargs: 91)
+    monkeypatch.setattr(
+        main_module,
+        "_append_job_run_event",
+        lambda job_run_id, event_type, message, level="info", details=None: job_events.append(
+            (str(job_run_id), event_type, message, details)
+        ),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_finish_job_run",
+        lambda job_run_id, status, result=None, error_text=None: finished.append((status, error_text)),
+    )
+    monkeypatch.setattr(main_module.time, "sleep", lambda _seconds: None)
+
+    started = main_module._start_prop_sync_if_needed("covers_import")
+
+    assert started is True
+    assert thread_starts == 1
+    assert attempts["count"] == 2
+    assert any(event_type == "job.retry" for _, event_type, _, _ in job_events)
+    assert finished[-1] == ("completed", None)
+    assert main_module._PROP_SYNC_STATE["last_result"] == {
+        "source": "covers_import",
+        "synced_props": 6,
+        "changed_props": 3,
+        "rebuilt_predictions": 3,
+        "attempted_predictions": 3,
+        "skipped_predictions": 0,
+        "dfs_snapshot": {"inserted": 3, "updated": 0, "skipped": 0},
+        "target_game_ids": [9910],
+        "published_payloads": {"watchlist.json": 1},
+    }
+
+
 def test_run_legacy_recalculate_job_tracks_repair_substages_separately(monkeypatch) -> None:
     progress_updates: list[tuple[str | None, int | None, int | None, int | None, str | None]] = []
 
