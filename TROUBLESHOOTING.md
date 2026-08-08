@@ -277,6 +277,32 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - the `3am America/New_York` Odds API wrapper no longer decides based on local `/api/matchups`
 - it now prechecks The Odds API `events` endpoint and counts only same-day WNBA events in `America/New_York`, so empty-slate skips do not depend on whether local scheduled `games` rows already exist
 
+## `2am` Cron Times Out Waiting For Training
+
+### Symptom
+
+- `settle-and-train` starts normally
+- `/var/log/wnba-daily-props.log` later shows a training timeout
+- live CPU stays busy and `/api/ops/health` still reports model training running
+
+### Likely Cause
+
+- `/api/models/train` is the full Model Lab walk-forward job, not a game-only retrain
+- larger game-feature sets can extend the full run beyond the default `WNBA_TRAIN_POLL_TIMEOUT_SECONDS=1200`
+
+### What To Check
+
+- inspect the live training state:
+  - `curl -sS http://127.0.0.1:8010/api/ops/health`
+- confirm the training process is still active:
+  - `ps -ef | grep '[r]un_model_training.py'`
+- if it is still progressing, raise the timeout in the cron environment before treating it as a failure
+
+### Notes
+
+- the August 8, 2026 speed fix reduced a game-evaluation hotspot by refitting direct game models once per `YYYY-MM` segment instead of nearly every historical row
+- that helps, but cron still waits on the entire Model Lab training path plus prewarm
+
 ## SQLite And Persistence Problems
 
 ### Symptom

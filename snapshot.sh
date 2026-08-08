@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="$ROOT/.venv/bin/python"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-$ROOT/data/snapshots}"
-DB_PATH="${WNBA_DB_PATH:-$ROOT/data/wnba.sqlite}"
+DB_PATH="${WNBA_DB_PATH:-}"
 SNAPSHOT_AUTOSAVE_INTERVAL="${SNAPSHOT_AUTOSAVE_INTERVAL:-300}"
 SNAPSHOT_KEEP_LATEST="${SNAPSHOT_KEEP_LATEST:-5}"
 SNAPSHOT_NAME="${SNAPSHOT_NAME:-wnba-runtime}"
@@ -12,6 +12,12 @@ SNAPSHOT_NAME="${SNAPSHOT_NAME:-wnba-runtime}"
 if [[ ! -x "$PYTHON" ]]; then
   echo "Missing Python virtual environment."
   echo "Run: python3 -m venv .venv && \"$ROOT/.venv/bin/pip\" install -r backend/requirements.txt"
+  exit 1
+fi
+
+if [[ -z "$DB_PATH" ]]; then
+  echo "WNBA_DB_PATH is required."
+  echo "Refusing to default snapshot operations to $ROOT/data/wnba.sqlite because repo-local runtime SQLite is not an authoritative app runtime."
   exit 1
 fi
 

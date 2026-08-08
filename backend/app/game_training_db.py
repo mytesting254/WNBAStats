@@ -6,11 +6,12 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .game_pregame_features import build_matchup_pregame_features
 from .game_pregame_features import GAME_PREGAME_FEATURE_VERSION
 from .paths import get_training_db_path
 
 
-GAME_TRAINING_DB_VERSION = "v3"
+GAME_TRAINING_DB_VERSION = "v4"
 _GAME_TRAINING_DB_LOCK = threading.RLock()
 
 
@@ -242,6 +243,10 @@ def _rebuild_game_training_examples(
             g.game_total,
             g.home_moneyline,
             g.away_moneyline,
+            g.home_spread_price,
+            g.away_spread_price,
+            g.over_price,
+            g.under_price,
             home_result.points AS home_points,
             away_result.points AS away_points,
             home_result.possessions AS home_possessions,
@@ -257,6 +262,7 @@ def _rebuild_game_training_examples(
     ).fetchall()
 
     history: dict[int, dict[str, object]] = {}
+    runtime_cache: dict[str, dict[tuple, object]] = {}
     rows_to_insert: list[tuple[object, ...]] = []
     for row in rows:
         candidate_rows += 1
@@ -278,6 +284,15 @@ def _rebuild_game_training_examples(
             / gp._historical_league_possessions(history),
             0.94,
             1.06,
+        )
+        matchup_pregame = build_matchup_pregame_features(
+            source_conn,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            game_id=int(row["id"]),
+            game_date=game_date,
+            use_injury_context=False,
+            runtime_cache=runtime_cache,
         )
         features = gp._assemble_direct_game_features(
             home_recent_points=float(home_context["recent_points"]),
@@ -309,6 +324,11 @@ def _rebuild_game_training_examples(
             game_total=gp._coerce_float(row["game_total"]),
             home_moneyline=gp._coerce_float(row["home_moneyline"]),
             away_moneyline=gp._coerce_float(row["away_moneyline"]),
+            home_spread_price=gp._coerce_float(row["home_spread_price"]),
+            away_spread_price=gp._coerce_float(row["away_spread_price"]),
+            over_price=gp._coerce_float(row["over_price"]),
+            under_price=gp._coerce_float(row["under_price"]),
+            matchup_pregame=matchup_pregame,
         )
         baseline_home = gp._baseline_points_from_context(
             team_context=home_context,
@@ -339,6 +359,7 @@ def _rebuild_game_training_examples(
             "has_spread": spread_home is not None,
             "has_total": game_total is not None and game_total > 0,
             "has_moneyline": home_moneyline is not None and away_moneyline is not None,
+            "has_total_prices": row["over_price"] is not None and row["under_price"] is not None,
         }
         has_margin_target = int(exclusion_reason is None)
         has_total_target = int(exclusion_reason is None)

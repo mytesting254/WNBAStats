@@ -1492,6 +1492,7 @@ export function App() {
           <ModelsView
             runs={modelRuns}
             latest={latestModelRun}
+            performance={performance}
             loading={tabLoading.models || training}
             error={error}
             onTrain={handleTrainModel}
@@ -2425,6 +2426,7 @@ function OperationCard({
 function ModelsView({
   runs,
   latest,
+  performance,
   loading,
   error,
   onTrain,
@@ -2432,6 +2434,7 @@ function ModelsView({
 }: {
   runs: ModelRun[];
   latest: ModelRun | null;
+  performance: ModelPerformance | null;
   loading: boolean;
   error: string | null;
   onTrain: () => void;
@@ -2629,6 +2632,78 @@ function ModelsView({
                   {!gameMetrics.length && (
                     <tr>
                       <td colSpan={11}>No game residual metrics yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="model-card">
+            <p className="eyebrow">Live totals tracking</p>
+            <p className="reason">
+              {performance?.game_totals?.message ?? "No settled game total predictions yet."}
+            </p>
+            <div className="detail-grid model-validation-grid">
+              <Metric label="Settled totals" value={formatCount(performance?.game_totals?.settled)} />
+              <Metric label="All settled" value={formatCount(performance?.game_totals?.total_settled)} />
+              <Metric label="O/U hit rate" value={formatMetricPercent(performance?.game_totals?.win_rate)} />
+              <Metric label="Total wins" value={formatCount(performance?.game_totals?.wins)} />
+            </div>
+            <div className="detail-grid model-validation-grid">
+              <Metric label="Projected total MAE" value={formatMetricNumber(performance?.game_totals?.average_absolute_error)} />
+              <Metric label="Avg abs edge" value={formatMetricNumber(performance?.game_totals?.average_absolute_edge)} />
+              <Metric label="Edge buckets" value={formatCount(performance?.game_totals?.by_edge.length)} />
+              <Metric label="Conf buckets" value={formatCount(performance?.game_totals?.by_confidence.length)} />
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Edge bucket</th>
+                    <th>Settled</th>
+                    <th>Wins</th>
+                    <th>Hit rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(performance?.game_totals?.by_edge ?? []).map((bucket) => (
+                    <tr key={bucket.label}>
+                      <td>{bucket.label}</td>
+                      <td>{bucket.settled}</td>
+                      <td>{bucket.wins}</td>
+                      <td>{formatMetricPercent(bucket.win_rate)}</td>
+                    </tr>
+                  ))}
+                  {!(performance?.game_totals?.by_edge?.length ?? 0) && (
+                    <tr>
+                      <td colSpan={4}>No edge bucket results yet.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Confidence</th>
+                    <th>Settled</th>
+                    <th>Wins</th>
+                    <th>Hit rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(performance?.game_totals?.by_confidence ?? []).map((bucket) => (
+                    <tr key={bucket.label}>
+                      <td>{bucket.label}</td>
+                      <td>{bucket.settled}</td>
+                      <td>{bucket.wins}</td>
+                      <td>{formatMetricPercent(bucket.win_rate)}</td>
+                    </tr>
+                  ))}
+                  {!(performance?.game_totals?.by_confidence?.length ?? 0) && (
+                    <tr>
+                      <td colSpan={4}>No confidence bucket results yet.</td>
                     </tr>
                   )}
                 </tbody>
@@ -3583,16 +3658,19 @@ function MatchupsView({
                 <MiniStat label="ATS Pick" value={selectedMatchup.ats_pick} />
                 <MiniStat label="ATS Pick Edge" value={formatAtsPickEdge(selectedMatchup)} />
                 <MiniStat label="Projected Total" value={formatProjectedTotal(selectedMatchup)} />
+                <MiniStat label="O/U Pick" value={selectedMatchup.total_pick} />
                 <MiniStat label="Q1 Total Proj" value={formatSegmentTotal(selectedMatchup.projected_q1_total)} />
                 <MiniStat label="1H Total Proj" value={formatSegmentTotal(selectedMatchup.projected_first_half_total)} />
                 <MiniStat label="O/U Edge" value={formatNullableEdge(selectedMatchup.total_edge)} />
-                <MiniStat label="Confidence" value={selectedMatchup.game_confidence} />
+                <MiniStat label="O/U Conf" value={selectedMatchup.total_confidence ?? selectedMatchup.game_confidence} />
+                <MiniStat label="Game Conf" value={selectedMatchup.game_confidence} />
                 <MiniStat
                   label={seasonNetDiffLabel(selectedMatchup)}
                   value={formatSignedNumber(selectedMatchup.rating_differentials?.season_net_diff)}
                   className={signedValueTone(selectedMatchup.rating_differentials?.season_net_diff)}
                 />
               </div>
+              {selectedMatchup.total_reason ? <p className="reason">{selectedMatchup.total_reason}</p> : null}
               <CoversRecordsPanel matchup={selectedMatchup} />
             </article>
           ) : (
@@ -5147,10 +5225,12 @@ function MatchupProps({
         <MiniStat label="ATS Pick" value={matchup.ats_pick} />
         <MiniStat label="ATS Pick Edge" value={formatAtsPickEdge(matchup)} />
         <MiniStat label="Projected Total" value={formatProjectedTotal(matchup)} />
+        <MiniStat label="O/U Pick" value={matchup.total_pick} />
         <MiniStat label="Q1 Total Proj" value={formatSegmentTotal(matchup.projected_q1_total)} />
         <MiniStat label="1H Total Proj" value={formatSegmentTotal(matchup.projected_first_half_total)} />
         <MiniStat label="O/U Edge" value={formatNullableEdge(matchup.total_edge)} />
-        <MiniStat label="Confidence" value={matchup.game_confidence} />
+        <MiniStat label="O/U Conf" value={matchup.total_confidence ?? matchup.game_confidence} />
+        <MiniStat label="Game Conf" value={matchup.game_confidence} />
       </div>
       <div className="panel-header compact">
         <div>
@@ -6693,7 +6773,7 @@ function formatProjectedTotal(matchup: Matchup) {
   if (matchup.projected_total == null) {
     return "N/A";
   }
-  return `${matchup.total_pick} ${matchup.projected_total.toFixed(1)}`;
+  return matchup.projected_total.toFixed(1);
 }
 
 function formatSegmentTotal(value: number | null | undefined) {

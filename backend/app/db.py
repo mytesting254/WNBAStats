@@ -11,7 +11,7 @@ import requests
 from dotenv import load_dotenv
 
 from .auth import ensure_auth_schema
-from .paths import ROOT_DIR, get_db_path
+from .paths import ROOT_DIR, get_db_path, is_repo_local_runtime_db_path
 
 load_dotenv(ROOT_DIR / ".env")
 _SQLITE_WRITE_LOCK = threading.RLock()
@@ -44,6 +44,7 @@ def connect() -> Any:
         return TursoHttpConnection(database_url, auth_token)
 
     db_path = get_db_path()
+    _validate_runtime_db_path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=30, factory=ManagedSqliteConnection)
     _configure_connection(conn)
@@ -64,6 +65,15 @@ def _configure_connection(conn: Any) -> None:
     conn.execute("PRAGMA cache_size = -8000")
     conn.execute("PRAGMA temp_store = MEMORY")
     conn.execute("PRAGMA busy_timeout = 30000")
+
+
+def _validate_runtime_db_path(db_path) -> None:
+    if is_repo_local_runtime_db_path(getattr(db_path, "resolve", lambda: db_path)() if hasattr(db_path, "resolve") else db_path):
+        raise RuntimeError(
+            f"Unsafe runtime database path refused: {db_path}. "
+            "The backend will not run against a repo-local SQLite runtime under ./data because that split app state from the live mounted runtime. "
+            "Set WNBA_DB_PATH to the authoritative mounted/runtime database path instead."
+        )
 
 
 class TursoRow(Mapping):
@@ -452,6 +462,69 @@ def init_db() -> None:
         )
         conn.execute(
             """
+            CREATE TABLE IF NOT EXISTS dfs_first_half_projection_snapshots (
+                id INTEGER PRIMARY KEY,
+                prop_line_id INTEGER NOT NULL,
+                game_id INTEGER NOT NULL,
+                player_id INTEGER NOT NULL,
+                sportsbook TEXT NOT NULL,
+                market TEXT NOT NULL,
+                line REAL NOT NULL,
+                over_odds INTEGER NOT NULL,
+                under_odds INTEGER NOT NULL,
+                full_game_projection REAL NOT NULL,
+                estimated_first_half_result REAL NOT NULL,
+                expected_halfway_line REAL NOT NULL,
+                pace_ratio REAL,
+                halftime_margin_to_line REAL,
+                on_track_probability REAL,
+                recommended_side TEXT NOT NULL,
+                confidence TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                model_rows INTEGER NOT NULL DEFAULT 0,
+                team_first_half_share REAL NOT NULL DEFAULT 0.5,
+                estimated_first_half_minutes_share REAL NOT NULL DEFAULT 0.5,
+                projected_first_half_total REAL,
+                game_total REAL,
+                start_time TEXT,
+                first_captured_at TEXT NOT NULL,
+                last_captured_at TEXT NOT NULL,
+                capture_count INTEGER NOT NULL DEFAULT 1,
+                FOREIGN KEY (prop_line_id) REFERENCES prop_lines(id),
+                FOREIGN KEY (game_id) REFERENCES games(id),
+                FOREIGN KEY (player_id) REFERENCES players(id),
+                UNIQUE(prop_line_id, model_version)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dfs_first_half_projection_settlements (
+                snapshot_id INTEGER PRIMARY KEY,
+                actual_first_half_result REAL NOT NULL,
+                winning_side TEXT NOT NULL,
+                absolute_error REAL NOT NULL,
+                signed_error REAL NOT NULL,
+                correct_side INTEGER NOT NULL,
+                settled_at TEXT NOT NULL,
+                FOREIGN KEY (snapshot_id) REFERENCES dfs_first_half_projection_snapshots(id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dfs_first_half_snapshots_game
+            ON dfs_first_half_projection_snapshots(game_id, player_id, market)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_dfs_first_half_snapshots_start
+            ON dfs_first_half_projection_snapshots(start_time, game_id)
+            """
+        )
+        conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS sportsbook_prop_lines (
                 id INTEGER PRIMARY KEY,
                 provider TEXT NOT NULL,
@@ -537,7 +610,9 @@ def init_db() -> None:
                 total_pick TEXT NOT NULL,
                 total_edge REAL,
                 confidence TEXT NOT NULL,
+                total_confidence TEXT,
                 reason TEXT NOT NULL,
+                total_reason TEXT,
                 spread_home REAL,
                 game_total REAL,
                 home_rest_days INTEGER,
@@ -552,6 +627,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE game_predictions ADD COLUMN projected_q1_total REAL")
         if "projected_first_half_total" not in game_prediction_columns:
             conn.execute("ALTER TABLE game_predictions ADD COLUMN projected_first_half_total REAL")
+        if "total_confidence" not in game_prediction_columns:
+            conn.execute("ALTER TABLE game_predictions ADD COLUMN total_confidence TEXT")
+        if "total_reason" not in game_prediction_columns:
+            conn.execute("ALTER TABLE game_predictions ADD COLUMN total_reason TEXT")
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS settled_game_predictions (
@@ -1174,6 +1253,57 @@ CREATE TABLE IF NOT EXISTS player_first_half_stats (
     FOREIGN KEY (opponent_team_id) REFERENCES teams(id)
 );
 
+CREATE TABLE IF NOT EXISTS dfs_first_half_projection_snapshots (
+    id INTEGER PRIMARY KEY,
+    prop_line_id INTEGER NOT NULL,
+    game_id INTEGER NOT NULL,
+    player_id INTEGER NOT NULL,
+    sportsbook TEXT NOT NULL,
+    market TEXT NOT NULL,
+    line REAL NOT NULL,
+    over_odds INTEGER NOT NULL,
+    under_odds INTEGER NOT NULL,
+    full_game_projection REAL NOT NULL,
+    estimated_first_half_result REAL NOT NULL,
+    expected_halfway_line REAL NOT NULL,
+    pace_ratio REAL,
+    halftime_margin_to_line REAL,
+    on_track_probability REAL,
+    recommended_side TEXT NOT NULL,
+    confidence TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    model_rows INTEGER NOT NULL DEFAULT 0,
+    team_first_half_share REAL NOT NULL DEFAULT 0.5,
+    estimated_first_half_minutes_share REAL NOT NULL DEFAULT 0.5,
+    projected_first_half_total REAL,
+    game_total REAL,
+    start_time TEXT,
+    first_captured_at TEXT NOT NULL,
+    last_captured_at TEXT NOT NULL,
+    capture_count INTEGER NOT NULL DEFAULT 1,
+    FOREIGN KEY (prop_line_id) REFERENCES prop_lines(id),
+    FOREIGN KEY (game_id) REFERENCES games(id),
+    FOREIGN KEY (player_id) REFERENCES players(id),
+    UNIQUE(prop_line_id, model_version)
+);
+
+CREATE TABLE IF NOT EXISTS dfs_first_half_projection_settlements (
+    snapshot_id INTEGER PRIMARY KEY,
+    actual_first_half_result REAL NOT NULL,
+    winning_side TEXT NOT NULL,
+    absolute_error REAL NOT NULL,
+    signed_error REAL NOT NULL,
+    correct_side INTEGER NOT NULL,
+    settled_at TEXT NOT NULL,
+    FOREIGN KEY (snapshot_id) REFERENCES dfs_first_half_projection_snapshots(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_dfs_first_half_snapshots_game
+ON dfs_first_half_projection_snapshots(game_id, player_id, market);
+
+CREATE INDEX IF NOT EXISTS idx_dfs_first_half_snapshots_start
+ON dfs_first_half_projection_snapshots(start_time, game_id);
+
 CREATE TABLE IF NOT EXISTS injuries (
     id INTEGER PRIMARY KEY,
     player_id INTEGER NOT NULL,
@@ -1266,7 +1396,9 @@ CREATE TABLE IF NOT EXISTS game_predictions (
     total_pick TEXT NOT NULL,
     total_edge REAL,
     confidence TEXT NOT NULL,
+    total_confidence TEXT,
     reason TEXT NOT NULL,
+    total_reason TEXT,
     spread_home REAL,
     game_total REAL,
     home_rest_days INTEGER,

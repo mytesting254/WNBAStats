@@ -260,6 +260,27 @@ export type ModelPerformance = {
   win_rate: number | null;
   average_ev: number | null;
   message?: string;
+  game_totals?: {
+    total_settled: number;
+    settled: number;
+    wins: number;
+    win_rate: number | null;
+    average_absolute_error: number | null;
+    average_absolute_edge: number | null;
+    by_edge: Array<{
+      label: string;
+      settled: number;
+      wins: number;
+      win_rate: number | null;
+    }>;
+    by_confidence: Array<{
+      label: string;
+      settled: number;
+      wins: number;
+      win_rate: number | null;
+    }>;
+    message?: string;
+  };
 };
 
 export type GemPerformance = {
@@ -816,7 +837,9 @@ export type Matchup = {
   total_pick: string;
   total_edge: number | null;
   game_confidence: string;
+  total_confidence?: string;
   game_reason: string;
+  total_reason?: string;
   home: TeamLast10;
   away: TeamLast10;
   home_team_ratings?: TeamRatings | null;

@@ -321,10 +321,11 @@ def _parse_lineup_injuries(page: str) -> list[dict[str, str]]:
                 continue
             injury_match = re.match(r"^(?P<player>.+?)\s+(?P<status>OUT|GTD|DOUBTFUL|QUESTIONABLE|PROBABLE)$", line, re.I)
             if injury_match and active_team:
+                player_name = re.sub(r"^[A-Z]{1,3}\s+", "", injury_match.group("player").strip())
                 rows.append(
                     {
                         "team": active_team,
-                        "player_name": injury_match.group("player").strip(),
+                        "player_name": player_name,
                         "status": injury_match.group("status").upper(),
                     }
                 )

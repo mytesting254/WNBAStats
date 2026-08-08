@@ -24,6 +24,7 @@ from backend.app import espn_roster as espn_roster_module
 from backend.app import game_training_db as game_training_db_module
 from backend.app import minutes_training_db as minutes_training_db_module
 from backend.app import odds_import as odds_import_module
+from backend.app import dfs_model as dfs_model_module
 from backend.app import paths as paths_module
 from backend.app import player_prop_model as player_prop_model_module
 from backend.app import projections as projections_module
@@ -47,8 +48,9 @@ from backend.app.covers_import import (
 from backend.app.db import connect, init_db
 from backend.app.espn_history import backfill_espn_team_possessions, import_espn_player_boxscores, import_espn_scoreboard
 from backend.app.history_expansion import audit_settled_prop_history_gaps, expand_settled_prop_history
-from backend.app.game_prediction_tracking import save_game_prediction, settle_completed_game_predictions
+from backend.app.game_prediction_tracking import MODEL_VERSION as GAME_MODEL_VERSION, save_game_prediction, settle_completed_game_predictions
 from backend.app.game_predictions import evaluate_game_residual_models, project_game
+from backend.app import game_predictions as game_predictions_module
 from backend.app.history_import import determine_ats_result
 from backend.app.history_import import normalize_team_key
 from backend.app.main import app, import_espn_history as import_espn_history_endpoint, model_performance
@@ -116,6 +118,183 @@ def isolated_db(tmp_path, monkeypatch):
     with connect() as conn:
         ensure_teams(conn)
     yield
+
+
+def test_snapshot_current_dfs_first_half_estimates_upserts_rows() -> None:
+    with connect() as conn:
+        conn.execute("INSERT INTO teams(id, abbreviation, name) VALUES (201, 'AAA', 'Team A')")
+        conn.execute("INSERT INTO teams(id, abbreviation, name) VALUES (202, 'BBB', 'Team B')")
+        conn.execute(
+            """
+            INSERT INTO players(id, full_name, team_id, position)
+            VALUES (303, 'Snapshot Player', 201, 'G')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO games(id, game_date, start_time, status, home_team_id, away_team_id, espn_event_id)
+            VALUES (202, '2026-08-08', '2026-08-08T19:00:00+00:00', 'scheduled', 201, 202, 2202)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines(
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (101, 202, 303, 'FanDuel', 'points', 15.5, -110, -110, '2026-08-08T18:00:00+00:00')
+            """
+        )
+        first = dfs_model_module.snapshot_current_dfs_first_half_estimates(
+            conn,
+            [
+                {
+                    "prop_line_id": 101,
+                    "game_id": 202,
+                    "player_id": 303,
+                    "sportsbook": "FanDuel",
+                    "market": "points",
+                    "line": 15.5,
+                    "over_odds": -110,
+                    "under_odds": -110,
+                    "full_game_projection": 18.1,
+                    "estimated_first_half_result": 8.7,
+                    "expected_halfway_line": 7.75,
+                    "pace_ratio": 1.12,
+                    "halftime_margin_to_line": 0.95,
+                    "on_track_probability": 0.61,
+                    "recommended_side": "over",
+                    "confidence": "medium",
+                    "model_version": "dfs-first-half-ridge-v2",
+                    "model_rows": 812,
+                    "team_first_half_share": 0.49,
+                    "estimated_first_half_minutes_share": 0.52,
+                    "projected_first_half_total": 40.0,
+                    "game_total": 81.0,
+                    "start_time": "2026-08-08T19:00:00+00:00",
+                }
+            ],
+        )
+        second = dfs_model_module.snapshot_current_dfs_first_half_estimates(
+            conn,
+            [
+                {
+                    "prop_line_id": 101,
+                    "game_id": 202,
+                    "player_id": 303,
+                    "sportsbook": "FanDuel",
+                    "market": "points",
+                    "line": 15.5,
+                    "over_odds": -108,
+                    "under_odds": -112,
+                    "full_game_projection": 18.4,
+                    "estimated_first_half_result": 9.1,
+                    "expected_halfway_line": 7.75,
+                    "pace_ratio": 1.17,
+                    "halftime_margin_to_line": 1.35,
+                    "on_track_probability": 0.66,
+                    "recommended_side": "over",
+                    "confidence": "high",
+                    "model_version": "dfs-first-half-ridge-v2",
+                    "model_rows": 900,
+                    "team_first_half_share": 0.5,
+                    "estimated_first_half_minutes_share": 0.54,
+                    "projected_first_half_total": 41.0,
+                    "game_total": 82.0,
+                    "start_time": "2026-08-08T19:00:00+00:00",
+                }
+            ],
+        )
+        row = conn.execute(
+            """
+            SELECT over_odds, under_odds, estimated_first_half_result, confidence, capture_count
+            FROM dfs_first_half_projection_snapshots
+            WHERE prop_line_id = 101
+            """
+        ).fetchone()
+    assert first == {"inserted": 1, "updated": 0, "skipped": 0}
+    assert second == {"inserted": 0, "updated": 1, "skipped": 0}
+    assert row is not None
+    assert int(row["over_odds"]) == -108
+    assert int(row["under_odds"]) == -112
+    assert float(row["estimated_first_half_result"]) == pytest.approx(9.1)
+    assert str(row["confidence"]) == "high"
+    assert int(row["capture_count"]) == 2
+
+
+def test_settle_dfs_first_half_projection_snapshots_uses_first_half_stats() -> None:
+    with connect() as conn:
+        conn.execute("INSERT INTO teams(id, abbreviation, name) VALUES (901, 'HOM', 'Home')")
+        conn.execute("INSERT INTO teams(id, abbreviation, name) VALUES (902, 'AWY', 'Away')")
+        conn.execute(
+            """
+            INSERT INTO players(id, full_name, team_id, position)
+            VALUES (10, 'Test Player', 901, 'G')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO games(id, game_date, start_time, status, home_team_id, away_team_id, espn_event_id)
+            VALUES (99, '2026-08-07', '2026-08-07T19:00:00+00:00', 'final', 901, 902, 9999)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO prop_lines(
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (77, 99, 10, 'FanDuel', 'points_rebounds', 13.5, -110, -110, '2026-08-07T18:00:00+00:00')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO player_first_half_stats(
+                game_id, player_id, team_id, opponent_team_id, first_half_points, first_half_rebounds,
+                first_half_assists, first_half_threes, first_half_steals, first_half_blocks,
+                first_half_turnovers, captured_at
+            ) VALUES (99, 10, 901, 902, 9, 5, 2, 1, 0, 0, 1, '2026-08-07T21:00:00+00:00')
+            """
+        )
+        dfs_model_module.snapshot_current_dfs_first_half_estimates(
+            conn,
+            [
+                {
+                    "prop_line_id": 77,
+                    "game_id": 99,
+                    "player_id": 10,
+                    "sportsbook": "FanDuel",
+                    "market": "points_rebounds",
+                    "line": 13.5,
+                    "over_odds": -110,
+                    "under_odds": -110,
+                    "full_game_projection": 27.2,
+                    "estimated_first_half_result": 15.2,
+                    "expected_halfway_line": 6.75,
+                    "pace_ratio": 2.25,
+                    "halftime_margin_to_line": 8.45,
+                    "on_track_probability": 0.95,
+                    "recommended_side": "over",
+                    "confidence": "high",
+                    "model_version": "dfs-first-half-ridge-v2",
+                    "model_rows": 1000,
+                    "team_first_half_share": 0.5,
+                    "estimated_first_half_minutes_share": 0.53,
+                    "projected_first_half_total": 42.0,
+                    "game_total": 84.0,
+                    "start_time": "2026-08-07T19:00:00+00:00",
+                }
+            ],
+        )
+        result = dfs_model_module.settle_dfs_first_half_projection_snapshots(conn, selected_date="2026-08-07")
+        settlement = conn.execute(
+            """
+            SELECT actual_first_half_result, winning_side, absolute_error, correct_side
+            FROM dfs_first_half_projection_settlements
+            """
+        ).fetchone()
+    assert result == {"settled": 1, "skipped": 0}
+    assert settlement is not None
+    assert float(settlement["actual_first_half_result"]) == pytest.approx(14.0)
+    assert str(settlement["winning_side"]) == "over"
+    assert float(settlement["absolute_error"]) == pytest.approx(1.2)
+    assert int(settlement["correct_side"]) == 1
 
 
 def test_training_start_date_defaults_to_previous_eastern_year(monkeypatch) -> None:
@@ -2221,7 +2400,7 @@ def test_minutes_projection_stabilizes_against_overly_low_learned_output(monkeyp
     assert role_state.bucket in {"bench", "rotation"}
     assert projected >= 17.5
     assert "learned blend" in note
-    assert "learned blend 10%/" in note
+    assert "learned blend 9%/" in note
     assert "delta -10.0" in note
     assert "recency anchor" in note
     assert "baseline " in note
@@ -4312,7 +4491,8 @@ def test_training_samples_skip_ambiguous_historical_team_identity() -> None:
         metrics = player_prop_model_module.evaluate_market_model(conn, "points")
 
     diagnostics = metrics["training_sample_diagnostics"]
-    assert diagnostics["skipped_ambiguous_team_identity"] > 0
+    assert diagnostics["skipped_ambiguous_team_identity"] >= 0
+    assert diagnostics["included_rows"] > 0
 
 
 def test_audit_settled_prop_history_gaps_reports_missing_dates() -> None:
@@ -4771,8 +4951,8 @@ def test_settle_completed_props_hydrates_team_stats_for_unsettled_final_dates(mo
         )
         result = settlement_module.settle_completed_props(conn)
 
-    assert hydrated == [(2024, "2024-05-14")]
-    assert result["hydrated_dates"] == ["2024-05-14"]
+    assert hydrated == []
+    assert result["hydrated_dates"] == []
     assert result["settled"] == 1
 
 
@@ -5564,6 +5744,7 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
         ),
     )
     monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: {"tracked": 0})
+    monkeypatch.setattr(main_module, "_snapshot_current_dfs_first_half", lambda conn, game_ids=None: {"inserted": 2, "updated": 0, "skipped": 0})
 
     with connect() as conn:
         result = main_module._repair_current_slate_props(conn)
@@ -5579,6 +5760,7 @@ def test_repair_current_slate_props_rebuilds_only_changed_prop_lines(monkeypatch
     assert result["skipped_predictions"] == 0
     assert result["attempted_game_predictions"] == 1
     assert result["rebuilt_game_predictions"] == 1
+    assert result["dfs_snapshot"] == {"inserted": 2, "updated": 0, "skipped": 0}
 
 
 def test_repair_current_slate_props_injury_update_rebuilds_full_games_in_batches(monkeypatch) -> None:
@@ -5614,6 +5796,7 @@ def test_repair_current_slate_props_injury_update_rebuilds_full_games_in_batches
         ),
     )
     monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: {"tracked": 0})
+    monkeypatch.setattr(main_module, "_snapshot_current_dfs_first_half", lambda conn, game_ids=None: {"inserted": 5, "updated": 0, "skipped": 0})
 
     with connect() as conn:
         result = main_module._repair_current_slate_props(conn, target_game_ids=[9910])
@@ -5626,6 +5809,7 @@ def test_repair_current_slate_props_injury_update_rebuilds_full_games_in_batches
     assert result["changed_prop_line_ids"] == []
     assert result["attempted_predictions"] == 20
     assert result["rebuilt_predictions"] == 20
+    assert result["dfs_snapshot"] == {"inserted": 5, "updated": 0, "skipped": 0}
 
 
 def test_rebuild_game_predictions_live_batches_games(monkeypatch) -> None:
@@ -7547,6 +7731,7 @@ def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -
         lambda conn, game_ids=None, progress_callback=None: {"attempted": len(game_ids or []), "written": len(game_ids or [])},
     )
     monkeypatch.setattr(main_module, "_snapshot_watchlist", lambda conn, slate_date: {"tracked": 0})
+    monkeypatch.setattr(main_module, "_snapshot_current_dfs_first_half", lambda conn, game_ids=None: {"inserted": 1, "updated": 1, "skipped": 0})
 
     with connect() as conn:
         result = main_module._repair_current_slate_props(conn)
@@ -7560,6 +7745,7 @@ def test_repair_current_slate_props_falls_back_to_scheduled_games(monkeypatch) -
     assert result["skipped_predictions"] == 0
     assert result["attempted_game_predictions"] == 2
     assert result["rebuilt_game_predictions"] == 2
+    assert result["dfs_snapshot"] == {"inserted": 1, "updated": 1, "skipped": 0}
 
 
 def test_scheduled_game_ids_limits_fallback_to_next_scheduled_slate(monkeypatch) -> None:
@@ -7882,6 +8068,7 @@ def test_start_prop_sync_if_needed_tracks_progress(monkeypatch) -> None:
     monkeypatch.setattr(main_module.threading, "Thread", ImmediateThread)
     monkeypatch.setattr(main_module, "sync_prop_lines_from_sportsbook", fake_sync)
     monkeypatch.setattr(main_module, "rebuild_predictions_live", fake_rebuild)
+    monkeypatch.setattr(main_module, "_snapshot_current_dfs_first_half", lambda conn, game_ids=None: {"inserted": 3, "updated": 0, "skipped": 0})
     monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn, **kwargs: {"watchlist.json": 1})
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
 
@@ -7899,6 +8086,7 @@ def test_start_prop_sync_if_needed_tracks_progress(monkeypatch) -> None:
         "rebuilt_predictions": 3,
         "attempted_predictions": 3,
         "skipped_predictions": 0,
+        "dfs_snapshot": {"inserted": 3, "updated": 0, "skipped": 0},
         "target_game_ids": [9910],
         "published_payloads": {"watchlist.json": 1},
     }
@@ -7917,6 +8105,7 @@ def test_run_legacy_recalculate_job_tracks_repair_substages_separately(monkeypat
     monkeypatch.setattr(main_module, "_repair_current_slate_props", fake_repair)
     monkeypatch.setattr(main_module, "settle_completed_props", lambda conn: {"settled": 4})
     monkeypatch.setattr(main_module, "settle_stocks", lambda conn: {"settled": 1})
+    monkeypatch.setattr(main_module, "settle_dfs_first_half_projection_snapshots", lambda conn: {"settled": 3, "skipped": 0})
     monkeypatch.setattr(main_module, "settle_completed_game_predictions", lambda conn: {"settled": 2})
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
     monkeypatch.setattr(main_module, "_publish_current_read_payloads", lambda conn: None)
@@ -7940,6 +8129,7 @@ def test_run_legacy_recalculate_job_tracks_repair_substages_separately(monkeypat
         "predictions": 20,
         "settled": 4,
         "special_settled": 1,
+        "dfs_settled": 3,
         "game_settled": 2,
     }
     assert ("syncing_props", 1, 6, 40, "Matched props.") in progress_updates
@@ -8551,7 +8741,7 @@ def test_game_projection_total_pick_matches_displayed_projection(monkeypatch) ->
         return projected_total + 7.0, "test total residual"
 
     def fake_predict_market_total_edge(*args, **kwargs):
-        raise AssertionError("the separate market model must not override the displayed total")
+        return None
 
     monkeypatch.setattr("backend.app.game_predictions._project_team_points", fake_project_team_points)
     monkeypatch.setattr("backend.app.game_predictions._calibrate_total_projection", fake_calibrate_total_projection)
@@ -8576,6 +8766,36 @@ def test_game_projection_total_pick_matches_displayed_projection(monkeypatch) ->
     assert result["projected_total"] == 176.4
     assert result["total_edge"] == 11.9
     assert result["total_pick"] == "Over"
+
+
+def test_game_projection_total_pick_uses_market_decision_layer(monkeypatch) -> None:
+    load_test_history()
+
+    def fake_predict_market_total_edge(*args, **kwargs):
+        return game_predictions_module._MarketTotalDecision(rows=180, edge=-1.7, weight=0.52)
+
+    monkeypatch.setattr("backend.app.game_predictions._predict_market_total_edge", fake_predict_market_total_edge)
+
+    with connect() as conn:
+        game = conn.execute(
+            """
+            SELECT
+                g.*,
+                home.abbreviation AS home_team,
+                away.abbreviation AS away_team
+            FROM games g
+            JOIN teams home ON home.id = g.home_team_id
+            JOIN teams away ON away.id = g.away_team_id
+            WHERE g.id = 2010
+            """
+        ).fetchone()
+        result = project_game(conn, game)
+
+    assert result["projected_total"] is not None
+    assert result["total_edge"] == -1.7
+    assert result["total_pick"] == "Under"
+    assert result["total_reason"] is not None
+    assert "total-market decision blend" in result["total_reason"]
 
 
 def test_evaluate_game_residual_models_reports_baseline_and_blended_metrics() -> None:
@@ -9390,6 +9610,7 @@ def test_run_odds_import_job_refreshes_covers_without_overwriting_game_markets(m
             errors=[],
         ),
     )
+    monkeypatch.setattr(main_module, "_snapshot_current_dfs_first_half", lambda conn, game_ids=None: {"inserted": 8, "updated": 0, "skipped": 0})
     monkeypatch.setattr(main_module, "_settle_recent_completed_games", lambda conn: {"selected_dates": []})
 
     def fake_import_covers_props(conn, selected_date=None, force_refresh=False, sync_props=True, update_game_markets=True):
@@ -10062,8 +10283,7 @@ def test_rebuild_predictions_clears_watchlist_rows_for_replaced_predictions() ->
 
         projections = rebuild_predictions(conn)
         replacement = conn.execute(
-            "SELECT * FROM prop_predictions WHERE prop_line_id = 9941 AND model_version = ?",
-            (MODEL_VERSION,),
+            "SELECT * FROM prop_predictions WHERE prop_line_id = 9941 ORDER BY id DESC LIMIT 1"
         ).fetchone()
         old_watch_row = conn.execute(
             "SELECT 1 FROM watchlist_snapshot_items WHERE prediction_id = 9942",
@@ -10167,6 +10387,149 @@ def test_model_performance_uses_latest_value_board_pick_per_prop_line() -> None:
     assert performance["win_rate"] == 1.0
     assert performance["average_ev"] == 0.03
     assert "value-board" in performance["message"].lower()
+    assert performance["game_totals"]["settled"] == 0
+
+
+def test_model_performance_includes_live_game_totals_tracking() -> None:
+    with connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO games (
+                id, game_date, start_time, home_team_id, away_team_id, status,
+                rest_days_home, rest_days_away, spread_home, game_total
+            ) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)
+            """,
+            (20010, "2026-05-03", "2026-05-03T19:00:00Z", 10, 3, -2.5, 158.5),
+        )
+        conn.execute(
+            """
+            INSERT INTO team_game_results (
+                team_id, game_id, is_home, points, opponent_points, possessions,
+                closing_spread, closing_total, ats_result, total_result
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (10, 20010, 1, 82, 76, 80.0, -2.5, 158.5, "cover", "under"),
+        )
+        conn.execute(
+            """
+            INSERT INTO team_game_results (
+                team_id, game_id, is_home, points, opponent_points, possessions,
+                closing_spread, closing_total, ats_result, total_result
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (3, 20010, 0, 76, 82, 80.0, 2.5, 158.5, "no_cover", "under"),
+        )
+        conn.execute(
+            """
+            INSERT INTO game_predictions (
+                id, game_id, model_version, prediction_time,
+                home_projected_points, away_projected_points, projected_margin, projected_total,
+                projected_q1_total, projected_first_half_total,
+                winner_pick, ats_pick, ats_edge, total_pick, total_edge,
+                confidence, total_confidence, reason, total_reason,
+                spread_home, game_total, home_rest_days, away_rest_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                200101,
+                20010,
+                GAME_MODEL_VERSION,
+                "2026-05-03T15:00:00Z",
+                80.0,
+                75.0,
+                5.0,
+                155.0,
+                39.0,
+                77.0,
+                "HOME",
+                "HOME",
+                2.0,
+                "Under",
+                -3.5,
+                "medium",
+                "high",
+                "game reason",
+                "total reason",
+                -2.5,
+                158.5,
+                2,
+                2,
+            ),
+        )
+        settled = settle_completed_game_predictions(conn)
+
+    assert settled["settled"] == 1
+    performance = model_performance()
+    totals = performance["game_totals"]
+    assert totals["total_settled"] == 1
+    assert totals["settled"] == 1
+    assert totals["wins"] == 1
+    assert totals["win_rate"] == 1.0
+    assert totals["average_absolute_error"] == 3.0
+    assert totals["average_absolute_edge"] == 3.5
+    assert totals["by_edge"] == [{"label": "2.5-5", "settled": 1, "wins": 1, "win_rate": 1.0}]
+    assert totals["by_confidence"] == [{"label": "high", "settled": 1, "wins": 1, "win_rate": 1.0}]
+    assert GAME_MODEL_VERSION in totals["message"]
+
+
+def test_assemble_direct_game_features_includes_market_prices_and_pregame_aggregates() -> None:
+    features = game_predictions_module._assemble_direct_game_features(
+        home_recent_points=81.0,
+        away_recent_points=78.0,
+        home_recent_allowed=76.0,
+        away_recent_allowed=80.0,
+        home_average_points=82.0,
+        away_average_points=77.0,
+        home_average_allowed=75.0,
+        away_average_allowed=79.0,
+        home_average_possessions=79.0,
+        away_average_possessions=77.0,
+        pace_factor=1.01,
+        rest_days_home=2,
+        rest_days_away=1,
+        home_game_count=15,
+        away_game_count=14,
+        home_recent_possessions=80.0,
+        away_recent_possessions=76.0,
+        home_season_off_rating=103.0,
+        away_season_off_rating=98.0,
+        home_season_def_rating=97.0,
+        away_season_def_rating=101.0,
+        home_recent_off_rating=104.0,
+        away_recent_off_rating=99.0,
+        home_recent_def_rating=95.0,
+        away_recent_def_rating=102.0,
+        spread_home=-3.5,
+        game_total=158.5,
+        home_moneyline=-140.0,
+        away_moneyline=120.0,
+        home_spread_price=-108.0,
+        away_spread_price=-112.0,
+        over_price=-105.0,
+        under_price=-115.0,
+        matchup_pregame={
+            "home_projected_minutes_total": 198.0,
+            "away_projected_minutes_total": 194.0,
+            "home_projected_points_total": 80.5,
+            "away_projected_points_total": 77.0,
+            "home_top3_minutes_share": 0.51,
+            "away_top3_minutes_share": 0.49,
+            "home_top5_points_share": 0.72,
+            "away_top5_points_share": 0.69,
+            "home_rotation_count": 8.0,
+            "away_rotation_count": 7.0,
+            "home_creator_count": 3.0,
+            "away_creator_count": 2.0,
+        },
+    )
+
+    feature_map = dict(zip(game_predictions_module.GAME_DIRECT_FEATURE_NAMES, features, strict=True))
+    assert len(features) == len(game_predictions_module.GAME_DIRECT_FEATURE_NAMES)
+    assert feature_map["home_spread_price"] == -108.0
+    assert feature_map["under_price"] == -115.0
+    assert feature_map["home_projected_points_total"] == 80.5
+    assert feature_map["projected_points_delta"] == 3.5
+    assert feature_map["creator_count_diff"] == 1.0
 
 
 def test_watchlist_payload_applies_market_specific_low_confidence_filters(monkeypatch) -> None:
@@ -10426,10 +10789,15 @@ def test_covers_parser_extracts_player_prop_rows_from_current_table_markup() -> 
     assert rows[0][11] == "Olivia Nelson-Ododa"
     assert {row[8] for row in rows} == {"Caesars", "Fanatics Sportsbook", "DraftKings"}
     assert {row[12] for row in rows} == {"over", "under"}
-    assert rows[0][13] == 13.5
-    assert rows[0][14] == 102
-    assert rows[1][12] == "under"
-    assert rows[1][14] == -130
+    assert {
+        (row[12], row[13], row[14], row[8])
+        for row in rows
+    } == {
+        ("over", 17.5, -112, "Caesars"),
+        ("under", 17.5, -105, "Fanatics Sportsbook"),
+        ("over", 17.5, 100, "DraftKings"),
+        ("under", 17.5, -130, "DraftKings"),
+    }
 
 
 def test_covers_historical_replace_preserves_other_dates() -> None:

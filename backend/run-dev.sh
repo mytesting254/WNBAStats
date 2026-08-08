@@ -16,7 +16,11 @@ if [ -f ".env.dev" ]; then
 fi
 
 export ENV="${ENV:-dev}"
-export WNBA_DB_PATH="${WNBA_DB_PATH:-/root/app-src/data/dev.sqlite}"
+if [ -z "${WNBA_DB_PATH:-}" ]; then
+  echo "WNBA_DB_PATH is required."
+  echo "Refusing to default to a repo-local dev SQLite path because runtime data must come from one authoritative DB."
+  exit 1
+fi
 export PORT="${PORT:-8000}"
 
 exec .venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port "$PORT"

@@ -262,6 +262,15 @@ def _import_the_odds_api_provider_rows(
     cached_payload = read_json_cache(RAW_CACHE_NAME)
     if not force_refresh:
         if cached_payload is None:
+            load_dotenv()
+            api_key = os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")
+            if not api_key:
+                return {
+                    "status": "missing_api_key",
+                    "message": "Set ODDS_API_KEY to import live sportsbook player props.",
+                    "imported": 0,
+                    "prop_sync_eligible": False,
+                }
             return {
                 "status": "missing_cache",
                 "source": "cache",
@@ -281,7 +290,8 @@ def _import_the_odds_api_provider_rows(
             }
         if progress_callback is not None:
             progress_callback("loading_saved_cache", 0, 1, "Loading saved Odds API cache.")
-        result = _replace_sportsbook_rows(conn, cached_payload, datetime.now(timezone.utc).isoformat())
+        importable_cached_events = [event for event in active_cached_events if _is_today_event(event, today=local_today_iso())]
+        result = _replace_sportsbook_rows(conn, importable_cached_events, datetime.now(timezone.utc).isoformat())
         if progress_callback is not None:
             progress_callback("loading_saved_cache", 1, 1, "Saved Odds API cache loaded.")
         return {
@@ -589,6 +599,7 @@ def sync_prop_lines_from_sportsbook(
         ]
         update_rows: list[tuple[str, int, int, str, int]] = []
         rebuild_prop_line_ids: list[int] = []
+        missing_prediction_prop_line_ids: list[int] = []
         for key, desired in desired_rows.items():
             existing = existing_by_key.get(key)
             if existing is None:
@@ -609,8 +620,10 @@ def sync_prop_lines_from_sportsbook(
                     int(existing["id"]),
                 )
             )
-            if over_changed or under_changed or missing_prediction:
+            if over_changed or under_changed:
                 rebuild_prop_line_ids.append(int(existing["id"]))
+            elif missing_prediction:
+                missing_prediction_prop_line_ids.append(int(existing["id"]))
 
         with sqlite_write_lock():
             _begin_immediate_with_retry(
@@ -689,6 +702,8 @@ def sync_prop_lines_from_sportsbook(
                         insert_rows,
                     )
             changed_prop_line_ids = sorted({int(prop_line_id) for prop_line_id in changed_prop_line_ids})
+            if not changed_prop_line_ids and missing_prediction_prop_line_ids:
+                changed_prop_line_ids = sorted({int(prop_line_id) for prop_line_id in missing_prediction_prop_line_ids})
             active_rebuild_progress_callback = rebuild_progress_callback or progress_callback
             if rebuild_predictions_after and changed_prop_line_ids:
                 rebuild_predictions_live(
@@ -1067,7 +1082,7 @@ def _active_cached_events(raw_payload: object) -> list[dict]:
     today = local_today_iso()
     active_events: list[dict] = []
     for event in raw_payload:
-        if _is_today_event(event, today=today):
+        if _is_active_cached_event(event, today=today):
             active_events.append(event)
     return active_events
 
@@ -1079,6 +1094,15 @@ def _is_today_event(event: object, *, today: str) -> bool:
     if not commence_time:
         return False
     return _game_date(str(commence_time)) == today
+
+
+def _is_active_cached_event(event: object, *, today: str) -> bool:
+    if not isinstance(event, dict):
+        return False
+    commence_time = event.get("commence_time")
+    if not commence_time:
+        return False
+    return _game_date(str(commence_time)) >= today
 
 
 def _event_rows(event_odds: dict, captured_at: str, *, game_id: int | None) -> list[tuple]:

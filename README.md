@@ -1,6 +1,6 @@
 # WNBA Prop Value
 
-Pregame WNBA prop-value app with local SQLite runtime by default.
+Pregame WNBA prop-value app with one authoritative runtime database.
 
 The app is built around a provider-backed pregame workflow:
 
@@ -14,7 +14,7 @@ The app is built around a provider-backed pregame workflow:
 
 - React + TypeScript + Vite frontend
 - Python + FastAPI backend
-- Local SQLite database (Turso optional via `USE_TURSO=true`)
+- SQLite runtime database via explicit `WNBA_DB_PATH` or Turso via `USE_TURSO=true`
 - JSON/JSONL cache layer
 - pytest tests
 
@@ -22,7 +22,8 @@ The app is built around a provider-backed pregame workflow:
 
 - `frontend` is the only public surface. Browser traffic should go to nginx first, and nginx proxies `/api/*` to the backend.
 - `backend` owns all provider calls, projections, settlement flows, and admin enforcement.
-- SQLite is the default runtime store and is expected to live on persistent disk.
+- SQLite runtime is supported only when `WNBA_DB_PATH` is explicitly set to the authoritative mounted/runtime DB.
+- Repo-local `./data/wnba.sqlite` is intentionally rejected as an app runtime path.
 - Raw provider pages and derived payloads are cached under `data/cache/` and are used for recovery, replay, and faster reloads.
 - The `Data` tab is an operations surface, not a public mutation surface.
 
@@ -148,6 +149,8 @@ The app is built around a provider-backed pregame workflow:
   - `GET /api/dfs/first-half`
   - `GET /api/player-first-half-history`
   - `GET /api/player-first-half-lines`
+- Live DFS first-half tracking now snapshots the current estimate per `prop_line_id` and settles it later against `player_first_half_stats`.
+- Snapshot rows live in `dfs_first_half_projection_snapshots` and settled outcomes live in `dfs_first_half_projection_settlements`.
 - The DFS UI depends on current `prop_lines`. Without current prop ingestion, the DFS first-half tab has no live slate to estimate against.
 - For current slates, the fastest recovery path is:
   1. load the saved odds cache into the live runtime
@@ -1343,6 +1346,7 @@ Runtime behavior:
 - normal live prop rebuilds now prewarm learned player/minutes/residual models before writing predictions
 - if uploaded cache files do not match the active live DB fingerprint, the backend retrains from the active runtime instead of silently downgrading prop predictions to `component`
 - full live training runs also prewarm current minutes, market, and residual artifacts into `/data/cache/model_artifacts`
+- full live training still runs the entire Model Lab path; recent game-model feature expansion made that path heavier, so game evaluation now refits direct game models once per `YYYY-MM` segment instead of once per historical row
 - `adaptive-context-v11-ratings-context` remains the current learned candidate version after deploy/restart, with uploaded cache files acting as a warm start rather than a hard dependency
 - weak settled player-prop markets currently stay on the component baseline even when the learned walk-forward gate passes:
   - `points_rebounds`
@@ -1376,12 +1380,14 @@ Useful options:
 - `-RunServerTraining` queues `/api/models/train` inside the live backend after uploading cache files.
 - `-PollServer` prints the live `/api/ops/health` payload after queueing server training.
 
-The current saved game evaluation signature is `v6`. Recent game-model runs use:
+The current saved game evaluation signature is `v7`. Recent game-model runs use:
 
 - historical game-market backfill from The Odds API for 2024-2025 spreads/totals/moneylines
 - direct historical game models for raw margin and raw total
+- expanded game-total inputs from existing runtime data: market prices, vig-free O/U probabilities, and matchup pregame roster aggregates derived from the player projection pipeline
 - a small market spread anchor for ATS trustworthiness
 - settled-game residual layers for ATS and totals
+- month-segmented refits for walk-forward game evaluation so training time scales with calendar segments instead of refitting direct game models on nearly every row
 - a conservative O/U decision rule that falls back to the raw total edge when the learned market-relative edge is under `1.0`
 
 Training auth expectations:
@@ -1430,12 +1436,18 @@ The game model is no longer just a heuristic score formula. Live matchup output 
 - settled-history correction: ATS and total residual models trained on saved game predictions versus final results
 - conservative O/U pick logic: if the learned market-relative total edge is too small, the app keeps the raw total edge instead of forcing a noisy flip
 
-Latest saved walk-forward game metrics (`game_eval_signature=v6`) are:
+Latest saved walk-forward game metrics (`game_eval_signature=v6` at the time of that snapshot) are:
 
 - `game_ats`: `10.431` MAE, `13.024` RMSE, `0.522` directional accuracy
 - `game_total`: `12.284` MAE, `15.717` RMSE, `0.462` directional accuracy
 - `game_overall`: `11.110` MAE, `13.992` RMSE, `0.535` directional accuracy
 
 Relative to the baseline game formulas, the saved blended model currently improves ATS and overall direction while keeping materially better raw total error. Total market-direction still lags the baseline slightly, so future work should target total-pick calibration rather than more raw total regression weight.
+
+Operational note:
+
+- `/api/models/train` is still the full Model Lab job, not a game-only retrain
+- if you only change game-model features, the cron-facing training wrapper can still run longer because player-market walk-forward and cache prewarm remain part of the same job
+- the default `scripts/live_daily_props.sh` poll timeout is `1200` seconds; raise `WNBA_TRAIN_POLL_TIMEOUT_SECONDS` if live full-training runtime grows beyond that
 
 Matchup predictions are saved when `/api/matchups` is built, and current-slate recalculation also rewrites saved game predictions for the active/scheduled slate before caches are republished. ESPN history imports and settlement flows then compare final scores against those saved winner, ATS, and over/under predictions.

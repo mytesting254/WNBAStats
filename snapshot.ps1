@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 $SnapshotDir = if ($env:SNAPSHOT_DIR) { $env:SNAPSHOT_DIR } else { Join-Path $Root "data\snapshots" }
-$DbPath = if ($env:WNBA_DB_PATH) { $env:WNBA_DB_PATH } else { Join-Path $Root "data\wnba.sqlite" }
+$DbPath = if ($env:WNBA_DB_PATH) { $env:WNBA_DB_PATH } else { $null }
 $SnapshotAutosaveInterval = if ($env:SNAPSHOT_AUTOSAVE_INTERVAL) { $env:SNAPSHOT_AUTOSAVE_INTERVAL } else { "300" }
 $SnapshotKeepLatest = if ($env:SNAPSHOT_KEEP_LATEST) { $env:SNAPSHOT_KEEP_LATEST } else { "5" }
 $SnapshotName = if ($env:SNAPSHOT_NAME) { $env:SNAPSHOT_NAME } else { "wnba-runtime" }
@@ -23,6 +23,10 @@ function Show-Usage {
 
 if (-not (Test-Path $Python)) {
     Write-Error "Missing Python virtual environment. Run: python3.14.exe -m venv .venv; & '.\.venv\Scripts\pip.exe' install -r backend\requirements.txt"
+}
+
+if (-not $DbPath) {
+    Write-Error "WNBA_DB_PATH is required. Refusing to default snapshot operations to repo-local data\wnba.sqlite because repo-local runtime SQLite is not an authoritative app runtime."
 }
 
 function Resolve-SnapshotIntervalSeconds {

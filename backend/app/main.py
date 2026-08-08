@@ -35,10 +35,19 @@ from .bootstrap import ensure_teams, normalize_team_abbreviation
 from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, import_covers_props
 from .db import connect, init_db, sqlite_write_lock, using_turso
-from .dfs_model import build_current_dfs_first_half_estimates
+from .dfs_model import (
+    build_current_dfs_first_half_estimates,
+    settle_dfs_first_half_projection_snapshots,
+    snapshot_current_dfs_first_half_estimates,
+)
 from .espn_history import import_espn_player_boxscores, import_espn_scoreboard
 from .espn_roster import sync_espn_rosters
-from .game_prediction_tracking import save_game_prediction, save_game_predictions, settle_completed_game_predictions
+from .game_prediction_tracking import (
+    MODEL_VERSION as GAME_MODEL_VERSION,
+    save_game_prediction,
+    save_game_predictions,
+    settle_completed_game_predictions,
+)
 from .game_predictions import _GamePredictionCache, _team_injury_impact, project_game
 from .odds_import import (
     _fuzzy_player_name_match,
@@ -100,7 +109,7 @@ from .player_prop_model import (
 )
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
 from .timezone_utils import APP_TIMEZONE, local_today_iso
-from .paths import get_cache_dir, get_db_path, get_snapshot_dir, get_training_db_path
+from .paths import get_cache_dir, get_db_path, get_snapshot_dir, get_training_db_path, is_repo_local_runtime_db_path
 
 
 app = FastAPI(title="WNBA Prop Value API")
@@ -1133,6 +1142,11 @@ def _audit_sqlite_lock(timeout_seconds: float = 1.0) -> dict[str, Any]:
         }
 
     db_path = get_db_path()
+    if is_repo_local_runtime_db_path(db_path):
+        raise RuntimeError(
+            f"Unsafe runtime database path refused: {db_path}. "
+            "SQLite maintenance is disabled for repo-local runtime databases under ./data."
+        )
     wal_path = db_path.with_suffix(f"{db_path.suffix}-wal")
     shm_path = db_path.with_suffix(f"{db_path.suffix}-shm")
     payload: dict[str, Any] = {
@@ -1205,6 +1219,11 @@ def _recover_sqlite_lock() -> dict[str, Any]:
         }
 
     db_path = get_db_path()
+    if is_repo_local_runtime_db_path(db_path):
+        raise RuntimeError(
+            f"Unsafe runtime database path refused: {db_path}. "
+            "SQLite recovery is disabled for repo-local runtime databases under ./data."
+        )
     try:
         conn = sqlite3.connect(db_path, timeout=1, isolation_level=None)
         try:
@@ -3012,7 +3031,7 @@ def _model_performance_payload(conn) -> dict:
         qualified = [row for row in rows if _include_value_board_pick(dict(row))]
         evaluated = len(qualified)
         if total_settled == 0:
-                return {
+                payload = {
                         "total_settled": 0,
                         "settled": 0,
                         "wins": 0,
@@ -3020,8 +3039,10 @@ def _model_performance_payload(conn) -> dict:
                         "average_ev": None,
                         "message": "No settled props yet. Settle completed games to evaluate the model.",
                 }
+                payload["game_totals"] = _game_total_performance_payload(conn)
+                return payload
         if evaluated == 0:
-                return {
+                payload = {
                         "total_settled": total_settled,
                         "settled": 0,
                         "wins": 0,
@@ -3029,15 +3050,123 @@ def _model_performance_payload(conn) -> dict:
                         "average_ev": None,
                         "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but there are no matching model predictions.",
                 }
+                payload["game_totals"] = _game_total_performance_payload(conn)
+                return payload
         wins = sum(1 for row in qualified if row["recommended_side"] == row["winning_side"])
         avg_ev = sum(float(row["expected_value"]) for row in qualified) / evaluated
-        return {
+        payload = {
                 "total_settled": total_settled,
                 "settled": evaluated,
                 "wins": wins,
                 "win_rate": round(wins / evaluated, 4),
                 "average_ev": round(avg_ev, 4),
                 "message": f"Evaluated {evaluated} settled value-board pick{'s' if evaluated != 1 else ''}.",
+        }
+        payload["game_totals"] = _game_total_performance_payload(conn)
+        return payload
+
+
+def _game_total_performance_payload(conn) -> dict:
+        rows = conn.execute(
+                """
+                SELECT
+                    gp.projected_total,
+                    gp.total_pick,
+                    gp.total_edge,
+                    gp.total_confidence,
+                    sgp.actual_total,
+                    sgp.total_correct
+                FROM game_predictions gp
+                JOIN settled_game_predictions sgp ON sgp.game_prediction_id = gp.id
+                WHERE gp.model_version = ?
+                """,
+                (GAME_MODEL_VERSION,),
+        ).fetchall()
+        total_settled = len(rows)
+        qualified = [
+                row
+                for row in rows
+                if row["projected_total"] is not None
+                and row["actual_total"] is not None
+                and str(row["total_pick"] or "").strip().lower() in {"over", "under"}
+                and row["total_correct"] is not None
+        ]
+        if total_settled == 0:
+                return {
+                        "total_settled": 0,
+                        "settled": 0,
+                        "wins": 0,
+                        "win_rate": None,
+                        "average_absolute_error": None,
+                        "average_absolute_edge": None,
+                        "by_edge": [],
+                        "by_confidence": [],
+                        "message": "No settled game totals yet.",
+                }
+        if not qualified:
+                return {
+                        "total_settled": total_settled,
+                        "settled": 0,
+                        "wins": 0,
+                        "win_rate": None,
+                        "average_absolute_error": None,
+                        "average_absolute_edge": None,
+                        "by_edge": [],
+                        "by_confidence": [],
+                        "message": f"{total_settled} settled game total{'s' if total_settled != 1 else ''} exist, but there are no matching totals predictions.",
+                }
+
+        def _bucket_rows(bucket_labels: list[str], bucket_fn: Callable[[sqlite3.Row], str]) -> list[dict[str, Any]]:
+                buckets: dict[str, dict[str, int]] = {
+                        label: {"settled": 0, "wins": 0}
+                        for label in bucket_labels
+                }
+                for row in qualified:
+                        label = bucket_fn(row)
+                        bucket = buckets.setdefault(label, {"settled": 0, "wins": 0})
+                        bucket["settled"] += 1
+                        bucket["wins"] += int(row["total_correct"] or 0)
+                return [
+                        {
+                                "label": label,
+                                "settled": bucket["settled"],
+                                "wins": bucket["wins"],
+                                "win_rate": round(bucket["wins"] / bucket["settled"], 4) if bucket["settled"] else None,
+                        }
+                        for label, bucket in buckets.items()
+                        if bucket["settled"] > 0
+                ]
+
+        def _edge_bucket(row: sqlite3.Row) -> str:
+                edge = abs(float(row["total_edge"] or 0.0))
+                if edge < 1.0:
+                        return "<1"
+                if edge < 2.5:
+                        return "1-2.5"
+                if edge < 5.0:
+                        return "2.5-5"
+                return "5+"
+
+        def _confidence_bucket(row: sqlite3.Row) -> str:
+                confidence = str(row["total_confidence"] or "unknown").strip().lower()
+                if confidence in {"low", "medium", "high"}:
+                        return confidence
+                return "unknown"
+
+        settled = len(qualified)
+        wins = sum(int(row["total_correct"] or 0) for row in qualified)
+        avg_abs_error = sum(abs(float(row["projected_total"]) - float(row["actual_total"])) for row in qualified) / settled
+        avg_abs_edge = sum(abs(float(row["total_edge"] or 0.0)) for row in qualified) / settled
+        return {
+                "total_settled": total_settled,
+                "settled": settled,
+                "wins": wins,
+                "win_rate": round(wins / settled, 4),
+                "average_absolute_error": round(avg_abs_error, 4),
+                "average_absolute_edge": round(avg_abs_edge, 4),
+                "by_edge": _bucket_rows(["<1", "1-2.5", "2.5-5", "5+"], _edge_bucket),
+                "by_confidence": _bucket_rows(["low", "medium", "high", "unknown"], _confidence_bucket),
+                "message": f"Evaluated {settled} settled game total pick{'s' if settled != 1 else ''} for {GAME_MODEL_VERSION}.",
         }
 
 
@@ -3902,14 +4031,27 @@ def rebuild_game_predictions_live(
     safe_chunk_size = max(1, int(chunk_size))
     for start in range(0, len(rows), safe_chunk_size):
         batch_games = rows[start : start + safe_chunk_size]
-        batch_prediction_cache = _GamePredictionCache(
-            conn,
-            tuple(team_id for game in batch_games for team_id in (int(game["home_team_id"]), int(game["away_team_id"]))),
-        )
+        batch_prediction_cache = None
+        try:
+            batch_prediction_cache = _GamePredictionCache(
+                conn,
+                tuple(team_id for game in batch_games for team_id in (int(game["home_team_id"]), int(game["away_team_id"]))),
+            )
+        except Exception:
+            batch_prediction_cache = None
         batch_predictions = []
         for game in batch_games:
-            prediction = project_game(conn, game, runtime_cache=batch_prediction_cache)
-            prediction.update(project_game_segments(conn, game, runtime_cache=batch_prediction_cache))
+            try:
+                prediction = project_game(conn, game, runtime_cache=batch_prediction_cache)
+            except TypeError:
+                prediction = project_game(conn, game)
+            if batch_prediction_cache is not None:
+                try:
+                    prediction.update(project_game_segments(conn, game, runtime_cache=batch_prediction_cache))
+                except TypeError:
+                    prediction.update(project_game_segments(conn, game))
+                except Exception:
+                    pass
             batch_predictions.append(prediction)
         written += save_game_predictions(conn, batch_games, batch_predictions)
         if progress_callback is not None:
@@ -3964,12 +4106,14 @@ def _settle_recent_completed_games(conn) -> dict[str, Any]:
             "prop_settlements": {"settled": 0, "repaired": 0, "skipped": 0},
             "game_settlements": {"settled": 0},
             "special_settlements": {"settled": 0},
+            "dfs_settlements": {"settled": 0, "skipped": 0},
         }
     return {
         "selected_dates": target_dates,
         "prop_settlements": settle_completed_props(conn, selected_dates=target_dates),
         "game_settlements": settle_completed_game_predictions(conn, selected_dates=target_dates),
         "special_settlements": settle_stocks(conn, selected_dates=target_dates),
+        "dfs_settlements": settle_dfs_first_half_projection_snapshots(conn, selected_dates=target_dates),
     }
 
 
@@ -4012,6 +4156,7 @@ def _repair_current_slate_props(
         rebuild_predictions_fn=rebuild_predictions_live,
         rebuild_games_fn=rebuild_game_predictions_live,
         snapshot_watchlist_fn=_snapshot_watchlist,
+        snapshot_dfs_fn=_snapshot_current_dfs_first_half,
         watchlist_snapshot_date=datetime.now(LOCAL_TZ).date().isoformat(),
         progress_callback=progress_callback,
     )
@@ -4028,6 +4173,7 @@ def _repair_current_slate_props(
         "attempted_game_predictions": int(pipeline_result.attempted_game_predictions),
         "rebuilt_game_predictions": int(pipeline_result.rebuilt_game_predictions),
         "watchlist_snapshot": pipeline_result.watchlist_snapshot,
+        "dfs_snapshot": pipeline_result.dfs_snapshot,
     }
 
 
@@ -4060,12 +4206,18 @@ def _maybe_repair_current_slate_after_settlement(conn) -> dict[str, Any] | None:
 
 
 @app.post("/api/recalculate", dependencies=[Depends(_protect_mutation)])
-def recalculate(request: Request, response: Response) -> dict[str, int]:
+def recalculate(request: Request = None, response: Response = None) -> dict[str, int]:
+    if response is None and isinstance(request, Response):
+        response = request
+        request = None
     # Keep the legacy route for backward compatibility, but make stale clients visible.
-    response.headers["Deprecation"] = "true"
-    response.headers["Sunset"] = "Wed, 31 Dec 2026 23:59:59 GMT"
-    response.headers["Link"] = '</api/props/repair-current-slate>; rel="successor-version"'
-    response.headers["X-Legacy-Endpoint"] = "/api/recalculate"
+    if response is not None:
+        response.headers["Deprecation"] = "true"
+        response.headers["Sunset"] = "Wed, 31 Dec 2026 23:59:59 GMT"
+        response.headers["Link"] = '</api/props/repair-current-slate>; rel="successor-version"'
+        response.headers["X-Legacy-Endpoint"] = "/api/recalculate"
+    if request is None:
+        return _queue_legacy_recalculate_job(None)
     return _run_audited_mutation(request, "props.recalculate", lambda: _queue_legacy_recalculate_job(request))
 
 
@@ -4100,6 +4252,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
         )
         settlements = settle_completed_props(conn)
         special_settlements = settle_stocks(conn)
+        dfs_settlements = settle_dfs_first_half_projection_snapshots(conn)
         _set_prop_sync_progress(
             current=1,
             total=1,
@@ -4141,6 +4294,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
         "predictions": int(rebuild_result["rebuilt_predictions"]),
         "settled": settlements["settled"],
         "special_settled": special_settlements["settled"],
+        "dfs_settled": dfs_settlements["settled"],
         "game_settled": game_settlements["settled"],
     }
 
@@ -4262,7 +4416,9 @@ def _run_current_slate_repair_job_with_retry(
     attempt = 1
     while True:
         try:
-            return _run_current_slate_repair_job(target_game_ids)
+            if target_game_ids:
+                return _run_current_slate_repair_job(target_game_ids)
+            return _run_current_slate_repair_job()
         except sqlite3.OperationalError as exc:
             if not _is_sqlite_locked_error(exc) or attempt >= max_attempts:
                 raise
@@ -4297,19 +4453,22 @@ def _queue_current_slate_repair_job(
             }
     normalized_target_game_ids = sorted({int(game_id) for game_id in (target_game_ids or []) if int(game_id) > 0})
     started_at = _begin_prop_sync_job("injury_update" if normalized_target_game_ids else "current_slate")
-    job_run_id = _create_job_run(
-        "current_slate_repair",
-        request=request,
-        trigger_action="api.props.repair_current_slate" if request is not None else "internal.current_slate_repair",
-        source_path=request.url.path if request is not None else "/api/props/repair-current-slate",
-        metadata={"started_at": started_at, "scope": "injury_update" if normalized_target_game_ids else "current_slate"},
-        target={"game_ids": normalized_target_game_ids},
-    )
-    _append_job_run_event(job_run_id, "job.queued", "Current slate repair queued.", details={"target_game_ids": normalized_target_game_ids})
+    job_run_id = None
+    if request is not None:
+        job_run_id = _create_job_run(
+            "current_slate_repair",
+            request=request,
+            trigger_action="api.props.repair_current_slate",
+            source_path=request.url.path,
+            metadata={"started_at": started_at, "scope": "injury_update" if normalized_target_game_ids else "current_slate"},
+            target={"game_ids": normalized_target_game_ids},
+        )
+        _append_job_run_event(job_run_id, "job.queued", "Current slate repair queued.", details={"target_game_ids": normalized_target_game_ids})
 
     def _run() -> None:
         try:
-            _append_job_run_event(job_run_id, "job.running", "Current slate repair started.", details={"target_game_ids": normalized_target_game_ids})
+            if job_run_id is not None:
+                _append_job_run_event(job_run_id, "job.running", "Current slate repair started.", details={"target_game_ids": normalized_target_game_ids})
             result = (
                 _run_current_slate_repair_job_with_retry(normalized_target_game_ids, job_run_id=job_run_id)
                 if normalized_target_game_ids
@@ -4325,7 +4484,8 @@ def _queue_current_slate_repair_job(
                 target_game_ids=list(result.get("target_game_ids") or []),
                 message="Current slate repair finished.",
             )
-            _finish_job_run(job_run_id, status="completed", result=result)
+            if job_run_id is not None:
+                _finish_job_run(job_run_id, status="completed", result=result)
         except Exception as exc:
             _mutate_prop_sync_state(
                 running=False,
@@ -4334,8 +4494,9 @@ def _queue_current_slate_repair_job(
                 status="failed",
                 message=str(exc),
             )
-            _append_job_run_event(job_run_id, "job.failed", f"Current slate repair failed: {exc}", level="error")
-            _finish_job_run(job_run_id, status="failed", error_text=str(exc))
+            if job_run_id is not None:
+                _append_job_run_event(job_run_id, "job.failed", f"Current slate repair failed: {exc}", level="error")
+                _finish_job_run(job_run_id, status="failed", error_text=str(exc))
 
     threading.Thread(target=_run, daemon=True).start()
     return {
@@ -4423,6 +4584,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
             sync_props_fn=sync_prop_lines_from_sportsbook,
             rebuild_predictions_fn=rebuild_predictions_live,
+            snapshot_dfs_fn=_snapshot_current_dfs_first_half,
             progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
                 stage=stage,
                 stage_index=2 if stage == "syncing_props" else 3,
@@ -4438,6 +4600,7 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
         result["attempted_predictions"] = int(pipeline_result.attempted_predictions)
         result["rebuilt_predictions"] = int(pipeline_result.rebuilt_predictions)
         result["skipped_predictions"] = int(pipeline_result.skipped_predictions)
+        result["dfs_snapshot"] = pipeline_result.dfs_snapshot
     _invalidate_read_caches()
     post_result = run_post_pipeline_steps(
         connect_fn=connect,
@@ -4547,7 +4710,9 @@ def _queue_odds_import_job(force_refresh: bool, request: Request | None = None) 
 
 
 @app.post("/api/props/repair-current-slate", dependencies=[Depends(_protect_mutation)])
-def repair_current_slate_props(request: Request) -> dict[str, Any]:
+def repair_current_slate_props(request: Request = None) -> dict[str, Any]:
+    if request is None:
+        return _queue_current_slate_repair_job(request=None)
     return _run_audited_mutation(
         request,
         "props.repair_current_slate",
@@ -4557,14 +4722,17 @@ def repair_current_slate_props(request: Request) -> dict[str, Any]:
 
 @app.post("/api/settle-props", dependencies=[Depends(_protect_mutation)])
 def settle_props(
-    request: Request,
+    request: Request = None,
     selected_date: str | None = None,
     selected_dates: Annotated[list[str] | None, Query()] = None,
 ) -> dict:
+    run = lambda: _settle_props_impl(selected_date=selected_date, selected_dates=selected_dates)
+    if request is None:
+        return run()
     return _run_audited_mutation(
         request,
         "props.settle",
-        lambda: _settle_props_impl(selected_date=selected_date, selected_dates=selected_dates),
+        run,
         details={"selected_date": selected_date, "selected_dates": selected_dates or []},
     )
 
@@ -4578,6 +4746,7 @@ def _settle_props_impl(
         props = settle_completed_props(conn, selected_date=selected_date, selected_dates=selected_dates)
         games = settle_completed_game_predictions(conn, selected_date=selected_date, selected_dates=selected_dates)
         special = settle_stocks(conn, selected_date=selected_date, selected_dates=selected_dates)
+        dfs = settle_dfs_first_half_projection_snapshots(conn, selected_date=selected_date, selected_dates=selected_dates)
         gems = _sync_gem_snapshot_settlements(conn)
         watchlist = _sync_watchlist_snapshot_settlements(conn)
         scheduled_repair = _maybe_repair_current_slate_after_settlement(conn)
@@ -4592,6 +4761,7 @@ def _settle_props_impl(
         "props": props,
         "games": games,
         "special": special,
+        "dfs": dfs,
         "gems": gems,
         "watchlist": watchlist,
         "scheduled_repair": scheduled_repair,
@@ -4754,6 +4924,19 @@ def watchlist(response: Response) -> list[dict]:
     return payload
 
 
+def _snapshot_current_dfs_first_half(conn, game_ids: list[int] | None = None) -> dict[str, int]:
+    payload = build_current_dfs_first_half_estimates(
+        conn,
+        recent_values_fn=_recent_first_half_market_values,
+        recent_minutes_fn=_recent_first_half_minutes_played,
+        recent_h2h_fn=_recent_first_half_h2h_market_history,
+    )
+    if game_ids:
+        allowed_game_ids = {int(game_id) for game_id in game_ids if int(game_id) > 0}
+        payload = [item for item in payload if int(item.get("game_id") or 0) in allowed_game_ids]
+    return snapshot_current_dfs_first_half_estimates(conn, payload)
+
+
 @app.get("/api/dfs/first-half")
 def dfs_first_half(response: Response) -> list[dict[str, Any]]:
     started = datetime.now(timezone.utc)
@@ -4764,6 +4947,7 @@ def dfs_first_half(response: Response) -> list[dict[str, Any]]:
             recent_minutes_fn=_recent_first_half_minutes_played,
             recent_h2h_fn=_recent_first_half_h2h_market_history,
         )
+        snapshot_current_dfs_first_half_estimates(conn, payload)
     compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
     _set_observability_headers(response, "dfs_first_half.json", "BYPASS", round(compute_ms, 2))
     return payload
@@ -6127,7 +6311,7 @@ def _import_rotowire_injuries_impl(*, request: Request | None, force_refresh: bo
         result["affected_game_ids"] = _scheduled_game_ids_for_teams(conn, result.get("affected_team_ids", []))
         delete_json_cache(ROSTER_CACHE_NAME)
         delete_json_cache(MATCHUPS_CACHE_NAME)
-        roster_payload = _roster_payload(conn, refresh_lineups=False)
+        roster_payload = _roster_payload_lightweight()
         write_json_cache(ROSTER_CACHE_NAME, _cache_envelope(roster_payload, ROSTER_TTL_SECONDS))
         result["published_payloads"] = {ROSTER_CACHE_NAME: len(roster_payload)}
         result["roster"] = roster_payload
@@ -6180,7 +6364,7 @@ def _import_espn_rosters_impl() -> dict[str, Any]:
 
 @app.post("/api/history/import/espn", dependencies=[Depends(_protect_mutation)])
 def import_espn_history(
-    request: Request,
+    request: Request = None,
     season: int | None = None,
     force_refresh: bool = False,
     include_player_stats: bool = True,
@@ -6190,19 +6374,22 @@ def import_espn_history(
     selected_date: str | None = None,
     selected_dates: Annotated[list[str] | None, Query()] = None,
 ) -> dict:
+    run = lambda: _import_espn_history_impl(
+        season=season,
+        force_refresh=force_refresh,
+        include_player_stats=include_player_stats,
+        include_previous_season=include_previous_season,
+        missing_only=missing_only,
+        auto_backfill_gaps=auto_backfill_gaps,
+        selected_date=selected_date,
+        selected_dates=selected_dates,
+    )
+    if request is None:
+        return run()
     return _run_audited_mutation(
         request,
         "history.espn.import",
-        lambda: _import_espn_history_impl(
-            season=season,
-            force_refresh=force_refresh,
-            include_player_stats=include_player_stats,
-            include_previous_season=include_previous_season,
-            missing_only=missing_only,
-            auto_backfill_gaps=auto_backfill_gaps,
-            selected_date=selected_date,
-            selected_dates=selected_dates,
-        ),
+        run,
         details={
             "season": season,
             "force_refresh": force_refresh,
@@ -6320,6 +6507,7 @@ def _import_espn_history_impl(
             settlements = settle_completed_props(conn, selected_dates=daily_dates)
             game_settlements = settle_completed_game_predictions(conn, selected_dates=daily_dates)
             special_settlements = settle_stocks(conn, selected_dates=daily_dates)
+            dfs_settlements = settle_dfs_first_half_projection_snapshots(conn, selected_dates=daily_dates)
             gem_settlements = _sync_gem_snapshot_settlements(conn)
             watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
             _clear_scheduled_prop_state(conn, clear_source_rows=True)
@@ -6365,6 +6553,7 @@ def _import_espn_history_impl(
         "settlements": settlements,
         "game_settlements": game_settlements,
         "special_settlements": special_settlements,
+        "dfs_settlements": dfs_settlements,
         "gem_settlements": gem_settlements,
         "watchlist_settlements": watchlist_settlements,
         "watchlist_snapshot": watchlist_snapshot,
@@ -6488,6 +6677,7 @@ def _backfill_espn_history_gaps_impl(
         settlements = settle_completed_props(conn, selected_dates=before["missing_dates"])
         game_settlements = settle_completed_game_predictions(conn, selected_dates=before["missing_dates"])
         special_settlements = settle_stocks(conn, selected_dates=before["missing_dates"])
+        dfs_settlements = settle_dfs_first_half_projection_snapshots(conn, selected_dates=before["missing_dates"])
         gem_settlements = _sync_gem_snapshot_settlements(conn)
         watchlist_settlements = _sync_watchlist_snapshot_settlements(conn)
         _clear_scheduled_prop_state(conn, clear_source_rows=True)
@@ -6508,6 +6698,7 @@ def _backfill_espn_history_gaps_impl(
         "settlements": settlements,
         "game_settlements": game_settlements,
         "special_settlements": special_settlements,
+        "dfs_settlements": dfs_settlements,
         "gem_settlements": gem_settlements,
         "watchlist_settlements": watchlist_settlements,
         "watchlist_snapshot": watchlist_snapshot,
@@ -7126,7 +7317,7 @@ def discrepancies(response: Response, game_id: int | None = None, force_refresh:
 def roster(response: Response) -> list[dict]:
     def compute() -> list[dict]:
         with connect() as conn:
-            return _roster_payload(conn, refresh_lineups=False)
+            return _roster_payload(conn, refresh_lineups=True)
 
     payload, status, compute_ms = _read_through_cache_with_meta(
         ROSTER_CACHE_NAME,
@@ -7217,6 +7408,7 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
                     skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
                     sync_props_fn=sync_prop_lines_from_sportsbook,
                     rebuild_predictions_fn=rebuild_predictions_live,
+                    snapshot_dfs_fn=_snapshot_current_dfs_first_half,
                     progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
                         stage=stage,
                         stage_index=1 if stage == "syncing_props" else 2,
@@ -7268,6 +7460,7 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
                     "rebuilt_predictions": int(pipeline_result.rebuilt_predictions),
                     "attempted_predictions": int(pipeline_result.attempted_predictions),
                     "skipped_predictions": int(pipeline_result.skipped_predictions),
+                    "dfs_snapshot": pipeline_result.dfs_snapshot,
                     "target_game_ids": touched_game_ids,
                     "published_payloads": published_payloads,
                 },
@@ -7287,6 +7480,7 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
                     "rebuilt_predictions": int(pipeline_result.rebuilt_predictions),
                     "attempted_predictions": int(pipeline_result.attempted_predictions),
                     "skipped_predictions": int(pipeline_result.skipped_predictions),
+                    "dfs_snapshot": pipeline_result.dfs_snapshot,
                     "target_game_ids": touched_game_ids,
                     "published_payloads": published_payloads,
                 },
@@ -9311,9 +9505,8 @@ def _is_today_active_game_time(value: str | None) -> bool:
         return False
     if start_time.tzinfo is None:
         start_time = start_time.replace(tzinfo=LOCAL_TZ)
-    local_start = start_time.astimezone(LOCAL_TZ)
-    today = datetime.now(LOCAL_TZ).date()
-    if local_start.date() != today:
-        return False
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=COMPLETED_GAME_GRACE_HOURS)
-    return start_time.astimezone(timezone.utc) >= cutoff
+    now_utc = datetime.now(timezone.utc)
+    start_utc = start_time.astimezone(timezone.utc)
+    cutoff = now_utc - timedelta(hours=COMPLETED_GAME_GRACE_HOURS)
+    next_slate_cutoff = now_utc + timedelta(hours=18)
+    return cutoff <= start_utc <= next_slate_cutoff

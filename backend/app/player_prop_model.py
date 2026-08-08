@@ -326,15 +326,15 @@ class RidgeModel:
 
 @dataclass(frozen=True)
 class TrainingSample:
-    source_prop_line_id: int | None
-    source_player_id: int
-    source_game_id: int
     features: list[float]
     target: float
     game_date: str
     season: str
     segment: str
     baseline: float
+    source_prop_line_id: int | None = None
+    source_player_id: int = 0
+    source_game_id: int = 0
     is_recent_transfer: bool = False
     sample_count: int = 0
     avg_minutes: float = 0.0
@@ -342,9 +342,6 @@ class TrainingSample:
 
 @dataclass(frozen=True)
 class FinalProjectionSample:
-    source_prop_line_id: int | None
-    source_player_id: int
-    source_game_id: int
     features: list[float]
     target: float
     game_date: str
@@ -356,6 +353,9 @@ class FinalProjectionSample:
     under_odds: int | None
     sample_count: int
     avg_minutes: float
+    source_prop_line_id: int | None = None
+    source_player_id: int = 0
+    source_game_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -2534,7 +2534,7 @@ def _historical_training_features(
         player_id=int(row["player_id"]),
         game_id=int(row["game_id"]),
         team_id=int(context["team_id"]),
-        position=str(row["position"] or ""),
+        position=str(_row_mapping_value(row, "position") or ""),
         before_game_date=current_game_date,
     )
     projected_minutes, _minutes_note = _project_minutes(
@@ -5853,6 +5853,13 @@ def _cached_player_h2h_rows(
             params,
         ).fetchall()
     return cache[key]  # type: ignore[return-value]
+
+
+def _row_mapping_value(row: sqlite3.Row, key: str, default: object = None) -> object:
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
 
 
 def _historical_row_opponent_id(row: sqlite3.Row) -> int:

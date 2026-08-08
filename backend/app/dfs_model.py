@@ -7,6 +7,7 @@ import sqlite3
 from collections import defaultdict
 from dataclasses import asdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
@@ -273,6 +274,234 @@ def build_current_dfs_first_half_estimates(
     return payload
 
 
+def snapshot_current_dfs_first_half_estimates(
+    conn: sqlite3.Connection,
+    estimates: list[dict[str, object]],
+) -> dict[str, int]:
+    if not estimates:
+        return {"inserted": 0, "updated": 0, "skipped": 0}
+    captured_at = _utc_now_iso()
+    inserted = 0
+    updated = 0
+    skipped = 0
+    for estimate in estimates:
+        prop_line_id = int(estimate.get("prop_line_id") or 0)
+        model_version = str(estimate.get("model_version") or "").strip()
+        if prop_line_id <= 0 or not model_version:
+            skipped += 1
+            continue
+        existing = conn.execute(
+            """
+            SELECT *
+            FROM dfs_first_half_projection_snapshots
+            WHERE prop_line_id = ?
+              AND model_version = ?
+            LIMIT 1
+            """,
+            (prop_line_id, model_version),
+        ).fetchone()
+        payload = _dfs_snapshot_payload(estimate)
+        if existing is None:
+            conn.execute(
+                """
+                INSERT INTO dfs_first_half_projection_snapshots (
+                    prop_line_id,
+                    game_id,
+                    player_id,
+                    sportsbook,
+                    market,
+                    line,
+                    over_odds,
+                    under_odds,
+                    full_game_projection,
+                    estimated_first_half_result,
+                    expected_halfway_line,
+                    pace_ratio,
+                    halftime_margin_to_line,
+                    on_track_probability,
+                    recommended_side,
+                    confidence,
+                    model_version,
+                    model_rows,
+                    team_first_half_share,
+                    estimated_first_half_minutes_share,
+                    projected_first_half_total,
+                    game_total,
+                    start_time,
+                    first_captured_at,
+                    last_captured_at,
+                    capture_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                """,
+                (
+                    prop_line_id,
+                    payload["game_id"],
+                    payload["player_id"],
+                    payload["sportsbook"],
+                    payload["market"],
+                    payload["line"],
+                    payload["over_odds"],
+                    payload["under_odds"],
+                    payload["full_game_projection"],
+                    payload["estimated_first_half_result"],
+                    payload["expected_halfway_line"],
+                    payload["pace_ratio"],
+                    payload["halftime_margin_to_line"],
+                    payload["on_track_probability"],
+                    payload["recommended_side"],
+                    payload["confidence"],
+                    model_version,
+                    payload["model_rows"],
+                    payload["team_first_half_share"],
+                    payload["estimated_first_half_minutes_share"],
+                    payload["projected_first_half_total"],
+                    payload["game_total"],
+                    payload["start_time"],
+                    captured_at,
+                    captured_at,
+                ),
+            )
+            inserted += 1
+            continue
+        conn.execute(
+            """
+            UPDATE dfs_first_half_projection_snapshots
+            SET game_id = ?,
+                player_id = ?,
+                sportsbook = ?,
+                market = ?,
+                line = ?,
+                over_odds = ?,
+                under_odds = ?,
+                full_game_projection = ?,
+                estimated_first_half_result = ?,
+                expected_halfway_line = ?,
+                pace_ratio = ?,
+                halftime_margin_to_line = ?,
+                on_track_probability = ?,
+                recommended_side = ?,
+                confidence = ?,
+                model_rows = ?,
+                team_first_half_share = ?,
+                estimated_first_half_minutes_share = ?,
+                projected_first_half_total = ?,
+                game_total = ?,
+                start_time = ?,
+                last_captured_at = ?,
+                capture_count = capture_count + 1
+            WHERE id = ?
+            """,
+            (
+                payload["game_id"],
+                payload["player_id"],
+                payload["sportsbook"],
+                payload["market"],
+                payload["line"],
+                payload["over_odds"],
+                payload["under_odds"],
+                payload["full_game_projection"],
+                payload["estimated_first_half_result"],
+                payload["expected_halfway_line"],
+                payload["pace_ratio"],
+                payload["halftime_margin_to_line"],
+                payload["on_track_probability"],
+                payload["recommended_side"],
+                payload["confidence"],
+                payload["model_rows"],
+                payload["team_first_half_share"],
+                payload["estimated_first_half_minutes_share"],
+                payload["projected_first_half_total"],
+                payload["game_total"],
+                payload["start_time"],
+                captured_at,
+                int(existing["id"]),
+            ),
+        )
+        updated += 1
+    return {"inserted": inserted, "updated": updated, "skipped": skipped}
+
+
+def settle_dfs_first_half_projection_snapshots(
+    conn: sqlite3.Connection,
+    *,
+    selected_date: str | None = None,
+    selected_dates: list[str] | None = None,
+) -> dict[str, int]:
+    date_values = [str(item).strip() for item in (selected_dates or []) if str(item).strip()]
+    if selected_date:
+        normalized = str(selected_date).strip()
+        if normalized and normalized not in date_values:
+            date_values.append(normalized)
+    clauses = ["g.status = 'final'"]
+    params: list[object] = []
+    if date_values:
+        placeholders = ",".join("?" for _ in date_values)
+        clauses.append(f"g.game_date IN ({placeholders})")
+        params.extend(date_values)
+    rows = conn.execute(
+        f"""
+        SELECT
+            snap.id,
+            snap.market,
+            snap.expected_halfway_line,
+            snap.estimated_first_half_result,
+            pfh.first_half_points,
+            pfh.first_half_rebounds,
+            pfh.first_half_assists,
+            pfh.first_half_threes,
+            pfh.first_half_steals,
+            pfh.first_half_blocks,
+            pfh.first_half_turnovers
+        FROM dfs_first_half_projection_snapshots snap
+        JOIN games g ON g.id = snap.game_id
+        JOIN player_first_half_stats pfh
+          ON pfh.game_id = snap.game_id
+         AND pfh.player_id = snap.player_id
+        LEFT JOIN dfs_first_half_projection_settlements settled
+          ON settled.snapshot_id = snap.id
+        WHERE settled.snapshot_id IS NULL
+          AND {' AND '.join(clauses)}
+        """,
+        tuple(params),
+    ).fetchall()
+    settled = 0
+    skipped = 0
+    settled_at = _utc_now_iso()
+    for row in rows:
+        actual = _market_first_half_stat_value(row, str(row["market"] or ""))
+        if actual is None:
+            skipped += 1
+            continue
+        expected_halfway_line = float(row["expected_halfway_line"] or 0.0)
+        projected = float(row["estimated_first_half_result"] or 0.0)
+        winning_side = "over" if actual >= expected_halfway_line else "under"
+        signed_error = projected - actual
+        conn.execute(
+            """
+            INSERT INTO dfs_first_half_projection_settlements (
+                snapshot_id,
+                actual_first_half_result,
+                winning_side,
+                absolute_error,
+                signed_error,
+                correct_side,
+                settled_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(row["id"]),
+                float(actual),
+                winning_side,
+                abs(signed_error),
+                signed_error,
+                1 if winning_side == str("over" if projected >= expected_halfway_line else "under") else 0,
+                settled_at,
+            ),
+        )
+        settled += 1
+    return {"settled": settled, "skipped": skipped}
+
+
 def _predict_current_half_estimate(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -341,6 +570,67 @@ def _predict_current_half_estimate(
         start_time=str(row["start_time"]) if row["start_time"] is not None else None,
         confidence="high" if abs(halftime_margin) >= 2.0 else "medium" if abs(halftime_margin) >= 1.0 else "low",
     )
+
+
+def _dfs_snapshot_payload(estimate: dict[str, object]) -> dict[str, object]:
+    return {
+        "game_id": int(estimate.get("game_id") or 0),
+        "player_id": int(estimate.get("player_id") or 0),
+        "sportsbook": str(estimate.get("sportsbook") or ""),
+        "market": str(estimate.get("market") or "").strip().lower(),
+        "line": float(estimate.get("line") or 0.0),
+        "over_odds": int(estimate.get("over_odds") or 0),
+        "under_odds": int(estimate.get("under_odds") or 0),
+        "full_game_projection": float(estimate.get("full_game_projection") or 0.0),
+        "estimated_first_half_result": float(estimate.get("estimated_first_half_result") or 0.0),
+        "expected_halfway_line": float(estimate.get("expected_halfway_line") or 0.0),
+        "pace_ratio": None if estimate.get("pace_ratio") is None else float(estimate.get("pace_ratio") or 0.0),
+        "halftime_margin_to_line": None if estimate.get("halftime_margin_to_line") is None else float(estimate.get("halftime_margin_to_line") or 0.0),
+        "on_track_probability": None if estimate.get("on_track_probability") is None else float(estimate.get("on_track_probability") or 0.0),
+        "recommended_side": str(estimate.get("recommended_side") or ""),
+        "confidence": str(estimate.get("confidence") or ""),
+        "model_rows": int(estimate.get("model_rows") or 0),
+        "team_first_half_share": float(estimate.get("team_first_half_share") or 0.5),
+        "estimated_first_half_minutes_share": float(estimate.get("estimated_first_half_minutes_share") or 0.5),
+        "projected_first_half_total": None if estimate.get("projected_first_half_total") is None else float(estimate.get("projected_first_half_total") or 0.0),
+        "game_total": None if estimate.get("game_total") is None else float(estimate.get("game_total") or 0.0),
+        "start_time": None if estimate.get("start_time") is None else str(estimate.get("start_time") or ""),
+    }
+
+
+def _market_first_half_stat_value(row: sqlite3.Row, market: str) -> float | None:
+    normalized = str(market or "").strip().lower()
+    if normalized == "points":
+        return float(row["first_half_points"] or 0.0)
+    if normalized == "rebounds":
+        return float(row["first_half_rebounds"] or 0.0)
+    if normalized == "assists":
+        return float(row["first_half_assists"] or 0.0)
+    if normalized == "threes":
+        return float(row["first_half_threes"] or 0.0)
+    if normalized == "steals":
+        return float(row["first_half_steals"] or 0.0)
+    if normalized == "blocks":
+        return float(row["first_half_blocks"] or 0.0)
+    if normalized == "turnovers":
+        return float(row["first_half_turnovers"] or 0.0)
+    if normalized == "points_rebounds":
+        return float(row["first_half_points"] or 0.0) + float(row["first_half_rebounds"] or 0.0)
+    if normalized == "points_assists":
+        return float(row["first_half_points"] or 0.0) + float(row["first_half_assists"] or 0.0)
+    if normalized == "rebounds_assists":
+        return float(row["first_half_rebounds"] or 0.0) + float(row["first_half_assists"] or 0.0)
+    if normalized == "points_rebounds_assists":
+        return (
+            float(row["first_half_points"] or 0.0)
+            + float(row["first_half_rebounds"] or 0.0)
+            + float(row["first_half_assists"] or 0.0)
+        )
+    return None
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def train_dfs_half_market_model(

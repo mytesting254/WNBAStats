@@ -16,7 +16,20 @@ def get_db_path() -> Path:
     override = os.getenv("WNBA_DB_PATH")
     if override:
         return Path(override)
-    return get_data_dir() / "wnba.sqlite"
+    raise RuntimeError(
+        "WNBA_DB_PATH is required. Refusing to guess a runtime database path because repo-local SQLite "
+        "defaults caused split-brain data between the app runtime and the checkout."
+    )
+
+
+def is_repo_local_runtime_db_path(path: Path | str) -> bool:
+    try:
+        resolved = Path(path).resolve()
+        repo_data = (ROOT_DIR / "data").resolve()
+        resolved.relative_to(repo_data)
+        return True
+    except (OSError, ValueError):
+        return False
 
 
 def get_cache_dir() -> Path:

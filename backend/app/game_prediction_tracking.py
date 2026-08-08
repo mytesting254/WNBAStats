@@ -20,8 +20,8 @@ def save_game_prediction(conn: sqlite3.Connection, game: Mapping, prediction: Ma
                 home_projected_points, away_projected_points, projected_margin, projected_total,
                 projected_q1_total, projected_first_half_total,
                 winner_pick, ats_pick, ats_edge, total_pick, total_edge,
-                confidence, reason, spread_home, game_total, home_rest_days, away_rest_days
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                confidence, total_confidence, reason, total_reason, spread_home, game_total, home_rest_days, away_rest_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(game_id, model_version) DO UPDATE SET
                 prediction_time = excluded.prediction_time,
                 home_projected_points = excluded.home_projected_points,
@@ -36,7 +36,9 @@ def save_game_prediction(conn: sqlite3.Connection, game: Mapping, prediction: Ma
                 total_pick = excluded.total_pick,
                 total_edge = excluded.total_edge,
                 confidence = excluded.confidence,
+                total_confidence = excluded.total_confidence,
                 reason = excluded.reason,
+                total_reason = excluded.total_reason,
                 spread_home = excluded.spread_home,
                 game_total = excluded.game_total,
                 home_rest_days = excluded.home_rest_days,
@@ -58,7 +60,9 @@ def save_game_prediction(conn: sqlite3.Connection, game: Mapping, prediction: Ma
                 str(prediction.get("total_pick") or "N/A"),
                 prediction.get("total_edge"),
                 str(prediction.get("game_confidence") or "unknown"),
+                str(prediction.get("total_confidence") or prediction.get("game_confidence") or "unknown"),
                 str(prediction.get("game_reason") or ""),
+                str(prediction.get("total_reason") or ""),
                 _value(game, "spread_home"),
                 _value(game, "game_total"),
                 _value(game, "rest_days_home"),
@@ -94,7 +98,9 @@ def save_game_predictions(conn: sqlite3.Connection, games: list[Mapping], predic
                 str(prediction.get("total_pick") or "N/A"),
                 prediction.get("total_edge"),
                 str(prediction.get("game_confidence") or "unknown"),
+                str(prediction.get("total_confidence") or prediction.get("game_confidence") or "unknown"),
                 str(prediction.get("game_reason") or ""),
+                str(prediction.get("total_reason") or ""),
                 _value(game, "spread_home"),
                 _value(game, "game_total"),
                 _value(game, "rest_days_home"),
@@ -111,8 +117,8 @@ def save_game_predictions(conn: sqlite3.Connection, games: list[Mapping], predic
                 home_projected_points, away_projected_points, projected_margin, projected_total,
                 projected_q1_total, projected_first_half_total,
                 winner_pick, ats_pick, ats_edge, total_pick, total_edge,
-                confidence, reason, spread_home, game_total, home_rest_days, away_rest_days
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                confidence, total_confidence, reason, total_reason, spread_home, game_total, home_rest_days, away_rest_days
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(game_id, model_version) DO UPDATE SET
                 prediction_time = excluded.prediction_time,
                 home_projected_points = excluded.home_projected_points,
@@ -127,7 +133,9 @@ def save_game_predictions(conn: sqlite3.Connection, games: list[Mapping], predic
                 total_pick = excluded.total_pick,
                 total_edge = excluded.total_edge,
                 confidence = excluded.confidence,
+                total_confidence = excluded.total_confidence,
                 reason = excluded.reason,
+                total_reason = excluded.total_reason,
                 spread_home = excluded.spread_home,
                 game_total = excluded.game_total,
                 home_rest_days = excluded.home_rest_days,

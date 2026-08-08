@@ -250,8 +250,15 @@ def _unsettled_final_prop_dates(conn: sqlite3.Connection) -> list[str]:
         FROM prop_lines pl
         JOIN games g ON g.id = pl.game_id
         LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+        LEFT JOIN team_game_results home_result
+          ON home_result.game_id = g.id
+         AND home_result.team_id = g.home_team_id
+        LEFT JOIN team_game_results away_result
+          ON away_result.game_id = g.id
+         AND away_result.team_id = g.away_team_id
         WHERE g.status = 'final'
           AND sp.id IS NULL
+          AND (home_result.id IS NULL OR away_result.id IS NULL)
         ORDER BY g.game_date
         """
     ).fetchall()

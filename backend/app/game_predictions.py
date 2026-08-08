@@ -11,6 +11,7 @@ try:
 except ImportError:  # pragma: no cover - fallback remains exercised without numpy installed
     np = None
 
+from .game_pregame_features import build_matchup_pregame_features
 from .game_training_db import game_training_db_signature, load_game_training_rows
 from .player_prop_model import _before_training_start, _training_start_date
 
@@ -76,6 +77,31 @@ GAME_DIRECT_FEATURE_NAMES = [
     "home_implied_prob",
     "away_implied_prob",
     "vig_free_home_prob",
+    "home_spread_price",
+    "away_spread_price",
+    "spread_price_gap",
+    "over_price",
+    "under_price",
+    "total_price_gap",
+    "over_implied_prob",
+    "under_implied_prob",
+    "vig_free_over_prob",
+    "home_projected_minutes_total",
+    "away_projected_minutes_total",
+    "home_projected_points_total",
+    "away_projected_points_total",
+    "home_top3_minutes_share",
+    "away_top3_minutes_share",
+    "home_top5_points_share",
+    "away_top5_points_share",
+    "home_rotation_count",
+    "away_rotation_count",
+    "home_creator_count",
+    "away_creator_count",
+    "projected_minutes_delta",
+    "projected_points_delta",
+    "rotation_count_diff",
+    "creator_count_diff",
 ]
 GAME_MARGIN_FEATURE_NAMES = [
     "projected_margin",
@@ -271,6 +297,10 @@ def project_game(
         game_total=game_total,
         home_moneyline=_coerce_float(_row_value(game, "home_moneyline")),
         away_moneyline=_coerce_float(_row_value(game, "away_moneyline")),
+        home_spread_price=_coerce_float(_row_value(game, "home_spread_price")),
+        away_spread_price=_coerce_float(_row_value(game, "away_spread_price")),
+        over_price=_coerce_float(_row_value(game, "over_price")),
+        under_price=_coerce_float(_row_value(game, "under_price")),
     )
     direct_margin = _predict_direct_game_value(conn, "margin", direct_features)
     direct_total = _predict_direct_game_value(conn, "total", direct_features)
@@ -324,16 +354,32 @@ def project_game(
 
     total_edge = None
     total_pick = "N/A"
+    baseline_total_edge = None
+    total_market_decision = None
     if game_total is not None:
-        # The public O/U recommendation must describe the projected total shown
-        # alongside it. A separate market-edge model can disagree with the score
-        # projection, which previously produced contradictory labels such as
-        # "Under 180.1" against a 177.5 total.
-        total_edge = adjusted_total - game_total
+        baseline_total_edge = adjusted_total - game_total
+        total_market_decision = _predict_market_total_edge(
+            conn,
+            direct_features,
+            baseline_total_edge,
+            game_total,
+        )
+        total_edge = total_market_decision.edge if total_market_decision is not None else baseline_total_edge
         total_pick = "Over" if total_edge > 0 else "Under"
 
     winner = game["home_team"] if adjusted_margin >= 0 else game["away_team"]
     confidence = _confidence(abs(ats_edge or 0), abs(total_edge or 0), abs(adjusted_margin))
+    total_confidence = _total_confidence(total_edge)
+    total_reason = _total_reason(
+        projected_total=adjusted_total,
+        market_total=game_total,
+        total_edge=total_edge,
+        direct_total_rows=direct_total.rows if direct_total is not None else None,
+        baseline_total_edge=baseline_total_edge,
+        market_decision_rows=total_market_decision.rows if total_market_decision is not None else None,
+        market_decision_weight=total_market_decision.weight if total_market_decision is not None else None,
+        residual_notes=[note for note in residual_notes if "total" in note.lower()],
+    )
 
     return {
         "home_projected_points": round(home_projection, 1),
@@ -346,6 +392,7 @@ def project_game(
         "total_pick": total_pick,
         "total_edge": round(total_edge, 1) if total_edge is not None else None,
         "game_confidence": confidence,
+        "total_confidence": total_confidence,
         "game_reason": _reason(
             home_projection,
             away_projection,
@@ -359,6 +406,7 @@ def project_game(
             away_injury,
             residual_notes,
         ),
+        "total_reason": total_reason,
     }
 
 
@@ -388,12 +436,22 @@ def _moneyline_implied_probability(value: float | None) -> float | None:
 def _vig_free_home_probability(home_moneyline: float | None, away_moneyline: float | None) -> float | None:
     home_prob = _moneyline_implied_probability(home_moneyline)
     away_prob = _moneyline_implied_probability(away_moneyline)
-    if home_prob is None or away_prob is None:
+    return _vig_free_probability_from_probabilities(home_prob, away_prob)
+
+
+def _vig_free_probability(price_a: float | None, price_b: float | None) -> float | None:
+    prob_a = _moneyline_implied_probability(price_a)
+    prob_b = _moneyline_implied_probability(price_b)
+    return _vig_free_probability_from_probabilities(prob_a, prob_b)
+
+
+def _vig_free_probability_from_probabilities(prob_a: float | None, prob_b: float | None) -> float | None:
+    if prob_a is None or prob_b is None:
         return None
-    denom = home_prob + away_prob
+    denom = prob_a + prob_b
     if denom <= 0:
         return None
-    return home_prob / denom
+    return prob_a / denom
 
 
 def _insufficient_history_payload(game: Mapping[str, Any], home_history_count: int, away_history_count: int) -> dict:
@@ -471,6 +529,48 @@ def _confidence(ats_edge: float, total_edge: float, margin: float) -> str:
     if strongest_edge >= 2.5 or margin >= 5:
         return "medium"
     return "low"
+
+
+def _total_confidence(total_edge: float | None) -> str:
+    if total_edge is None:
+        return "no market"
+    absolute_edge = abs(float(total_edge))
+    if absolute_edge >= 5.0:
+        return "high"
+    if absolute_edge >= 2.5:
+        return "medium"
+    return "low"
+
+
+def _total_reason(
+    *,
+    projected_total: float,
+    market_total: float | None,
+    total_edge: float | None,
+    direct_total_rows: int | None,
+    baseline_total_edge: float | None,
+    market_decision_rows: int | None,
+    market_decision_weight: float | None,
+    residual_notes: list[str] | None = None,
+) -> str:
+    if market_total is None or total_edge is None:
+        return (
+            f"No trusted market total was available. Model projected {projected_total:.1f} "
+            "from team scoring, pace, rest, and injury context only."
+        )
+    details = [
+        f"Model total {projected_total:.1f} versus market {market_total:.1f}",
+        f"edge {total_edge:+.1f}",
+    ]
+    if baseline_total_edge is not None and abs(float(total_edge) - float(baseline_total_edge)) >= 0.05:
+        details.append(f"score-model edge {baseline_total_edge:+.1f}")
+    if direct_total_rows is not None:
+        details.append(f"direct total model support {direct_total_rows} rows")
+    if market_decision_rows is not None and market_decision_weight is not None:
+        details.append(f"total-market decision blend {market_decision_weight:.0%} ({market_decision_rows} rows)")
+    if residual_notes:
+        details.append("; ".join(residual_notes))
+    return ". ".join(details) + "."
 
 
 def _calibrate_total_projection(
@@ -575,6 +675,10 @@ def _direct_game_features(
     game_total: float | None,
     home_moneyline: float | None,
     away_moneyline: float | None,
+    home_spread_price: float | None,
+    away_spread_price: float | None,
+    over_price: float | None,
+    under_price: float | None,
 ) -> list[float]:
     home_recent_points = cache.weighted_recent(home_team_id, "points")
     away_recent_points = cache.weighted_recent(away_team_id, "points")
@@ -588,6 +692,15 @@ def _direct_game_features(
     away_average_possessions = cache.team_average(away_team_id, "possessions")
     home_recent_possessions = cache.weighted_recent(home_team_id, "possessions")
     away_recent_possessions = cache.weighted_recent(away_team_id, "possessions")
+    matchup_pregame = build_matchup_pregame_features(
+        cache.conn,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        game_id=game_id,
+        game_date=game_date,
+        use_injury_context=False,
+        runtime_cache=cache.runtime_cache,
+    )
     return _assemble_direct_game_features(
         home_recent_points=home_recent_points,
         away_recent_points=away_recent_points,
@@ -618,6 +731,11 @@ def _direct_game_features(
         game_total=game_total,
         home_moneyline=home_moneyline,
         away_moneyline=away_moneyline,
+        home_spread_price=home_spread_price,
+        away_spread_price=away_spread_price,
+        over_price=over_price,
+        under_price=under_price,
+        matchup_pregame=matchup_pregame,
     )
 
 
@@ -652,6 +770,11 @@ def _assemble_direct_game_features(
     game_total: float | None,
     home_moneyline: float | None,
     away_moneyline: float | None,
+    home_spread_price: float | None,
+    away_spread_price: float | None,
+    over_price: float | None,
+    under_price: float | None,
+    matchup_pregame: Mapping[str, float] | None = None,
 ) -> list[float]:
     recent_scoring_delta = float(home_recent_points) - float(away_recent_points)
     recent_allowed_delta = float(home_recent_allowed) - float(away_recent_allowed)
@@ -674,6 +797,22 @@ def _assemble_direct_game_features(
     home_implied_prob = _moneyline_implied_probability(home_moneyline) or 0.5
     away_implied_prob = _moneyline_implied_probability(away_moneyline) or 0.5
     vig_free_home_prob = _vig_free_home_probability(home_moneyline, away_moneyline) or 0.5
+    over_implied_prob = _moneyline_implied_probability(over_price) or 0.5
+    under_implied_prob = _moneyline_implied_probability(under_price) or 0.5
+    vig_free_over_prob = _vig_free_probability(over_price, under_price) or 0.5
+    matchup = dict(matchup_pregame or {})
+    home_projected_minutes_total = float(matchup.get("home_projected_minutes_total") or 0.0)
+    away_projected_minutes_total = float(matchup.get("away_projected_minutes_total") or 0.0)
+    home_projected_points_total = float(matchup.get("home_projected_points_total") or 0.0)
+    away_projected_points_total = float(matchup.get("away_projected_points_total") or 0.0)
+    home_top3_minutes_share = float(matchup.get("home_top3_minutes_share") or 0.0)
+    away_top3_minutes_share = float(matchup.get("away_top3_minutes_share") or 0.0)
+    home_top5_points_share = float(matchup.get("home_top5_points_share") or 0.0)
+    away_top5_points_share = float(matchup.get("away_top5_points_share") or 0.0)
+    home_rotation_count = float(matchup.get("home_rotation_count") or 0.0)
+    away_rotation_count = float(matchup.get("away_rotation_count") or 0.0)
+    home_creator_count = float(matchup.get("home_creator_count") or 0.0)
+    away_creator_count = float(matchup.get("away_creator_count") or 0.0)
     return [
         home_recent_points,
         away_recent_points,
@@ -718,6 +857,31 @@ def _assemble_direct_game_features(
         home_implied_prob,
         away_implied_prob,
         vig_free_home_prob,
+        float(home_spread_price or 0.0),
+        float(away_spread_price or 0.0),
+        float(home_spread_price or 0.0) - float(away_spread_price or 0.0),
+        float(over_price or 0.0),
+        float(under_price or 0.0),
+        float(over_price or 0.0) - float(under_price or 0.0),
+        over_implied_prob,
+        under_implied_prob,
+        vig_free_over_prob,
+        home_projected_minutes_total,
+        away_projected_minutes_total,
+        home_projected_points_total,
+        away_projected_points_total,
+        home_top3_minutes_share,
+        away_top3_minutes_share,
+        home_top5_points_share,
+        away_top5_points_share,
+        home_rotation_count,
+        away_rotation_count,
+        home_creator_count,
+        away_creator_count,
+        home_projected_minutes_total - away_projected_minutes_total,
+        home_projected_points_total - away_projected_points_total,
+        home_rotation_count - away_rotation_count,
+        home_creator_count - away_creator_count,
     ]
 
 
@@ -833,6 +997,12 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
             g.rest_days_away,
             g.spread_home,
             g.game_total,
+            g.home_moneyline,
+            g.away_moneyline,
+            g.home_spread_price,
+            g.away_spread_price,
+            g.over_price,
+            g.under_price,
             home_result.points AS home_points,
             away_result.points AS away_points,
             home_result.possessions AS home_possessions,
@@ -855,13 +1025,51 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
         }
 
     team_history: dict[int, dict[str, Any]] = {}
+    runtime_cache: dict[str, dict[tuple, object]] = {}
     margin_training_rows: list[tuple[list[float], float]] = []
     total_training_rows: list[tuple[list[float], float]] = []
     total_market_training_rows: list[tuple[list[float], float]] = []
+    pending_margin_rows: list[tuple[list[float], float]] = []
+    pending_total_rows: list[tuple[list[float], float]] = []
+    pending_total_market_rows: list[tuple[list[float], float]] = []
     ats_records: list[tuple[float, float, float]] = []
     total_records: list[tuple[float, float, float]] = []
     margin_records: list[tuple[float, float, float]] = []
     training_start = _training_start_date()
+    current_segment: str | None = None
+    direct_margin_model: _DirectGameModel | None = None
+    direct_total_model: _DirectGameModel | None = None
+    decision_model: _DirectGameModel | None = None
+
+    def _refresh_segment_models() -> None:
+        nonlocal direct_margin_model, direct_total_model, decision_model
+        direct_margin_model = (
+            _fit_direct_game_model("margin", margin_training_rows)
+            if len(margin_training_rows) >= GAME_DIRECT_MODEL_MIN_ROWS
+            else None
+        )
+        direct_total_model = (
+            _fit_direct_game_model("total", total_training_rows)
+            if len(total_training_rows) >= GAME_DIRECT_MODEL_MIN_ROWS
+            else None
+        )
+        decision_model = (
+            _fit_direct_game_model("total_market", total_market_training_rows)
+            if len(total_market_training_rows) >= GAME_TOTAL_DECISION_MODEL_MIN_ROWS
+            else None
+        )
+
+    def _advance_segment(next_segment: str) -> None:
+        nonlocal current_segment
+        if current_segment is not None:
+            margin_training_rows.extend(pending_margin_rows)
+            total_training_rows.extend(pending_total_rows)
+            total_market_training_rows.extend(pending_total_market_rows)
+            pending_margin_rows.clear()
+            pending_total_rows.clear()
+            pending_total_market_rows.clear()
+        current_segment = next_segment
+        _refresh_segment_models()
 
     for row in rows:
         use_target_row = not _before_training_start(str(row["game_date"]), training_start)
@@ -870,6 +1078,9 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
         home_context = _team_history_context(team_history.get(home_team_id))
         away_context = _team_history_context(team_history.get(away_team_id))
         if home_context["games"] >= 3 and away_context["games"] >= 3:
+            segment_key = _game_training_segment_key(str(row["game_date"] or ""))
+            if current_segment != segment_key:
+                _advance_segment(segment_key)
             baseline_home = _baseline_points_from_context(
                 team_context=home_context,
                 opponent_context=away_context,
@@ -884,6 +1095,15 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
             )
             baseline_margin = baseline_home - baseline_away
             baseline_total = baseline_home + baseline_away
+            matchup_pregame = build_matchup_pregame_features(
+                conn,
+                home_team_id=home_team_id,
+                away_team_id=away_team_id,
+                game_id=int(row["id"]),
+                game_date=str(row["game_date"] or "") or None,
+                use_injury_context=False,
+                runtime_cache=runtime_cache,
+            )
             direct_features = _assemble_direct_game_features(
                 home_recent_points=home_context["recent_points"],
                 away_recent_points=away_context["recent_points"],
@@ -912,13 +1132,17 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                 away_recent_def_rating=_team_rating(float(away_context["recent_allowed"]), float(away_context["recent_possessions"])),
                 spread_home=_coerce_float(row["spread_home"]),
                 game_total=_coerce_float(row["game_total"]),
-                home_moneyline=None,
-                away_moneyline=None,
+                home_moneyline=_coerce_float(row["home_moneyline"]),
+                away_moneyline=_coerce_float(row["away_moneyline"]),
+                home_spread_price=_coerce_float(row["home_spread_price"]),
+                away_spread_price=_coerce_float(row["away_spread_price"]),
+                over_price=_coerce_float(row["over_price"]),
+                under_price=_coerce_float(row["under_price"]),
+                matchup_pregame=matchup_pregame,
             )
             adjusted_margin = baseline_margin
             adjusted_total = baseline_total
-            if len(margin_training_rows) >= GAME_DIRECT_MODEL_MIN_ROWS:
-                direct_margin_model = _fit_direct_game_model("margin", margin_training_rows)
+            if direct_margin_model is not None:
                 direct_margin = _predict_direct_model(direct_margin_model, direct_features)
                 margin_weight = _direct_game_blend_weight(direct_margin_model.rows)
                 adjusted_margin = ((1 - margin_weight) * baseline_margin) + (margin_weight * direct_margin)
@@ -926,8 +1150,7 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                 adjusted_margin = (
                     (1 - GAME_MARGIN_POST_MARKET_ANCHOR) * adjusted_margin
                 ) + (GAME_MARGIN_POST_MARKET_ANCHOR * (-float(row["spread_home"])))
-            if len(total_training_rows) >= GAME_DIRECT_MODEL_MIN_ROWS:
-                direct_total_model = _fit_direct_game_model("total", total_training_rows)
+            if direct_total_model is not None:
                 direct_total = _predict_direct_model(direct_total_model, direct_features)
                 total_weight = _direct_game_blend_weight(direct_total_model.rows)
                 adjusted_total = ((1 - total_weight) * baseline_total) + (total_weight * direct_total)
@@ -953,8 +1176,7 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                 game_total_value = float(game_total)
                 baseline_total_edge = baseline_total - game_total_value
                 adjusted_total_edge = adjusted_total - game_total_value
-                if len(total_market_training_rows) >= GAME_TOTAL_DECISION_MODEL_MIN_ROWS:
-                    decision_model = _fit_direct_game_model("total_market", total_market_training_rows)
+                if decision_model is not None:
                     decision_features = [*direct_features, baseline_total_edge, game_total_value]
                     predicted_total_edge = _predict_direct_model(decision_model, decision_features)
                     decision_weight = _direct_total_decision_blend_weight(decision_model.rows)
@@ -970,10 +1192,10 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                         )
                     )
             if use_target_row:
-                margin_training_rows.append((direct_features, actual_margin))
-                total_training_rows.append((direct_features, actual_total))
+                pending_margin_rows.append((direct_features, actual_margin))
+                pending_total_rows.append((direct_features, actual_total))
                 if game_total is not None and float(game_total) > 0:
-                    total_market_training_rows.append(([*direct_features, baseline_total - float(game_total), float(game_total)], actual_total - float(game_total)))
+                    pending_total_market_rows.append(([*direct_features, baseline_total - float(game_total), float(game_total)], actual_total - float(game_total)))
 
         _append_team_history(
             team_history,
@@ -1072,6 +1294,13 @@ def _game_edge_training_rows(conn: sqlite3.Connection, edge_type: str) -> list[t
         ]
         samples.append((features, float(row["actual_total"]) - game_total))
     return samples
+
+
+def _game_training_segment_key(game_date: str) -> str:
+    normalized = str(game_date or "").strip()
+    if len(normalized) >= 7:
+        return normalized[:7]
+    return normalized
 
 
 def _train_direct_game_model(conn: sqlite3.Connection, target: str) -> _DirectGameModel | None:

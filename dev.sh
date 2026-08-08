@@ -7,10 +7,7 @@ FRONTEND_DIR="$ROOT/frontend"
 BACKEND_PORT="${BACKEND_PORT:-8010}"
 FRONTEND_PORT="${FRONTEND_PORT:-5184}"
 
-# Default dev startup to the local SQLite runtime so snapshot restore/start uses
-# the same database file on Linux and Windows.
 export USE_TURSO="${USE_TURSO:-0}"
-export WNBA_DB_PATH="${WNBA_DB_PATH:-$ROOT/data/wnba.sqlite}"
 
 if [[ "${CODESPACES:-}" == "true" ]]; then
   DEFAULT_HOST="0.0.0.0"
@@ -24,10 +21,12 @@ LOCAL_BACKEND_URL="http://127.0.0.1:$BACKEND_PORT"
 SKIP_HEALTH_CHECK="${SKIP_HEALTH_CHECK:-0}"
 export BACKEND_PORT
 
-# Enforce local SQLite in dev startup by default.
 export USE_TURSO=0
 if [[ -z "${WNBA_DB_PATH:-}" ]]; then
-  export WNBA_DB_PATH="$ROOT/data/wnba.sqlite"
+  echo "WNBA_DB_PATH is required."
+  echo "Refusing to default to $ROOT/data/wnba.sqlite because repo-local runtime SQLite caused split-brain app state."
+  echo "Set WNBA_DB_PATH to the authoritative runtime DB, or source scripts/live_env.sh first."
+  exit 1
 fi
 
 if [[ ! -x "$PYTHON" ]]; then

@@ -36,6 +36,7 @@ class PropPipelineResult:
     attempted_game_predictions: int
     rebuilt_game_predictions: int
     watchlist_snapshot: dict[str, Any] | None = None
+    dfs_snapshot: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,7 @@ def run_prop_sync_pipeline(
     rebuild_predictions_fn: Callable[..., LiveRebuildResult] = rebuild_predictions_live,
     rebuild_games_fn: Callable[..., dict[str, Any]] | None = None,
     snapshot_watchlist_fn: Callable[[sqlite3.Connection, str], dict[str, Any]] | None = None,
+    snapshot_dfs_fn: Callable[[sqlite3.Connection, list[int]], dict[str, Any]] | None = None,
 ) -> PropPipelineResult:
     normalized_target_game_ids = sorted({int(game_id) for game_id in (target_game_ids or []) if int(game_id) > 0})
     scanned = 0
@@ -245,6 +247,10 @@ def run_prop_sync_pipeline(
                 post_game_rebuild_message or "Refreshing watchlist snapshot.",
             )
 
+    dfs_snapshot = None
+    if snapshot_dfs_fn is not None and touched_game_ids:
+        dfs_snapshot = snapshot_dfs_fn(conn, touched_game_ids)
+
     watchlist_snapshot = None
     if snapshot_watchlist_fn is not None and watchlist_snapshot_date is not None:
         watchlist_snapshot = snapshot_watchlist_fn(conn, watchlist_snapshot_date)
@@ -262,6 +268,7 @@ def run_prop_sync_pipeline(
         attempted_game_predictions=attempted_game_predictions,
         rebuilt_game_predictions=rebuilt_game_predictions,
         watchlist_snapshot=watchlist_snapshot,
+        dfs_snapshot=dfs_snapshot,
     )
 
 

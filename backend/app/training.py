@@ -29,7 +29,7 @@ COMPONENT_MODEL_VERSION = "component-pregame-v2"
 DATA_SIGNATURE_LABEL = "data_signature="
 GAME_EVAL_SIGNATURE_LABEL = "game_eval_signature="
 ARTIFACT_BUNDLE_LABEL = "artifact_bundle="
-GAME_EVAL_SIGNATURE = "v6"
+GAME_EVAL_SIGNATURE = "v7"
 DEFAULT_TRAINING_MAX_WORKERS = 2
 
 

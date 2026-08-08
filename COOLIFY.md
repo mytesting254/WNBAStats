@@ -182,6 +182,15 @@ marks that player `didNotPlay`.
 - `WNBA_TRAIN_POLL_TIMEOUT_SECONDS` defaults to `1200`
 - `WNBA_TRAIN_POLL_INTERVAL_SECONDS` defaults to `5`
 
+Training still runs the full Model Lab walk-forward path. It does not isolate
+game-only retraining. After the August 8, 2026 game-model feature expansion,
+full live runs can legitimately exceed the old 20-minute wait window. If the
+job is still consuming CPU and `/api/ops/health` shows model training running,
+raise `WNBA_TRAIN_POLL_TIMEOUT_SECONDS` rather than assuming the job is hung.
+The repo now reduces the game-evaluation hotspot by refitting direct game
+models once per `YYYY-MM` segment instead of on nearly every historical row,
+but cron still waits on the full training pipeline.
+
 If the `2am America/New_York` job logs `Internal Server Error`, do not assume
 cron skipped the run. On Thursday, July 16, 2026, the host cron entries fired
 as expected, but the `settle-and-train` path failed inside
