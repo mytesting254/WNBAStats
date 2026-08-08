@@ -152,6 +152,8 @@ The app is built around a provider-backed pregame workflow:
 - Live DFS first-half tracking now snapshots the current estimate per `prop_line_id` and settles it later against `player_first_half_stats`.
 - Snapshot rows live in `dfs_first_half_projection_snapshots` and settled outcomes live in `dfs_first_half_projection_settlements`.
 - The DFS UI depends on current `prop_lines`. Without current prop ingestion, the DFS first-half tab has no live slate to estimate against.
+- DFS first-half estimates are generated from current full-game `prop_lines` through `prop_predictions`; Covers does not supply a separate DFS slate.
+- Because DFS snapshots key off `prop_line_id`, any scheduled prop-line replacement must invalidate the old DFS snapshot chain before deleting the old line. Odds-only updates can reuse the same `prop_line_id`.
 - For current slates, the fastest recovery path is:
   1. load the saved odds cache into the live runtime
   2. sync sportsbook rows into `prop_lines`
@@ -649,7 +651,12 @@ Cache behavior safeguards:
 - Saved-cache no-op is date-aware. A cache load skips rewrite only when DB already has Covers rows for `game_date >= cache_date`; historical leftover rows no longer block loading today's cached slate.
 - When Covers write/sync hits SQLite lock contention, the API returns a `db_locked` status instead of crashing, so retries are safe.
 - Final `prop_lines` sync is Covers-first by player/game/market. If Covers and Odds API both exist for the same player market, Covers rows win and overlapping non-Covers rows are ignored.
-- Reingest sync is diff-based. Unchanged scheduled `prop_lines` stay in place, deleted lines clean up their dependent snapshots/predictions, and only inserted or odds-changed rows rebuild projections.
+- Reingest sync is diff-based and identity-aware. Scheduled `prop_lines` are keyed by exact `game_id + player_id + market + line`.
+- Unchanged scheduled rows stay in place.
+- Odds-only changes update the existing row so downstream records keep the same `prop_line_id`.
+- Line changes are treated as replacements. The old scheduled `prop_line` is invalidated everywhere it is referenced, then deleted, and the new line is inserted as a new `prop_line_id`.
+- Replacement cleanup removes dependent `prop_predictions`, value-board/watchlist/gem snapshot items, and DFS first-half projection snapshots/settlements before deleting the obsolete scheduled line, which prevents foreign-key failures during Covers sync.
+- Only inserted rows and rows with changed odds rebuild projections.
 - Projection rebuilds now reuse a shared player/game feature context within the run, which reduces repeated minutes/context recomputation when one player has multiple live markets.
 
 Refresh from the app or call:
@@ -659,6 +666,14 @@ POST /api/covers/import?force_refresh=true
 ```
 
 Loading saved Covers cache (`POST /api/covers/import` without `force_refresh`) also performs immediate prop-line sync so model props load without waiting for a background precompute.
+
+The intended Covers refresh pipeline is:
+
+1. Refresh or load cached Covers matchup/player-prop payloads into `sportsbook_prop_lines`.
+2. Diff scheduled `prop_lines` against the normalized Covers-preferred slate.
+3. Keep unchanged rows, update odds-only changes in place, and replace exact-line changes only after invalidating every dependent record tied to the obsolete `prop_line_id`.
+4. Insert new rows and rebuild projections only for inserted or changed lines.
+5. Republish current-slate payloads so matchup, value-board, watchlist, gem, and DFS views all point at the new active `prop_line_id` set.
 
 If a live refresh returns matchup context only, inspect the runtime `covers_pages_raw.json` first. That file preserves the fetched matchup page, odds page, and market fragments even when no player-prop rows are written, which makes parser drift easier to diagnose than relying on the API response alone.
 

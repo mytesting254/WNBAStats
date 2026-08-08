@@ -634,6 +634,37 @@ def sync_prop_lines_from_sportsbook(
             if delete_prop_line_ids:
                 delete_attempts = 4 if fast_fail else 20
                 delete_sleep = 0.05 if fast_fail else 0.15
+                dfs_snapshot_ids: list[int] = []
+                for start in range(0, len(delete_prop_line_ids), 250):
+                    prop_line_id_batch = delete_prop_line_ids[start : start + 250]
+                    placeholders = ",".join("?" for _ in prop_line_id_batch)
+                    dfs_snapshot_ids.extend(
+                        int(row["id"])
+                        for row in conn.execute(
+                            f"""
+                            SELECT id
+                            FROM dfs_first_half_projection_snapshots
+                            WHERE prop_line_id IN ({placeholders})
+                            """,
+                            tuple(prop_line_id_batch),
+                        ).fetchall()
+                    )
+                _delete_by_id_batches(
+                    conn,
+                    "dfs_first_half_projection_settlements",
+                    "snapshot_id",
+                    dfs_snapshot_ids,
+                    attempts=delete_attempts,
+                    base_sleep=delete_sleep,
+                )
+                _delete_by_id_batches(
+                    conn,
+                    "dfs_first_half_projection_snapshots",
+                    "id",
+                    dfs_snapshot_ids,
+                    attempts=delete_attempts,
+                    base_sleep=delete_sleep,
+                )
                 _delete_by_id_batches(
                     conn,
                     "watchlist_snapshot_items",

@@ -9844,6 +9844,84 @@ def test_odds_sync_reingest_preserves_unchanged_prop_lines() -> None:
     assert prediction["reason"] == "stale"
 
 
+def test_odds_sync_removes_dfs_snapshot_before_replacing_scheduled_prop_line() -> None:
+    load_test_history()
+    captured_at = datetime.now(timezone.utc).isoformat()
+    with connect() as conn:
+        conn.execute("DELETE FROM prop_predictions")
+        conn.execute("DELETE FROM prop_lines")
+        conn.execute(
+            """
+            INSERT INTO prop_lines (
+                id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at
+            ) VALUES (9651, 2010, 1001, 'DraftKings', 'points', 21.5, -110, -110, ?)
+            """,
+            (captured_at,),
+        )
+        snapshot_result = dfs_model_module.snapshot_current_dfs_first_half_estimates(
+            conn,
+            [
+                {
+                    "prop_line_id": 9651,
+                    "game_id": 2010,
+                    "player_id": 1001,
+                    "sportsbook": "DraftKings",
+                    "market": "points",
+                    "line": 21.5,
+                    "over_odds": -110,
+                    "under_odds": -110,
+                    "full_game_projection": 22.0,
+                    "estimated_first_half_result": 11.0,
+                    "expected_halfway_line": 10.75,
+                    "pace_ratio": 1.0,
+                    "halftime_margin_to_line": 0.25,
+                    "on_track_probability": 0.55,
+                    "recommended_side": "over",
+                    "confidence": "medium",
+                    "model_version": "dfs-first-half-ridge-v2",
+                    "model_rows": 100,
+                    "team_first_half_share": 0.5,
+                    "estimated_first_half_minutes_share": 0.5,
+                    "projected_first_half_total": 40.0,
+                    "game_total": 80.0,
+                    "start_time": "2026-05-08T23:30:00Z",
+                }
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO sportsbook_prop_lines (
+                provider, provider_event_id, game_id, game_date, commence_time, home_team, away_team,
+                bookmaker_key, sportsbook, market_key, market, player_name, side, line, price, captured_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "over", 22.5, -105, captured_at),
+                ("covers", "evt", 2010, "2026-05-08", "2026-05-08T23:30:00Z", "New York Liberty", "Connecticut Sun", "dk", "DraftKings", "player_points", "points", "Breanna Stewart", "under", 22.5, -115, captured_at),
+            ],
+        )
+
+        result = sync_prop_lines_from_sportsbook(
+            conn,
+            rebuild_predictions_after=False,
+            include_change_details=True,
+        )
+        old_line = conn.execute("SELECT id FROM prop_lines WHERE id = 9651").fetchone()
+        old_snapshot = conn.execute(
+            "SELECT id FROM dfs_first_half_projection_snapshots WHERE prop_line_id = 9651"
+        ).fetchone()
+        replacement = conn.execute(
+            "SELECT line FROM prop_lines WHERE game_id = 2010 AND player_id = 1001 AND market = 'points'"
+        ).fetchone()
+
+    assert snapshot_result == {"inserted": 1, "updated": 0, "skipped": 0}
+    assert isinstance(result, SyncPropLinesResult)
+    assert old_line is None
+    assert old_snapshot is None
+    assert replacement is not None
+    assert float(replacement["line"]) == pytest.approx(22.5)
+
+
 def test_odds_sync_reingest_updates_only_changed_prop_line_predictions(monkeypatch) -> None:
     load_test_history()
     first_captured_at = datetime.now(timezone.utc).isoformat()
