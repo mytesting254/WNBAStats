@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover
     HistGradientBoostingRegressor = None
 
 from . import game_predictions as gp
+from .game_pregame_features import build_matchup_pregame_features
 from .segment_training_db import load_segment_training_rows
 from .segment_training_db import _segment_history_context
 
@@ -436,12 +437,26 @@ def _segment_features(
 ) -> list[float]:
     home_team_id = int(game["home_team_id"])
     away_team_id = int(game["away_team_id"])
+    game_id = _game_value(game, "id")
     game_date = str(_game_value(game, "game_date") or "")
     pace_factor = gp._clamp(
         ((float(home_context["avg_possessions"]) + float(away_context["avg_possessions"])) / 2.0)
         / max(_league_half_possessions(conn, game_date=game_date), 1.0),
         0.94,
         1.06,
+    )
+    matchup_pregame = (
+        build_matchup_pregame_features(
+            conn,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            game_id=int(game_id),
+            game_date=game_date,
+            use_injury_context=False,
+            runtime_cache=cache.runtime_cache,
+        )
+        if game_id is not None
+        else None
     )
     base_features = gp._assemble_direct_game_features(
         home_recent_points=float(home_context["recent_points"]),
@@ -473,6 +488,11 @@ def _segment_features(
         game_total=gp._coerce_float(game["game_total"]),
         home_moneyline=gp._coerce_float(game["home_moneyline"]),
         away_moneyline=gp._coerce_float(game["away_moneyline"]),
+        home_spread_price=gp._coerce_float(_game_value(game, "home_spread_price")),
+        away_spread_price=gp._coerce_float(_game_value(game, "away_spread_price")),
+        over_price=gp._coerce_float(_game_value(game, "over_price")),
+        under_price=gp._coerce_float(_game_value(game, "under_price")),
+        matchup_pregame=matchup_pregame,
     )
     home_segment_context = _team_segment_context(conn, team_id=home_team_id, game_date=game_date, current_is_home=True)
     away_segment_context = _team_segment_context(conn, team_id=away_team_id, game_date=game_date, current_is_home=False)

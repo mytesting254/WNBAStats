@@ -6,11 +6,12 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .game_pregame_features import build_matchup_pregame_features
 from .game_pregame_features import GAME_PREGAME_FEATURE_VERSION
 from .paths import get_segment_training_db_path
 
 
-SEGMENT_TRAINING_DB_VERSION = "v2"
+SEGMENT_TRAINING_DB_VERSION = "v3"
 _SEGMENT_TRAINING_DB_LOCK = threading.RLock()
 SEGMENT_EXTRA_FEATURE_NAMES = [
     "home_avg_q1_points",
@@ -228,9 +229,14 @@ def _rebuild_segment_training_examples(
             g.away_team_id,
             g.rest_days_home,
             g.rest_days_away,
+            g.spread_home,
             g.game_total,
             g.home_moneyline,
             g.away_moneyline,
+            g.home_spread_price,
+            g.away_spread_price,
+            g.over_price,
+            g.under_price,
             home_result.possessions AS home_possessions,
             away_result.possessions AS away_possessions,
             segments.home_q1_points,
@@ -252,6 +258,7 @@ def _rebuild_segment_training_examples(
 
     history: dict[int, dict[str, object]] = {}
     segment_history: dict[int, dict[str, object]] = {}
+    runtime_cache: dict[str, dict[tuple, object]] = {}
     rows_to_insert: list[tuple[object, ...]] = []
     for row in rows:
         candidate_rows += 1
@@ -275,6 +282,15 @@ def _rebuild_segment_training_examples(
             / gp._historical_league_possessions(history),
             0.94,
             1.06,
+        )
+        matchup_pregame = build_matchup_pregame_features(
+            source_conn,
+            home_team_id=home_team_id,
+            away_team_id=away_team_id,
+            game_id=int(row["id"]),
+            game_date=game_date,
+            use_injury_context=False,
+            runtime_cache=runtime_cache,
         )
         base_features = gp._assemble_direct_game_features(
             home_recent_points=float(home_context["recent_points"]),
@@ -302,10 +318,15 @@ def _rebuild_segment_training_examples(
             away_recent_off_rating=gp._team_rating(float(away_context["recent_points"]), float(away_context["recent_possessions"])),
             home_recent_def_rating=gp._team_rating(float(home_context["recent_allowed"]), float(home_context["recent_possessions"])),
             away_recent_def_rating=gp._team_rating(float(away_context["recent_allowed"]), float(away_context["recent_possessions"])),
-            spread_home=None,
+            spread_home=gp._coerce_float(row["spread_home"]),
             game_total=gp._coerce_float(row["game_total"]),
             home_moneyline=gp._coerce_float(row["home_moneyline"]),
             away_moneyline=gp._coerce_float(row["away_moneyline"]),
+            home_spread_price=gp._coerce_float(row["home_spread_price"]),
+            away_spread_price=gp._coerce_float(row["away_spread_price"]),
+            over_price=gp._coerce_float(row["over_price"]),
+            under_price=gp._coerce_float(row["under_price"]),
+            matchup_pregame=matchup_pregame,
         )
         features = [
             *base_features,
