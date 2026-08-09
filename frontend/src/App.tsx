@@ -3125,6 +3125,42 @@ function renderRecentOutcomesWithMinutes(
   );
 }
 
+function renderSpecialH2HHistory(
+  snapshot: Pick<SpecialStocksSnapshot, "h2h_opponent" | "h2h_values" | "h2h_minutes">,
+  keyPrefix: string
+) {
+  if (!Array.isArray(snapshot.h2h_values) || snapshot.h2h_values.length === 0) {
+    return <span className="empty-inline">No H2H</span>;
+  }
+  return (
+    <div className="prop-l5-strip" aria-label={`Head-to-head stocks vs ${snapshot.h2h_opponent ?? "opponent"}`}>
+      {snapshot.h2h_values.slice(0, 5).map((value, idx) => (
+        <span
+          key={`${keyPrefix}-h2h-${idx}`}
+          className="neutral"
+          title={`Stocks vs ${snapshot.h2h_opponent ?? "opponent"}: ${value.toFixed(1)}`}
+        >
+          {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+        </span>
+      ))}
+      {Array.isArray(snapshot.h2h_minutes) && snapshot.h2h_minutes.length > 0 && (
+        <>
+          <span className="l5-separator" title="Minutes in head-to-head games">|</span>
+          {snapshot.h2h_minutes.slice(0, 5).map((minutes, idx) => (
+            <span
+              key={`${keyPrefix}-h2h-min-${idx}`}
+              className="min-chip"
+              title={`Minutes vs ${snapshot.h2h_opponent ?? "opponent"}: ${minutes.toFixed(1)}`}
+            >
+              {minutes.toFixed(1)}
+            </span>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 type GemPreset = "conservative" | "balanced" | "aggressive";
 type GemProp = ValueProp & {
   gem_score: number;
@@ -4970,6 +5006,7 @@ function SpecialStocksView({
                 <table className="props-table special-props-table">
                   <colgroup>
                     <col className="special-col-player" />
+                    <col className="special-col-player" />
                     <col className="special-col-tier" />
                     <col className="special-col-metric" />
                     <col className="special-col-metric" />
@@ -4985,6 +5022,7 @@ function SpecialStocksView({
                   <thead>
                     <tr>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("player_name")}>Player {sortIndicator("player_name")}</button></th>
+                      <th>H2H STK</th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("tier")}>Tier {sortIndicator("tier")}</button></th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("projected_steals")}>STL {sortIndicator("projected_steals")}</button></th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("projected_blocks")}>BLK {sortIndicator("projected_blocks")}</button></th>
@@ -5020,6 +5058,7 @@ function SpecialStocksView({
                             </div>
                           </div>
                         </td>
+                        <td>{renderSpecialH2HHistory(snapshot, `special-h2h-${snapshot.id}`)}</td>
                         <td>
                           {(snapshot.stocks_prob_2_plus ?? 0) >= highConfidenceThreshold
                             ? "High"
@@ -5041,7 +5080,7 @@ function SpecialStocksView({
                     ))}
                     {!selectedCard.players.length && (
                       <tr>
-                        <td colSpan={12}>No special props generated for this game yet.</td>
+                        <td colSpan={13}>No special props generated for this game yet.</td>
                       </tr>
                     )}
                   </tbody>

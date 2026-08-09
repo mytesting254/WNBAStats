@@ -33,8 +33,8 @@ _STOCKS_RECENT_WINDOW_GAMES = 12
 _STOCKS_STABILITY_WINDOW_GAMES = 24
 _STOCKS_PROMOTION_WINDOW_GAMES = 3
 _SNAPSHOT_DELTA_TOLERANCE = 1e-4
-SPECIALS_DEFAULT_HIGH_THRESHOLD = 0.50
-SPECIALS_DEFAULT_WATCH_THRESHOLD = 0.40
+SPECIALS_DEFAULT_HIGH_THRESHOLD = 0.55
+SPECIALS_DEFAULT_WATCH_THRESHOLD = 0.45
 SPECIALS_MIN_SETTLED_THRESHOLD_ROWS = 40
 SPECIALS_MIN_THRESHOLD_BUCKET_ROWS = 10
 SPECIALS_MIN_THRESHOLD_BUCKET_HITS = 4
@@ -42,6 +42,33 @@ SPECIALS_MIN_THRESHOLD_BUCKET_HITS = 4
 
 def _clamp(value: float, lower: float, upper: float) -> float:
     return max(lower, min(upper, value))
+
+
+def _stocks_recent_history_blend_weight(projected_stocks: float) -> float:
+    if projected_stocks < 1.25:
+        return 0.12
+    if projected_stocks < 1.75:
+        return 0.16
+    if projected_stocks < 2.5:
+        return 0.20
+    return 0.18
+
+
+def _stocks_probability_context_penalty(
+    *,
+    projected_stocks: float,
+    prepared_stocks_row: sqlite3.Row | None,
+    matchup_context: sqlite3.Row | dict[str, object] | None,
+    recent_hit_rate: float | None,
+) -> float:
+    penalty = 1.0
+    if prepared_stocks_row is None:
+        penalty *= 0.96 if projected_stocks < 2.0 else 0.97
+    if matchup_context is None:
+        penalty *= 0.97
+    if recent_hit_rate is None:
+        penalty *= 0.98
+    return penalty
 
 
 def get_tracking_db_path() -> Path:
@@ -76,6 +103,29 @@ def ensure_tracking_schema() -> Path:
                     block_prob_2_plus REAL NOT NULL,
                     stocks_prob_2_plus REAL NOT NULL,
                     stocks_prob_3_plus REAL NOT NULL DEFAULT 0,
+                    snapshot_team_id INTEGER,
+                    snapshot_team_abbr TEXT,
+                    snapshot_rotation_role TEXT,
+                    snapshot_candidate_reason TEXT,
+                    snapshot_recent_minutes_avg REAL NOT NULL DEFAULT 0,
+                    snapshot_recent_stocks_avg REAL NOT NULL DEFAULT 0,
+                    snapshot_recent_games INTEGER NOT NULL DEFAULT 0,
+                    snapshot_projected_minutes REAL NOT NULL DEFAULT 0,
+                    snapshot_minute_volatility REAL NOT NULL DEFAULT 0,
+                    snapshot_recent_hit_rate_2_plus REAL,
+                    snapshot_injury_status TEXT NOT NULL DEFAULT 'available',
+                    snapshot_injury_availability_factor REAL NOT NULL DEFAULT 1,
+                    snapshot_injury_usage_multiplier REAL NOT NULL DEFAULT 1,
+                    snapshot_injury_minutes_delta REAL NOT NULL DEFAULT 0,
+                    snapshot_opportunity_unavailable REAL NOT NULL DEFAULT 0,
+                    snapshot_opportunity_key_outs REAL NOT NULL DEFAULT 0,
+                    snapshot_opportunity_persistence REAL NOT NULL DEFAULT 0,
+                    snapshot_opportunity_competition REAL NOT NULL DEFAULT 0,
+                    snapshot_pace_factor REAL,
+                    snapshot_stocks_allowed_factor REAL,
+                    snapshot_turnover_pressure_factor REAL,
+                    snapshot_has_prep_context INTEGER NOT NULL DEFAULT 0,
+                    snapshot_has_matchup_context INTEGER NOT NULL DEFAULT 0,
                     data_quality TEXT NOT NULL,
                     UNIQUE(game_id, player_id, model_version, captured_at)
                 );
@@ -210,6 +260,40 @@ def ensure_tracking_schema() -> Path:
                 try:
                     conn.execute(
                         "ALTER TABLE projection_snapshots ADD COLUMN stocks_prob_3_plus REAL NOT NULL DEFAULT 0"
+                    )
+                except sqlite3.OperationalError as exc:
+                    if "duplicate column name" not in str(exc).lower():
+                        raise
+            for column_name, column_sql in (
+                ("snapshot_team_id", "INTEGER"),
+                ("snapshot_team_abbr", "TEXT"),
+                ("snapshot_rotation_role", "TEXT"),
+                ("snapshot_candidate_reason", "TEXT"),
+                ("snapshot_recent_minutes_avg", "REAL NOT NULL DEFAULT 0"),
+                ("snapshot_recent_stocks_avg", "REAL NOT NULL DEFAULT 0"),
+                ("snapshot_recent_games", "INTEGER NOT NULL DEFAULT 0"),
+                ("snapshot_projected_minutes", "REAL NOT NULL DEFAULT 0"),
+                ("snapshot_minute_volatility", "REAL NOT NULL DEFAULT 0"),
+                ("snapshot_recent_hit_rate_2_plus", "REAL"),
+                ("snapshot_injury_status", "TEXT NOT NULL DEFAULT 'available'"),
+                ("snapshot_injury_availability_factor", "REAL NOT NULL DEFAULT 1"),
+                ("snapshot_injury_usage_multiplier", "REAL NOT NULL DEFAULT 1"),
+                ("snapshot_injury_minutes_delta", "REAL NOT NULL DEFAULT 0"),
+                ("snapshot_opportunity_unavailable", "REAL NOT NULL DEFAULT 0"),
+                ("snapshot_opportunity_key_outs", "REAL NOT NULL DEFAULT 0"),
+                ("snapshot_opportunity_persistence", "REAL NOT NULL DEFAULT 0"),
+                ("snapshot_opportunity_competition", "REAL NOT NULL DEFAULT 0"),
+                ("snapshot_pace_factor", "REAL"),
+                ("snapshot_stocks_allowed_factor", "REAL"),
+                ("snapshot_turnover_pressure_factor", "REAL"),
+                ("snapshot_has_prep_context", "INTEGER NOT NULL DEFAULT 0"),
+                ("snapshot_has_matchup_context", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column_name in columns:
+                    continue
+                try:
+                    conn.execute(
+                        f"ALTER TABLE projection_snapshots ADD COLUMN {column_name} {column_sql}"
                     )
                 except sqlite3.OperationalError as exc:
                     if "duplicate column name" not in str(exc).lower():
@@ -392,7 +476,30 @@ def _snapshot_rows_match(
         ("block_prob_2_plus", 12),
         ("stocks_prob_2_plus", 13),
         ("stocks_prob_3_plus", 14),
-        ("data_quality", 15),
+        ("snapshot_team_id", 15),
+        ("snapshot_team_abbr", 16),
+        ("snapshot_rotation_role", 17),
+        ("snapshot_candidate_reason", 18),
+        ("snapshot_recent_minutes_avg", 19),
+        ("snapshot_recent_stocks_avg", 20),
+        ("snapshot_recent_games", 21),
+        ("snapshot_projected_minutes", 22),
+        ("snapshot_minute_volatility", 23),
+        ("snapshot_recent_hit_rate_2_plus", 24),
+        ("snapshot_injury_status", 25),
+        ("snapshot_injury_availability_factor", 26),
+        ("snapshot_injury_usage_multiplier", 27),
+        ("snapshot_injury_minutes_delta", 28),
+        ("snapshot_opportunity_unavailable", 29),
+        ("snapshot_opportunity_key_outs", 30),
+        ("snapshot_opportunity_persistence", 31),
+        ("snapshot_opportunity_competition", 32),
+        ("snapshot_pace_factor", 33),
+        ("snapshot_stocks_allowed_factor", 34),
+        ("snapshot_turnover_pressure_factor", 35),
+        ("snapshot_has_prep_context", 36),
+        ("snapshot_has_matchup_context", 37),
+        ("data_quality", 38),
     )
     for column_name, tuple_index in comparable_columns:
         latest_value = latest_row[column_name]
@@ -454,6 +561,29 @@ def _latest_snapshot_rows_by_pair(
             block_prob_2_plus,
             stocks_prob_2_plus,
             stocks_prob_3_plus,
+            snapshot_team_id,
+            snapshot_team_abbr,
+            snapshot_rotation_role,
+            snapshot_candidate_reason,
+            snapshot_recent_minutes_avg,
+            snapshot_recent_stocks_avg,
+            snapshot_recent_games,
+            snapshot_projected_minutes,
+            snapshot_minute_volatility,
+            snapshot_recent_hit_rate_2_plus,
+            snapshot_injury_status,
+            snapshot_injury_availability_factor,
+            snapshot_injury_usage_multiplier,
+            snapshot_injury_minutes_delta,
+            snapshot_opportunity_unavailable,
+            snapshot_opportunity_key_outs,
+            snapshot_opportunity_persistence,
+            snapshot_opportunity_competition,
+            snapshot_pace_factor,
+            snapshot_stocks_allowed_factor,
+            snapshot_turnover_pressure_factor,
+            snapshot_has_prep_context,
+            snapshot_has_matchup_context,
             data_quality
         FROM latest
         WHERE snapshot_rank = 1
@@ -1207,27 +1337,27 @@ def rebuild_candidate_players(
             LEFT JOIN team_unavailable tu ON tu.team_id = p.team_id
             WHERE COALESCE(li.status, 'available') NOT IN ('out', 'inactive', 'suspended', 'unavailable')
               AND (
-                    COALESCE(rs.recent_minutes_avg, 0.0) >= 14.0
-                 OR COALESCE(rs.recent_stocks_avg, 0.0) >= 1.5
+                    COALESCE(rs.recent_minutes_avg, 0.0) >= 16.0
+                 OR COALESCE(rs.recent_stocks_avg, 0.0) >= 1.7
                  OR (
                         COALESCE(rs.recent_games, 0) >= 4
-                    AND COALESCE(rs.recent_minutes_avg, 0.0) >= 10.0
+                    AND COALESCE(rs.recent_minutes_avg, 0.0) >= 11.0
                  )
                  OR (
                         COALESCE(rs.recent_games, 0) >= 4
                     AND COALESCE(rs.recent_minutes_avg, 0.0) >= 8.0
-                    AND COALESCE(rs.recent_stocks_avg, 0.0) >= 1.1
+                    AND COALESCE(rs.recent_stocks_avg, 0.0) >= 1.2
                     AND lower(trim(COALESCE(p.rotation_role, 'rotation'))) IN ('star', 'starter', 'rotation', 'bench')
                  )
                  OR (
                         COALESCE(rs.recent_games, 0) >= 3
-                    AND COALESCE(rs.last3_minutes_avg, 0.0) >= 16.0
+                    AND COALESCE(rs.last3_minutes_avg, 0.0) >= 18.0
                     AND COALESCE(rs.last3_minutes_avg, 0.0) >= COALESCE(rs.stability_minutes_avg, 0.0) + 4.0
                  )
                  OR (
                         COALESCE(tu.unavailable_count, 0) >= 2
                     AND COALESCE(rs.recent_games, 0) >= 3
-                    AND COALESCE(rs.recent_minutes_avg, 0.0) >= 8.0
+                    AND COALESCE(rs.recent_minutes_avg, 0.0) >= 10.0
                  )
               )
             ORDER BY
@@ -1341,7 +1471,13 @@ def _candidate_players_for_snapshot(
             cp.game_date,
             cp.player_id,
             cp.player_name,
-            cp.team_id
+            cp.team_id,
+            cp.team_abbr,
+            cp.rotation_role,
+            cp.recent_minutes_avg,
+            cp.recent_stocks_avg,
+            cp.recent_games,
+            cp.candidate_reason
         FROM candidate_players cp
         """
         + filter_sql
@@ -1364,7 +1500,13 @@ def _candidate_players_for_snapshot(
             cp.game_date,
             cp.player_id,
             cp.player_name,
-            cp.team_id
+            cp.team_id,
+            cp.team_abbr,
+            cp.rotation_role,
+            cp.recent_minutes_avg,
+            cp.recent_stocks_avg,
+            cp.recent_games,
+            cp.candidate_reason
         FROM candidate_players cp
         """
         + filter_sql
@@ -1900,7 +2042,17 @@ def _player_prep_features_for_game(
         SELECT
             market,
             contextual_projection,
-            recent_hit_rate_2_plus
+            recent_hit_rate_2_plus,
+            projected_minutes,
+            minute_volatility,
+            injury_status,
+            injury_availability_factor,
+            injury_usage_multiplier,
+            injury_minutes_delta,
+            opportunity_unavailable,
+            opportunity_key_outs,
+            opportunity_persistence,
+            opportunity_competition
         FROM player_prep_features
         WHERE game_id = ?
           AND player_id = ?
@@ -2021,6 +2173,18 @@ def rebuild_game_board_summaries(
                         top_player_name,
                         built_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(game_id) DO UPDATE SET
+                        game_date = excluded.game_date,
+                        player_count = excluded.player_count,
+                        candidate_count_50_plus = excluded.candidate_count_50_plus,
+                        candidate_threshold = excluded.candidate_threshold,
+                        candidate_count_threshold = excluded.candidate_count_threshold,
+                        avg_prob_2_plus = excluded.avg_prob_2_plus,
+                        avg_prob_3_plus = excluded.avg_prob_3_plus,
+                        top_projected_stocks = excluded.top_projected_stocks,
+                        top_prob_2_plus = excluded.top_prob_2_plus,
+                        top_player_name = excluded.top_player_name,
+                        built_at = excluded.built_at
                     """,
                     summary_rows,
                 )
@@ -2050,6 +2214,12 @@ def snapshot_stocks(
             player_id = int(row["player_id"])
             player_name = str(row["player_name"])
             team_id = int(row["team_id"]) if row["team_id"] is not None else None
+            team_abbr = str(row["team_abbr"] or "")
+            rotation_role = str(row["rotation_role"] or "")
+            candidate_reason = str(row["candidate_reason"] or "")
+            recent_minutes_avg = float(row["recent_minutes_avg"] or 0.0)
+            recent_stocks_avg = float(row["recent_stocks_avg"] or 0.0)
+            recent_games = int(row["recent_games"] or 0)
             prepared_features = _player_prep_features_for_game(tracking, game_id=game_id, player_id=player_id)
             matchup_context = _team_prep_context_for_game(tracking, game_id=game_id, team_id=team_id)
             def _component_projection(market: str) -> float:
@@ -2142,7 +2312,7 @@ def snapshot_stocks(
                     game_date=str(game_date),
                 )
             if recent_hit_rate is not None:
-                history_weight = 0.18 if projected_stocks < 1.5 else 0.28 if projected_stocks < 2.5 else 0.22
+                history_weight = _stocks_recent_history_blend_weight(projected_stocks)
                 stocks_prob_2_plus = ((1.0 - history_weight) * stocks_prob_2_plus) + (
                     history_weight * float(recent_hit_rate)
                 )
@@ -2155,6 +2325,49 @@ def snapshot_stocks(
                 raw_probability=_poisson_at_least(projected_stocks, 3),
                 game_date=str(game_date),
                 history_count_cache=calibration_history_cache,
+            )
+            context_penalty = _stocks_probability_context_penalty(
+                projected_stocks=projected_stocks,
+                prepared_stocks_row=prepared_stocks_row,
+                matchup_context=matchup_context,
+                recent_hit_rate=recent_hit_rate,
+            )
+            if context_penalty < 1.0:
+                stocks_prob_2_plus = max(0.0, min(1.0, stocks_prob_2_plus * context_penalty))
+                stocks_prob_3_plus = max(0.0, min(1.0, stocks_prob_3_plus * context_penalty))
+            snapshot_projected_minutes = 0.0
+            snapshot_minute_volatility = 0.0
+            snapshot_recent_hit_rate_2_plus = None
+            snapshot_injury_status = "available"
+            snapshot_injury_availability_factor = 1.0
+            snapshot_injury_usage_multiplier = 1.0
+            snapshot_injury_minutes_delta = 0.0
+            snapshot_opportunity_unavailable = 0.0
+            snapshot_opportunity_key_outs = 0.0
+            snapshot_opportunity_persistence = 0.0
+            snapshot_opportunity_competition = 0.0
+            if prepared_stocks_row is not None:
+                snapshot_projected_minutes = float(prepared_stocks_row["projected_minutes"] or 0.0)
+                snapshot_minute_volatility = float(prepared_stocks_row["minute_volatility"] or 0.0)
+                snapshot_recent_hit_rate_2_plus = (
+                    None
+                    if prepared_stocks_row["recent_hit_rate_2_plus"] is None
+                    else float(prepared_stocks_row["recent_hit_rate_2_plus"])
+                )
+                snapshot_injury_status = str(prepared_stocks_row["injury_status"] or "available")
+                snapshot_injury_availability_factor = float(prepared_stocks_row["injury_availability_factor"] or 1.0)
+                snapshot_injury_usage_multiplier = float(prepared_stocks_row["injury_usage_multiplier"] or 1.0)
+                snapshot_injury_minutes_delta = float(prepared_stocks_row["injury_minutes_delta"] or 0.0)
+                snapshot_opportunity_unavailable = float(prepared_stocks_row["opportunity_unavailable"] or 0.0)
+                snapshot_opportunity_key_outs = float(prepared_stocks_row["opportunity_key_outs"] or 0.0)
+                snapshot_opportunity_persistence = float(prepared_stocks_row["opportunity_persistence"] or 0.0)
+                snapshot_opportunity_competition = float(prepared_stocks_row["opportunity_competition"] or 0.0)
+            snapshot_pace_factor = None if matchup_context is None else float(matchup_context["pace_factor"] or 1.0)
+            snapshot_stocks_allowed_factor = (
+                None if matchup_context is None else float(matchup_context["stocks_allowed_factor"] or 1.0)
+            )
+            snapshot_turnover_pressure_factor = (
+                None if matchup_context is None else float(matchup_context["turnover_pressure_factor"] or 1.0)
             )
             candidate_snapshot = (
                 int(game_id),
@@ -2172,6 +2385,29 @@ def snapshot_stocks(
                 block_prob_2_plus,
                 stocks_prob_2_plus,
                 stocks_prob_3_plus,
+                team_id,
+                team_abbr,
+                rotation_role,
+                candidate_reason,
+                recent_minutes_avg,
+                recent_stocks_avg,
+                recent_games,
+                snapshot_projected_minutes,
+                snapshot_minute_volatility,
+                snapshot_recent_hit_rate_2_plus,
+                snapshot_injury_status,
+                snapshot_injury_availability_factor,
+                snapshot_injury_usage_multiplier,
+                snapshot_injury_minutes_delta,
+                snapshot_opportunity_unavailable,
+                snapshot_opportunity_key_outs,
+                snapshot_opportunity_persistence,
+                snapshot_opportunity_competition,
+                snapshot_pace_factor,
+                snapshot_stocks_allowed_factor,
+                snapshot_turnover_pressure_factor,
+                1 if prepared_stocks_row is not None else 0,
+                1 if matchup_context is not None else 0,
                 "model_only",
             )
             latest_row = latest_rows.get((game_id, player_id))
@@ -2197,8 +2433,31 @@ def snapshot_stocks(
                     block_prob_2_plus,
                     stocks_prob_2_plus,
                     stocks_prob_3_plus,
+                    snapshot_team_id,
+                    snapshot_team_abbr,
+                    snapshot_rotation_role,
+                    snapshot_candidate_reason,
+                    snapshot_recent_minutes_avg,
+                    snapshot_recent_stocks_avg,
+                    snapshot_recent_games,
+                    snapshot_projected_minutes,
+                    snapshot_minute_volatility,
+                    snapshot_recent_hit_rate_2_plus,
+                    snapshot_injury_status,
+                    snapshot_injury_availability_factor,
+                    snapshot_injury_usage_multiplier,
+                    snapshot_injury_minutes_delta,
+                    snapshot_opportunity_unavailable,
+                    snapshot_opportunity_key_outs,
+                    snapshot_opportunity_persistence,
+                    snapshot_opportunity_competition,
+                    snapshot_pace_factor,
+                    snapshot_stocks_allowed_factor,
+                    snapshot_turnover_pressure_factor,
+                    snapshot_has_prep_context,
+                    snapshot_has_matchup_context,
                     data_quality
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 rows_to_insert,
             )

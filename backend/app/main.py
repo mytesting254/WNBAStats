@@ -1528,6 +1528,18 @@ def special_stocks() -> list[dict[str, Any]]:
             item["position"] = game_row["position"]
             item["team"] = game_row["team"]
             item["team_logo_url"] = game_row["team_logo_url"]
+            resolved_team_id = game_row["team_id"]
+            if resolved_team_id is not None:
+                item.update(
+                    _recent_h2h_market_history(
+                        conn,
+                        player_id=int(player_id),
+                        market="blocks_steals",
+                        game_id=int(game_id),
+                        resolved_team_id=int(resolved_team_id),
+                        limit=5,
+                    )
+                )
             board_summary = board_summaries.get(int(game_id))
             if board_summary is not None:
                 item["board_player_count"] = int(board_summary.get("player_count") or 0)
@@ -8513,6 +8525,7 @@ def _special_game_rows_by_pair(conn, pairs: list[tuple[int, int]]) -> dict[tuple
             home.abbreviation AS home_team,
             away.abbreviation AS away_team,
             p.position,
+            rt.id AS team_id,
             rt.abbreviation AS team,
             rt.logo_url AS team_logo_url
         FROM target_pairs tp

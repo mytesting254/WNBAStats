@@ -145,6 +145,9 @@ export type SpecialStocksSnapshot = {
   board_top_player_name?: string | null;
   recent_values?: number[];
   recent_minutes?: number[];
+  h2h_opponent?: string | null;
+  h2h_values?: number[];
+  h2h_minutes?: number[];
   actual_steals?: number | null;
   actual_blocks?: number | null;
   actual_stocks?: number | null;

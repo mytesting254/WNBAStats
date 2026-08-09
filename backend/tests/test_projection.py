@@ -6902,6 +6902,78 @@ def test_snapshot_stocks_skips_unchanged_rows(monkeypatch, tmp_path) -> None:
     assert int(snapshot_count) == int(first_written)
 
 
+def test_snapshot_stocks_persists_snapshot_time_context(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    with connect() as conn:
+        stocks_tracking_module.rebuild_candidate_players(conn)
+        stocks_tracking_module.rebuild_team_prep_context(conn)
+        stocks_tracking_module.rebuild_player_prep_features(conn)
+        written = stocks_tracking_module.snapshot_stocks(conn)
+
+    assert written > 0
+    with sqlite3.connect(tracking_path) as tracking:
+        tracking.row_factory = sqlite3.Row
+        row = tracking.execute(
+            """
+            SELECT
+                snapshot_team_id,
+                snapshot_team_abbr,
+                snapshot_rotation_role,
+                snapshot_candidate_reason,
+                snapshot_recent_minutes_avg,
+                snapshot_recent_stocks_avg,
+                snapshot_recent_games,
+                snapshot_projected_minutes,
+                snapshot_minute_volatility,
+                snapshot_recent_hit_rate_2_plus,
+                snapshot_injury_status,
+                snapshot_injury_availability_factor,
+                snapshot_injury_usage_multiplier,
+                snapshot_injury_minutes_delta,
+                snapshot_opportunity_unavailable,
+                snapshot_opportunity_key_outs,
+                snapshot_opportunity_persistence,
+                snapshot_opportunity_competition,
+                snapshot_pace_factor,
+                snapshot_stocks_allowed_factor,
+                snapshot_turnover_pressure_factor,
+                snapshot_has_prep_context,
+                snapshot_has_matchup_context
+            FROM projection_snapshots
+            ORDER BY id
+            LIMIT 1
+            """
+        ).fetchone()
+
+    assert row is not None
+    assert int(row["snapshot_team_id"]) > 0
+    assert str(row["snapshot_team_abbr"])
+    assert str(row["snapshot_rotation_role"]) != ""
+    assert str(row["snapshot_candidate_reason"]) != ""
+    assert float(row["snapshot_recent_minutes_avg"]) >= 0.0
+    assert float(row["snapshot_recent_stocks_avg"]) >= 0.0
+    assert int(row["snapshot_recent_games"]) >= 0
+    assert float(row["snapshot_projected_minutes"]) >= 0.0
+    assert float(row["snapshot_minute_volatility"]) >= 0.0
+    assert row["snapshot_recent_hit_rate_2_plus"] is None or float(row["snapshot_recent_hit_rate_2_plus"]) >= 0.0
+    assert str(row["snapshot_injury_status"]) != ""
+    assert float(row["snapshot_injury_availability_factor"]) > 0.0
+    assert float(row["snapshot_injury_usage_multiplier"]) > 0.0
+    assert abs(float(row["snapshot_injury_minutes_delta"])) < 20.0
+    assert float(row["snapshot_opportunity_unavailable"]) >= 0.0
+    assert float(row["snapshot_opportunity_key_outs"]) >= 0.0
+    assert float(row["snapshot_opportunity_persistence"]) >= 0.0
+    assert float(row["snapshot_opportunity_competition"]) >= 0.0
+    assert float(row["snapshot_pace_factor"]) > 0.0
+    assert float(row["snapshot_stocks_allowed_factor"]) > 0.0
+    assert float(row["snapshot_turnover_pressure_factor"]) > 0.0
+    assert int(row["snapshot_has_prep_context"]) == 1
+    assert int(row["snapshot_has_matchup_context"]) == 1
+
+
 def test_history_winsorization_clips_market_outliers() -> None:
     clipped = player_prop_model_module._winsorize_history_values([1.0, 1.0, 2.0, 2.0, 9.0], "blocks_steals")
 
@@ -7580,8 +7652,8 @@ def test_special_threshold_recommendations_fallback_when_history_is_sparse() -> 
     result = stocks_tracking_module.fit_special_threshold_recommendations(rows)
 
     assert result["status"] == "insufficient_history"
-    assert result["high_confidence_threshold"] == 0.5
-    assert result["watch_threshold"] == 0.4
+    assert result["high_confidence_threshold"] == 0.55
+    assert result["watch_threshold"] == 0.45
     assert result["settled_rows"] == 3
 
 

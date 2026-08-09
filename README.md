@@ -420,6 +420,11 @@ Operational expectations:
 
 Modeled prop payloads expose `h2h_opponent`, `h2h_values`, and `h2h_minutes`. The UI displays them in a `Line H2H` column between Player and Market/Pick across Pregame Props, Gems, Watchlist, and matchup/parlay tables. Head-to-head history follows the player across team changes while excluding games in which the player represented the current opponent; rows without prior meetings display `No H2H`.
 
+The `Special Props` stocks table also exposes a dedicated `H2H STK` column. It
+shows up to five prior `blocks_steals` results against the current opponent
+plus the minutes from those same games, using the same player/opponent logic as
+the main prop H2H payloads.
+
 `/api/value-board` and `/api/watchlist` use their dedicated short-lived read-through caches and bypass the generic app-response cache. This prevents an older whole-response payload from masking newly published prop fields such as H2H history after a deployment.
 
 Any table with a dedicated `Best` column uses the same fixed-width logo slot so sportsbook marks stay aligned across `Pregame Props`, `Gems`, `Watchlist`, `Parlays`, and discrepancy tables.
@@ -1154,6 +1159,11 @@ Those fields are intentionally prep-only for now: the live Specials scoring
 path still uses the simpler validated projection blend after the August 6,
 2026 backtest showed that a direct multiplier on those fields improved recent
 candidate hit rate but regressed full-history probability calibration.
+Snapshot writes now also persist the key prep and matchup inputs directly onto
+`projection_snapshots` so settled audits do not depend on mutable cache tables
+such as `candidate_players`, `player_prep_features`, or `team_prep_context`.
+Historical rows can be backfilled with `scripts/backfill_stocks_snapshot_context.py`
+when older snapshots predate the durable fields.
 Mounted-runtime validation on `2026-07-13` completed an ET-today run in about
 `1m 1s` for `3` prepared games, `79` candidates, and `79` fresh snapshots.
 
@@ -1166,6 +1176,9 @@ The `Special Props` tab now exposes calibration tables for both `2+ Stocks Prob`
 and `3+ Stocks Prob`. Each table shows settled count, hits, average predicted
 probability, and realized hit rate by probability bucket so the UI can compare
 how the 2+ and 3+ models are tracking separately.
+When support is too thin for a threshold fit, the board now falls back to more
+conservative `High`/`Watch` defaults of `55%` and `45%` instead of the original
+`50%` / `40%`.
 
 Network access notes:
 
