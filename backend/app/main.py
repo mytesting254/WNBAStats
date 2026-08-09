@@ -33,7 +33,7 @@ from .auth import (
 )
 from .bootstrap import ensure_teams, normalize_team_abbreviation
 from .cache import delete_json_cache, read_json_cache, write_json_cache
-from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, import_covers_props
+from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, _replace_covers_rows, import_covers_props
 from .db import connect, ensure_dfs_runtime_schema, init_db, sqlite_write_lock, using_turso
 from .dfs_model import (
     DFS_HALF_MODEL_VERSION,
@@ -6536,6 +6536,19 @@ def import_covers(request: Request, selected_date: str | None = None, force_refr
 
 
 def _import_covers_impl(*, request: Request | None, selected_date: str | None, force_refresh: bool) -> dict[str, Any]:
+    if force_refresh:
+        with connect() as conn:
+            cached_result = _load_saved_covers_payload_into_runtime(conn, update_game_markets=True)
+            if cached_result is not None:
+                _invalidate_read_caches()
+                cached_result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+                sync_started = _start_covers_refresh_if_needed(selected_date=selected_date, request=request)
+                cached_result["sync_started"] = sync_started
+                if sync_started:
+                    cached_result["message"] = "Loaded Covers props from saved JSON. Fresh Covers refresh queued in background."
+                else:
+                    cached_result["message"] = "Loaded Covers props from saved JSON. Fresh Covers refresh already running."
+                return cached_result
     with connect() as conn:
         result = _import_covers_provider_rows(conn, selected_date=selected_date, force_refresh=force_refresh, update_game_markets=True)
     ingestion = build_covers_provider_ingestion(result)
@@ -7794,6 +7807,188 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
                 message=str(exc),
             )
             _append_job_run_event(job_run_id, "job.failed", f"Background prop sync failed: {exc}", level="error", details={"source": source})
+            _finish_job_run(job_run_id, status="failed", error_text=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+
+def _load_saved_covers_payload_into_runtime(conn, *, update_game_markets: bool = True) -> dict[str, Any] | None:
+    cached_payload = read_json_cache(COVERS_RAW_CACHE_NAME)
+    if not isinstance(cached_payload, dict):
+        return None
+    rows = cached_payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return None
+    result = _replace_covers_rows(
+        conn,
+        rows,
+        cached_payload.get("games", []),
+        update_game_markets=update_game_markets,
+    )
+    return {
+        **result,
+        "synced_props": 0,
+        "status": "loaded_from_cache",
+        "source": "cache",
+        "message": "Loaded Covers props from saved JSON.",
+        "prop_sync_eligible": True,
+    }
+
+
+def _start_covers_refresh_if_needed(
+    *,
+    selected_date: str | None,
+    request: Request | None = None,
+) -> bool:
+    with _PROP_SYNC_LOCK:
+        if _PROP_SYNC_STATE["running"]:
+            return False
+    _begin_prop_sync_job("covers_import", stage="queued", message="Fresh Covers refresh queued in background.")
+    job_run_id = _create_job_run(
+        "background_covers_refresh",
+        request=request,
+        trigger_action="internal.covers_import" if request is None else "api.covers.import",
+        source_path=request.url.path if request is not None else None,
+        metadata={"source": "covers_import", "selected_date": selected_date, "force_refresh": True},
+    )
+    _append_job_run_event(job_run_id, "job.queued", "Background Covers refresh queued.", details={"selected_date": selected_date})
+
+    def _run() -> None:
+        try:
+            _append_job_run_event(job_run_id, "job.running", "Background Covers refresh started.", details={"selected_date": selected_date})
+            _set_prop_sync_progress(
+                stage="requesting_provider",
+                stage_index=1,
+                stage_total=4,
+                current=0,
+                total=1,
+                message="Fetching today's Covers matchup pages and extracting prop tables.",
+                scope="covers_import",
+            )
+            with connect() as conn:
+                covers_result = _import_covers_provider_rows(
+                    conn,
+                    selected_date=selected_date,
+                    force_refresh=True,
+                    update_game_markets=True,
+                )
+            if not bool(covers_result.get("prop_sync_eligible")):
+                _invalidate_read_caches()
+                with connect() as conn:
+                    published_payloads = _publish_post_mutation_read_payloads(conn)
+                _mutate_prop_sync_state(
+                    running=False,
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    last_result={
+                        "source": "covers_import",
+                        "covers_result": covers_result,
+                        "published_payloads": published_payloads,
+                    },
+                    last_error=None,
+                    status="completed",
+                    scope="covers_import",
+                    target_game_ids=[],
+                    message=str(covers_result.get("message") or "Background Covers refresh finished."),
+                )
+                _finish_job_run(
+                    job_run_id,
+                    status="completed",
+                    result={
+                        "source": "covers_import",
+                        "covers_result": covers_result,
+                        "published_payloads": published_payloads,
+                    },
+                )
+                return
+
+            with connect() as conn:
+                pipeline_result = run_prop_sync_pipeline(
+                    conn,
+                    request_source="covers_import",
+                    target_game_ids=[int(game_id) for game_id in (covers_result.get("target_game_ids") or []) if int(game_id) > 0],
+                    sync_props=True,
+                    rebuild_mode="changed_props",
+                    skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
+                    sync_props_fn=sync_prop_lines_from_sportsbook,
+                    rebuild_predictions_fn=rebuild_predictions_live,
+                    snapshot_dfs_fn=_snapshot_current_dfs_first_half,
+                    progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                        stage=stage,
+                        stage_index=2 if stage == "syncing_props" else 3,
+                        stage_total=4,
+                        current=current,
+                        total=total,
+                        message=message,
+                        scope="covers_import",
+                    ),
+                )
+                touched_game_ids = list(pipeline_result.target_game_ids)
+                _set_prop_sync_progress(
+                    scope="covers_import",
+                    target_game_ids=touched_game_ids,
+                )
+            _invalidate_read_caches()
+            post_result = run_post_pipeline_steps(
+                connect_fn=connect,
+                policy=PropPostProcessPolicy(
+                    publish_mode="targeted",
+                    matchup_game_ids=touched_game_ids,
+                    full_matchup_refresh=False,
+                    include_performance=False,
+                    publish_start_message="Publishing refreshed Covers payloads.",
+                    publish_done_message="Background Covers refresh finished.",
+                ),
+                progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                    stage=stage,
+                    stage_index=4,
+                    stage_total=4,
+                    current=current,
+                    total=total,
+                    message=message,
+                    scope="covers_import",
+                ),
+                publish_post_mutation_payloads_fn=lambda conn, policy: _publish_post_mutation_read_payloads(
+                    conn,
+                    matchup_game_ids=list(policy.matchup_game_ids or []),
+                    full_matchup_refresh=policy.full_matchup_refresh,
+                    include_performance=policy.include_performance,
+                ),
+            )
+            published_payloads = dict(post_result.published_payloads or {})
+            result_payload = {
+                "source": "covers_import",
+                "covers_result": covers_result,
+                "synced_props": int(pipeline_result.scanned_props),
+                "changed_props": int(pipeline_result.synced_props),
+                "rebuilt_predictions": int(pipeline_result.rebuilt_predictions),
+                "attempted_predictions": int(pipeline_result.attempted_predictions),
+                "skipped_predictions": int(pipeline_result.skipped_predictions),
+                "dfs_snapshot": pipeline_result.dfs_snapshot,
+                "target_game_ids": touched_game_ids,
+                "published_payloads": published_payloads,
+            }
+            _mutate_prop_sync_state(
+                running=False,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                last_result=result_payload,
+                last_error=None,
+                status="completed",
+                scope="covers_import",
+                target_game_ids=touched_game_ids,
+                message="Background Covers refresh finished.",
+            )
+            _finish_job_run(job_run_id, status="completed", result=result_payload)
+        except Exception as exc:
+            _mutate_prop_sync_state(
+                running=False,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                last_error=str(exc),
+                status="failed",
+                scope="covers_import",
+                message=str(exc),
+            )
+            _append_job_run_event(job_run_id, "job.failed", f"Background Covers refresh failed: {exc}", level="error", details={"selected_date": selected_date})
             _finish_job_run(job_run_id, status="failed", error_text=str(exc))
 
     threading.Thread(target=_run, daemon=True).start()
