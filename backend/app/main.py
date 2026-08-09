@@ -4407,7 +4407,8 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
     with connect() as conn:
         rebuild_result = _repair_current_slate_props(
             conn,
-            progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+            progress_callback=lambda stage, current, total, message, conn=conn: _set_prop_sync_progress(
+                conn=conn,
                 stage=stage,
                 stage_index=(
                     1
@@ -4694,7 +4695,8 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
         result = _import_the_odds_api_provider_rows(
             conn,
             force_refresh=force_refresh,
-            progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+            progress_callback=lambda stage, current, total, message, conn=conn: _set_prop_sync_progress(
+                conn=conn,
                 stage=stage,
                 stage_index=(
                     1
@@ -4766,7 +4768,8 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
             sync_props_fn=sync_prop_lines_from_sportsbook,
             rebuild_predictions_fn=rebuild_predictions_live,
             snapshot_dfs_fn=_snapshot_current_dfs_first_half,
-            progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+            progress_callback=lambda stage, current, total, message, conn=conn: _set_prop_sync_progress(
+                conn=conn,
                 stage=stage,
                 stage_index=2 if stage == "syncing_props" else 3,
                 stage_total=total_stages,
@@ -7844,7 +7847,8 @@ def _start_prop_sync_if_needed(
                         sync_props_fn=sync_prop_lines_from_sportsbook,
                         rebuild_predictions_fn=rebuild_predictions_live,
                         snapshot_dfs_fn=_snapshot_current_dfs_first_half,
-                        progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                        progress_callback=lambda stage, current, total, message, conn=conn: _set_prop_sync_progress(
+                            conn=conn,
                             stage=stage,
                             stage_index=1 if stage == "syncing_props" else 2,
                             stage_total=3,
@@ -8070,7 +8074,8 @@ def _start_covers_refresh_if_needed(
                     sync_props_fn=sync_prop_lines_from_sportsbook,
                     rebuild_predictions_fn=rebuild_predictions_live,
                     snapshot_dfs_fn=_snapshot_current_dfs_first_half,
-                    progress_callback=lambda stage, current, total, message: _set_prop_sync_progress(
+                    progress_callback=lambda stage, current, total, message, conn=conn: _set_prop_sync_progress(
+                        conn=conn,
                         stage=stage,
                         stage_index=2 if stage == "syncing_props" else 3,
                         stage_total=4,
