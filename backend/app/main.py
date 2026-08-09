@@ -4425,6 +4425,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
         )
     with connect() as conn:
         _set_prop_sync_progress(
+            conn=conn,
             stage="settling_props",
             stage_index=4,
             stage_total=total_stages,
@@ -4436,11 +4437,13 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
         special_settlements = settle_stocks(conn)
         dfs_settlements = settle_dfs_first_half_projection_snapshots(conn)
         _set_prop_sync_progress(
+            conn=conn,
             current=1,
             total=1,
             message=f"Settled {int(settlements['settled'])} player props.",
         )
         _set_prop_sync_progress(
+            conn=conn,
             stage="settling_games",
             stage_index=5,
             stage_total=total_stages,
@@ -4450,6 +4453,7 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
         )
         game_settlements = settle_completed_game_predictions(conn)
         _set_prop_sync_progress(
+            conn=conn,
             current=1,
             total=1,
             message=f"Settled {int(game_settlements['settled'])} game predictions.",
@@ -7861,6 +7865,7 @@ def _start_prop_sync_if_needed(
                     )
                     touched_game_ids = list(pipeline_result.target_game_ids)
                     _set_prop_sync_progress(
+                        conn=conn,
                         scope=source,
                         target_game_ids=touched_game_ids,
                     )
@@ -8091,6 +8096,7 @@ def _start_covers_refresh_if_needed(
                 )
                 touched_game_ids = list(pipeline_result.target_game_ids)
                 _set_prop_sync_progress(
+                    conn=conn,
                     scope="covers_import",
                     target_game_ids=touched_game_ids,
                 )
