@@ -36,6 +36,7 @@ from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, import_covers_props
 from .db import connect, ensure_dfs_runtime_schema, init_db, sqlite_write_lock, using_turso
 from .dfs_model import (
+    DFS_HALF_MODEL_VERSION,
     build_current_dfs_first_half_estimates,
     prewarm_dfs_half_cache,
     settle_dfs_first_half_projection_snapshots,
@@ -4980,18 +4981,234 @@ def _snapshot_current_dfs_first_half(conn, game_ids: list[int] | None = None) ->
     return snapshot_current_dfs_first_half_estimates(conn, payload)
 
 
+def _current_dfs_source_prop_line_ids(conn) -> set[int]:
+    rows = conn.execute(
+        """
+        WITH raw_props AS (
+            SELECT
+                pl.prop_line_id,
+                pl.game_date,
+                pl.start_time,
+                pl.status,
+                ROW_NUMBER() OVER (
+                    PARTITION BY pl.game_id, pl.player_id, pl.market
+                    ORDER BY
+                        CASE
+                            WHEN pl.recommended_side = 'over' THEN pl.over_odds
+                            ELSE pl.under_odds
+                        END DESC,
+                        pl.expected_value DESC,
+                        pl.prediction_id DESC
+                ) AS rn
+            FROM (
+                SELECT
+                    pp.id AS prediction_id,
+                    pp.expected_value,
+                    pp.recommended_side,
+                    lines.id AS prop_line_id,
+                    lines.game_id,
+                    lines.player_id,
+                    lower(lines.market) AS market,
+                    lines.over_odds,
+                    lines.under_odds,
+                    games.game_date,
+                    games.start_time,
+                    games.status
+                FROM prop_predictions pp
+                JOIN prop_lines lines ON lines.id = pp.prop_line_id
+                JOIN games ON games.id = lines.game_id
+                LEFT JOIN settled_props sp ON sp.prop_line_id = lines.id
+                WHERE sp.id IS NULL
+                  AND lower(lines.market) IN ('points','rebounds','assists','turnovers','points_rebounds','points_assists','rebounds_assists','points_rebounds_assists','threes')
+            ) pl
+        )
+        SELECT prop_line_id, game_date, start_time, status
+        FROM raw_props
+        WHERE rn = 1
+        """
+    ).fetchall()
+    today_iso = _local_today_iso()
+    visible_statuses = {"scheduled", "in_progress", "final"}
+    prop_line_ids: set[int] = set()
+    for row in rows:
+        if _app_local_game_date(row["game_date"], row["start_time"]) != today_iso:
+            continue
+        if str(row["status"] or "").lower() not in visible_statuses:
+            continue
+        prop_line_ids.add(int(row["prop_line_id"]))
+    return prop_line_ids
+
+
+def _current_dfs_snapshot_payload(conn) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            snap.prop_line_id,
+            snap.game_id,
+            snap.player_id,
+            p.full_name AS player,
+            p.position,
+            p.rotation_role,
+            resolved_team.abbreviation AS team,
+            resolved_team.logo_url AS team_logo_url,
+            snap.sportsbook,
+            lower(snap.market) AS market,
+            snap.line,
+            snap.over_odds,
+            snap.under_odds,
+            snap.full_game_projection,
+            snap.estimated_first_half_result,
+            snap.expected_halfway_line,
+            snap.pace_ratio,
+            snap.halftime_margin_to_line,
+            snap.on_track_probability,
+            snap.recommended_side,
+            snap.model_version,
+            snap.model_rows,
+            snap.team_first_half_share,
+            snap.estimated_first_half_minutes_share,
+            snap.projected_first_half_total,
+            snap.game_total,
+            snap.start_time,
+            snap.confidence,
+            g.game_date,
+            g.status,
+            (
+                SELECT COALESCE(
+                    (
+                        SELECT h.team_id
+                        FROM player_team_history h
+                        LEFT JOIN games hg ON hg.id = h.game_id
+                        WHERE h.player_id = p.id
+                          AND h.team_id IN (g.home_team_id, g.away_team_id)
+                          AND h.game_id IS NOT NULL
+                          AND hg.game_date IS NOT NULL
+                          AND hg.game_date <= g.game_date
+                        ORDER BY hg.game_date DESC, h.id DESC
+                        LIMIT 1
+                    ),
+                    CASE
+                        WHEN p.team_id IN (g.home_team_id, g.away_team_id) THEN p.team_id
+                        ELSE g.home_team_id
+                    END
+                )
+            ) AS resolved_team_id
+        FROM dfs_first_half_projection_snapshots snap
+        JOIN prop_lines pl ON pl.id = snap.prop_line_id
+        JOIN games g ON g.id = snap.game_id
+        JOIN players p ON p.id = snap.player_id
+        LEFT JOIN settled_props sp ON sp.prop_line_id = snap.prop_line_id
+        JOIN teams resolved_team ON resolved_team.id = (
+            SELECT COALESCE(
+                (
+                    SELECT h.team_id
+                    FROM player_team_history h
+                    LEFT JOIN games hg ON hg.id = h.game_id
+                    WHERE h.player_id = p.id
+                      AND h.team_id IN (g.home_team_id, g.away_team_id)
+                      AND h.game_id IS NOT NULL
+                      AND hg.game_date IS NOT NULL
+                      AND hg.game_date <= g.game_date
+                    ORDER BY hg.game_date DESC, h.id DESC
+                    LIMIT 1
+                ),
+                CASE
+                    WHEN p.team_id IN (g.home_team_id, g.away_team_id) THEN p.team_id
+                    ELSE g.home_team_id
+                END
+            )
+        )
+        WHERE sp.id IS NULL
+          AND snap.model_version = ?
+        ORDER BY snap.start_time ASC, p.full_name ASC, snap.market ASC
+        """,
+        (DFS_HALF_MODEL_VERSION,),
+    ).fetchall()
+    today_iso = _local_today_iso()
+    visible_statuses = {"scheduled", "in_progress", "final"}
+    active_prop_line_ids = _current_dfs_source_prop_line_ids(conn)
+    payload: list[dict[str, Any]] = []
+    seen_prop_line_ids: set[int] = set()
+    for row in rows:
+        prop_line_id = int(row["prop_line_id"])
+        if prop_line_id not in active_prop_line_ids:
+            continue
+        if _app_local_game_date(row["game_date"], row["start_time"]) != today_iso:
+            continue
+        if str(row["status"] or "").lower() not in visible_statuses:
+            continue
+        seen_prop_line_ids.add(prop_line_id)
+        payload.append(
+            {
+                "prop_line_id": prop_line_id,
+                "game_id": int(row["game_id"]),
+                "player_id": int(row["player_id"]),
+                "player": str(row["player"]),
+                "position": str(row["position"]) if row["position"] is not None else None,
+                "team": str(row["team"]),
+                "team_logo_url": str(row["team_logo_url"]) if row["team_logo_url"] is not None else None,
+                "sportsbook": str(row["sportsbook"]),
+                "market": str(row["market"]),
+                "line": float(row["line"] or 0.0),
+                "over_odds": int(row["over_odds"] or 0),
+                "under_odds": int(row["under_odds"] or 0),
+                "full_game_projection": float(row["full_game_projection"] or 0.0),
+                "estimated_first_half_result": float(row["estimated_first_half_result"] or 0.0),
+                "expected_halfway_line": float(row["expected_halfway_line"] or 0.0),
+                "pace_ratio": None if row["pace_ratio"] is None else float(row["pace_ratio"] or 0.0),
+                "halftime_margin_to_line": None if row["halftime_margin_to_line"] is None else float(row["halftime_margin_to_line"] or 0.0),
+                "on_track_probability": None if row["on_track_probability"] is None else float(row["on_track_probability"] or 0.0),
+                "recommended_side": str(row["recommended_side"]),
+                "model_version": str(row["model_version"]),
+                "model_rows": int(row["model_rows"] or 0),
+                "team_first_half_share": float(row["team_first_half_share"] or 0.5),
+                "estimated_first_half_minutes_share": float(row["estimated_first_half_minutes_share"] or 0.5),
+                "projected_first_half_total": None if row["projected_first_half_total"] is None else float(row["projected_first_half_total"] or 0.0),
+                "game_total": None if row["game_total"] is None else float(row["game_total"] or 0.0),
+                "start_time": str(row["start_time"]) if row["start_time"] is not None else None,
+                "confidence": str(row["confidence"]),
+                "recent_values": _recent_first_half_market_values(
+                    conn,
+                    player_id=int(row["player_id"]),
+                    market=str(row["market"]),
+                    game_id=int(row["game_id"]),
+                    limit=5,
+                ),
+                "recent_minutes": _recent_first_half_minutes_played(
+                    conn,
+                    player_id=int(row["player_id"]),
+                    game_id=int(row["game_id"]),
+                    limit=5,
+                ),
+                **_recent_first_half_h2h_market_history(
+                    conn,
+                    player_id=int(row["player_id"]),
+                    market=str(row["market"]),
+                    game_id=int(row["game_id"]),
+                    resolved_team_id=int(row["resolved_team_id"]),
+                    limit=5,
+                ),
+            }
+        )
+    if active_prop_line_ids and seen_prop_line_ids == active_prop_line_ids:
+        return payload
+    return []
+
+
 @app.get("/api/dfs/first-half")
 def dfs_first_half(response: Response) -> list[dict[str, Any]]:
     started = datetime.now(timezone.utc)
     with connect() as conn:
         ensure_dfs_runtime_schema(conn)
-        payload = build_current_dfs_first_half_estimates(
-            conn,
-            recent_values_fn=_recent_first_half_market_values,
-            recent_minutes_fn=_recent_first_half_minutes_played,
-            recent_h2h_fn=_recent_first_half_h2h_market_history,
-        )
-        snapshot_current_dfs_first_half_estimates(conn, payload)
+        payload = _current_dfs_snapshot_payload(conn)
+        if not payload:
+            payload = build_current_dfs_first_half_estimates(
+                conn,
+                recent_values_fn=_recent_first_half_market_values,
+                recent_minutes_fn=_recent_first_half_minutes_played,
+                recent_h2h_fn=_recent_first_half_h2h_market_history,
+            )
+            snapshot_current_dfs_first_half_estimates(conn, payload)
     compute_ms = (datetime.now(timezone.utc) - started).total_seconds() * 1000
     _set_observability_headers(response, "dfs_first_half.json", "BYPASS", round(compute_ms, 2))
     return payload
