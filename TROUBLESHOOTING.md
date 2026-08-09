@@ -427,6 +427,17 @@ If the roster tab is missing entirely or the `Data` tab breaks after roster chan
 - if box scores skip, `settle_completed_props` and `settle_dfs_first_half_projection_snapshots` both return no eligible rows for that date
 - fix the fetch headers first, then rerun the relevant ESPN history import date so the game rows, box scores, and settlements can repair in order
 
+### If DFS Prewarm Or Evaluation Starts Hitting SQLite `database is locked`
+
+- treat it as a training-path bug before lowering DFS sample counts or quality gates
+- DFS should rebuild curated training DBs only in explicit prewarm/import flows, not while computing cache keys
+- on Sunday, August 9, 2026, the traced failure was DFS cache-key generation calling training-db signature helpers that could rebuild `wnba-player-half-training.sqlite` and `wnba-training.sqlite`
+- the stable pattern is:
+  - rebuild curated training DBs first
+  - read metadata-only signatures second
+  - train/evaluate third
+- if this regresses, inspect `backend/app/dfs_model.py`, `backend/app/player_half_training_db.py`, and `backend/app/player_prop_training_db.py` before changing SQLite pragmas or cron timing
+
 ## Deployment Recovery Workflow
 
 When production behavior becomes unclear:

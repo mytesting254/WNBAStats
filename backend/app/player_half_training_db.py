@@ -131,6 +131,27 @@ def load_player_half_prop_examples(
     return rows, info
 
 
+def player_half_training_db_signature(
+    conn: sqlite3.Connection,
+    *,
+    allow_rebuild: bool = False,
+) -> str:
+    info = ensure_player_half_training_db(conn, force=False, allow_rebuild=allow_rebuild)
+    payload = {
+        "path": str(info["path"]),
+        "source_signature": str(info["source_signature"]),
+        "db_version": PLAYER_HALF_TRAINING_DB_VERSION,
+        "player_rows": int(info["player_rows"]),
+        "prop_rows": int(info["prop_rows"]),
+        "candidate_player_rows": int(info["candidate_player_rows"]),
+        "candidate_prop_rows": int(info["candidate_prop_rows"]),
+        "built_at": str(info["built_at"]),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    import hashlib
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
+
+
 def _connect_training_db(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=30)
     conn.row_factory = sqlite3.Row

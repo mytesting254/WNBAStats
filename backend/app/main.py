@@ -37,6 +37,7 @@ from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, 
 from .db import connect, init_db, sqlite_write_lock, using_turso
 from .dfs_model import (
     build_current_dfs_first_half_estimates,
+    prewarm_dfs_half_cache,
     settle_dfs_first_half_projection_snapshots,
     snapshot_current_dfs_first_half_estimates,
 )
@@ -1404,6 +1405,7 @@ def _start_model_prewarm() -> None:
         try:
             with connect() as conn:
                 prewarm_model_cache(conn)
+                prewarm_dfs_half_cache(conn)
         except Exception as exc:
             print(f"[startup] model prewarm skipped: {exc}")
 
@@ -3856,6 +3858,33 @@ def _refresh_roster_read_payloads(conn) -> dict[str, int]:
 
 
 def _clear_scheduled_prop_state(conn, *, clear_source_rows: bool = False) -> None:
+    conn.execute(
+        """
+        DELETE FROM dfs_first_half_projection_settlements
+        WHERE snapshot_id IN (
+            SELECT snap.id
+            FROM dfs_first_half_projection_snapshots snap
+            JOIN prop_lines pl ON pl.id = snap.prop_line_id
+            JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE sp.id IS NULL
+              AND g.status = 'scheduled'
+        )
+        """
+    )
+    conn.execute(
+        """
+        DELETE FROM dfs_first_half_projection_snapshots
+        WHERE prop_line_id IN (
+            SELECT pl.id
+            FROM prop_lines pl
+            JOIN games g ON g.id = pl.game_id
+            LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+            WHERE sp.id IS NULL
+              AND g.status = 'scheduled'
+        )
+        """
+    )
     conn.execute(
         """
         DELETE FROM watchlist_snapshot_items
@@ -6525,6 +6554,7 @@ def _import_espn_history_impl(
             _clear_scheduled_prop_state(conn, clear_source_rows=True)
             synced_props = 0
             projections = []
+            dfs_prewarm = prewarm_dfs_half_cache(conn)
             watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
             gap_audit = _espn_stats_gap_audit(conn)
             backfill_result: dict[str, Any] | None = None
@@ -6566,6 +6596,7 @@ def _import_espn_history_impl(
         "game_settlements": game_settlements,
         "special_settlements": special_settlements,
         "dfs_settlements": dfs_settlements,
+        "dfs_prewarm": dfs_prewarm,
         "gem_settlements": gem_settlements,
         "watchlist_settlements": watchlist_settlements,
         "watchlist_snapshot": watchlist_snapshot,
@@ -6695,6 +6726,7 @@ def _backfill_espn_history_gaps_impl(
         _clear_scheduled_prop_state(conn, clear_source_rows=True)
         synced_props = 0
         projections = []
+        dfs_prewarm = prewarm_dfs_half_cache(conn)
         watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
         after = _espn_stats_gap_audit(conn, start_date=start_date, end_date=end_date, limit_missing_games=1000)
     _clear_prop_scrape_caches()
@@ -6711,6 +6743,7 @@ def _backfill_espn_history_gaps_impl(
         "game_settlements": game_settlements,
         "special_settlements": special_settlements,
         "dfs_settlements": dfs_settlements,
+        "dfs_prewarm": dfs_prewarm,
         "gem_settlements": gem_settlements,
         "watchlist_settlements": watchlist_settlements,
         "watchlist_snapshot": watchlist_snapshot,

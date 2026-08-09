@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .paths import get_training_db_path
 
 PLAYER_PROP_TRAINING_DB_VERSION = "v4"
+_PLAYER_PROP_TRAINING_DB_LOCK = threading.RLock()
 
 MARKET_SAMPLE_CURATION_POLICY: dict[str, dict[str, dict[str, float | bool]]] = {}
 
@@ -36,55 +38,55 @@ def ensure_player_prop_training_db(
                 "missing": True,
             }
 
-    with sqlite3.connect(training_db_path) as training_conn:
-        training_conn.row_factory = sqlite3.Row
-        _init_training_db(training_conn)
-        metadata = _read_metadata(training_conn)
-        current_row_count = int(metadata.get("included_rows") or 0)
-        if (
-            not force
-            and metadata.get("source_signature") == expected_signature
-            and metadata.get("db_version") == PLAYER_PROP_TRAINING_DB_VERSION
-            and current_row_count > 0
-        ):
+    with _PLAYER_PROP_TRAINING_DB_LOCK:
+        with _connect_training_db(training_db_path) as training_conn:
+            _init_training_db(training_conn)
+            metadata = _read_metadata(training_conn)
+            current_row_count = int(metadata.get("included_rows") or 0)
+            if (
+                not force
+                and metadata.get("source_signature") == expected_signature
+                and metadata.get("db_version") == PLAYER_PROP_TRAINING_DB_VERSION
+                and current_row_count > 0
+            ):
+                return {
+                    "path": str(training_db_path),
+                    "rebuilt": False,
+                    "included_rows": current_row_count,
+                    "candidate_rows": int(metadata.get("candidate_rows") or 0),
+                    "excluded_rows": int(metadata.get("excluded_rows") or 0),
+                    "built_at": metadata.get("built_at"),
+                    "source_signature": expected_signature,
+                }
+
+            if not allow_rebuild:
+                return {
+                    "path": str(training_db_path),
+                    "rebuilt": False,
+                    "included_rows": current_row_count,
+                    "candidate_rows": int(metadata.get("candidate_rows") or 0),
+                    "excluded_rows": int(metadata.get("excluded_rows") or 0),
+                    "built_at": metadata.get("built_at"),
+                    "source_signature": str(metadata.get("source_signature") or ""),
+                    "stale": True,
+                    "missing": False,
+                }
+
+            _rebuild_player_prop_training_examples(
+                source_conn=conn,
+                training_conn=training_conn,
+                source_signature=expected_signature,
+            )
+            metadata = _read_metadata(training_conn)
             return {
                 "path": str(training_db_path),
-                "rebuilt": False,
-                "included_rows": current_row_count,
+                "rebuilt": True,
+                "included_rows": int(metadata.get("included_rows") or 0),
                 "candidate_rows": int(metadata.get("candidate_rows") or 0),
                 "excluded_rows": int(metadata.get("excluded_rows") or 0),
                 "built_at": metadata.get("built_at"),
                 "source_signature": expected_signature,
             }
-
-        if not allow_rebuild:
-            return {
-                "path": str(training_db_path),
-                "rebuilt": False,
-                "included_rows": current_row_count,
-                "candidate_rows": int(metadata.get("candidate_rows") or 0),
-                "excluded_rows": int(metadata.get("excluded_rows") or 0),
-                "built_at": metadata.get("built_at"),
-                "source_signature": str(metadata.get("source_signature") or ""),
-                "stale": True,
-                "missing": False,
-            }
-
-        _rebuild_player_prop_training_examples(
-            source_conn=conn,
-            training_conn=training_conn,
-            source_signature=expected_signature,
-        )
-        metadata = _read_metadata(training_conn)
-        return {
-            "path": str(training_db_path),
-            "rebuilt": True,
-            "included_rows": int(metadata.get("included_rows") or 0),
-            "candidate_rows": int(metadata.get("candidate_rows") or 0),
-            "excluded_rows": int(metadata.get("excluded_rows") or 0),
-            "built_at": metadata.get("built_at"),
-            "source_signature": expected_signature,
-        }
 
 
 def load_player_prop_training_samples(
@@ -101,7 +103,7 @@ def load_player_prop_training_samples(
     training_db_path = Path(str(info["path"]))
     if not training_db_path.exists():
         return [], TrainingSampleDiagnostics()
-    with sqlite3.connect(training_db_path) as training_conn:
+    with _connect_training_db(training_db_path) as training_conn:
         training_conn.row_factory = sqlite3.Row
         try:
             rows = training_conn.execute(
@@ -163,7 +165,7 @@ def load_player_prop_final_projection_samples(
     training_db_path = Path(str(info["path"]))
     if not training_db_path.exists():
         return [], TrainingSampleDiagnostics()
-    with sqlite3.connect(training_db_path) as training_conn:
+    with _connect_training_db(training_db_path) as training_conn:
         training_conn.row_factory = sqlite3.Row
         try:
             rows = training_conn.execute(
@@ -212,6 +214,17 @@ def load_player_prop_final_projection_samples(
         for row in rows
     ]
     return samples, diagnostics
+
+
+def _connect_training_db(path: Path) -> sqlite3.Connection:
+    conn = sqlite3.connect(path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA cache_size = -8000")
+    conn.execute("PRAGMA temp_store = MEMORY")
+    conn.execute("PRAGMA busy_timeout = 30000")
+    return conn
 
 
 def _init_training_db(conn: sqlite3.Connection) -> None:
@@ -516,8 +529,12 @@ def _source_signature(conn: sqlite3.Connection) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
-def player_prop_training_db_signature(conn: sqlite3.Connection) -> str:
-    info = ensure_player_prop_training_db(conn, force=False)
+def player_prop_training_db_signature(
+    conn: sqlite3.Connection,
+    *,
+    allow_rebuild: bool = False,
+) -> str:
+    info = ensure_player_prop_training_db(conn, force=False, allow_rebuild=allow_rebuild)
     payload = {
         "path": str(info["path"]),
         "source_signature": str(info["source_signature"]),

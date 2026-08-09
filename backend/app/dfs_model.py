@@ -13,9 +13,12 @@ from pathlib import Path
 
 from .cache import read_json_cache, write_json_cache
 from .odds import american_to_implied_probability
-from .player_half_training_db import load_player_half_prop_examples
+from .player_half_training_db import (
+    ensure_player_half_training_db,
+    load_player_half_prop_examples,
+    player_half_training_db_signature,
+)
 from .player_half_training_db import _estimated_minute_share as _half_minute_share
-from .paths import get_player_half_training_db_path
 from .player_prop_model import (
     FEATURE_NAMES,
     ModelTuningConfig,
@@ -700,6 +703,36 @@ def pretrain_dfs_half_models(
     }
 
 
+def prewarm_dfs_half_cache(
+    conn: sqlite3.Connection,
+    *,
+    config: ModelTuningConfig | None = None,
+    min_history_rows: int = DFS_HALF_EVAL_MIN_HISTORY_ROWS,
+    min_segment_rows: int = DFS_HALF_EVAL_MIN_SEGMENT_ROWS,
+) -> dict[str, object]:
+    ensure_player_half_training_db(conn, force=False, allow_rebuild=True)
+    from .player_prop_training_db import ensure_player_prop_training_db
+
+    ensure_player_prop_training_db(conn, force=False, allow_rebuild=True)
+    training = pretrain_dfs_half_models(conn, config=config)
+    evaluation = evaluate_dfs_half_models(
+        conn,
+        config=config,
+        min_history_rows=min_history_rows,
+        min_segment_rows=min_segment_rows,
+        allow_recompute=True,
+    )
+    shipped_markets = list(((evaluation.get("gating") or {}).get("shipped_markets") or []))
+    return {
+        "model_version": DFS_HALF_MODEL_VERSION,
+        "trained_markets": int(training.get("trained_markets") or 0),
+        "market_count": int(training.get("market_count") or 0),
+        "shipped_markets": shipped_markets,
+        "shipped_market_count": len(shipped_markets),
+        "overall_rows": int(((evaluation.get("overall") or {}).get("rows") or 0)),
+    }
+
+
 def evaluate_dfs_half_models(
     conn: sqlite3.Connection,
     *,
@@ -1071,14 +1104,20 @@ def _dfs_half_model_cache_key(
     market: str,
     config: ModelTuningConfig,
 ) -> str:
-    db_marker = hashlib.sha1(str(db_path).encode("utf-8")).hexdigest()[:12]
-    half_training_path = str(get_player_half_training_db_path())
-    half_marker = hashlib.sha1(half_training_path.encode("utf-8")).hexdigest()[:12]
+    with sqlite3.connect(db_path) as signature_conn:
+        signature_conn.row_factory = sqlite3.Row
+        runtime_marker = _path_fingerprint(db_path)
+        half_marker = player_half_training_db_signature(signature_conn, allow_rebuild=False)
+        from .player_prop_training_db import player_prop_training_db_signature
+        prop_marker = player_prop_training_db_signature(signature_conn, allow_rebuild=False)
     config_marker = hashlib.sha1(
         json.dumps(config.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:12]
     version_marker = hashlib.sha1(DFS_HALF_MODEL_VERSION.encode("utf-8")).hexdigest()[:8]
-    return f"{DFS_HALF_MODEL_CACHE_PREFIX}-{market}-{db_marker}-{half_marker}-{config_marker}-{version_marker}.json"
+    return (
+        f"{DFS_HALF_MODEL_CACHE_PREFIX}-{market}-{runtime_marker}-"
+        f"{half_marker}-{prop_marker}-{config_marker}-{version_marker}.json"
+    )
 
 
 def _dfs_half_eval_cache_key(
@@ -1088,8 +1127,12 @@ def _dfs_half_eval_cache_key(
     min_history_rows: int,
     min_segment_rows: int,
 ) -> str:
-    db_marker = _path_fingerprint(db_path)
-    half_marker = _path_fingerprint(str(get_player_half_training_db_path()))
+    with sqlite3.connect(db_path) as signature_conn:
+        signature_conn.row_factory = sqlite3.Row
+        db_marker = _path_fingerprint(db_path)
+        half_marker = player_half_training_db_signature(signature_conn, allow_rebuild=False)
+        from .player_prop_training_db import player_prop_training_db_signature
+        prop_marker = player_prop_training_db_signature(signature_conn, allow_rebuild=False)
     config_marker = hashlib.sha1(
         json.dumps(config.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()[:12]
@@ -1110,7 +1153,7 @@ def _dfs_half_eval_cache_key(
     ).hexdigest()[:12]
     version_marker = hashlib.sha1(DFS_HALF_EVAL_VERSION.encode("utf-8")).hexdigest()[:8]
     return (
-        f"{DFS_HALF_EVAL_CACHE_PREFIX}-{db_marker}-{half_marker}-"
+        f"{DFS_HALF_EVAL_CACHE_PREFIX}-{db_marker}-{half_marker}-{prop_marker}-"
         f"{config_marker}-{threshold_marker}-{version_marker}.json"
     )
 

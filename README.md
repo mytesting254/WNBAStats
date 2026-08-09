@@ -143,8 +143,16 @@ The app is built around a provider-backed pregame workflow:
 - The curated first-half training DB lives beside the runtime DB:
   - default path: `data/wnba-player-half-training.sqlite`
   - override: `WNBA_PLAYER_HALF_TRAINING_DB_PATH`
+- DFS first-half training also reuses curated full-game projection samples from:
+  - default path: `data/wnba-training.sqlite`
+  - override: `WNBA_TRAINING_DB_PATH`
 - DFS first-half model training now fits only rows with observed halftime player stats.
   - fallback share-derived halftime estimates remain in the curated DB for analysis, but are excluded from model fitting
+- DFS prewarm now follows the same pattern as the other learned models:
+  - rebuild curated half and player-prop training DBs explicitly
+  - derive cache signatures from training-db metadata only
+  - serve current-slate reads from warmed artifacts instead of retraining inside request/cache-key paths
+- Signature helpers must stay read-only. On Sunday, August 9, 2026, DFS cache-key generation was traced mutating `wnba-player-half-training.sqlite` and `wnba-training.sqlite`, which made SQLite lock contention possible during prewarm and repair runs.
 - DFS first-half estimates currently expose:
   - `GET /api/dfs/first-half`
   - `GET /api/player-first-half-history`
@@ -1376,6 +1384,7 @@ WNBA still stores Model Lab run history in the database, not in artifact files. 
 Runtime behavior:
 
 - normal live prop rebuilds now prewarm learned player/minutes/residual models before writing predictions
+- startup and ESPN-history repair flows now also prewarm DFS first-half artifacts after settlement, so `GET /api/dfs/first-half` can stay on cached evaluation/model state
 - if uploaded cache files do not match the active live DB fingerprint, the backend retrains from the active runtime instead of silently downgrading prop predictions to `component`
 - full live training runs also prewarm current minutes, market, and residual artifacts into `/data/cache/model_artifacts`
 - full live training still runs the entire Model Lab path; recent game-model feature expansion made that path heavier, so game evaluation now refits direct game models once per `YYYY-MM` segment instead of once per historical row
