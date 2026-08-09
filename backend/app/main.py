@@ -1067,6 +1067,59 @@ def _mark_stale_prop_sync_state(state: dict[str, Any] | None) -> dict[str, Any] 
     return stale_state
 
 
+def _recover_stale_prop_sync_jobs(*, conn=None) -> int:
+    owns_connection = conn is None
+    recovered = 0
+    try:
+        db_conn = conn if conn is not None else connect()
+        rows = db_conn.execute(
+            """
+            SELECT *
+            FROM prop_sync_jobs
+            WHERE status IN ('queued', 'running')
+            ORDER BY started_at DESC, id DESC
+            """
+        ).fetchall()
+        for row in rows:
+            state = _row_to_prop_sync_state(row)
+            if state is None or state.get("status") != "stale":
+                continue
+            db_conn.execute(
+                """
+                UPDATE prop_sync_jobs
+                SET status = ?, finished_at = ?, message = ?, last_error = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    "stale",
+                    state.get("finished_at"),
+                    state.get("message"),
+                    state.get("last_error"),
+                    datetime.now(timezone.utc).isoformat(),
+                    int(row["id"]),
+                ),
+            )
+            recovered += 1
+        if owns_connection:
+            db_conn.commit()
+    except Exception as exc:
+        print(f"[prop-sync] stale recovery skipped: {exc}")
+        return 0
+    finally:
+        if owns_connection:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+    return recovered
+
+
+def _current_prop_sync_state() -> dict[str, Any]:
+    sync_state, latest_job = _resolved_prop_sync_state()
+    effective = latest_job if latest_job is not None else sync_state
+    return effective or dict(_PROP_SYNC_STATE)
+
+
 def _latest_prop_sync_job_state() -> dict[str, Any] | None:
     try:
         with connect() as conn:
@@ -1398,6 +1451,9 @@ def on_startup() -> None:
     init_db()
     with connect() as conn:
         ensure_teams(conn)
+        recovered_jobs = _recover_stale_prop_sync_jobs(conn=conn)
+    if recovered_jobs:
+        print(f"[prop-sync] recovered {recovered_jobs} stale queued/running job(s) on startup.")
     _start_model_prewarm()
     _start_read_payload_prewarm()
 
@@ -4343,14 +4399,14 @@ def _run_legacy_recalculate_job() -> dict[str, Any]:
 
 
 def _queue_legacy_recalculate_job(request: Request | None = None) -> dict[str, Any]:
-    with _PROP_SYNC_LOCK:
-        if _PROP_SYNC_STATE["running"]:
-            return {
-                "status": "busy",
-                "started_at": _PROP_SYNC_STATE["started_at"],
-                "scope": _PROP_SYNC_STATE.get("scope"),
-                "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
-            }
+    sync_state = _current_prop_sync_state()
+    if sync_state.get("running"):
+        return {
+            "status": "busy",
+            "started_at": sync_state.get("started_at"),
+            "scope": sync_state.get("scope"),
+            "target_game_ids": list(sync_state.get("target_game_ids") or []),
+        }
     started_at = _begin_prop_sync_job("legacy_recalculate")
     job_run_id = _create_job_run(
         "legacy_recalculate",
@@ -4486,14 +4542,14 @@ def _queue_current_slate_repair_job(
     *,
     request: Request | None = None,
 ) -> dict[str, Any]:
-    with _PROP_SYNC_LOCK:
-        if _PROP_SYNC_STATE["running"]:
-            return {
-                "status": "busy",
-                "started_at": _PROP_SYNC_STATE["started_at"],
-                "scope": _PROP_SYNC_STATE.get("scope"),
-                "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
-            }
+    sync_state = _current_prop_sync_state()
+    if sync_state.get("running"):
+        return {
+            "status": "busy",
+            "started_at": sync_state.get("started_at"),
+            "scope": sync_state.get("scope"),
+            "target_game_ids": list(sync_state.get("target_game_ids") or []),
+        }
     normalized_target_game_ids = sorted({int(game_id) for game_id in (target_game_ids or []) if int(game_id) > 0})
     started_at = _begin_prop_sync_job("injury_update" if normalized_target_game_ids else "current_slate")
     job_run_id = None
@@ -4689,14 +4745,14 @@ def _run_odds_import_job(force_refresh: bool) -> dict[str, Any]:
 
 
 def _queue_odds_import_job(force_refresh: bool, request: Request | None = None) -> dict[str, Any]:
-    with _PROP_SYNC_LOCK:
-        if _PROP_SYNC_STATE["running"]:
-            return {
-                "status": "busy",
-                "started_at": _PROP_SYNC_STATE["started_at"],
-                "scope": _PROP_SYNC_STATE.get("scope"),
-                "target_game_ids": list(_PROP_SYNC_STATE.get("target_game_ids") or []),
-            }
+    sync_state = _current_prop_sync_state()
+    if sync_state.get("running"):
+        return {
+            "status": "busy",
+            "started_at": sync_state.get("started_at"),
+            "scope": sync_state.get("scope"),
+            "target_game_ids": list(sync_state.get("target_game_ids") or []),
+        }
     started_at = _begin_prop_sync_job(
         "odds_import",
         stage="queued",
@@ -7661,9 +7717,8 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
 
 
 def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> bool:
-    with _PROP_SYNC_LOCK:
-        if _PROP_SYNC_STATE["running"]:
-            return False
+    if _current_prop_sync_state().get("running"):
+        return False
     _begin_prop_sync_job(source)
     job_run_id = _create_job_run(
         "background_prop_sync",
@@ -7841,9 +7896,8 @@ def _start_covers_refresh_if_needed(
     selected_date: str | None,
     request: Request | None = None,
 ) -> bool:
-    with _PROP_SYNC_LOCK:
-        if _PROP_SYNC_STATE["running"]:
-            return False
+    if _current_prop_sync_state().get("running"):
+        return False
     _begin_prop_sync_job("covers_import", stage="queued", message="Fresh Covers refresh queued in background.")
     job_run_id = _create_job_run(
         "background_covers_refresh",
