@@ -298,6 +298,7 @@ def test_settle_dfs_first_half_projection_snapshots_uses_first_half_stats() -> N
 
 
 def test_load_cached_dfs_half_model_falls_back_to_existing_market_cache_file() -> None:
+    feature_count = len(FEATURE_NAMES) + len(dfs_model_module.DFS_HALF_EXTRA_FEATURES)
     cache_module.write_json_cache(
         "dfs_first_half_model-points-legacy.json",
         {
@@ -307,9 +308,9 @@ def test_load_cached_dfs_half_model_falls_back_to_existing_market_cache_file() -
                 "market": "points",
                 "rows": 321,
                 "intercept": 1.25,
-                "coefficients": [0.5, -0.2],
-                "feature_means": [10.0, 20.0],
-                "feature_scales": [2.0, 4.0],
+                "coefficients": [0.5] * feature_count,
+                "feature_means": [10.0] * feature_count,
+                "feature_scales": [2.0] * feature_count,
             },
         },
     )

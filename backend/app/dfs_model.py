@@ -231,13 +231,29 @@ def build_current_dfs_first_half_estimates(
     ).fetchall()
     payload: list[dict] = []
     runtime_cache: dict[str, dict[tuple, object]] = {}
+    market_models = {
+        market: train_dfs_half_market_model(conn, market, allow_training=False)
+        for market in sorted(
+            {
+                str(row["market"] or "").strip().lower()
+                for row in rows
+                if str(row["market"] or "").strip().lower() in DFS_HALF_MARKETS
+                and (not eligible_markets or str(row["market"] or "").strip().lower() in eligible_markets)
+            }
+        )
+    }
     for row in rows:
         market = str(row["market"] or "").strip().lower()
         if market not in DFS_HALF_MARKETS:
             continue
         if eligible_markets and market not in eligible_markets:
             continue
-        estimate = _predict_current_half_estimate(conn, row, runtime_cache=runtime_cache)
+        estimate = _predict_current_half_estimate(
+            conn,
+            row,
+            runtime_cache=runtime_cache,
+            model=market_models.get(market),
+        )
         if estimate is None:
             continue
         payload.append(
@@ -528,9 +544,11 @@ def _predict_current_half_estimate(
     row: sqlite3.Row,
     *,
     runtime_cache: dict[str, dict[tuple, object]] | None,
+    model: RidgeModel | None = None,
 ) -> DfsHalfEstimate | None:
     market = str(row["market"] or "").strip().lower()
-    model = train_dfs_half_market_model(conn, market, allow_training=False)
+    if model is None:
+        model = train_dfs_half_market_model(conn, market, allow_training=False)
     if model is None:
         return None
     player_id = int(row["player_id"])
@@ -1344,13 +1362,23 @@ def _deserialize_cached_dfs_half_model(payload: dict[str, object]) -> RidgeModel
     if not isinstance(model, dict):
         return None
     try:
+        coefficients = [float(value) for value in model["coefficients"]]
+        feature_means = [float(value) for value in model["feature_means"]]
+        feature_scales = [float(value) for value in model["feature_scales"]]
+        expected_feature_count = len(FEATURE_NAMES) + len(DFS_HALF_EXTRA_FEATURES)
+        if (
+            len(coefficients) != expected_feature_count
+            or len(feature_means) != expected_feature_count
+            or len(feature_scales) != expected_feature_count
+        ):
+            return None
         return RidgeModel(
             market=str(model["market"]),
             rows=int(model["rows"]),
             intercept=float(model["intercept"]),
-            coefficients=[float(value) for value in model["coefficients"]],
-            feature_means=[float(value) for value in model["feature_means"]],
-            feature_scales=[float(value) for value in model["feature_scales"]],
+            coefficients=coefficients,
+            feature_means=feature_means,
+            feature_scales=feature_scales,
         )
     except (KeyError, TypeError, ValueError):
         return None
