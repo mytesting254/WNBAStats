@@ -425,8 +425,13 @@ def sync_prop_lines_from_sportsbook(
     progress_callback: Callable[[int, int, str | None], None] | None = None,
     rebuild_progress_callback: Callable[[int, int, str | None], None] | None = None,
 ) -> int | SyncPropLinesResult:
+    def flush_progress_transaction() -> None:
+        if conn.in_transaction:
+            conn.commit()
+
     if progress_callback is not None:
         progress_callback(0, 1, "Collecting sportsbook props.")
+        flush_progress_transaction()
     try:
         target_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
         game_filter = ""
@@ -547,6 +552,7 @@ def sync_prop_lines_from_sportsbook(
         touched_game_ids = target_game_ids or sorted({int(row["game_id"]) for row in rows if row["game_id"] is not None})
         if progress_callback is not None:
             progress_callback(len(rows), max(len(rows), 1), f"Matched {len(rows)} sportsbook props across {len(touched_game_ids)} games.")
+            flush_progress_transaction()
         existing_rows = _open_scheduled_prop_line_rows(conn, touched_game_ids)
         existing_by_key = {
             (
@@ -749,6 +755,7 @@ def sync_prop_lines_from_sportsbook(
                     max(len(rows), 1),
                     f"Synced {len(insert_rows)} new, {len(update_rows)} updated, {len(delete_prop_line_ids)} removed prop lines.",
                 )
+                flush_progress_transaction()
             if include_change_details:
                 return SyncPropLinesResult(
                     synced_props=len(candidate_rows),
