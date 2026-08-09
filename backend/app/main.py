@@ -978,7 +978,7 @@ def _begin_prop_sync_job(
     stage: str = "queued",
     message: str = "Queued for background processing.",
     target_game_ids: list[int] | None = None,
-) -> str:
+) -> tuple[str, int | None]:
     started_at = datetime.now(timezone.utc).isoformat()
     job_id = _create_prop_sync_job_record(
         scope,
@@ -1004,7 +1004,7 @@ def _begin_prop_sync_job(
         total=0,
         message=message,
     )
-    return started_at
+    return started_at, job_id
 
 
 def _row_to_prop_sync_state(row) -> dict[str, Any] | None:
@@ -4489,7 +4489,7 @@ def _queue_legacy_recalculate_job(request: Request | None = None) -> dict[str, A
             "scope": sync_state.get("scope"),
             "target_game_ids": list(sync_state.get("target_game_ids") or []),
         }
-    started_at = _begin_prop_sync_job("legacy_recalculate")
+    started_at, _job_id = _begin_prop_sync_job("legacy_recalculate")
     job_run_id = _create_job_run(
         "legacy_recalculate",
         request=request,
@@ -4633,7 +4633,7 @@ def _queue_current_slate_repair_job(
             "target_game_ids": list(sync_state.get("target_game_ids") or []),
         }
     normalized_target_game_ids = sorted({int(game_id) for game_id in (target_game_ids or []) if int(game_id) > 0})
-    started_at = _begin_prop_sync_job("injury_update" if normalized_target_game_ids else "current_slate")
+    started_at, _job_id = _begin_prop_sync_job("injury_update" if normalized_target_game_ids else "current_slate")
     job_run_id = None
     if request is not None:
         job_run_id = _create_job_run(
@@ -4835,7 +4835,7 @@ def _queue_odds_import_job(force_refresh: bool, request: Request | None = None) 
             "scope": sync_state.get("scope"),
             "target_game_ids": list(sync_state.get("target_game_ids") or []),
         }
-    started_at = _begin_prop_sync_job(
+    started_at, _job_id = _begin_prop_sync_job(
         "odds_import",
         stage="queued",
         message="Odds import queued for background processing.",
@@ -6677,16 +6677,16 @@ def _import_covers_impl(*, request: Request | None, selected_date: str | None, f
     if force_refresh:
         with connect() as conn:
             cached_result = _load_saved_covers_payload_into_runtime(conn, update_game_markets=True)
-            if cached_result is not None:
-                _invalidate_read_caches()
-                cached_result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
-                sync_started = _start_covers_refresh_if_needed(selected_date=selected_date, request=request)
-                cached_result["sync_started"] = sync_started
-                if sync_started:
-                    cached_result["message"] = "Loaded Covers props from saved JSON. Fresh Covers refresh queued in background."
-                else:
-                    cached_result["message"] = "Loaded Covers props from saved JSON. Fresh Covers refresh already running."
-                return cached_result
+        if cached_result is not None:
+            sync_started = _start_covers_refresh_if_needed(selected_date=selected_date, request=request)
+            _invalidate_read_caches()
+            cached_result["published_payloads"] = {}
+            cached_result["sync_started"] = sync_started
+            if sync_started:
+                cached_result["message"] = "Loaded Covers props from saved JSON. Fresh Covers refresh queued in background."
+            else:
+                cached_result["message"] = "Loaded Covers props from saved JSON. Fresh Covers refresh was not queued."
+            return cached_result
     with connect() as conn:
         result = _import_covers_provider_rows(conn, selected_date=selected_date, force_refresh=force_refresh, update_game_markets=True)
     ingestion = build_covers_provider_ingestion(result)
@@ -7807,7 +7807,9 @@ def _start_prop_sync_if_needed(
     if _current_prop_sync_state().get("running"):
         return False
     normalized_target_game_ids = sorted({int(game_id) for game_id in (target_game_ids or []) if int(game_id) > 0})
-    _begin_prop_sync_job(source, target_game_ids=normalized_target_game_ids)
+    _started_at, prop_sync_job_id = _begin_prop_sync_job(source, target_game_ids=normalized_target_game_ids)
+    if prop_sync_job_id is None:
+        return False
     job_run_id = _create_job_run(
         "background_prop_sync",
         request=request,
@@ -7993,7 +7995,13 @@ def _start_covers_refresh_if_needed(
 ) -> bool:
     if _current_prop_sync_state().get("running"):
         return False
-    _begin_prop_sync_job("covers_import", stage="queued", message="Fresh Covers refresh queued in background.")
+    _started_at, prop_sync_job_id = _begin_prop_sync_job(
+        "covers_import",
+        stage="queued",
+        message="Fresh Covers refresh queued in background.",
+    )
+    if prop_sync_job_id is None:
+        return False
     job_run_id = _create_job_run(
         "background_covers_refresh",
         request=request,
