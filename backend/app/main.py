@@ -3072,6 +3072,24 @@ def _cached_rotowire_refresh_metadata() -> dict[str, Any]:
     }
 
 
+def _roster_cache_requires_refresh() -> bool:
+    roster_cache = read_json_cache(ROSTER_CACHE_NAME)
+    raw_cache = read_json_cache(ROTOWIRE_RAW_CACHE_NAME)
+    if not isinstance(roster_cache, dict) or not isinstance(raw_cache, dict):
+        return False
+
+    raw_rows = raw_cache.get("rows")
+    cached_payload = roster_cache.get("payload")
+    if isinstance(raw_rows, list) and raw_rows and isinstance(cached_payload, list) and not cached_payload:
+        return True
+
+    roster_cached_at = _parse_cache_timestamp(roster_cache.get("cached_at"))
+    raw_captured_at = _parse_cache_timestamp(raw_cache.get("captured_at"))
+    if roster_cached_at is None or raw_captured_at is None:
+        return False
+    return raw_captured_at > roster_cached_at
+
+
 def _roster_payload(conn, *, refresh_lineups: bool = True) -> list[dict]:
     if refresh_lineups:
         try:
@@ -7818,11 +7836,17 @@ def roster(response: Response) -> list[dict]:
         with connect() as conn:
             return _roster_payload(conn, refresh_lineups=True)
 
-    payload, status, compute_ms = _read_through_cache_with_meta(
-        ROSTER_CACHE_NAME,
-        ROSTER_TTL_SECONDS,
-        compute,
-    )
+    if _roster_cache_requires_refresh():
+        payload = compute()
+        write_json_cache(ROSTER_CACHE_NAME, _cache_envelope(payload, ROSTER_TTL_SECONDS))
+        status = "MISS"
+        compute_ms = 0.0
+    else:
+        payload, status, compute_ms = _read_through_cache_with_meta(
+            ROSTER_CACHE_NAME,
+            ROSTER_TTL_SECONDS,
+            compute,
+        )
     _set_observability_headers(response, ROSTER_CACHE_NAME, status, compute_ms)
     return payload
 
