@@ -4337,7 +4337,7 @@ def _repair_current_slate_props(
         rebuild_predictions_fn=rebuild_predictions_live,
         rebuild_games_fn=rebuild_game_predictions_live,
         snapshot_watchlist_fn=_snapshot_watchlist,
-        snapshot_dfs_fn=_snapshot_current_dfs_first_half,
+        snapshot_dfs_fn=None,
         watchlist_snapshot_date=datetime.now(LOCAL_TZ).date().isoformat(),
         progress_callback=progress_callback,
     )
@@ -4592,6 +4592,70 @@ def _run_current_slate_repair_job(target_game_ids: list[int] | None = None) -> d
     return result
 
 
+def _queue_dfs_follow_up_refresh(
+    game_ids: list[int] | None,
+    *,
+    source_scope: str,
+    request: Request | None = None,
+) -> dict[str, Any] | None:
+    normalized_game_ids = sorted({int(game_id) for game_id in (game_ids or []) if int(game_id) > 0})
+    if not normalized_game_ids:
+        return None
+    job_run_id = _create_job_run(
+        "dfs_follow_up_refresh",
+        request=request,
+        trigger_action=f"internal.{source_scope}.dfs_follow_up" if request is None else f"api.{source_scope}.dfs_follow_up",
+        source_path=request.url.path if request is not None else None,
+        metadata={"source_scope": source_scope, "target_game_ids": normalized_game_ids},
+        target={"game_ids": normalized_game_ids},
+    )
+    _append_job_run_event(
+        job_run_id,
+        "job.queued",
+        "DFS follow-up refresh queued.",
+        details={"source_scope": source_scope, "target_game_ids": normalized_game_ids},
+    )
+
+    def _run() -> None:
+        try:
+            _append_job_run_event(
+                job_run_id,
+                "job.running",
+                "DFS follow-up refresh started.",
+                details={"source_scope": source_scope, "target_game_ids": normalized_game_ids},
+            )
+            with connect() as conn:
+                snapshot_result = _snapshot_current_dfs_first_half(conn, normalized_game_ids)
+            result = {
+                "source_scope": source_scope,
+                "target_game_ids": normalized_game_ids,
+                "dfs_snapshot": snapshot_result,
+            }
+            _append_job_run_event(
+                job_run_id,
+                "job.completed",
+                "DFS follow-up refresh finished.",
+                details=result,
+            )
+            _finish_job_run(job_run_id, status="completed", result=result)
+        except Exception as exc:
+            _append_job_run_event(
+                job_run_id,
+                "job.failed",
+                f"DFS follow-up refresh failed: {exc}",
+                level="error",
+                details={"source_scope": source_scope, "target_game_ids": normalized_game_ids},
+            )
+            _finish_job_run(job_run_id, status="failed", error_text=str(exc))
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {
+        "status": "queued",
+        "job_run_id": job_run_id,
+        "target_game_ids": normalized_game_ids,
+    }
+
+
 def _run_current_slate_repair_job_with_retry(
     target_game_ids: list[int] | None = None,
     *,
@@ -4660,6 +4724,20 @@ def _queue_current_slate_repair_job(
                 if normalized_target_game_ids
                 else _run_current_slate_repair_job_with_retry(job_run_id=job_run_id)
             )
+            dfs_follow_up = _queue_dfs_follow_up_refresh(
+                list(result.get("target_game_ids") or []),
+                source_scope=str(result.get("scope") or "current_slate"),
+                request=request,
+            )
+            if dfs_follow_up is not None:
+                result["dfs_follow_up"] = dfs_follow_up
+                if job_run_id is not None:
+                    _append_job_run_event(
+                        job_run_id,
+                        "job.dfs_follow_up_queued",
+                        "DFS follow-up refresh queued.",
+                        details=dfs_follow_up,
+                    )
             _mutate_prop_sync_state(
                 running=False,
                 finished_at=datetime.now(timezone.utc).isoformat(),
