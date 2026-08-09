@@ -7846,7 +7846,9 @@ def _start_prop_sync_if_needed(
                         skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
                         sync_props_fn=sync_prop_lines_from_sportsbook,
                         rebuild_predictions_fn=rebuild_predictions_live,
-                        snapshot_dfs_fn=_snapshot_current_dfs_first_half,
+                        # Keep DFS first-half snapshots out of the critical sync path.
+                        # The props pipeline must be able to finish even if DFS refreshes lag.
+                        snapshot_dfs_fn=None,
                         progress_callback=lambda stage, current, total, message, conn=conn: _set_prop_sync_progress(
                             conn=conn,
                             stage=stage,
@@ -8073,7 +8075,9 @@ def _start_covers_refresh_if_needed(
                     skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
                     sync_props_fn=sync_prop_lines_from_sportsbook,
                     rebuild_predictions_fn=rebuild_predictions_live,
-                    snapshot_dfs_fn=_snapshot_current_dfs_first_half,
+                    # Keep DFS first-half snapshots out of the critical sync path.
+                    # The props pipeline must be able to finish even if DFS refreshes lag.
+                    snapshot_dfs_fn=None,
                     progress_callback=lambda stage, current, total, message, conn=conn: _set_prop_sync_progress(
                         conn=conn,
                         stage=stage,
