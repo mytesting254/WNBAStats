@@ -3716,9 +3716,12 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
   const records = normalizeCoversRecords(matchup.covers_records);
   const h2hSegments = matchup.h2h_segment_summary;
   const hasCovers = Boolean(records.head_to_head.length || records.away_last_10.length || records.home_last_10.length);
+  const directH2HRows = normalizeCoversRecordRows(matchup.h2h_records);
   const h2hRows = records.head_to_head.length
     ? records.head_to_head.slice(0, 10)
-    : buildFallbackH2HRows(matchup);
+    : directH2HRows.length
+      ? directH2HRows.slice(0, 10)
+      : buildFallbackH2HRows(matchup);
   const singleH2HRow = h2hRows.length === 1 ? h2hRows[0] : null;
   const awayRows = hasCovers
     ? records.away_last_10.slice(0, 10)
@@ -4157,11 +4160,17 @@ function normalizeTeamCode(value: string | null | undefined) {
 function normalizeCoversRecords(records: Matchup["covers_records"] | null | undefined): NormalizedCoversRecords {
   const source = records && typeof records === "object" ? records : null;
   return {
-    head_to_head: Array.isArray(source?.head_to_head) ? source.head_to_head.map(normalizeCoversRecordRow).filter((row): row is CoversRecordRow => row != null) : [],
-    away_last_10: Array.isArray(source?.away_last_10) ? source.away_last_10.map(normalizeCoversRecordRow).filter((row): row is CoversRecordRow => row != null) : [],
-    home_last_10: Array.isArray(source?.home_last_10) ? source.home_last_10.map(normalizeCoversRecordRow).filter((row): row is CoversRecordRow => row != null) : [],
+    head_to_head: normalizeCoversRecordRows(source?.head_to_head),
+    away_last_10: normalizeCoversRecordRows(source?.away_last_10),
+    home_last_10: normalizeCoversRecordRows(source?.home_last_10),
     team_table: Array.isArray(source?.team_table) ? source.team_table : [],
   };
+}
+
+function normalizeCoversRecordRows(rows: unknown): CoversRecordRow[] {
+  return Array.isArray(rows)
+    ? rows.map(normalizeCoversRecordRow).filter((row): row is CoversRecordRow => row != null)
+    : [];
 }
 
 function normalizeCoversRecordRow(row: unknown): CoversRecordRow | null {

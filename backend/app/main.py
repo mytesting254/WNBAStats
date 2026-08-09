@@ -3606,6 +3606,13 @@ def _build_matchup_payload_item(
         "home": home_summary,
         "away": away_summary,
         "covers_records": group_covers_records,
+        "h2h_records": _direct_h2h_matchup_rows(
+            conn,
+            away_team_id=int(game["away_team_id"]),
+            home_team_id=int(game["home_team_id"]),
+            scheduled_start_time=str(game["start_time"]),
+            scheduled_game_id=game_id,
+        ),
         "props": _value_board_payload_for_games(conn, game_ids, include_filtered_only=False),
         "sportsbook_props": _sportsbook_props_for_games(conn, game_ids),
         "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
@@ -10091,6 +10098,84 @@ def _h2h_segment_summary(
         "home_avg_first_half_points": round(home_first_half_points / meeting_count, 1),
         "avg_first_half_total": round(first_half_total / meeting_count, 1),
     }
+
+
+def _direct_h2h_matchup_rows(
+    conn,
+    *,
+    away_team_id: int,
+    home_team_id: int,
+    scheduled_start_time: str,
+    scheduled_game_id: int,
+) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT
+            g.game_date,
+            g.start_time,
+            home.abbreviation AS home_team,
+            away.abbreviation AS away_team,
+            home_result.points AS home_points,
+            home_result.opponent_points AS away_points,
+            home_result.spread_home,
+            home_result.game_total
+        FROM games g
+        JOIN teams home ON home.id = g.home_team_id
+        JOIN teams away ON away.id = g.away_team_id
+        JOIN team_game_results home_result
+          ON home_result.game_id = g.id
+         AND home_result.team_id = g.home_team_id
+        WHERE (
+            (g.home_team_id = ? AND g.away_team_id = ?)
+            OR
+            (g.home_team_id = ? AND g.away_team_id = ?)
+        )
+          AND g.id != ?
+          AND COALESCE(g.start_time, '') < COALESCE(?, '')
+        ORDER BY g.start_time DESC
+        LIMIT 10
+        """,
+        (home_team_id, away_team_id, away_team_id, home_team_id, scheduled_game_id, scheduled_start_time),
+    ).fetchall()
+    payload: list[dict[str, Any]] = []
+    for row in rows:
+        home_points = float(row["home_points"] or 0.0)
+        away_points = float(row["away_points"] or 0.0)
+        winner: str | None
+        if home_points == away_points:
+            winner = None
+        elif home_points > away_points:
+            winner = str(row["home_team"])
+        else:
+            winner = str(row["away_team"])
+        ats = _team_ats_result(
+            {
+                "spread_home": row["spread_home"],
+                "is_home": 1,
+                "points": home_points,
+                "opponent_points": away_points,
+            }
+        )
+        total = _game_total_result(
+            {
+                "game_total": row["game_total"],
+                "points": home_points,
+                "opponent_points": away_points,
+            }
+        )
+        payload.append(
+            {
+                "date": datetime.strptime(str(row["game_date"] or ""), "%Y-%m-%d").strftime("%b %-d, %y")
+                if str(row["game_date"] or "").strip()
+                else "",
+                "home": str(row["home_team"]),
+                "winner": winner,
+                "score": f"{int(home_points)} - {int(away_points)}",
+                "ats": ats.replace("no_cover", "No Cover").replace("cover", "Cover").replace("push", "Push").replace("unknown", "N/A"),
+                "total": total.replace("over", "Over").replace("under", "Under").replace("push", "Push").replace("unknown", "N/A"),
+            }
+        )
+    return payload
 
 
 def _team_ratings_by_team(conn, team_ids: set[int]) -> dict[int, dict[str, Any]]:

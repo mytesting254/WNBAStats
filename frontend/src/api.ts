@@ -863,6 +863,7 @@ export type Matchup = {
     home_avg_first_half_points: number | null;
     avg_first_half_total: number | null;
   } | null;
+  h2h_records?: CoversRecordRow[] | null;
   covers_records?: CoversRecords | null;
   props: ValueProp[];
   sportsbook_props: SportsbookProp[];
