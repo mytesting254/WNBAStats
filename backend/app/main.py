@@ -907,6 +907,7 @@ def _queue_model_training_job(request: Request | None = None) -> dict[str, Any]:
             with sqlite_write_lock():
                 with connect() as conn:
                     result = run_walk_forward_training(conn)
+                    result["dfs_prewarm"] = prewarm_dfs_half_cache(conn)
             _invalidate_read_caches()
             with sqlite_write_lock():
                 with connect() as conn:
