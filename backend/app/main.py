@@ -163,6 +163,7 @@ _ESPN_HISTORY_IMPORT_LOCK = threading.Lock()
 _READ_CACHE_REBUILD_LOCKS: dict[str, threading.Lock] = {}
 _READ_CACHE_REBUILD_LOCKS_LOCK = threading.Lock()
 PROP_SYNC_STALE_SECONDS = int(os.getenv("PROP_SYNC_STALE_SECONDS", "1800"))
+PROP_SYNC_RESUME_MAX_AGE_SECONDS = int(os.getenv("PROP_SYNC_RESUME_MAX_AGE_SECONDS", "14400"))
 RECENT_FINALS_SETTLEMENT_LOOKBACK_DAYS = int(os.getenv("RECENT_FINALS_SETTLEMENT_LOOKBACK_DAYS", "3"))
 _PROP_SYNC_STATE: dict[str, Any] = {
     "job_id": None,
@@ -1120,6 +1121,46 @@ def _current_prop_sync_state() -> dict[str, Any]:
     return effective or dict(_PROP_SYNC_STATE)
 
 
+def _latest_recoverable_stale_prop_sync_job(*, conn=None) -> dict[str, Any] | None:
+    owns_connection = conn is None
+    recoverable_scopes = {"covers_import", "current_slate", "injury_update", "legacy_recalculate"}
+    try:
+        db_conn = conn if conn is not None else connect()
+        rows = db_conn.execute(
+            """
+            SELECT *
+            FROM prop_sync_jobs
+            WHERE status = 'stale'
+            ORDER BY finished_at DESC, started_at DESC, id DESC
+            LIMIT 25
+            """
+        ).fetchall()
+    except Exception as exc:
+        print(f"[prop-sync] stale resume scan skipped: {exc}")
+        return None
+    finally:
+        if owns_connection:
+            try:
+                db_conn.close()
+            except Exception:
+                pass
+
+    for row in rows:
+        state = _row_to_prop_sync_state(row)
+        if state is None or str(state.get("scope") or "") not in recoverable_scopes:
+            continue
+        candidate_time = (
+            _parse_iso_datetime(state.get("finished_at"))
+            or _parse_iso_datetime(state.get("started_at"))
+        )
+        if candidate_time is None:
+            continue
+        age_seconds = (datetime.now(timezone.utc) - candidate_time.astimezone(timezone.utc)).total_seconds()
+        if age_seconds <= PROP_SYNC_RESUME_MAX_AGE_SECONDS:
+            return state
+    return None
+
+
 def _latest_prop_sync_job_state() -> dict[str, Any] | None:
     try:
         with connect() as conn:
@@ -1456,6 +1497,7 @@ def on_startup() -> None:
         print(f"[prop-sync] recovered {recovered_jobs} stale queued/running job(s) on startup.")
     _start_model_prewarm()
     _start_read_payload_prewarm()
+    _start_prop_sync_resume_worker()
 
 
 def _start_model_prewarm() -> None:
@@ -1480,6 +1522,46 @@ def _start_read_payload_prewarm() -> None:
             print(f"[startup] read payload prewarm skipped: {exc}")
 
     thread = threading.Thread(target=_worker, name="read-payload-prewarm", daemon=True)
+    thread.start()
+
+
+def _start_prop_sync_resume_worker() -> None:
+    def _worker() -> None:
+        try:
+            time.sleep(2.0)
+            with connect() as conn:
+                state = _latest_recoverable_stale_prop_sync_job(conn=conn)
+            if state is None:
+                return
+            scope = str(state.get("scope") or "")
+            target_game_ids = [int(game_id) for game_id in (state.get("target_game_ids") or []) if int(game_id) > 0]
+            stage = str(state.get("stage") or "")
+            resumed = False
+            if scope == "covers_import":
+                if stage == "requesting_provider":
+                    resumed = _start_covers_refresh_if_needed(selected_date=None, request=None)
+                else:
+                    resumed = _start_prop_sync_if_needed("covers_import", request=None, target_game_ids=target_game_ids or None)
+            elif scope in {"current_slate", "injury_update"}:
+                result = _queue_current_slate_repair_job(target_game_ids if scope == "injury_update" else target_game_ids, request=None)
+                resumed = str(result.get("status") or "") == "queued"
+            elif scope == "legacy_recalculate":
+                result = _queue_legacy_recalculate_job(request=None)
+                resumed = str(result.get("status") or "") == "queued"
+            if resumed:
+                print(
+                    f"[prop-sync] resumed stale {scope} job from startup recovery "
+                    f"(started_at={state.get('started_at')}, stage={stage or 'unknown'})."
+                )
+            else:
+                print(
+                    f"[prop-sync] stale {scope} job was recoverable but could not be resumed "
+                    f"(started_at={state.get('started_at')}, stage={stage or 'unknown'})."
+                )
+        except Exception as exc:
+            print(f"[prop-sync] startup resume skipped: {exc}")
+
+    thread = threading.Thread(target=_worker, name="prop-sync-startup-resume", daemon=True)
     thread.start()
 
 
@@ -7716,18 +7798,30 @@ def matchups(response: Response, force_refresh: bool = False) -> list[dict]:
     return payload
 
 
-def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> bool:
+def _start_prop_sync_if_needed(
+    source: str,
+    request: Request | None = None,
+    *,
+    target_game_ids: list[int] | None = None,
+) -> bool:
     if _current_prop_sync_state().get("running"):
         return False
-    _begin_prop_sync_job(source)
+    normalized_target_game_ids = sorted({int(game_id) for game_id in (target_game_ids or []) if int(game_id) > 0})
+    _begin_prop_sync_job(source, target_game_ids=normalized_target_game_ids)
     job_run_id = _create_job_run(
         "background_prop_sync",
         request=request,
         trigger_action=f"internal.{source}" if request is None else f"api.{source}",
         source_path=request.url.path if request is not None else None,
-        metadata={"source": source},
+        metadata={"source": source, "target_game_ids": normalized_target_game_ids},
+        target={"game_ids": normalized_target_game_ids},
     )
-    _append_job_run_event(job_run_id, "job.queued", "Background prop sync queued.", details={"source": source})
+    _append_job_run_event(
+        job_run_id,
+        "job.queued",
+        "Background prop sync queued.",
+        details={"source": source, "target_game_ids": normalized_target_game_ids},
+    )
 
     def _run_background_prop_sync_job_with_retry(
         *,
@@ -7741,6 +7835,7 @@ def _start_prop_sync_if_needed(source: str, request: Request | None = None) -> b
                     pipeline_result = run_prop_sync_pipeline(
                         conn,
                         request_source=source,
+                        target_game_ids=normalized_target_game_ids or None,
                         sync_props=True,
                         rebuild_mode="changed_props",
                         skip_rebuild_message="No prop-line changes; skipped prediction rebuild.",
