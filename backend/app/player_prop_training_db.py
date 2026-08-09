@@ -516,10 +516,21 @@ def _final_rows_to_insert(market: str, samples: list[object], built_at: str) -> 
 
 
 def _source_signature(conn: sqlite3.Connection) -> str:
-    from .player_prop_model import _model_fingerprint, _training_start_date
+    from .player_prop_model import (
+        COMPONENT_MODEL_VERSION,
+        FEATURE_NAMES,
+        MINUTES_FEATURE_NAMES,
+        MODEL_VERSION,
+        _model_fingerprint,
+        _training_start_date,
+    )
 
     payload = {
         "model_fingerprint": _model_fingerprint(conn),
+        "model_version": MODEL_VERSION,
+        "component_model_version": COMPONENT_MODEL_VERSION,
+        "feature_names": list(FEATURE_NAMES),
+        "minutes_feature_names": list(MINUTES_FEATURE_NAMES),
         "training_start_date": _training_start_date(),
         "db_version": PLAYER_PROP_TRAINING_DB_VERSION,
         "market_sample_curation_policy": MARKET_SAMPLE_CURATION_POLICY,
