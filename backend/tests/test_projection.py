@@ -297,6 +297,31 @@ def test_settle_dfs_first_half_projection_snapshots_uses_first_half_stats() -> N
     assert int(settlement["correct_side"]) == 1
 
 
+def test_load_cached_dfs_half_model_falls_back_to_existing_market_cache_file() -> None:
+    cache_module.write_json_cache(
+        "dfs_first_half_model-points-legacy.json",
+        {
+            "model_version": dfs_model_module.DFS_HALF_MODEL_VERSION,
+            "config": {},
+            "model": {
+                "market": "points",
+                "rows": 321,
+                "intercept": 1.25,
+                "coefficients": [0.5, -0.2],
+                "feature_means": [10.0, 20.0],
+                "feature_scales": [2.0, 4.0],
+            },
+        },
+    )
+
+    loaded = dfs_model_module._load_cached_dfs_half_model("dfs_first_half_model-points-missing.json", market="points")
+
+    assert loaded is not None
+    assert loaded.market == "points"
+    assert loaded.rows == 321
+    assert loaded.intercept == pytest.approx(1.25)
+
+
 def test_training_start_date_defaults_to_previous_eastern_year(monkeypatch) -> None:
     monkeypatch.delenv("WNBA_TRAINING_START_DATE", raising=False)
 

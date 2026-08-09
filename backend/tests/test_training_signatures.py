@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
 from backend.app.bootstrap import ensure_teams
 from backend.app.db import connect, init_db
+from backend.app import dfs_model as dfs_model_module
 from backend.app import game_training_db as game_training_db_module
 from backend.app import minutes_training_db as minutes_training_db_module
+from backend.app import player_half_training_db as player_half_training_db_module
 from backend.app import player_prop_model as player_prop_model_module
 
 
@@ -18,6 +22,7 @@ def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("WNBA_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setenv("WNBA_SNAPSHOT_DIR", str(tmp_path / "snapshots"))
     monkeypatch.setenv("WNBA_TRAINING_DB_PATH", str(tmp_path / "wnba-training.sqlite"))
+    monkeypatch.setenv("WNBA_PLAYER_HALF_TRAINING_DB_PATH", str(tmp_path / "wnba-player-half-training.sqlite"))
     init_db()
     with connect() as conn:
         ensure_teams(conn)
@@ -105,6 +110,41 @@ def test_player_model_fingerprint_changes_after_game_market_repair() -> None:
         second = player_prop_model_module._model_fingerprint(conn)
 
     assert second != first
+
+
+def test_dfs_path_fingerprint_ignores_runtime_db_mtime() -> None:
+    db_path = os.environ["WNBA_DB_PATH"]
+    first = dfs_model_module._path_fingerprint(db_path)
+    stat = os.stat(db_path)
+    os.utime(db_path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000_000))
+    second = dfs_model_module._path_fingerprint(db_path)
+
+    assert second == first
+
+
+def test_player_half_signature_uses_existing_training_metadata_when_source_table_missing() -> None:
+    training_db_path = os.environ["WNBA_PLAYER_HALF_TRAINING_DB_PATH"]
+    with player_half_training_db_module._connect_training_db(Path(training_db_path)) as training_conn:
+        player_half_training_db_module._init_training_db(training_conn)
+        training_conn.executemany(
+            "INSERT OR REPLACE INTO player_half_training_metadata(key, value) VALUES(?, ?)",
+            [
+                ("source_signature", "cached-source"),
+                ("player_rows", "10"),
+                ("prop_rows", "20"),
+                ("candidate_player_rows", "12"),
+                ("candidate_prop_rows", "24"),
+                ("built_at", "2026-08-09T10:00:00+00:00"),
+                ("db_version", player_half_training_db_module.PLAYER_HALF_TRAINING_DB_VERSION),
+            ],
+        )
+        training_conn.commit()
+    with connect() as conn:
+        conn.execute("DROP TABLE player_first_half_stats")
+        signature = player_half_training_db_module.player_half_training_db_signature(conn, allow_rebuild=False)
+
+    assert isinstance(signature, str)
+    assert len(signature) == 16
 
 
 def _seed_final_game(conn) -> None:

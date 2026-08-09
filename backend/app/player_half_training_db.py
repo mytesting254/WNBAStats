@@ -136,7 +136,26 @@ def player_half_training_db_signature(
     *,
     allow_rebuild: bool = False,
 ) -> str:
-    info = ensure_player_half_training_db(conn, force=False, allow_rebuild=allow_rebuild)
+    try:
+        info = ensure_player_half_training_db(conn, force=False, allow_rebuild=allow_rebuild)
+    except sqlite3.OperationalError:
+        if allow_rebuild:
+            raise
+        training_db_path = get_player_half_training_db_path()
+        metadata: dict[str, str] = {}
+        if training_db_path.exists():
+            with _connect_training_db(training_db_path) as training_conn:
+                _init_training_db(training_conn)
+                metadata = _read_metadata(training_conn)
+        info = {
+            "path": str(training_db_path),
+            "source_signature": str(metadata.get("source_signature") or "missing-source"),
+            "player_rows": int(metadata.get("player_rows") or 0),
+            "prop_rows": int(metadata.get("prop_rows") or 0),
+            "candidate_player_rows": int(metadata.get("candidate_player_rows") or 0),
+            "candidate_prop_rows": int(metadata.get("candidate_prop_rows") or 0),
+            "built_at": metadata.get("built_at"),
+        }
     payload = {
         "path": str(info["path"]),
         "source_signature": str(info["source_signature"]),

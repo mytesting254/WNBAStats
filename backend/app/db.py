@@ -1051,6 +1051,90 @@ def init_db() -> None:
         )
 
 
+def ensure_dfs_runtime_schema(conn: Any) -> None:
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS player_first_half_stats (
+            game_id INTEGER NOT NULL,
+            player_id INTEGER NOT NULL,
+            team_id INTEGER NOT NULL,
+            opponent_team_id INTEGER NOT NULL,
+            first_half_points INTEGER NOT NULL DEFAULT 0,
+            first_half_rebounds INTEGER NOT NULL DEFAULT 0,
+            first_half_assists INTEGER NOT NULL DEFAULT 0,
+            first_half_threes INTEGER NOT NULL DEFAULT 0,
+            first_half_steals INTEGER NOT NULL DEFAULT 0,
+            first_half_blocks INTEGER NOT NULL DEFAULT 0,
+            first_half_turnovers INTEGER NOT NULL DEFAULT 0,
+            first_half_field_goals_made INTEGER NOT NULL DEFAULT 0,
+            first_half_field_goals_attempted INTEGER NOT NULL DEFAULT 0,
+            first_half_free_throws_made INTEGER NOT NULL DEFAULT 0,
+            first_half_free_throws_attempted INTEGER NOT NULL DEFAULT 0,
+            first_half_minutes REAL,
+            minutes_source TEXT,
+            source TEXT NOT NULL DEFAULT 'espn_playbyplay',
+            captured_at TEXT NOT NULL,
+            PRIMARY KEY (game_id, player_id),
+            FOREIGN KEY (game_id) REFERENCES games(id),
+            FOREIGN KEY (player_id) REFERENCES players(id),
+            FOREIGN KEY (team_id) REFERENCES teams(id),
+            FOREIGN KEY (opponent_team_id) REFERENCES teams(id)
+        );
+
+        CREATE TABLE IF NOT EXISTS dfs_first_half_projection_snapshots (
+            id INTEGER PRIMARY KEY,
+            prop_line_id INTEGER NOT NULL,
+            game_id INTEGER NOT NULL,
+            player_id INTEGER NOT NULL,
+            sportsbook TEXT NOT NULL,
+            market TEXT NOT NULL,
+            line REAL NOT NULL,
+            over_odds INTEGER NOT NULL,
+            under_odds INTEGER NOT NULL,
+            full_game_projection REAL NOT NULL,
+            estimated_first_half_result REAL NOT NULL,
+            expected_halfway_line REAL NOT NULL,
+            pace_ratio REAL,
+            halftime_margin_to_line REAL,
+            on_track_probability REAL,
+            recommended_side TEXT NOT NULL,
+            confidence TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            model_rows INTEGER NOT NULL DEFAULT 0,
+            team_first_half_share REAL NOT NULL DEFAULT 0.5,
+            estimated_first_half_minutes_share REAL NOT NULL DEFAULT 0.5,
+            projected_first_half_total REAL,
+            game_total REAL,
+            start_time TEXT,
+            first_captured_at TEXT NOT NULL,
+            last_captured_at TEXT NOT NULL,
+            capture_count INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY (prop_line_id) REFERENCES prop_lines(id),
+            FOREIGN KEY (game_id) REFERENCES games(id),
+            FOREIGN KEY (player_id) REFERENCES players(id),
+            UNIQUE(prop_line_id, model_version)
+        );
+
+        CREATE TABLE IF NOT EXISTS dfs_first_half_projection_settlements (
+            snapshot_id INTEGER PRIMARY KEY,
+            actual_first_half_result REAL NOT NULL,
+            winning_side TEXT NOT NULL,
+            absolute_error REAL NOT NULL,
+            signed_error REAL NOT NULL,
+            correct_side INTEGER NOT NULL,
+            settled_at TEXT NOT NULL,
+            FOREIGN KEY (snapshot_id) REFERENCES dfs_first_half_projection_snapshots(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_dfs_first_half_snapshots_game
+        ON dfs_first_half_projection_snapshots(game_id, player_id, market);
+
+        CREATE INDEX IF NOT EXISTS idx_dfs_first_half_snapshots_start
+        ON dfs_first_half_projection_snapshots(start_time, game_id);
+        """
+    )
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS teams (
     id INTEGER PRIMARY KEY,

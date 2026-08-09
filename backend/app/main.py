@@ -34,7 +34,7 @@ from .auth import (
 from .bootstrap import ensure_teams, normalize_team_abbreviation
 from .cache import delete_json_cache, read_json_cache, write_json_cache
 from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, import_covers_props
-from .db import connect, init_db, sqlite_write_lock, using_turso
+from .db import connect, ensure_dfs_runtime_schema, init_db, sqlite_write_lock, using_turso
 from .dfs_model import (
     build_current_dfs_first_half_estimates,
     prewarm_dfs_half_cache,
@@ -4967,6 +4967,7 @@ def watchlist(response: Response) -> list[dict]:
 
 
 def _snapshot_current_dfs_first_half(conn, game_ids: list[int] | None = None) -> dict[str, int]:
+    ensure_dfs_runtime_schema(conn)
     payload = build_current_dfs_first_half_estimates(
         conn,
         recent_values_fn=_recent_first_half_market_values,
@@ -4983,6 +4984,7 @@ def _snapshot_current_dfs_first_half(conn, game_ids: list[int] | None = None) ->
 def dfs_first_half(response: Response) -> list[dict[str, Any]]:
     started = datetime.now(timezone.utc)
     with connect() as conn:
+        ensure_dfs_runtime_schema(conn)
         payload = build_current_dfs_first_half_estimates(
             conn,
             recent_values_fn=_recent_first_half_market_values,

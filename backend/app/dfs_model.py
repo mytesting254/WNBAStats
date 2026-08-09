@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .cache import read_json_cache, write_json_cache
 from .odds import american_to_implied_probability
+from .paths import get_cache_dir
 from .player_half_training_db import (
     ensure_player_half_training_db,
     load_player_half_prop_examples,
@@ -678,7 +679,7 @@ def train_dfs_half_market_model(
     tuning = config or ModelTuningConfig()
     db_path = str(conn.execute("PRAGMA database_list").fetchone()["file"] or "")
     cache_key = _dfs_half_model_cache_key(db_path, market, tuning)
-    cached = _load_cached_dfs_half_model(cache_key)
+    cached = _load_cached_dfs_half_model(cache_key, market=market)
     if cached is not None:
         return cached
     if not allow_training:
@@ -1336,10 +1337,7 @@ def _dfs_half_eval_cache_key(
     )
 
 
-def _load_cached_dfs_half_model(cache_key: str) -> RidgeModel | None:
-    payload = read_json_cache(cache_key)
-    if not isinstance(payload, dict):
-        return None
+def _deserialize_cached_dfs_half_model(payload: dict[str, object]) -> RidgeModel | None:
     if str(payload.get("model_version") or "") != DFS_HALF_MODEL_VERSION:
         return None
     model = payload.get("model")
@@ -1356,6 +1354,30 @@ def _load_cached_dfs_half_model(cache_key: str) -> RidgeModel | None:
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _load_cached_dfs_half_model(cache_key: str, *, market: str | None = None) -> RidgeModel | None:
+    payload = read_json_cache(cache_key)
+    if isinstance(payload, dict):
+        loaded = _deserialize_cached_dfs_half_model(payload)
+        if loaded is not None:
+            return loaded
+    if not market:
+        return None
+    cache_dir = get_cache_dir()
+    prefix = f"{DFS_HALF_MODEL_CACHE_PREFIX}-{market}-"
+    try:
+        candidates = sorted(cache_dir.glob(f"{prefix}*.json"), key=lambda path: path.stat().st_mtime_ns, reverse=True)
+    except OSError:
+        return None
+    for path in candidates:
+        loaded_payload = read_json_cache(path.name)
+        if not isinstance(loaded_payload, dict):
+            continue
+        loaded = _deserialize_cached_dfs_half_model(loaded_payload)
+        if loaded is not None:
+            return loaded
+    return None
 
 
 def _store_cached_dfs_half_model(
@@ -1379,11 +1401,22 @@ def _store_cached_dfs_half_model(
 
 def _load_cached_dfs_half_eval(cache_key: str) -> dict[str, object] | None:
     payload = read_json_cache(cache_key)
-    if not isinstance(payload, dict):
+    if isinstance(payload, dict) and str(payload.get("model_family") or "") == DFS_HALF_EVAL_VERSION:
+        return payload
+    cache_dir = get_cache_dir()
+    try:
+        candidates = sorted(
+            cache_dir.glob(f"{DFS_HALF_EVAL_CACHE_PREFIX}-*.json"),
+            key=lambda path: path.stat().st_mtime_ns,
+            reverse=True,
+        )
+    except OSError:
         return None
-    if str(payload.get("model_family") or "") != DFS_HALF_EVAL_VERSION:
-        return None
-    return payload
+    for path in candidates:
+        loaded_payload = read_json_cache(path.name)
+        if isinstance(loaded_payload, dict) and str(loaded_payload.get("model_family") or "") == DFS_HALF_EVAL_VERSION:
+            return loaded_payload
+    return None
 
 
 def _store_cached_dfs_half_eval(cache_key: str, payload: dict[str, object]) -> None:
@@ -1395,8 +1428,7 @@ def _store_cached_dfs_half_eval(cache_key: str, payload: dict[str, object]) -> N
 
 def _path_fingerprint(raw_path: str) -> str:
     try:
-        stat = Path(raw_path).stat()
-        payload = f"{Path(raw_path)}:{stat.st_size}:{stat.st_mtime_ns}"
+        payload = str(Path(raw_path).resolve())
     except OSError:
-        payload = str(raw_path)
+        payload = str(Path(raw_path))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
