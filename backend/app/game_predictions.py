@@ -102,6 +102,39 @@ GAME_DIRECT_FEATURE_NAMES = [
     "projected_points_delta",
     "rotation_count_diff",
     "creator_count_diff",
+    "home_off_form_delta",
+    "away_off_form_delta",
+    "home_def_form_delta",
+    "away_def_form_delta",
+    "home_pace_form_delta",
+    "away_pace_form_delta",
+    "home_fga_form_delta",
+    "away_fga_form_delta",
+    "home_fga_allowed_form_delta",
+    "away_fga_allowed_form_delta",
+    "home_turnover_rate_form_delta",
+    "away_turnover_rate_form_delta",
+    "home_forced_turnover_rate_form_delta",
+    "away_forced_turnover_rate_form_delta",
+    "home_off_form_volatility",
+    "away_off_form_volatility",
+    "home_def_form_volatility",
+    "away_def_form_volatility",
+    "off_form_delta_diff",
+    "def_form_delta_diff",
+    "pace_form_delta_diff",
+    "fga_form_delta_diff",
+    "fga_allowed_form_delta_diff",
+    "turnover_rate_form_delta_diff",
+    "forced_turnover_rate_form_delta_diff",
+    "home_hot_offense_flag",
+    "away_hot_offense_flag",
+    "home_slump_offense_flag",
+    "away_slump_offense_flag",
+    "home_hot_defense_flag",
+    "away_hot_defense_flag",
+    "home_slump_defense_flag",
+    "away_slump_defense_flag",
 ]
 GAME_MARGIN_FEATURE_NAMES = [
     "projected_margin",
@@ -816,6 +849,32 @@ def _assemble_direct_game_features(
     away_rotation_count = float(matchup.get("away_rotation_count") or 0.0)
     home_creator_count = float(matchup.get("home_creator_count") or 0.0)
     away_creator_count = float(matchup.get("away_creator_count") or 0.0)
+    home_off_form_delta = float(matchup.get("home_off_form_delta") or 0.0)
+    away_off_form_delta = float(matchup.get("away_off_form_delta") or 0.0)
+    home_def_form_delta = float(matchup.get("home_def_form_delta") or 0.0)
+    away_def_form_delta = float(matchup.get("away_def_form_delta") or 0.0)
+    home_pace_form_delta = float(matchup.get("home_pace_form_delta") or 0.0)
+    away_pace_form_delta = float(matchup.get("away_pace_form_delta") or 0.0)
+    home_fga_form_delta = float(matchup.get("home_fga_form_delta") or 0.0)
+    away_fga_form_delta = float(matchup.get("away_fga_form_delta") or 0.0)
+    home_fga_allowed_form_delta = float(matchup.get("home_fga_allowed_form_delta") or 0.0)
+    away_fga_allowed_form_delta = float(matchup.get("away_fga_allowed_form_delta") or 0.0)
+    home_turnover_rate_form_delta = float(matchup.get("home_turnover_rate_form_delta") or 0.0)
+    away_turnover_rate_form_delta = float(matchup.get("away_turnover_rate_form_delta") or 0.0)
+    home_forced_turnover_rate_form_delta = float(matchup.get("home_forced_turnover_rate_form_delta") or 0.0)
+    away_forced_turnover_rate_form_delta = float(matchup.get("away_forced_turnover_rate_form_delta") or 0.0)
+    home_off_form_volatility = float(matchup.get("home_off_form_volatility") or 0.0)
+    away_off_form_volatility = float(matchup.get("away_off_form_volatility") or 0.0)
+    home_def_form_volatility = float(matchup.get("home_def_form_volatility") or 0.0)
+    away_def_form_volatility = float(matchup.get("away_def_form_volatility") or 0.0)
+    home_hot_offense_flag = float(matchup.get("home_hot_offense_flag") or 0.0)
+    away_hot_offense_flag = float(matchup.get("away_hot_offense_flag") or 0.0)
+    home_slump_offense_flag = float(matchup.get("home_slump_offense_flag") or 0.0)
+    away_slump_offense_flag = float(matchup.get("away_slump_offense_flag") or 0.0)
+    home_hot_defense_flag = float(matchup.get("home_hot_defense_flag") or 0.0)
+    away_hot_defense_flag = float(matchup.get("away_hot_defense_flag") or 0.0)
+    home_slump_defense_flag = float(matchup.get("home_slump_defense_flag") or 0.0)
+    away_slump_defense_flag = float(matchup.get("away_slump_defense_flag") or 0.0)
     return [
         home_recent_points,
         away_recent_points,
@@ -885,6 +944,39 @@ def _assemble_direct_game_features(
         home_projected_points_total - away_projected_points_total,
         home_rotation_count - away_rotation_count,
         home_creator_count - away_creator_count,
+        home_off_form_delta,
+        away_off_form_delta,
+        home_def_form_delta,
+        away_def_form_delta,
+        home_pace_form_delta,
+        away_pace_form_delta,
+        home_fga_form_delta,
+        away_fga_form_delta,
+        home_fga_allowed_form_delta,
+        away_fga_allowed_form_delta,
+        home_turnover_rate_form_delta,
+        away_turnover_rate_form_delta,
+        home_forced_turnover_rate_form_delta,
+        away_forced_turnover_rate_form_delta,
+        home_off_form_volatility,
+        away_off_form_volatility,
+        home_def_form_volatility,
+        away_def_form_volatility,
+        home_off_form_delta - away_off_form_delta,
+        home_def_form_delta - away_def_form_delta,
+        home_pace_form_delta - away_pace_form_delta,
+        home_fga_form_delta - away_fga_form_delta,
+        home_fga_allowed_form_delta - away_fga_allowed_form_delta,
+        home_turnover_rate_form_delta - away_turnover_rate_form_delta,
+        home_forced_turnover_rate_form_delta - away_forced_turnover_rate_form_delta,
+        home_hot_offense_flag,
+        away_hot_offense_flag,
+        home_slump_offense_flag,
+        away_slump_offense_flag,
+        home_hot_defense_flag,
+        away_hot_defense_flag,
+        home_slump_defense_flag,
+        away_slump_defense_flag,
     ]
 
 

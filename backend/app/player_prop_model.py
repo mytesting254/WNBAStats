@@ -16,10 +16,11 @@ except ImportError:  # pragma: no cover - fallback remains exercised without num
     np = None
 
 from .odds import american_to_implied_probability
+from .team_form_regime import build_team_form_regime
 from .timezone_utils import APP_TIMEZONE
 
 
-MODEL_VERSION = "adaptive-context-v11-ratings-context"
+MODEL_VERSION = "adaptive-context-v12-team-form-regime"
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
 MODEL_CACHE_PREFIX = "learned_prop_model"
 TRAINING_MARKETS = [
@@ -76,6 +77,39 @@ FEATURE_NAMES = [
     "opponent_def_rating_factor",
     "recent_opponent_def_rating_factor",
     "matchup_net_rating_diff",
+    "team_off_form_delta",
+    "opponent_off_form_delta",
+    "team_def_form_delta",
+    "opponent_def_form_delta",
+    "team_pace_form_delta",
+    "opponent_pace_form_delta",
+    "team_fga_form_delta",
+    "opponent_fga_form_delta",
+    "team_fga_allowed_form_delta",
+    "opponent_fga_allowed_form_delta",
+    "team_turnover_rate_form_delta",
+    "opponent_turnover_rate_form_delta",
+    "team_forced_turnover_rate_form_delta",
+    "opponent_forced_turnover_rate_form_delta",
+    "team_off_form_volatility",
+    "opponent_off_form_volatility",
+    "team_def_form_volatility",
+    "opponent_def_form_volatility",
+    "off_form_delta_diff",
+    "def_form_delta_diff",
+    "pace_form_delta_diff",
+    "fga_form_delta_diff",
+    "fga_allowed_form_delta_diff",
+    "turnover_rate_form_delta_diff",
+    "forced_turnover_rate_form_delta_diff",
+    "team_hot_offense_flag",
+    "opponent_hot_offense_flag",
+    "team_slump_offense_flag",
+    "opponent_slump_offense_flag",
+    "team_hot_defense_flag",
+    "opponent_hot_defense_flag",
+    "team_slump_defense_flag",
+    "opponent_slump_defense_flag",
 ]
 FEATURE_INDEX = {name: idx for idx, name in enumerate(FEATURE_NAMES)}
 MINUTES_FEATURE_NAMES = [
@@ -832,6 +866,63 @@ def _market_context_features(
     ]
 
 
+def _team_form_regime_feature_values(
+    team_form: dict[str, float] | None,
+    opponent_form: dict[str, float] | None,
+) -> list[float]:
+    team_payload = dict(team_form or {})
+    opponent_payload = dict(opponent_form or {})
+    team_off_form_delta = float(team_payload.get("off_form_delta") or 0.0)
+    opponent_off_form_delta = float(opponent_payload.get("off_form_delta") or 0.0)
+    team_def_form_delta = float(team_payload.get("def_form_delta") or 0.0)
+    opponent_def_form_delta = float(opponent_payload.get("def_form_delta") or 0.0)
+    team_pace_form_delta = float(team_payload.get("pace_form_delta") or 0.0)
+    opponent_pace_form_delta = float(opponent_payload.get("pace_form_delta") or 0.0)
+    team_fga_form_delta = float(team_payload.get("fga_form_delta") or 0.0)
+    opponent_fga_form_delta = float(opponent_payload.get("fga_form_delta") or 0.0)
+    team_fga_allowed_form_delta = float(team_payload.get("fga_allowed_form_delta") or 0.0)
+    opponent_fga_allowed_form_delta = float(opponent_payload.get("fga_allowed_form_delta") or 0.0)
+    team_turnover_rate_form_delta = float(team_payload.get("turnover_rate_form_delta") or 0.0)
+    opponent_turnover_rate_form_delta = float(opponent_payload.get("turnover_rate_form_delta") or 0.0)
+    team_forced_turnover_rate_form_delta = float(team_payload.get("forced_turnover_rate_form_delta") or 0.0)
+    opponent_forced_turnover_rate_form_delta = float(opponent_payload.get("forced_turnover_rate_form_delta") or 0.0)
+    return [
+        team_off_form_delta,
+        opponent_off_form_delta,
+        team_def_form_delta,
+        opponent_def_form_delta,
+        team_pace_form_delta,
+        opponent_pace_form_delta,
+        team_fga_form_delta,
+        opponent_fga_form_delta,
+        team_fga_allowed_form_delta,
+        opponent_fga_allowed_form_delta,
+        team_turnover_rate_form_delta,
+        opponent_turnover_rate_form_delta,
+        team_forced_turnover_rate_form_delta,
+        opponent_forced_turnover_rate_form_delta,
+        float(team_payload.get("off_form_volatility") or 0.0),
+        float(opponent_payload.get("off_form_volatility") or 0.0),
+        float(team_payload.get("def_form_volatility") or 0.0),
+        float(opponent_payload.get("def_form_volatility") or 0.0),
+        team_off_form_delta - opponent_off_form_delta,
+        team_def_form_delta - opponent_def_form_delta,
+        team_pace_form_delta - opponent_pace_form_delta,
+        team_fga_form_delta - opponent_fga_form_delta,
+        team_fga_allowed_form_delta - opponent_fga_allowed_form_delta,
+        team_turnover_rate_form_delta - opponent_turnover_rate_form_delta,
+        team_forced_turnover_rate_form_delta - opponent_forced_turnover_rate_form_delta,
+        float(team_payload.get("hot_offense_flag") or 0.0),
+        float(opponent_payload.get("hot_offense_flag") or 0.0),
+        float(team_payload.get("slump_offense_flag") or 0.0),
+        float(opponent_payload.get("slump_offense_flag") or 0.0),
+        float(team_payload.get("hot_defense_flag") or 0.0),
+        float(opponent_payload.get("hot_defense_flag") or 0.0),
+        float(team_payload.get("slump_defense_flag") or 0.0),
+        float(opponent_payload.get("slump_defense_flag") or 0.0),
+    ]
+
+
 def feature_snapshot(
     conn: sqlite3.Connection,
     player_id: int,
@@ -910,6 +1001,27 @@ def feature_snapshot(
     team_rating_context = _cached_team_rating_context(conn, int(context["team_id"]), reference_game_date) if context else None
     opponent_rating_context = _cached_team_rating_context(conn, int(context["opponent_id"]), reference_game_date) if context else None
     league_rating_context = _cached_league_rating_context(conn, reference_game_date) if context else None
+    team_form = (
+        build_team_form_regime(
+            conn,
+            team_id=int(context["team_id"]),
+            before_game_date=reference_game_date,
+            runtime_cache=runtime_cache,
+        )
+        if context
+        else None
+    )
+    opponent_form = (
+        build_team_form_regime(
+            conn,
+            team_id=int(context["opponent_id"]),
+            before_game_date=reference_game_date,
+            runtime_cache=runtime_cache,
+        )
+        if context
+        else None
+    )
+    team_form_features = _team_form_regime_feature_values(team_form, opponent_form)
     team_off_rating_factor = (
         _clamp(
             float(team_rating_context["off_rating"]) / max(float(league_rating_context["off_rating"]), 1.0),
@@ -1022,6 +1134,7 @@ def feature_snapshot(
         opponent_def_rating_factor,
         recent_opponent_def_rating_factor,
         matchup_net_rating_diff,
+        *team_form_features,
     ]
     archetype_note = ", ".join(archetype.labels()) or "balanced"
     reason = (
@@ -1042,6 +1155,8 @@ def feature_snapshot(
         f" Lineup share {float(lineup_context[0]):.2f}, lineup rank {float(lineup_context[1]):.2f}, position share {float(lineup_context[2]):.2f}."
         f" Opportunity unavailable {float(opportunity_context[0]):.1f}, key outs {float(opportunity_context[1]):.1f}, persistence {float(opportunity_context[2]):.2f}, competition {float(opportunity_context[3]):.1f}."
         f" Recent opponent {recent_opponent_factor:.2f}. Ratings: team off {team_off_rating_factor:.2f}, opp def {opponent_def_rating_factor:.2f}, recent opp def {recent_opponent_def_rating_factor:.2f}, net diff {matchup_net_rating_diff:+.1f}."
+        f" Team form: off {team_form_features[0]:+.1f}, def {team_form_features[2]:+.1f}, pace {team_form_features[4]:+.1f};"
+        f" opponent form: off {team_form_features[1]:+.1f}, def {team_form_features[3]:+.1f}, pace {team_form_features[5]:+.1f}."
     )
     return FeatureSnapshot(
         features,
@@ -2462,6 +2577,20 @@ def _historical_training_features(
     team_rating_context = _cached_team_rating_context(conn, int(context["team_id"]), current_game_date)
     opponent_rating_context = _cached_team_rating_context(conn, int(context["opponent_id"]), current_game_date)
     league_rating_context = _cached_league_rating_context(conn, current_game_date)
+    training_runtime_cache = {"team_form_regime": _connection_training_cache_bucket(conn, "team_form_regime")}
+    team_form = build_team_form_regime(
+        conn,
+        team_id=int(context["team_id"]),
+        before_game_date=current_game_date,
+        runtime_cache=training_runtime_cache,
+    )
+    opponent_form = build_team_form_regime(
+        conn,
+        team_id=int(context["opponent_id"]),
+        before_game_date=current_game_date,
+        runtime_cache=training_runtime_cache,
+    )
+    team_form_features = _team_form_regime_feature_values(team_form, opponent_form)
     team_off_rating_factor = _clamp(
         float(team_rating_context["off_rating"]) / max(float(league_rating_context["off_rating"]), 1.0),
         0.94,
@@ -2637,6 +2766,7 @@ def _historical_training_features(
         opponent_def_rating_factor,
         recent_opponent_def_rating_factor,
         matchup_net_rating_diff,
+        *team_form_features,
     ]
 
 

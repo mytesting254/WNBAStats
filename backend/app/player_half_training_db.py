@@ -10,7 +10,7 @@ from pathlib import Path
 from .paths import get_player_half_training_db_path
 
 
-PLAYER_HALF_TRAINING_DB_VERSION = "v1"
+PLAYER_HALF_TRAINING_DB_VERSION = "v2"
 _PLAYER_HALF_TRAINING_DB_LOCK = threading.RLock()
 DEFAULT_TEAM_FIRST_HALF_SHARE = float(os.getenv("WNBA_DEFAULT_TEAM_FIRST_HALF_SHARE", "0.5"))
 
@@ -237,6 +237,12 @@ def _init_training_db(conn: sqlite3.Connection) -> None:
             on_track_by_half INTEGER NOT NULL DEFAULT 0,
             winning_side TEXT,
             final_margin REAL,
+            prior_observed_count INTEGER NOT NULL DEFAULT 0,
+            prior_observed_last REAL,
+            prior_observed_avg_3 REAL,
+            prior_observed_avg_5 REAL,
+            prior_observed_avg_10 REAL,
+            prior_observed_std_5 REAL,
             share_details_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
@@ -248,6 +254,19 @@ def _init_training_db(conn: sqlite3.Connection) -> None:
         ON player_half_prop_examples(market, game_date, source_prop_line_id);
         """
     )
+    prop_columns = {row["name"] for row in conn.execute("PRAGMA table_info(player_half_prop_examples)").fetchall()}
+    if "prior_observed_count" not in prop_columns:
+        conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_count INTEGER NOT NULL DEFAULT 0")
+    if "prior_observed_last" not in prop_columns:
+        conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_last REAL")
+    if "prior_observed_avg_3" not in prop_columns:
+        conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_avg_3 REAL")
+    if "prior_observed_avg_5" not in prop_columns:
+        conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_avg_5 REAL")
+    if "prior_observed_avg_10" not in prop_columns:
+        conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_avg_10 REAL")
+    if "prior_observed_std_5" not in prop_columns:
+        conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_std_5 REAL")
     conn.commit()
 
 
@@ -351,6 +370,7 @@ def _rebuild_player_half_training_examples(
             "opponent_team_id": row_payload[3],
             "game_date": row_payload[4],
             "season": row_payload[5],
+            "observed_market_values": _observed_market_values_from_player_row(row),
             "share_details_json": row_payload[35],
         }
 
@@ -373,6 +393,8 @@ def _rebuild_player_half_training_examples(
             player_insert_rows,
         )
 
+    player_market_history: dict[tuple[int, str], list[float]] = {}
+    seen_player_market_games: set[tuple[int, int, str]] = set()
     prop_rows = source_conn.execute(
         """
         SELECT
@@ -404,6 +426,9 @@ def _rebuild_player_half_training_examples(
         estimated_half = _estimated_market_value(lookup, market)
         if estimated_half is None:
             continue
+        history_key = (int(row["source_player_id"]), market)
+        history_values = player_market_history.get(history_key, [])
+        history_summary = _history_summary(history_values)
         line_value = float(row["line_value"] or 0.0)
         expected_halfway_line = line_value * 0.5 if line_value else None
         line_progress_ratio = estimated_half / line_value if line_value else None
@@ -438,10 +463,24 @@ def _rebuild_player_half_training_examples(
                 1 if on_track else 0,
                 str(row["winning_side"] or ""),
                 float(row["final_margin"] or 0.0),
+                int(history_summary["count"]),
+                history_summary["last"],
+                history_summary["avg_3"],
+                history_summary["avg_5"],
+                history_summary["avg_10"],
+                history_summary["std_5"],
                 str(lookup["share_details_json"]),
                 built_at,
             )
         )
+        observed_market_values = lookup.get("observed_market_values") if isinstance(lookup, dict) else None
+        observed_value = None
+        if isinstance(observed_market_values, dict):
+            observed_value = observed_market_values.get(market)
+        seen_key = (int(row["source_game_id"]), int(row["source_player_id"]), market)
+        if observed_value is not None and seen_key not in seen_player_market_games:
+            player_market_history.setdefault(history_key, []).append(float(observed_value))
+            seen_player_market_games.add(seen_key)
 
     if prop_insert_rows:
         training_conn.executemany(
@@ -451,8 +490,9 @@ def _rebuild_player_half_training_examples(
                 market, line_value, over_odds, under_odds, final_actual_result, estimated_first_half_result,
                 estimated_first_half_minutes, estimated_first_half_minutes_share, team_first_half_share,
                 line_progress_ratio, normalized_pace_ratio, halftime_margin_to_line, on_track_by_half,
-                winning_side, final_margin, share_details_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                winning_side, final_margin, prior_observed_count, prior_observed_last, prior_observed_avg_3,
+                prior_observed_avg_5, prior_observed_avg_10, prior_observed_std_5, share_details_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             prop_insert_rows,
         )
@@ -628,6 +668,61 @@ def _estimated_market_value(player_row: dict[str, object], market: str) -> float
     }
     value = mapping.get(str(market or "").strip().lower())
     return float(value) if value is not None else None
+
+
+def _observed_market_values_from_player_row(row: sqlite3.Row) -> dict[str, float] | None:
+    if row["first_half_points"] is None:
+        return None
+    points = float(row["first_half_points"] or 0.0)
+    rebounds = float(row["first_half_rebounds"] or 0.0)
+    assists = float(row["first_half_assists"] or 0.0)
+    threes = float(row["first_half_threes"] or 0.0)
+    steals = float(row["first_half_steals"] or 0.0)
+    blocks = float(row["first_half_blocks"] or 0.0)
+    turnovers = float(row["first_half_turnovers"] or 0.0)
+    return {
+        "points": points,
+        "rebounds": rebounds,
+        "assists": assists,
+        "turnovers": turnovers,
+        "threes": threes,
+        "steals": steals,
+        "blocks": blocks,
+        "points_rebounds": points + rebounds,
+        "points_assists": points + assists,
+        "rebounds_assists": rebounds + assists,
+        "points_rebounds_assists": points + rebounds + assists,
+        "blocks_steals": blocks + steals,
+    }
+
+
+def _history_summary(values: list[float]) -> dict[str, float | int | None]:
+    return {
+        "count": len(values),
+        "last": values[-1] if values else None,
+        "avg_3": _window_average(values, 3),
+        "avg_5": _window_average(values, 5),
+        "avg_10": _window_average(values, 10),
+        "std_5": _window_std(values, 5),
+    }
+
+
+def _window_average(values: list[float], window: int) -> float | None:
+    if not values:
+        return None
+    subset = values[-window:]
+    return round(sum(subset) / len(subset), 3)
+
+
+def _window_std(values: list[float], window: int) -> float | None:
+    if not values:
+        return None
+    subset = values[-window:]
+    if len(subset) < 2:
+        return 0.0
+    mean = sum(subset) / len(subset)
+    variance = sum((value - mean) * (value - mean) for value in subset) / len(subset)
+    return round(variance ** 0.5, 3)
 
 
 def _clip(value: float, lower: float, upper: float) -> float:

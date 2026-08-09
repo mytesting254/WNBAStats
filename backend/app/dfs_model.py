@@ -30,10 +30,10 @@ from .player_prop_model import (
 )
 
 
-DFS_HALF_MODEL_VERSION = "dfs-first-half-ridge-v2"
+DFS_HALF_MODEL_VERSION = "dfs-first-half-ridge-v3"
 DFS_HALF_MODEL_CACHE_PREFIX = "dfs_first_half_model"
 DFS_HALF_EVAL_CACHE_PREFIX = "dfs_first_half_eval"
-DFS_HALF_EVAL_VERSION = "dfs-first-half-walk-forward-v1"
+DFS_HALF_EVAL_VERSION = "dfs-first-half-walk-forward-v2"
 DFS_HALF_REQUIRE_OBSERVED_TARGETS = True
 DFS_HALF_EVAL_MIN_HISTORY_ROWS = 200
 DFS_HALF_EVAL_MIN_SEGMENT_ROWS = 10
@@ -51,6 +51,12 @@ DFS_HALF_EXTRA_FEATURES = [
     "avg_minutes",
     "team_first_half_share",
     "estimated_first_half_minutes_share",
+    "prior_observed_count",
+    "prior_observed_last",
+    "prior_observed_avg_3",
+    "prior_observed_avg_5",
+    "prior_observed_avg_10",
+    "prior_observed_std_5",
 ]
 DFS_HALF_MARKETS = [
     "points",
@@ -63,6 +69,17 @@ DFS_HALF_MARKETS = [
     "points_rebounds_assists",
     "threes",
 ]
+DFS_HALF_BLEND_WEIGHTS = {
+    "points": 0.7,
+    "rebounds": 0.7,
+    "assists": 0.4,
+    "turnovers": 1.0,
+    "points_rebounds": 0.6,
+    "points_assists": 0.5,
+    "rebounds_assists": 0.4,
+    "points_rebounds_assists": 0.6,
+    "threes": 0.3,
+}
 
 
 @dataclass(frozen=True)
@@ -528,6 +545,13 @@ def _predict_current_half_estimate(
     team_first_half_share = _projected_team_first_half_share(projected_first_half_total, game_total)
     estimated_first_half_minutes_share = _half_minute_share(str(row["rotation_role"] or "").strip().lower(), team_first_half_share)
     sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
+    history_features = _current_player_first_half_history_features(
+        conn,
+        player_id=player_id,
+        market=market,
+        game_id=game_id,
+        runtime_cache=runtime_cache,
+    )
     features = _dfs_half_feature_row(
         base_features=snapshot.values,
         component_projection=float(snapshot.component_projection),
@@ -538,9 +562,17 @@ def _predict_current_half_estimate(
         avg_minutes=float(avg_minutes),
         team_first_half_share=team_first_half_share,
         estimated_first_half_minutes_share=estimated_first_half_minutes_share,
+        prior_observed_count=history_features["count"],
+        prior_observed_last=history_features["last"],
+        prior_observed_avg_3=history_features["avg_3"],
+        prior_observed_avg_5=history_features["avg_5"],
+        prior_observed_avg_10=history_features["avg_10"],
+        prior_observed_std_5=history_features["std_5"],
     )
-    estimate = max(0.0, _predict(model, features))
+    learned_estimate = max(0.0, _predict(model, features))
     expected_halfway_line = line_value * 0.5
+    component_half = float(snapshot.component_projection) * team_first_half_share
+    estimate = _dfs_half_blend_prediction(market, learned_estimate, component_half)
     halftime_margin = estimate - expected_halfway_line
     pace_ratio = estimate / expected_halfway_line if abs(expected_halfway_line) > 1e-9 else None
     on_track_probability = None if pace_ratio is None else 1.0 / (1.0 + math.exp(-4.0 * (pace_ratio - 1.0)))
@@ -879,9 +911,10 @@ def _evaluate_dfs_half_market_walk_forward(
         segment_errors: list[float] = []
         segment_side_hits = 0
         for sample in segment_samples:
-            prediction = max(0.0, _predict(model, sample.features))
+            learned_prediction = max(0.0, _predict(model, sample.features))
             expected_halfway_line = sample.line_value * 0.5
             component_half = sample.component_projection * sample.team_first_half_share
+            prediction = _dfs_half_blend_prediction(market, learned_prediction, component_half)
             actual_side_over = sample.target >= expected_halfway_line
             predicted_side_over = prediction >= expected_halfway_line
             error = prediction - sample.target
@@ -1001,6 +1034,12 @@ def _dfs_half_eval_samples(conn: sqlite3.Connection, market: str) -> list[DfsHal
                     avg_minutes=float(sample.avg_minutes),
                     team_first_half_share=team_first_half_share,
                     estimated_first_half_minutes_share=float(half_row["estimated_first_half_minutes_share"] or 0.5),
+                    prior_observed_count=int(half_row["prior_observed_count"] or 0),
+                    prior_observed_last=_nullable_float(half_row["prior_observed_last"]),
+                    prior_observed_avg_3=_nullable_float(half_row["prior_observed_avg_3"]),
+                    prior_observed_avg_5=_nullable_float(half_row["prior_observed_avg_5"]),
+                    prior_observed_avg_10=_nullable_float(half_row["prior_observed_avg_10"]),
+                    prior_observed_std_5=_nullable_float(half_row["prior_observed_std_5"]),
                 ),
                 target=float(half_row["estimated_first_half_result"] or 0.0),
                 line_value=float(half_row["line_value"] or 0.0),
@@ -1050,6 +1089,12 @@ def _dfs_half_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple
                     avg_minutes=float(sample.avg_minutes),
                     team_first_half_share=float(half_row["team_first_half_share"] or 0.5),
                     estimated_first_half_minutes_share=float(half_row["estimated_first_half_minutes_share"] or 0.5),
+                    prior_observed_count=int(half_row["prior_observed_count"] or 0),
+                    prior_observed_last=_nullable_float(half_row["prior_observed_last"]),
+                    prior_observed_avg_3=_nullable_float(half_row["prior_observed_avg_3"]),
+                    prior_observed_avg_5=_nullable_float(half_row["prior_observed_avg_5"]),
+                    prior_observed_avg_10=_nullable_float(half_row["prior_observed_avg_10"]),
+                    prior_observed_std_5=_nullable_float(half_row["prior_observed_std_5"]),
                 ),
                 float(half_row["estimated_first_half_result"] or 0.0),
             )
@@ -1079,6 +1124,12 @@ def _dfs_half_feature_row(
     avg_minutes: float,
     team_first_half_share: float,
     estimated_first_half_minutes_share: float,
+    prior_observed_count: int,
+    prior_observed_last: float | None,
+    prior_observed_avg_3: float | None,
+    prior_observed_avg_5: float | None,
+    prior_observed_avg_10: float | None,
+    prior_observed_std_5: float | None,
 ) -> list[float]:
     return [
         *base_features,
@@ -1090,7 +1141,134 @@ def _dfs_half_feature_row(
         float(avg_minutes),
         float(team_first_half_share),
         float(estimated_first_half_minutes_share),
+        float(prior_observed_count),
+        float(prior_observed_last if prior_observed_last is not None else 0.0),
+        float(prior_observed_avg_3 if prior_observed_avg_3 is not None else 0.0),
+        float(prior_observed_avg_5 if prior_observed_avg_5 is not None else 0.0),
+        float(prior_observed_avg_10 if prior_observed_avg_10 is not None else 0.0),
+        float(prior_observed_std_5 if prior_observed_std_5 is not None else 0.0),
     ]
+
+
+def _dfs_half_blend_prediction(market: str, learned_prediction: float, component_half: float) -> float:
+    weight = float(DFS_HALF_BLEND_WEIGHTS.get(str(market or "").strip().lower(), 1.0))
+    return max(0.0, (weight * float(learned_prediction)) + ((1.0 - weight) * float(component_half)))
+
+
+def _current_player_first_half_history_features(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    market: str,
+    game_id: int,
+    runtime_cache: dict[str, dict[tuple, object]] | None,
+) -> dict[str, float | int | None]:
+    bucket: dict[tuple, object] | None = None
+    if runtime_cache is not None:
+        bucket = runtime_cache.setdefault("dfs_half_history", {})
+    game_date = _current_game_date(conn, game_id, runtime_cache)
+    cache_key = (int(player_id), str(market), int(game_id), str(game_date or ""))
+    if bucket is not None and cache_key in bucket:
+        return dict(bucket[cache_key])  # type: ignore[arg-type]
+
+    values: list[float] = []
+    if game_date:
+        rows = conn.execute(
+            """
+            SELECT pfh.*
+            FROM player_first_half_stats pfh
+            JOIN games g ON g.id = pfh.game_id
+            WHERE pfh.player_id = ?
+              AND g.status = 'final'
+              AND g.game_date < ?
+            ORDER BY g.game_date ASC, pfh.game_id ASC
+            """,
+            (int(player_id), str(game_date)),
+        ).fetchall()
+        for row in rows:
+            value = _first_half_market_value_from_stat_row(row, market)
+            if value is not None:
+                values.append(float(value))
+    summary = {
+        "count": len(values),
+        "last": values[-1] if values else None,
+        "avg_3": _window_average(values, 3),
+        "avg_5": _window_average(values, 5),
+        "avg_10": _window_average(values, 10),
+        "std_5": _window_std(values, 5),
+    }
+    if bucket is not None:
+        bucket[cache_key] = dict(summary)
+    return summary
+
+
+def _current_game_date(
+    conn: sqlite3.Connection,
+    game_id: int,
+    runtime_cache: dict[str, dict[tuple, object]] | None,
+) -> str | None:
+    bucket: dict[tuple, object] | None = None
+    if runtime_cache is not None:
+        bucket = runtime_cache.setdefault("dfs_half_game_date", {})
+        cache_key = (int(game_id),)
+        cached = bucket.get(cache_key)
+        if cached is not None:
+            return str(cached) if cached else None
+    row = conn.execute("SELECT game_date FROM games WHERE id = ?", (int(game_id),)).fetchone()
+    game_date = str(row["game_date"]) if row and row["game_date"] is not None else None
+    if bucket is not None:
+        bucket[(int(game_id),)] = game_date
+    return game_date
+
+
+def _first_half_market_value_from_stat_row(row: sqlite3.Row, market: str) -> float | None:
+    points = float(row["first_half_points"] or 0.0)
+    rebounds = float(row["first_half_rebounds"] or 0.0)
+    assists = float(row["first_half_assists"] or 0.0)
+    threes = float(row["first_half_threes"] or 0.0)
+    steals = float(row["first_half_steals"] or 0.0)
+    blocks = float(row["first_half_blocks"] or 0.0)
+    turnovers = float(row["first_half_turnovers"] or 0.0)
+    mapping = {
+        "points": points,
+        "rebounds": rebounds,
+        "assists": assists,
+        "turnovers": turnovers,
+        "threes": threes,
+        "steals": steals,
+        "blocks": blocks,
+        "points_rebounds": points + rebounds,
+        "points_assists": points + assists,
+        "rebounds_assists": rebounds + assists,
+        "points_rebounds_assists": points + rebounds + assists,
+        "blocks_steals": blocks + steals,
+    }
+    value = mapping.get(str(market or "").strip().lower())
+    return float(value) if value is not None else None
+
+
+def _window_average(values: list[float], window: int) -> float | None:
+    if not values:
+        return None
+    subset = values[-window:]
+    return round(sum(subset) / len(subset), 3)
+
+
+def _window_std(values: list[float], window: int) -> float | None:
+    if not values:
+        return None
+    subset = values[-window:]
+    if len(subset) < 2:
+        return 0.0
+    mean = sum(subset) / len(subset)
+    variance = sum((value - mean) * (value - mean) for value in subset) / len(subset)
+    return round(variance ** 0.5, 3)
+
+
+def _nullable_float(value: object) -> float | None:
+    if value is None:
+        return None
+    return float(value)
 
 
 def _projected_team_first_half_share(projected_first_half_total: float | None, game_total: float | None) -> float:

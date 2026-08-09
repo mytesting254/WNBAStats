@@ -4,8 +4,9 @@ import sqlite3
 from typing import Any
 
 from .player_prop_model import _historical_row_team_id, _shared_projection_context
+from .team_form_regime import TEAM_FORM_REGIME_VERSION, build_team_form_regime
 
-GAME_PREGAME_FEATURE_VERSION = "v1"
+GAME_PREGAME_FEATURE_VERSION = f"v2-{TEAM_FORM_REGIME_VERSION}"
 ROSTER_PLAYER_LIMIT = 10
 
 
@@ -265,6 +266,18 @@ def build_matchup_pregame_features(
         use_injury_context=use_injury_context,
         runtime_cache=runtime_cache,
     )
+    home_form = build_team_form_regime(
+        conn,
+        team_id=home_team_id,
+        before_game_date=game_date,
+        runtime_cache=runtime_cache,
+    )
+    away_form = build_team_form_regime(
+        conn,
+        team_id=away_team_id,
+        before_game_date=game_date,
+        runtime_cache=runtime_cache,
+    )
     return {
         "home_projected_minutes_total": home["projected_minutes_total"],
         "away_projected_minutes_total": away["projected_minutes_total"],
@@ -286,4 +299,30 @@ def build_matchup_pregame_features(
         "away_rebounder_count": away["rebounder_count"],
         "home_core_minutes_count": home["core_minutes_count"],
         "away_core_minutes_count": away["core_minutes_count"],
+        "home_off_form_delta": home_form["off_form_delta"],
+        "away_off_form_delta": away_form["off_form_delta"],
+        "home_def_form_delta": home_form["def_form_delta"],
+        "away_def_form_delta": away_form["def_form_delta"],
+        "home_pace_form_delta": home_form["pace_form_delta"],
+        "away_pace_form_delta": away_form["pace_form_delta"],
+        "home_fga_form_delta": home_form["fga_form_delta"],
+        "away_fga_form_delta": away_form["fga_form_delta"],
+        "home_fga_allowed_form_delta": home_form["fga_allowed_form_delta"],
+        "away_fga_allowed_form_delta": away_form["fga_allowed_form_delta"],
+        "home_turnover_rate_form_delta": home_form["turnover_rate_form_delta"],
+        "away_turnover_rate_form_delta": away_form["turnover_rate_form_delta"],
+        "home_forced_turnover_rate_form_delta": home_form["forced_turnover_rate_form_delta"],
+        "away_forced_turnover_rate_form_delta": away_form["forced_turnover_rate_form_delta"],
+        "home_off_form_volatility": home_form["off_form_volatility"],
+        "away_off_form_volatility": away_form["off_form_volatility"],
+        "home_def_form_volatility": home_form["def_form_volatility"],
+        "away_def_form_volatility": away_form["def_form_volatility"],
+        "home_hot_offense_flag": home_form["hot_offense_flag"],
+        "away_hot_offense_flag": away_form["hot_offense_flag"],
+        "home_slump_offense_flag": home_form["slump_offense_flag"],
+        "away_slump_offense_flag": away_form["slump_offense_flag"],
+        "home_hot_defense_flag": home_form["hot_defense_flag"],
+        "away_hot_defense_flag": away_form["hot_defense_flag"],
+        "home_slump_defense_flag": home_form["slump_defense_flag"],
+        "away_slump_defense_flag": away_form["slump_defense_flag"],
     }

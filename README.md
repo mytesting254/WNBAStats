@@ -131,6 +131,18 @@ The app is built around a provider-backed pregame workflow:
   - `Q1` fast-start rate
 - `1H` currently excludes those `Q1`-specific additions because they improved `Q1` but degraded `1H` holdout performance.
 
+### Team Form Regime Features
+
+- Shared pregame team-form features now feed the game, segment, and player-prop stacks from one source.
+- The regime layer compares each team's recent window against its broader baseline and emits:
+  - offensive and defensive rating deltas
+  - pace, field-goal-attempt, and field-goal-attempts-allowed deltas
+  - turnover-rate and forced-turnover-rate deltas
+  - recent offense/defense volatility
+  - hot/slump offense and defense flags
+- Player props now train and infer against both team and opponent regime states, plus their matchup deltas.
+- Segment and game models inherit the same regime payload through shared matchup pregame features.
+
 ### DFS First-Half Props
 
 - Current DFS first-half estimates are built from full-game prop lines plus curated first-half history.
@@ -148,6 +160,7 @@ The app is built around a provider-backed pregame workflow:
   - override: `WNBA_TRAINING_DB_PATH`
 - DFS first-half model training now fits only rows with observed halftime player stats.
   - fallback share-derived halftime estimates remain in the curated DB for analysis, but are excluded from model fitting
+- DFS first-half estimates inherit any player-prop feature improvements that flow through the curated full-game training samples and component projection inputs.
 - DFS prewarm now follows the same pattern as the other learned models:
   - rebuild curated half and player-prop training DBs explicitly
   - derive cache signatures from training-db metadata only
