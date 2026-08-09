@@ -156,7 +156,7 @@ RATE_LIMIT_REFRESH_CAPACITY = float(os.getenv("RATE_LIMIT_REFRESH_CAPACITY", "6"
 RATE_LIMIT_REFRESH_REFILL_PER_SEC = float(os.getenv("RATE_LIMIT_REFRESH_REFILL_PER_SEC", "0.33"))
 _RATE_BUCKETS: dict[tuple[str, str], tuple[float, float]] = {}
 _RATE_LOCK = threading.Lock()
-_PROP_SYNC_LOCK = threading.Lock()
+_PROP_SYNC_LOCK = threading.RLock()
 _MODEL_TRAIN_LOCK = threading.Lock()
 _DB_MAINTENANCE_LOCK = threading.Lock()
 _ESPN_HISTORY_IMPORT_LOCK = threading.Lock()
@@ -7841,6 +7841,12 @@ def _start_prop_sync_if_needed(
         while True:
             try:
                 with connect() as conn:
+                    _append_job_run_event(
+                        job_run_id,
+                        "pipeline.sync.start",
+                        "Starting prop sync pipeline.",
+                        details={"source": source, "target_game_ids": normalized_target_game_ids},
+                    )
                     pipeline_result = run_prop_sync_pipeline(
                         conn,
                         request_source=source,
@@ -7864,12 +7870,33 @@ def _start_prop_sync_if_needed(
                         ),
                     )
                     touched_game_ids = list(pipeline_result.target_game_ids)
+                    _append_job_run_event(
+                        job_run_id,
+                        "pipeline.sync.done",
+                        "Prop sync pipeline finished.",
+                        details={
+                            "source": source,
+                            "target_game_ids": touched_game_ids,
+                            "scanned_props": int(pipeline_result.scanned_props),
+                            "changed_props": int(pipeline_result.synced_props),
+                            "changed_prop_line_ids": len(pipeline_result.changed_prop_line_ids),
+                            "attempted_predictions": int(pipeline_result.attempted_predictions),
+                            "rebuilt_predictions": int(pipeline_result.rebuilt_predictions),
+                            "skipped_predictions": int(pipeline_result.skipped_predictions),
+                        },
+                    )
                     _set_prop_sync_progress(
                         conn=conn,
                         scope=source,
                         target_game_ids=touched_game_ids,
                     )
                 _invalidate_read_caches()
+                _append_job_run_event(
+                    job_run_id,
+                    "pipeline.cache.invalidated",
+                    "Read caches invalidated after prop sync.",
+                    details={"source": source, "target_game_ids": touched_game_ids},
+                )
                 post_result = run_post_pipeline_steps(
                     connect_fn=connect,
                     policy=PropPostProcessPolicy(
@@ -7894,6 +7921,16 @@ def _start_prop_sync_if_needed(
                         full_matchup_refresh=policy.full_matchup_refresh,
                         include_performance=policy.include_performance,
                     ),
+                )
+                _append_job_run_event(
+                    job_run_id,
+                    "pipeline.publish.done",
+                    "Post-sync payload publish finished.",
+                    details={
+                        "source": source,
+                        "target_game_ids": touched_game_ids,
+                        "published_payloads": dict(post_result.published_payloads or {}),
+                    },
                 )
                 return pipeline_result, touched_game_ids, dict(post_result.published_payloads or {})
             except sqlite3.OperationalError as exc:
@@ -8041,6 +8078,18 @@ def _start_covers_refresh_if_needed(
                     force_refresh=True,
                     update_game_markets=True,
                 )
+            _append_job_run_event(
+                job_run_id,
+                "provider.import.done",
+                "Covers provider rows imported.",
+                details={
+                    "selected_date": selected_date,
+                    "status": str(covers_result.get("status") or ""),
+                    "message": str(covers_result.get("message") or ""),
+                    "target_game_ids": list(covers_result.get("target_game_ids") or []),
+                    "imported": int(covers_result.get("imported") or 0),
+                },
+            )
             if not bool(covers_result.get("prop_sync_eligible")):
                 _invalidate_read_caches()
                 with connect() as conn:
@@ -8071,6 +8120,12 @@ def _start_covers_refresh_if_needed(
                 return
 
             with connect() as conn:
+                _append_job_run_event(
+                    job_run_id,
+                    "pipeline.sync.start",
+                    "Starting prop sync pipeline.",
+                    details={"source": "covers_import", "selected_date": selected_date},
+                )
                 pipeline_result = run_prop_sync_pipeline(
                     conn,
                     request_source="covers_import",
@@ -8095,12 +8150,34 @@ def _start_covers_refresh_if_needed(
                     ),
                 )
                 touched_game_ids = list(pipeline_result.target_game_ids)
+                _append_job_run_event(
+                    job_run_id,
+                    "pipeline.sync.done",
+                    "Prop sync pipeline finished.",
+                    details={
+                        "source": "covers_import",
+                        "selected_date": selected_date,
+                        "target_game_ids": touched_game_ids,
+                        "scanned_props": int(pipeline_result.scanned_props),
+                        "changed_props": int(pipeline_result.synced_props),
+                        "changed_prop_line_ids": len(pipeline_result.changed_prop_line_ids),
+                        "attempted_predictions": int(pipeline_result.attempted_predictions),
+                        "rebuilt_predictions": int(pipeline_result.rebuilt_predictions),
+                        "skipped_predictions": int(pipeline_result.skipped_predictions),
+                    },
+                )
                 _set_prop_sync_progress(
                     conn=conn,
                     scope="covers_import",
                     target_game_ids=touched_game_ids,
                 )
             _invalidate_read_caches()
+            _append_job_run_event(
+                job_run_id,
+                "pipeline.cache.invalidated",
+                "Read caches invalidated after Covers sync.",
+                details={"source": "covers_import", "target_game_ids": touched_game_ids},
+            )
             post_result = run_post_pipeline_steps(
                 connect_fn=connect,
                 policy=PropPostProcessPolicy(
@@ -8128,6 +8205,16 @@ def _start_covers_refresh_if_needed(
                 ),
             )
             published_payloads = dict(post_result.published_payloads or {})
+            _append_job_run_event(
+                job_run_id,
+                "pipeline.publish.done",
+                "Post-sync Covers payload publish finished.",
+                details={
+                    "source": "covers_import",
+                    "target_game_ids": touched_game_ids,
+                    "published_payloads": published_payloads,
+                },
+            )
             result_payload = {
                 "source": "covers_import",
                 "covers_result": covers_result,
