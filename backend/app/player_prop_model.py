@@ -2821,18 +2821,23 @@ def train_minutes_model(
     )
 
 
-def prewarm_model_cache(conn: sqlite3.Connection, config: ModelTuningConfig | None = None) -> dict[str, int]:
+def prewarm_model_cache(
+    conn: sqlite3.Connection,
+    config: ModelTuningConfig | None = None,
+    *,
+    allow_training: bool = True,
+) -> dict[str, int]:
     tuning = config or DEFAULT_TUNING_CONFIG
     warmed = {"minutes": 0, "markets": 0, "residuals": 0}
-    if train_minutes_model(conn, config=tuning) is not None:
+    if train_minutes_model(conn, config=tuning, allow_training=allow_training) is not None:
         warmed["minutes"] = 1
     for bucket in MINUTES_ROLE_BUCKETS:
-        if train_minutes_model(conn, config=tuning, role_bucket=bucket) is not None:
+        if train_minutes_model(conn, config=tuning, role_bucket=bucket, allow_training=allow_training) is not None:
             warmed["minutes"] += 1
     for market in TRAINING_MARKETS:
-        if train_market_model(conn, market, config=tuning) is not None:
+        if train_market_model(conn, market, config=tuning, allow_training=allow_training) is not None:
             warmed["markets"] += 1
-        if train_market_residual_model(conn, market, config=tuning) is not None:
+        if train_market_residual_model(conn, market, config=tuning, allow_training=allow_training) is not None:
             warmed["residuals"] += 1
     return warmed
 
