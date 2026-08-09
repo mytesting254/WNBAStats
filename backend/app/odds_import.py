@@ -589,9 +589,6 @@ def sync_prop_lines_from_sportsbook(
             for key, row in existing_by_key.items()
             if key not in desired_rows
         ]
-        final_sync_message = (
-            f"Synced {len(insert_rows)} new, {len(update_rows)} updated, {len(delete_prop_line_ids)} removed prop lines."
-        )
         insert_rows = [
             (
                 payload["game_id"],
@@ -633,6 +630,9 @@ def sync_prop_lines_from_sportsbook(
                 rebuild_prop_line_ids.append(int(existing["id"]))
             elif missing_prediction:
                 missing_prediction_prop_line_ids.append(int(existing["id"]))
+        final_sync_message = (
+            f"Synced {len(insert_rows)} new, {len(update_rows)} updated, {len(delete_prop_line_ids)} removed prop lines."
+        )
 
         with sqlite_write_lock():
             _begin_immediate_with_retry(
