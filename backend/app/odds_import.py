@@ -589,6 +589,9 @@ def sync_prop_lines_from_sportsbook(
             for key, row in existing_by_key.items()
             if key not in desired_rows
         ]
+        final_sync_message = (
+            f"Synced {len(insert_rows)} new, {len(update_rows)} updated, {len(delete_prop_line_ids)} removed prop lines."
+        )
         insert_rows = [
             (
                 payload["game_id"],
@@ -749,21 +752,23 @@ def sync_prop_lines_from_sportsbook(
                     progress_callback=active_rebuild_progress_callback,
                 )
             conn.commit()
-            if progress_callback is not None:
-                progress_callback(
-                    len(rows),
-                    max(len(rows), 1),
-                    f"Synced {len(insert_rows)} new, {len(update_rows)} updated, {len(delete_prop_line_ids)} removed prop lines.",
-                )
-                flush_progress_transaction()
             if include_change_details:
-                return SyncPropLinesResult(
+                result = SyncPropLinesResult(
                     synced_props=len(candidate_rows),
                     changed_props=len(insert_rows) + len(update_rows) + len(delete_prop_line_ids),
                     changed_prop_line_ids=changed_prop_line_ids,
                     touched_game_ids=touched_game_ids,
                 )
-            return len(candidate_rows)
+            else:
+                result = len(candidate_rows)
+        if progress_callback is not None:
+            progress_callback(
+                len(rows),
+                max(len(rows), 1),
+                final_sync_message,
+            )
+            flush_progress_transaction()
+        return result
     except sqlite3.OperationalError as exc:
         if _is_sqlite_locked_error(exc):
             try:
