@@ -755,6 +755,8 @@ Use the `Date Results` operation when only one completed date, or a small batch 
 
 Use `Refresh ESPN` only for a larger hard refresh or backfill. That path fetches fresh ESPN data for the current season and previous season. Box score imports are idempotent in Turso: `player_game_stats` is unique by `(player_id, game_id)`, player upserts are batched, and stat inserts use `INSERT OR REPLACE`, so repeated missing-only fills can safely repair gaps without duplicating rows.
 
+Important ESPN failure mode: scoreboard and summary imports depend on the request headers ESPN currently accepts. On Sunday, August 9, 2026, the production `User-Agent: WNBAStats/1.0` fingerprint started returning `403 Forbidden` for both scoreboard and summary endpoints even though generic clients such as `python-requests/2.31.0` still succeeded. When that happens, completed games can remain stuck as `games.status = 'scheduled'`, box scores never import because the box-score pass only scans `final` games, prop settlement finds `0` eligible rows, and the DFS first-half tab can still show those stale scheduled games if unresolved prop lines remain attached.
+
 Saved prop settlements are also repairable now. `settled_props` no longer behaves as insert-once-only state: rerunning settlement can backfill incomplete historical rows such as missing `game_margin`, `team_margin`, `team_spread`, and `blowout_result`, and it can resolve the player's team from `player_team_history` for that specific game when current roster state differs from historical roster state.
 
 Injury context is refreshed from RotoWire lineups via:
@@ -985,6 +987,8 @@ Completed games are matched to existing sportsbook-derived scheduled games by da
 When `include_player_stats=true`, ESPN player box scores are imported for the selected date, selected date batch, or requested season. The app then syncs matching sportsbook prop lines into deduped model prop lines so Parlay Candidates use provider-backed player game logs without counting identical sportsbook lines multiple times.
 
 After the ESPN sync finishes, the app settles saved player prop predictions and saved game predictions against the imported final scores and box scores, then rebuilds current predictions from the updated player history. Player-prop settlement now hydrates ESPN team stats for the affected final dates before writing `settled_props`, so pace, offensive-rating, defensive-rating, and net-rating context stays aligned with the same canonical team tables used by training. The settlement writer now derives its placeholder count from a shared `settled_props` column tuple and validates each settlement row width before writing. That safeguard was added after the Thursday, July 16, 2026 overnight cron run failed with SQLite `22 values for 21 columns` during `settle_completed_props`.
+
+If an ESPN refresh reports scoreboard `403` errors for a completed date, do not expect rerunning settlement alone to fix that date. First restore a working ESPN fetch path and rerun the history import so the affected games are marked `final` and receive `team_game_results`, `player_game_stats`, and `player_first_half_stats`; only after that will prop and DFS settlements become eligible.
 
 ## Local Data And Generated Files
 

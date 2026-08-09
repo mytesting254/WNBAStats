@@ -410,6 +410,23 @@ So an absent or very small H2H view is not always a bug.
 
 If the roster tab is missing entirely or the `Data` tab breaks after roster changes, compare the current frontend against the last known-good tab layout before changing backend behavior.
 
+## ESPN Completed-Game Import Failures
+
+### If Past Games Still Show Up In DFS Or Other Current-Slate Views
+
+- first inspect the affected `games` rows; if a past date is still stored as `status = 'scheduled'`, treat it as an ingest failure before changing frontend filters
+- confirm whether those games have `team_game_results`, `player_game_stats`, and `player_first_half_stats`; if all three are empty, settlement and DFS settlement will both report `0` eligible rows
+- unresolved `prop_lines` plus stale `scheduled` status are enough for `/api/dfs/first-half` to leak those games into the DFS tab
+- the missing-stats audit only scans `final` games, so a past game stuck in `scheduled` can disappear from the normal ESPN gap report
+
+### If ESPN Scoreboard Or Summary Requests Start Returning `403 Forbidden`
+
+- reproduce the fetch from the live backend container before changing DB rows; on Sunday, August 9, 2026, ESPN rejected `User-Agent: WNBAStats/1.0` while still serving the same JSON to `python-requests/2.31.0`
+- if scoreboard fetches fail, completed games will not flip from `scheduled` to `final`
+- if games do not become `final`, the box-score importer skips them because it only scans final games
+- if box scores skip, `settle_completed_props` and `settle_dfs_first_half_projection_snapshots` both return no eligible rows for that date
+- fix the fetch headers first, then rerun the relevant ESPN history import date so the game rows, box scores, and settlements can repair in order
+
 ## Deployment Recovery Workflow
 
 When production behavior becomes unclear:

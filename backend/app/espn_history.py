@@ -20,6 +20,12 @@ from .timezone_utils import APP_TIMEZONE
 BASE_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/scoreboard"
 SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/wnba/summary"
 LOCAL_TZ = APP_TIMEZONE
+ESPN_REQUEST_HEADERS = {
+    # ESPN now rejects the repo-specific UA but still serves the same JSON to
+    # generic HTTP clients.
+    "User-Agent": "python-requests/2.31.0",
+    "Accept": "application/json,text/plain,*/*",
+}
 
 
 def fetch_scoreboard(season: int, force_refresh: bool = False, selected_date: str | None = None) -> dict[str, Any]:
@@ -31,7 +37,7 @@ def fetch_scoreboard(season: int, force_refresh: bool = False, selected_date: st
             return cached
 
     params = urlencode({"dates": dates_param, "limit": 500})
-    request = Request(f"{BASE_URL}?{params}", headers={"User-Agent": "WNBAStats/1.0"})
+    request = Request(f"{BASE_URL}?{params}", headers=ESPN_REQUEST_HEADERS)
     with urlopen(request, timeout=30) as response:
         payload = json.loads(response.read().decode("utf-8"))
     payload["cached_at"] = datetime.now(timezone.utc).isoformat()
@@ -47,7 +53,7 @@ def fetch_summary(event_id: int, force_refresh: bool = False) -> dict[str, Any]:
         if isinstance(cached, dict):
             return cached
 
-    request = Request(f"{SUMMARY_URL}?{urlencode({'event': str(event_id)})}", headers={"User-Agent": "WNBAStats/1.0"})
+    request = Request(f"{SUMMARY_URL}?{urlencode({'event': str(event_id)})}", headers=ESPN_REQUEST_HEADERS)
     with urlopen(request, timeout=30) as response:
         payload = json.loads(response.read().decode("utf-8"))
     payload["cached_at"] = datetime.now(timezone.utc).isoformat()
