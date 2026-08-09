@@ -5413,9 +5413,7 @@ def _current_dfs_snapshot_payload(conn) -> list[dict[str, Any]]:
                 ),
             }
         )
-    if active_prop_line_ids and seen_prop_line_ids == active_prop_line_ids:
-        return payload
-    return []
+    return payload
 
 
 @app.get("/api/dfs/first-half")
