@@ -951,11 +951,10 @@ def _queue_model_training_job(request: Request | None = None, *, include_dfs: bo
         )
         _append_job_run_event(job_run_id, "job.running", "Model training started.")
         try:
-            with sqlite_write_lock():
-                with connect() as conn:
-                    result = run_walk_forward_training(conn)
-                    if include_dfs:
-                        result["dfs_prewarm"] = prewarm_dfs_half_cache(conn)
+            with connect() as conn:
+                result = run_walk_forward_training(conn)
+                if include_dfs:
+                    result["dfs_prewarm"] = prewarm_dfs_half_cache(conn)
             _invalidate_read_caches()
             with sqlite_write_lock():
                 with connect() as conn:

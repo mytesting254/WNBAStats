@@ -11,6 +11,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .db import connect, sqlite_write_lock
 from .game_training_db import game_training_db_signature
 from .game_predictions import evaluate_game_residual_models
 from .paths import get_cache_dir
@@ -55,7 +56,7 @@ def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
     if component_run is None:
         component_run = _run_component_benchmark(conn)
         component_run["notes"] = _append_data_signature(component_run.get("notes"), data_signature)
-        _save_model_run(conn, component_run)
+        _persist_model_run(component_run)
 
     started_at = datetime.now(timezone.utc).isoformat()
     metrics = {}
@@ -100,8 +101,7 @@ def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
         ),
     }
     learned_run["notes"] = _append_game_eval_signature(learned_run.get("notes"), GAME_EVAL_SIGNATURE)
-    _save_model_run(conn, learned_run)
-    conn.commit()
+    _persist_model_run(learned_run)
     return learned_run
 
 
@@ -265,6 +265,13 @@ def _save_model_run(conn: sqlite3.Connection, run: dict) -> None:
         notes = _append_artifact_bundle(run.get("notes"), artifact_bundle["manifest_path"])
         run["notes"] = notes
         conn.execute("UPDATE model_runs SET notes = ? WHERE id = ?", (notes, run["id"]))
+
+
+def _persist_model_run(run: dict) -> None:
+    with sqlite_write_lock():
+        with connect() as write_conn:
+            _save_model_run(write_conn, run)
+            write_conn.commit()
 
 
 def _training_data_signature(conn: sqlite3.Connection) -> str:
