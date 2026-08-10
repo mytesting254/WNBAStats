@@ -298,6 +298,21 @@ def _delete_explicit_dnp_prop_lines_for_settlement(
         return 0
     placeholders = ",".join("?" for _ in prop_line_ids)
     delete_params = tuple(prop_line_ids)
+    conn.execute(
+        f"""
+        DELETE FROM dfs_first_half_projection_settlements
+        WHERE snapshot_id IN (
+            SELECT id
+            FROM dfs_first_half_projection_snapshots
+            WHERE prop_line_id IN ({placeholders})
+        )
+        """,
+        delete_params,
+    )
+    conn.execute(
+        f"DELETE FROM dfs_first_half_projection_snapshots WHERE prop_line_id IN ({placeholders})",
+        delete_params,
+    )
     conn.execute(f"DELETE FROM watchlist_snapshot_items WHERE prop_line_id IN ({placeholders})", delete_params)
     conn.execute(f"DELETE FROM gem_snapshot_items WHERE prop_line_id IN ({placeholders})", delete_params)
     conn.execute(f"DELETE FROM prop_predictions WHERE prop_line_id IN ({placeholders})", delete_params)
