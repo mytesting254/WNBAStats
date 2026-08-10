@@ -39,6 +39,7 @@ def settle_completed_props(
 ) -> dict:
     target_dates = _normalized_dates(selected_date, selected_dates)
     hydrated_dates = _hydrate_team_stats_for_settlement(conn, target_dates)
+    deleted_explicit_dnp_prop_lines = _delete_explicit_dnp_prop_lines_for_settlement(conn, target_dates)
     date_filter = ""
     params: tuple[str, ...] = ()
     if target_dates:
@@ -198,6 +199,7 @@ def settle_completed_props(
         "settled": len(settlements),
         "repaired": len(repairs),
         "skipped": skipped,
+        "deleted_explicit_dnp_prop_lines": deleted_explicit_dnp_prop_lines,
         "settled_at": settled_at,
         "hydrated_dates": hydrated_dates,
         "selected_date": target_dates[0] if len(target_dates) == 1 else None,
@@ -263,6 +265,44 @@ def _unsettled_final_prop_dates(conn: sqlite3.Connection) -> list[str]:
         """
     ).fetchall()
     return [str(row["game_date"]).strip() for row in rows if row["game_date"]]
+
+
+def _delete_explicit_dnp_prop_lines_for_settlement(
+    conn: sqlite3.Connection,
+    target_dates: list[str],
+) -> int:
+    date_filter = ""
+    params: tuple[str, ...] = ()
+    if target_dates:
+        placeholders = ",".join("?" for _ in target_dates)
+        date_filter = f" AND g.game_date IN ({placeholders})"
+        params = tuple(target_dates)
+    rows = conn.execute(
+        """
+        SELECT DISTINCT pl.id
+        FROM prop_lines pl
+        JOIN games g ON g.id = pl.game_id
+        JOIN player_game_availability pga
+          ON pga.game_id = pl.game_id
+         AND pga.player_id = pl.player_id
+        LEFT JOIN settled_props sp ON sp.prop_line_id = pl.id
+        WHERE g.status = 'final'
+          AND sp.id IS NULL
+          AND pga.did_not_play = 1
+        """
+        + date_filter,
+        params,
+    ).fetchall()
+    prop_line_ids = [int(row["id"]) for row in rows]
+    if not prop_line_ids:
+        return 0
+    placeholders = ",".join("?" for _ in prop_line_ids)
+    delete_params = tuple(prop_line_ids)
+    conn.execute(f"DELETE FROM watchlist_snapshot_items WHERE prop_line_id IN ({placeholders})", delete_params)
+    conn.execute(f"DELETE FROM gem_snapshot_items WHERE prop_line_id IN ({placeholders})", delete_params)
+    conn.execute(f"DELETE FROM prop_predictions WHERE prop_line_id IN ({placeholders})", delete_params)
+    conn.execute(f"DELETE FROM prop_lines WHERE id IN ({placeholders})", delete_params)
+    return len(prop_line_ids)
 
 
 def _season_for_date(value: str) -> int:
