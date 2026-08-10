@@ -287,21 +287,25 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 
 ### Likely Cause
 
-- `/api/models/train` is the full Model Lab walk-forward job, not a game-only retrain
-- larger game-feature sets can extend the full run beyond the default `WNBA_TRAIN_POLL_TIMEOUT_SECONDS=1200`
+- older deployments ran `/api/models/train` with DFS prewarm inline, so the `2am` cron could wait on the full Model Lab walk-forward job plus DFS cache/model prep
+- larger game-feature sets can extend the core run beyond the default `WNBA_TRAIN_POLL_TIMEOUT_SECONDS=1200`
 
 ### What To Check
 
 - inspect the live training state:
   - `curl -sS http://127.0.0.1:8010/api/ops/health`
-- confirm the training process is still active:
-  - `ps -ef | grep '[r]un_model_training.py'`
-- if it is still progressing, raise the timeout in the cron environment before treating it as a failure
+- note whether `model_training.running` or `dfs_prewarm.running` is still true
+- if the deployment still uses the older combined cron path, confirm the training process is still active before calling it stuck
+- if it is still progressing, either split DFS prewarm into its own cron step or raise the timeout in the cron environment before treating it as a failure
 
 ### Notes
 
 - the August 8, 2026 speed fix reduced a game-evaluation hotspot by refitting direct game models once per `YYYY-MM` segment instead of nearly every historical row
-- that helps, but cron still waits on the entire Model Lab training path plus prewarm
+- starting Monday, August 10, 2026, the repo cron template separates the nightly flow into:
+  - `2am America/New_York` `settle-and-train` for ESPN refresh, settlements, and core walk-forward training
+  - `3am America/New_York` `train-dfs` for standalone DFS prewarm
+  - `4am America/New_York` `odds-if-matchups` for the Odds API refresh
+- the Models tab still calls `/api/models/train` without overrides, so manual UI training continues to include DFS prewarm by default
 
 ## SQLite And Persistence Problems
 

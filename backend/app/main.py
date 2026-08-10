@@ -158,6 +158,7 @@ _RATE_BUCKETS: dict[tuple[str, str], tuple[float, float]] = {}
 _RATE_LOCK = threading.Lock()
 _PROP_SYNC_LOCK = threading.RLock()
 _MODEL_TRAIN_LOCK = threading.Lock()
+_DFS_PREWARM_LOCK = threading.Lock()
 _DB_MAINTENANCE_LOCK = threading.Lock()
 _ESPN_HISTORY_IMPORT_LOCK = threading.Lock()
 _READ_CACHE_REBUILD_LOCKS: dict[str, threading.Lock] = {}
@@ -185,6 +186,16 @@ _PROP_SYNC_STATE: dict[str, Any] = {
     "updated_at": None,
 }
 _MODEL_TRAIN_STATE: dict[str, Any] = {
+    "running": False,
+    "started_at": None,
+    "finished_at": None,
+    "last_error": None,
+    "last_result": None,
+    "status": "idle",
+    "message": None,
+    "updated_at": None,
+}
+_DFS_PREWARM_STATE: dict[str, Any] = {
     "running": False,
     "started_at": None,
     "finished_at": None,
@@ -866,7 +877,41 @@ def _mutate_model_training_state(
         }
 
 
-def _queue_model_training_job(request: Request | None = None) -> dict[str, Any]:
+def _mutate_dfs_prewarm_state(
+    *,
+    running: Any = _UNSET,
+    started_at: Any = _UNSET,
+    finished_at: Any = _UNSET,
+    last_error: Any = _UNSET,
+    last_result: Any = _UNSET,
+    status: Any = _UNSET,
+    message: Any = _UNSET,
+) -> dict[str, Any]:
+    with _DFS_PREWARM_LOCK:
+        updates = {
+            "running": running,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "last_error": last_error,
+            "last_result": last_result,
+            "status": status,
+            "message": message,
+        }
+        for key, value in updates.items():
+            if value is _UNSET:
+                continue
+            if key == "last_result" and value is not None:
+                _DFS_PREWARM_STATE[key] = dict(value)
+            else:
+                _DFS_PREWARM_STATE[key] = value
+        _DFS_PREWARM_STATE["updated_at"] = datetime.now(timezone.utc).isoformat()
+        return {
+            key: (dict(value) if isinstance(value, dict) else value)
+            for key, value in _DFS_PREWARM_STATE.items()
+        }
+
+
+def _queue_model_training_job(request: Request | None = None, *, include_dfs: bool = True) -> dict[str, Any]:
     with _MODEL_TRAIN_LOCK:
         if _MODEL_TRAIN_STATE.get("running"):
             return {
@@ -881,7 +926,7 @@ def _queue_model_training_job(request: Request | None = None) -> dict[str, Any]:
         request=request,
         trigger_action="api.models.train" if request is not None else "internal.model_training",
         source_path=request.url.path if request is not None else "/api/models/train",
-        metadata={"started_at": started_at},
+        metadata={"started_at": started_at, "include_dfs": bool(include_dfs)},
     )
     _mutate_model_training_state(
         running=True,
@@ -909,7 +954,8 @@ def _queue_model_training_job(request: Request | None = None) -> dict[str, Any]:
             with sqlite_write_lock():
                 with connect() as conn:
                     result = run_walk_forward_training(conn)
-                    result["dfs_prewarm"] = prewarm_dfs_half_cache(conn)
+                    if include_dfs:
+                        result["dfs_prewarm"] = prewarm_dfs_half_cache(conn)
             _invalidate_read_caches()
             with sqlite_write_lock():
                 with connect() as conn:
@@ -943,6 +989,85 @@ def _queue_model_training_job(request: Request | None = None) -> dict[str, Any]:
         "status": "queued",
         "started_at": started_at,
         "message": "Model training queued. Results will appear when the background job finishes.",
+    }
+
+
+def _queue_dfs_prewarm_job(request: Request | None = None) -> dict[str, Any]:
+    with _DFS_PREWARM_LOCK:
+        if _DFS_PREWARM_STATE.get("running"):
+            return {
+                "status": "busy",
+                "started_at": _DFS_PREWARM_STATE.get("started_at"),
+                "message": str(_DFS_PREWARM_STATE.get("message") or "DFS prewarm is already running."),
+            }
+
+    started_at = datetime.now(timezone.utc).isoformat()
+    job_run_id = _create_job_run(
+        "dfs_prewarm",
+        request=request,
+        trigger_action="api.models.dfs_prewarm" if request is not None else "internal.dfs_prewarm",
+        source_path=request.url.path if request is not None else "/api/models/dfs/prewarm",
+        metadata={"started_at": started_at},
+    )
+    _mutate_dfs_prewarm_state(
+        running=True,
+        started_at=started_at,
+        finished_at=None,
+        last_error=None,
+        last_result=None,
+        status="queued",
+        message="DFS prewarm queued.",
+    )
+    _append_job_run_event(job_run_id, "job.queued", "DFS prewarm queued.")
+
+    def _run() -> None:
+        _mutate_dfs_prewarm_state(
+            running=True,
+            started_at=started_at,
+            finished_at=None,
+            last_error=None,
+            last_result=None,
+            status="running",
+            message="DFS prewarm is running.",
+        )
+        _append_job_run_event(job_run_id, "job.running", "DFS prewarm started.")
+        try:
+            with sqlite_write_lock():
+                with connect() as conn:
+                    result = prewarm_dfs_half_cache(conn)
+            _invalidate_read_caches()
+            with sqlite_write_lock():
+                with connect() as conn:
+                    result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+            _mutate_dfs_prewarm_state(
+                running=False,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                last_error=None,
+                last_result=result,
+                status="completed",
+                message="DFS prewarm finished.",
+            )
+            _append_job_run_event(job_run_id, "job.publish", "DFS prewarm finished and payloads were published.", details=result)
+            _finish_job_run(job_run_id, status="completed", result=result)
+        except Exception as exc:
+            _mutate_dfs_prewarm_state(
+                running=False,
+                started_at=started_at,
+                finished_at=datetime.now(timezone.utc).isoformat(),
+                last_error=str(exc),
+                last_result=None,
+                status="error",
+                message=f"DFS prewarm failed: {exc}",
+            )
+            _append_job_run_event(job_run_id, "job.failed", f"DFS prewarm failed: {exc}", level="error")
+            _finish_job_run(job_run_id, status="failed", error_text=str(exc))
+
+    threading.Thread(target=_run, name="dfs-prewarm", daemon=True).start()
+    return {
+        "status": "queued",
+        "started_at": started_at,
+        "message": "DFS prewarm queued. Results will appear when the background job finishes.",
     }
 
 
@@ -1829,11 +1954,14 @@ def ops_health() -> dict[str, Any]:
     sync_state, latest_job = _resolved_prop_sync_state()
     with _MODEL_TRAIN_LOCK:
         model_training_state = dict(_MODEL_TRAIN_STATE)
+    with _DFS_PREWARM_LOCK:
+        dfs_prewarm_state = dict(_DFS_PREWARM_STATE)
     return {
         "status": "ok",
         "prop_sync": sync_state,
         "prop_sync_job": latest_job,
         "model_training": model_training_state,
+        "dfs_prewarm": dfs_prewarm_state,
         "runtime_storage": {
             "db_path": str(get_db_path()),
             "training_db_path": str(get_training_db_path()),
@@ -6746,8 +6874,18 @@ def model_loss_breakdown(model_version: str = MODEL_VERSION, top_n_players: int 
 
 
 @app.post("/api/models/train", dependencies=[Depends(_protect_mutation)])
-def train_model(request: Request) -> dict:
-    return _run_audited_mutation(request, "models.train", lambda: _queue_model_training_job(request))
+def train_model(request: Request, include_dfs: bool = True) -> dict:
+    return _run_audited_mutation(
+        request,
+        "models.train",
+        lambda: _queue_model_training_job(request, include_dfs=include_dfs),
+        details={"include_dfs": include_dfs},
+    )
+
+
+@app.post("/api/models/dfs/prewarm", dependencies=[Depends(_protect_mutation)])
+def prewarm_dfs_models(request: Request) -> dict:
+    return _run_audited_mutation(request, "models.dfs_prewarm", lambda: _queue_dfs_prewarm_job(request))
 
 
 @app.post("/api/models/tune", dependencies=[Depends(_protect_mutation)])
@@ -7032,7 +7170,6 @@ def _import_espn_history_impl(
             _clear_scheduled_prop_state(conn, clear_source_rows=True)
             synced_props = 0
             projections = []
-            dfs_prewarm = prewarm_dfs_half_cache(conn)
             watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
             gap_audit = _espn_stats_gap_audit(conn)
             backfill_result: dict[str, Any] | None = None
@@ -7074,7 +7211,6 @@ def _import_espn_history_impl(
         "game_settlements": game_settlements,
         "special_settlements": special_settlements,
         "dfs_settlements": dfs_settlements,
-        "dfs_prewarm": dfs_prewarm,
         "gem_settlements": gem_settlements,
         "watchlist_settlements": watchlist_settlements,
         "watchlist_snapshot": watchlist_snapshot,
@@ -7204,7 +7340,6 @@ def _backfill_espn_history_gaps_impl(
         _clear_scheduled_prop_state(conn, clear_source_rows=True)
         synced_props = 0
         projections = []
-        dfs_prewarm = prewarm_dfs_half_cache(conn)
         watchlist_snapshot = _snapshot_watchlist(conn, datetime.now(LOCAL_TZ).date().isoformat())
         after = _espn_stats_gap_audit(conn, start_date=start_date, end_date=end_date, limit_missing_games=1000)
     _clear_prop_scrape_caches()
@@ -7221,7 +7356,6 @@ def _backfill_espn_history_gaps_impl(
         "game_settlements": game_settlements,
         "special_settlements": special_settlements,
         "dfs_settlements": dfs_settlements,
-        "dfs_prewarm": dfs_prewarm,
         "gem_settlements": gem_settlements,
         "watchlist_settlements": watchlist_settlements,
         "watchlist_snapshot": watchlist_snapshot,

@@ -12,7 +12,7 @@ ODDS_API_KEY_VALUE="${ODDS_API_KEY:-${THE_ODDS_API_KEY:-}}"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/live_daily_props.sh refresh-rosters|refresh-results|prune-specials|settle|train-model|settle-and-train|odds-if-matchups
+Usage: scripts/live_daily_props.sh refresh-rosters|refresh-results|prune-specials|settle|train-model|train-model-core|train-dfs|settle-and-train|odds-if-matchups
 
 Environment:
   WNBA_API_BASE  Backend base URL. Default: http://127.0.0.1:8010
@@ -30,7 +30,8 @@ Environment:
 Cron example for 2am/3am Eastern:
   CRON_TZ=America/New_York
   0 2 * * * cd /root/WNBAStats && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh settle-and-train >> /var/log/wnba-daily-props.log 2>&1
-  0 3 * * * cd /root/WNBAStats && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh odds-if-matchups >> /var/log/wnba-daily-props.log 2>&1
+  0 3 * * * cd /root/WNBAStats && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh train-dfs >> /var/log/wnba-daily-props.log 2>&1
+  0 4 * * * cd /root/WNBAStats && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh odds-if-matchups >> /var/log/wnba-daily-props.log 2>&1
 EOF
 }
 
@@ -244,6 +245,39 @@ run_train_model() {
   wait_for_model_training "$started_at"
 }
 
+run_train_model_core() {
+  require_api_key_for_prod_hint
+  echo "[$(timestamp)] queueing core model training"
+  local payload
+  payload="$(api_post "/api/models/train?include_dfs=false")"
+  printf '%s\n' "$payload"
+  local started_at
+  started_at="$(printf '%s' "$payload" | train_started_at)"
+  if [ -z "$started_at" ]; then
+    echo "[$(timestamp)] model training response did not include started_at" >&2
+    return 1
+  fi
+  local message
+  message="$(printf '%s' "$payload" | train_message)"
+  if [ -n "$message" ]; then
+    echo "[$(timestamp)] $message"
+  fi
+  wait_for_model_training "$started_at"
+}
+
+run_train_dfs() {
+  require_api_key_for_prod_hint
+  echo "[$(timestamp)] queueing DFS prewarm"
+  local payload
+  payload="$(api_post "/api/models/dfs/prewarm")"
+  printf '%s\n' "$payload"
+  local message
+  message="$(printf '%s' "$payload" | train_message)"
+  if [ -n "$message" ]; then
+    echo "[$(timestamp)] $message"
+  fi
+}
+
 run_settle_and_train() {
   run_refresh_completed_results
   if ! run_refresh_rosters; then
@@ -251,7 +285,7 @@ run_settle_and_train() {
   fi
   run_prune_specials
   run_settle
-  run_train_model
+  run_train_model_core
 }
 
 run_odds_if_matchups() {
@@ -293,6 +327,12 @@ main() {
       ;;
     train-model)
       run_train_model
+      ;;
+    train-model-core)
+      run_train_model_core
+      ;;
+    train-dfs)
+      run_train_dfs
       ;;
     settle-and-train)
       run_settle_and_train

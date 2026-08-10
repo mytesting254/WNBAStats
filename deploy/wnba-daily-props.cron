@@ -10,7 +10,10 @@
 # environment. The 2am ET flow refreshes ESPN finals/box scores, then refreshes
 # cached ESPN rosters so current assignments win over completed-game history.
 # It then prunes unsettled Specials rows that are missing from ESPN or marked
-# DNP, settles props, and waits for model training to finish.
+# DNP, settles props, and waits for core model training to finish. DFS prewarm
+# now runs as a standalone cron after the main training path. Odds import runs
+# after DFS so the heavier jobs do not overlap.
 
 0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 02 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh settle-and-train >> /var/log/wnba-daily-props.log 2>&1
-0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 03 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh odds-if-matchups >> /var/log/wnba-daily-props.log 2>&1
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 03 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh train-dfs >> /var/log/wnba-daily-props.log 2>&1
+0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 04 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_daily_props.sh odds-if-matchups >> /var/log/wnba-daily-props.log 2>&1

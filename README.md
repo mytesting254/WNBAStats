@@ -394,6 +394,7 @@ POST /api/gems/sync-settlements
 POST /api/watchlist/snapshot
 POST /api/watchlist/sync-settlements
 POST /api/models/train
+POST /api/models/dfs/prewarm
 POST /api/props/repair-current-slate
 POST /api/settle-props
 ```
@@ -412,6 +413,7 @@ Preferred browser/admin path:
   - `POST /api/props/repair-current-slate`
   - `POST /api/settle-props`
   - `POST /api/models/train`
+  - `POST /api/models/dfs/prewarm`
   - `POST /api/odds/import`
   - `POST /api/covers/import`
   - `POST /api/injuries/import/rotowire`
@@ -639,7 +641,10 @@ Before treating a deployment as production-ready, verify all of the following:
   - stale proxy config
 - `2am America/New_York` cron logs can show `Internal Server Error` even when cron itself ran:
   - on Thursday, July 16, 2026, the actual failure was a bad `settled_props` insert shape during `settle_completed_props`, not a missing scheduled slate and not a skipped cron trigger
-- `3am America/New_York` Odds API refresh now prechecks The Odds API `events` endpoint instead of local `/api/matchups` rows:
+- `3am America/New_York` DFS prewarm now runs as its own cron step after the main `2am` settlement/core-training flow:
+  - that keeps ESPN import and core walk-forward training from blocking on DFS cache/model prep
+  - inspect `/api/ops/health` for the separate `dfs_prewarm` state when that job is running
+- `4am America/New_York` Odds API refresh now prechecks The Odds API `events` endpoint instead of local `/api/matchups` rows:
   - the precheck is quota-free and counts only WNBA events whose `commence_time` lands on the current date in `America/New_York`
   - if the provider reports zero same-day WNBA events, the cron wrapper skips the live props refresh
   - this avoids the old circular dependency where local scheduled games might not exist yet because the Odds API import itself is one of the flows that creates them
@@ -1525,7 +1530,9 @@ Relative to the baseline game formulas, the saved blended model currently improv
 Operational note:
 
 - `/api/models/train` is still the full Model Lab job, not a game-only retrain
-- if you only change game-model features, the cron-facing training wrapper can still run longer because player-market walk-forward and cache prewarm remain part of the same job
+- `/api/models/train?include_dfs=false` runs the core nightly walk-forward job without DFS prewarm
+- `/api/models/dfs/prewarm` runs DFS prewarm separately; the Models tab still calls `/api/models/train` without overrides and therefore still includes DFS by default
+- if you only change game-model features, the UI-triggered training path can still run longer because player-market walk-forward and DFS prewarm remain part of the same job
 - the default `scripts/live_daily_props.sh` poll timeout is `1200` seconds; raise `WNBA_TRAIN_POLL_TIMEOUT_SECONDS` if live full-training runtime grows beyond that
 
 Matchup predictions are saved when `/api/matchups` is built, and current-slate recalculation also rewrites saved game predictions for the active/scheduled slate before caches are republished. ESPN history imports and settlement flows then compare final scores against those saved winner, ATS, and over/under predictions.
