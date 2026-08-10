@@ -1980,10 +1980,7 @@ def _final_projection_samples(conn: sqlite3.Connection, market: str) -> tuple[li
 
 
 def _has_complete_training_context(row: sqlite3.Row) -> bool:
-    spread_home = row["spread_home"] if "spread_home" in row.keys() else None
     game_total = row["game_total"] if "game_total" in row.keys() else None
-    if spread_home is None:
-        return False
     if game_total is None:
         return False
     try:
@@ -2969,7 +2966,9 @@ def _training_start_date(today: date | None = None) -> str:
         except ValueError:
             pass
     current = today or datetime.now(APP_TIMEZONE).date()
-    return date(current.year - 1, 1, 1).isoformat()
+    # Keep roughly the last two full league years by default so low-volume
+    # combo markets retain enough settled samples for walk-forward validation.
+    return date(current.year - 2, 1, 1).isoformat()
 
 
 def _before_training_start(game_date: str | None, training_start: str) -> bool:

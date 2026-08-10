@@ -158,23 +158,47 @@ The app is built around a provider-backed pregame workflow:
 - DFS first-half training also reuses curated full-game projection samples from:
   - default path: `data/wnba-training.sqlite`
   - override: `WNBA_TRAINING_DB_PATH`
+- The shared full-game training window now defaults to the last two league years unless `WNBA_TRAINING_START_DATE` overrides it.
+  - this keeps lower-volume combo markets such as PRA above the walk-forward row gate without weakening the shipping thresholds
 - DFS first-half model training now fits only rows with observed halftime player stats.
   - fallback share-derived halftime estimates remain in the curated DB for analysis, but are excluded from model fitting
+- The curated first-half examples now persist observed proxy history for:
+  - first-half FGA last / avg-3 / avg-5
+  - first-half FG% avg-5
+  - first-half rebound-share avg-5
+  - first-half assist-share avg-5
+- The DFS first-half model consumes those observed proxy features at training and runtime.
 - DFS first-half estimates inherit any player-prop feature improvements that flow through the curated full-game training samples and component projection inputs.
 - DFS prewarm now follows the same pattern as the other learned models:
   - rebuild curated half and player-prop training DBs explicitly
   - derive cache signatures from training-db metadata only
   - serve current-slate reads from warmed artifacts instead of retraining inside request/cache-key paths
 - Signature helpers must stay read-only. On Sunday, August 9, 2026, DFS cache-key generation was traced mutating `wnba-player-half-training.sqlite` and `wnba-training.sqlite`, which made SQLite lock contention possible during prewarm and repair runs.
+- DFS evaluation cache reads must stay exact-key only.
+  - falling back to the newest eval artifact can mask fresh rebuilds with stale zero-row payloads
 - DFS first-half estimates currently expose:
   - `GET /api/dfs/first-half`
   - `GET /api/player-first-half-history`
   - `GET /api/player-first-half-lines`
+- DFS settled/history payloads now expose both the prediction-side and settlement-side labels:
+  - `projected_side`
+  - `actual_side`
+  - `half_pace_side`
+  - `projected_to_clear_by_half`
 - Live DFS first-half tracking now snapshots the current estimate per `prop_line_id` and settles it later against `player_first_half_stats`.
 - Snapshot rows live in `dfs_first_half_projection_snapshots` and settled outcomes live in `dfs_first_half_projection_settlements`.
 - The DFS UI depends on current `prop_lines`. Without current prop ingestion, the DFS first-half tab has no live slate to estimate against.
 - DFS first-half estimates are generated from current full-game `prop_lines` through `prop_predictions`; Covers does not supply a separate DFS slate.
 - Because DFS snapshots key off `prop_line_id`, any scheduled prop-line replacement must invalidate the old DFS snapshot chain before deleting the old line. Odds-only updates can reuse the same `prop_line_id`.
+- As of Monday, August 10, 2026, the shipped DFS first-half markets are:
+  - `points`
+  - `rebounds`
+  - `assists`
+  - `points_rebounds`
+  - `points_assists`
+  - `rebounds_assists`
+  - `points_rebounds_assists`
+  - `threes`
 - For current slates, the fastest recovery path is:
   1. load the saved odds cache into the live runtime
   2. sync sportsbook rows into `prop_lines`

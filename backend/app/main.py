@@ -5399,6 +5399,7 @@ def _current_dfs_snapshot_payload(conn) -> list[dict[str, Any]]:
                 "pace_ratio": None if row["pace_ratio"] is None else float(row["pace_ratio"] or 0.0),
                 "halftime_margin_to_line": None if row["halftime_margin_to_line"] is None else float(row["halftime_margin_to_line"] or 0.0),
                 "on_track_probability": None if row["on_track_probability"] is None else float(row["on_track_probability"] or 0.0),
+                "projected_side": str(row["recommended_side"]),
                 "recommended_side": str(row["recommended_side"]),
                 "model_version": str(row["model_version"]),
                 "model_rows": int(row["model_rows"] or 0),
@@ -5499,6 +5500,7 @@ def player_first_half_history(
                             'line', pl.line,
                             'sportsbook', pl.sportsbook,
                             'actual_result', sp.actual_result,
+                            'actual_side', sp.winning_side,
                             'winning_side', sp.winning_side
                         )
                     )
@@ -5609,6 +5611,7 @@ def player_first_half_lines(limit: int = Query(200, ge=1, le=1000)) -> list[dict
         expected_halfway_line = line * 0.5
         pace_ratio = first_half_result / expected_halfway_line if abs(expected_halfway_line) > 1e-9 else None
         halftime_margin_to_line = first_half_result - expected_halfway_line
+        half_pace_side = "over" if pace_ratio is not None and pace_ratio >= 1.0 else "under"
         payload.append(
             {
                 "game_date": row["game_date"],
@@ -5623,11 +5626,14 @@ def player_first_half_lines(limit: int = Query(200, ge=1, le=1000)) -> list[dict
                 "market": market,
                 "line": line,
                 "actual_result": float(row["actual_result"] or 0.0),
+                "actual_side": str(row["winning_side"] or ""),
                 "winning_side": str(row["winning_side"] or ""),
                 "first_half_result": float(first_half_result),
                 "expected_halfway_line": expected_halfway_line,
                 "pace_ratio": pace_ratio,
                 "halftime_margin_to_line": halftime_margin_to_line,
+                "half_pace_side": half_pace_side,
+                "projected_to_clear_by_half": bool(pace_ratio is not None and pace_ratio >= 1.0),
                 "on_track_by_half": bool(pace_ratio is not None and pace_ratio >= 1.0),
                 "first_half_points": int(row["first_half_points"] or 0),
                 "first_half_rebounds": int(row["first_half_rebounds"] or 0),
