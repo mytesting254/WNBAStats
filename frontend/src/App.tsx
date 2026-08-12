@@ -3020,9 +3020,11 @@ function renderRecentFormWithMinutes(
     return null;
   }
   const targetLine = comparisonLine ?? prop.line;
+  const recentValues = prop.recent_values.slice(0, 5);
+  const recentMinutes = Array.isArray(prop.recent_minutes) ? prop.recent_minutes.slice(0, 5) : [];
   return (
     <div className="prop-l5-strip" aria-label="Last 5 results and minutes">
-      {prop.recent_values.slice(0, 5).map((value, idx) => {
+      {recentValues.map((value, idx) => {
         const hit = prop.recommended_side === "over" ? value > targetLine : value < targetLine;
         return (
           <span
@@ -3034,10 +3036,10 @@ function renderRecentFormWithMinutes(
           </span>
         );
       })}
-      {Array.isArray(prop.recent_minutes) && prop.recent_minutes.length > 0 && (
+      {recentMinutes.length > 0 && (
         <>
           <span className="l5-separator" title="Minutes distribution">|</span>
-          {prop.recent_minutes.slice(0, 5).map((minutes, idx) => (
+          {recentMinutes.map((minutes, idx) => (
             <span
               key={`${keyPrefix}-min-${idx}`}
               className="min-chip"
@@ -3061,9 +3063,11 @@ function renderH2HFormWithMinutes(
     return <span className="empty-inline">No H2H</span>;
   }
   const targetLine = comparisonLine ?? prop.line;
+  const h2hValues = prop.h2h_values.slice(0, 5);
+  const h2hMinutes = Array.isArray(prop.h2h_minutes) ? prop.h2h_minutes.slice(0, 5) : [];
   return (
     <div className="prop-l5-strip prop-h2h-strip" aria-label={`Last head-to-head results against ${prop.h2h_opponent ?? "opponent"} and minutes`}>
-      {prop.h2h_values.slice(0, 5).map((value, idx) => {
+      {h2hValues.map((value, idx) => {
         const hit = prop.recommended_side === "over" ? value > targetLine : value < targetLine;
         return (
           <span
@@ -3075,10 +3079,10 @@ function renderH2HFormWithMinutes(
           </span>
         );
       })}
-      {Array.isArray(prop.h2h_minutes) && prop.h2h_minutes.length > 0 && (
+      {h2hMinutes.length > 0 && (
         <>
           <span className="l5-separator" title="Head-to-head minutes distribution">|</span>
-          {prop.h2h_minutes.slice(0, 5).map((minutes, idx) => (
+          {h2hMinutes.map((minutes, idx) => (
             <span key={`${keyPrefix}-min-${idx}`} className="min-chip" title={`Minutes played: ${minutes.toFixed(1)}`}>
               {minutes.toFixed(1)}
             </span>
@@ -3096,9 +3100,11 @@ function renderRecentOutcomesWithMinutes(
   if (!Array.isArray(snapshot.recent_values) || snapshot.recent_values.length === 0) {
     return <span className="empty-inline">No history</span>;
   }
+  const recentValues = snapshot.recent_values.slice(0, 5);
+  const recentMinutes = Array.isArray(snapshot.recent_minutes) ? snapshot.recent_minutes.slice(0, 5) : [];
   return (
     <div className="prop-l5-strip" aria-label="Last 5 outcomes and minutes">
-      {snapshot.recent_values.slice(0, 5).map((value, idx) => (
+      {recentValues.map((value, idx) => (
         <span
           key={`${keyPrefix}-${idx}`}
           className="neutral"
@@ -3107,10 +3113,10 @@ function renderRecentOutcomesWithMinutes(
           {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
         </span>
       ))}
-      {Array.isArray(snapshot.recent_minutes) && snapshot.recent_minutes.length > 0 && (
+      {recentMinutes.length > 0 && (
         <>
           <span className="l5-separator" title="Minutes distribution">|</span>
-          {snapshot.recent_minutes.slice(0, 5).map((minutes, idx) => (
+          {recentMinutes.map((minutes, idx) => (
             <span
               key={`${keyPrefix}-min-${idx}`}
               className="min-chip"
@@ -3132,9 +3138,11 @@ function renderSpecialH2HHistory(
   if (!Array.isArray(snapshot.h2h_values) || snapshot.h2h_values.length === 0) {
     return <span className="empty-inline">No H2H</span>;
   }
+  const h2hValues = snapshot.h2h_values.slice(0, 5);
+  const h2hMinutes = Array.isArray(snapshot.h2h_minutes) ? snapshot.h2h_minutes.slice(0, 5) : [];
   return (
     <div className="prop-l5-strip" aria-label={`Head-to-head stocks vs ${snapshot.h2h_opponent ?? "opponent"}`}>
-      {snapshot.h2h_values.slice(0, 5).map((value, idx) => (
+      {h2hValues.map((value, idx) => (
         <span
           key={`${keyPrefix}-h2h-${idx}`}
           className="neutral"
@@ -3143,10 +3151,10 @@ function renderSpecialH2HHistory(
           {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
         </span>
       ))}
-      {Array.isArray(snapshot.h2h_minutes) && snapshot.h2h_minutes.length > 0 && (
+      {h2hMinutes.length > 0 && (
         <>
           <span className="l5-separator" title="Minutes in head-to-head games">|</span>
-          {snapshot.h2h_minutes.slice(0, 5).map((minutes, idx) => (
+          {h2hMinutes.map((minutes, idx) => (
             <span
               key={`${keyPrefix}-h2h-min-${idx}`}
               className="min-chip"
