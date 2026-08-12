@@ -3965,7 +3965,7 @@ def _publish_matchup_snapshot_payloads(
             matchup,
             snapshot_key=snapshot_key,
             game_ids=grouped_game_ids,
-            value_board_props=_value_board_payload_for_games(conn, grouped_game_ids, include_filtered_only=True),
+            value_board_props=_value_board_payload_for_games(conn, grouped_game_ids, include_filtered_only=False),
         )
         write_json_cache(_matchup_snapshot_cache_name(snapshot_key), _cache_envelope(snapshot_payload, MATCHUPS_TTL_SECONDS))
         published[_matchup_snapshot_cache_name(snapshot_key)] = len(grouped_game_ids)
