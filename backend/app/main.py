@@ -7993,6 +7993,8 @@ def roster(response: Response) -> list[dict]:
 @app.get("/api/models/runs")
 @app.get("/api/model-runs")
 def model_runs(response: Response) -> dict:
+    response.headers["Cache-Control"] = "no-store"
+
     def compute() -> dict:
         with connect() as conn:
             return _model_runs_payload(conn)

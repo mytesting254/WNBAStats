@@ -1376,7 +1376,7 @@ export async function voidDnpProps(gameId: number, playerId: number): Promise<{ 
 }
 
 export async function fetchModelRuns(): Promise<{ latest: ModelRun | null; runs: ModelRun[] }> {
-  const response = await fetch("/api/models/runs");
+  const response = await apiFetch("/api/models/runs");
   if (!response.ok) {
     throw new Error("Failed to load model runs");
   }
