@@ -558,6 +558,8 @@ def _should_cache_app_response(request: Request) -> bool:
         "/api/operations/health",
         "/api/cache/status",
         "/api/cache/events",
+        "/api/models/runs",
+        "/api/model-runs",
         "/api/dfs/first-half",
         "/api/player-first-half-history",
         "/api/player-first-half-lines",
