@@ -35,6 +35,7 @@ DEFAULT_TRAINING_MAX_WORKERS = 2
 
 
 def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
+    _prepare_curated_training_dbs(conn)
     data_signature = _training_data_signature(conn)
     cached_learned = _latest_matching_run(
         conn,
@@ -114,6 +115,7 @@ def run_parameter_tuning(
     stabilization_scales: list[float] | None = None,
     recency_weight_scales: list[float] | None = None,
 ) -> dict:
+    _prepare_curated_training_dbs(conn)
     started_at = datetime.now(timezone.utc).isoformat()
     candidates = _tuning_candidates(
         ridge_penalties=ridge_penalties,
@@ -274,10 +276,32 @@ def _persist_model_run(run: dict) -> None:
             write_conn.commit()
 
 
+def _prepare_curated_training_dbs(conn: sqlite3.Connection) -> dict[str, dict[str, object]]:
+    from .game_training_db import ensure_game_training_db
+    from .minutes_training_db import ensure_minutes_training_db
+    from .player_prop_training_db import ensure_player_prop_training_db
+
+    if os.getenv("WNBA_SKIP_CURATED_PREP", "").strip().lower() in {"1", "true", "yes"}:
+        return {
+            "minutes": {},
+            "game": {},
+            "player_prop": {},
+        }
+
+    # Prepare shared curated DBs once in the parent process before any
+    # parallel market workers start reading them.
+    return {
+        "minutes": ensure_minutes_training_db(conn, force=False),
+        "game": ensure_game_training_db(conn, force=False),
+        "player_prop": ensure_player_prop_training_db(conn, force=False, allow_rebuild=True),
+    }
+
+
 def _training_data_signature(conn: sqlite3.Connection) -> str:
     payload = {
         "training_start_date": _training_start_date(),
         "model_tuning_config": DEFAULT_TUNING_CONFIG.to_dict(),
+        "prop_feature_ablation": os.getenv("WNBA_PROP_ABLATION", "").strip().lower(),
         "minutes_training_db_signature": minutes_training_db_signature(conn),
         "game_training_db_signature": game_training_db_signature(conn),
         "player_prop_training_db_signature": player_prop_training_db_signature(conn),

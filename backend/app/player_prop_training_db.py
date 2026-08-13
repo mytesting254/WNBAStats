@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from .paths import get_training_db_path
 
 PLAYER_PROP_TRAINING_DB_VERSION = "v4"
 _PLAYER_PROP_TRAINING_DB_LOCK = threading.RLock()
+_INSERT_BATCH_SIZE = 1000
 
 MARKET_SAMPLE_CURATION_POLICY: dict[str, dict[str, dict[str, float | bool]]] = {}
 
@@ -353,12 +355,11 @@ def _rebuild_player_prop_training_examples(
     excluded_rows = 0
     diagnostic_summary: dict[str, dict[str, int]] = {}
     exclusion_summary: dict[str, dict[str, dict[str, int]]] = {}
-    rows_to_insert: list[tuple[object, ...]] = []
-    exclusion_rows_to_insert: list[tuple[object, ...]] = []
     training_conn.execute("DELETE FROM player_prop_training_examples")
     training_conn.execute("DELETE FROM player_prop_training_exclusions")
 
     for market in TRAINING_MARKETS:
+        _progress_log(f"building market={market}")
         raw_samples, raw_diag = _build_training_samples_inline(source_conn, market)
         residual_samples, residual_diag = _build_residual_training_samples_inline(source_conn, market)
         final_samples, final_diag = _build_final_projection_samples_inline(source_conn, market)
@@ -384,34 +385,16 @@ def _rebuild_player_prop_training_examples(
             max(0, int(item["candidate_rows"]) - int(item["included_rows"]))
             for item in diag_map.values()
         )
-        rows_to_insert.extend(_raw_rows_to_insert(market, raw_samples, built_at))
-        rows_to_insert.extend(_residual_rows_to_insert(market, residual_samples, built_at))
-        rows_to_insert.extend(_final_rows_to_insert(market, final_samples, built_at))
-        exclusion_rows_to_insert.extend(_exclusion_rows_to_insert(market, "raw", raw_exclusions, built_at))
-        exclusion_rows_to_insert.extend(_exclusion_rows_to_insert(market, "residual", residual_exclusions, built_at))
-
-    training_conn.executemany(
-        """
-        INSERT INTO player_prop_training_examples (
-            market, sample_kind, source_prop_line_id, source_player_id, source_game_id,
-            game_date, season, segment, features_json, target_value,
-            baseline_value, component_projection, line_value,
-            over_odds, under_odds, sample_count, avg_minutes,
-            is_recent_transfer, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        rows_to_insert,
-    )
-    training_conn.executemany(
-        """
-        INSERT INTO player_prop_training_exclusions (
-            market, sample_kind, reason_code, source_prop_line_id, source_player_id,
-            source_game_id, game_date, season, segment, sample_count,
-            avg_minutes, is_recent_transfer, details_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        exclusion_rows_to_insert,
-    )
+        _insert_training_example_rows(training_conn, _raw_rows_to_insert(market, raw_samples, built_at))
+        _insert_training_example_rows(training_conn, _residual_rows_to_insert(market, residual_samples, built_at))
+        _insert_training_example_rows(training_conn, _final_rows_to_insert(market, final_samples, built_at))
+        _insert_training_exclusion_rows(training_conn, _exclusion_rows_to_insert(market, "raw", raw_exclusions, built_at))
+        _insert_training_exclusion_rows(training_conn, _exclusion_rows_to_insert(market, "residual", residual_exclusions, built_at))
+        _progress_log(
+            "inserted market="
+            f"{market} raw={len(raw_samples)} residual={len(residual_samples)} "
+            f"final={len(final_samples)}"
+        )
     _write_metadata(
         training_conn,
         {
@@ -426,6 +409,56 @@ def _rebuild_player_prop_training_examples(
         },
     )
     training_conn.commit()
+
+
+def _insert_training_example_rows(
+    conn: sqlite3.Connection,
+    rows: list[tuple[object, ...]],
+) -> None:
+    if not rows:
+        return
+    for chunk in _chunked(rows, _INSERT_BATCH_SIZE):
+        conn.executemany(
+            """
+            INSERT INTO player_prop_training_examples (
+                market, sample_kind, source_prop_line_id, source_player_id, source_game_id,
+                game_date, season, segment, features_json, target_value,
+                baseline_value, component_projection, line_value,
+                over_odds, under_odds, sample_count, avg_minutes,
+                is_recent_transfer, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            chunk,
+        )
+
+
+def _insert_training_exclusion_rows(
+    conn: sqlite3.Connection,
+    rows: list[tuple[object, ...]],
+) -> None:
+    if not rows:
+        return
+    for chunk in _chunked(rows, _INSERT_BATCH_SIZE):
+        conn.executemany(
+            """
+            INSERT INTO player_prop_training_exclusions (
+                market, sample_kind, reason_code, source_prop_line_id, source_player_id,
+                source_game_id, game_date, season, segment, sample_count,
+                avg_minutes, is_recent_transfer, details_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            chunk,
+        )
+
+
+def _chunked(rows: list[tuple[object, ...]], size: int) -> list[list[tuple[object, ...]]]:
+    return [rows[idx:idx + size] for idx in range(0, len(rows), size)]
+
+
+def _progress_log(message: str) -> None:
+    if os.getenv("WNBA_TRAINING_DB_PROGRESS", "").strip().lower() not in {"1", "true", "yes"}:
+        return
+    print(f"[player-prop-training-db] {message}", flush=True)
 
 
 def _raw_rows_to_insert(market: str, samples: list[object], built_at: str) -> list[tuple[object, ...]]:
@@ -524,6 +557,7 @@ def _source_signature(conn: sqlite3.Connection) -> str:
         _model_fingerprint,
         _training_start_date,
     )
+    from .player_role_curation import player_role_curation_signature
 
     payload = {
         "model_fingerprint": _model_fingerprint(conn),
@@ -534,6 +568,7 @@ def _source_signature(conn: sqlite3.Connection) -> str:
         "training_start_date": _training_start_date(),
         "db_version": PLAYER_PROP_TRAINING_DB_VERSION,
         "market_sample_curation_policy": MARKET_SAMPLE_CURATION_POLICY,
+        "player_role_curation_signature": player_role_curation_signature(conn),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     import hashlib

@@ -89,6 +89,19 @@ Still not finished:
 - line-quality and stale-odds cleanup still need dedicated rules
 - recent-transfer handling still needs a live inference fallback policy, not just cleaner training rows
 
+## Role Override Layer
+
+Player-role curation now has its own runtime table and workflow, documented in [PLAYER_ROLE_CURATION.md](/root/WNBAStats/PLAYER_ROLE_CURATION.md).
+
+Use that layer for:
+
+- ball-handler hierarchy overrides
+- rebound-role overrides
+- shot-volume role overrides
+- date-scoped role changes after injuries, transfers, or rotation shifts
+
+Do not use it for rolling pace or team pressure context. Those should remain derived from raw team history.
+
 ## Standard Command Pattern
 
 Build on the live mounted volume:

@@ -36,8 +36,14 @@ def build_team_form_regime(
             r.points,
             r.opponent_points,
             r.possessions,
+            b.field_goals_made,
             b.field_goals_attempted,
+            b.offensive_rebounds,
+            b.defensive_rebounds,
+            opp_box.field_goals_made AS opponent_field_goals_made,
             opp_box.field_goals_attempted AS opponent_field_goals_attempted,
+            opp_box.offensive_rebounds AS opponent_offensive_rebounds,
+            opp_box.defensive_rebounds AS opponent_defensive_rebounds,
             COALESCE(
                 b.total_turnovers,
                 COALESCE(b.turnovers, 0) + COALESCE(b.team_turnovers, 0),
@@ -90,6 +96,10 @@ def build_team_form_regime(
     pace_delta = recent["pace"] - baseline["pace"]
     fga_delta = recent["fga"] - baseline["fga"]
     fga_allowed_delta = recent["fga_allowed"] - baseline["fga_allowed"]
+    miss_delta = recent["misses"] - baseline["misses"]
+    miss_allowed_delta = recent["misses_allowed"] - baseline["misses_allowed"]
+    oreb_rate_delta = recent["oreb_rate"] - baseline["oreb_rate"]
+    oreb_allowed_rate_delta = recent["oreb_allowed_rate"] - baseline["oreb_allowed_rate"]
     turnover_rate_delta = recent["turnover_rate"] - baseline["turnover_rate"]
     forced_turnover_rate_delta = recent["forced_turnover_rate"] - baseline["forced_turnover_rate"]
     off_std = _stddev(recent_off_values)
@@ -101,6 +111,10 @@ def build_team_form_regime(
         "pace_form_delta": round(pace_delta, 3),
         "fga_form_delta": round(fga_delta, 3),
         "fga_allowed_form_delta": round(fga_allowed_delta, 3),
+        "miss_form_delta": round(miss_delta, 3),
+        "miss_allowed_form_delta": round(miss_allowed_delta, 3),
+        "oreb_rate_form_delta": round(oreb_rate_delta, 4),
+        "oreb_allowed_rate_form_delta": round(oreb_allowed_rate_delta, 4),
         "turnover_rate_form_delta": round(turnover_rate_delta, 4),
         "forced_turnover_rate_form_delta": round(forced_turnover_rate_delta, 4),
         "off_form_volatility": round(off_std, 3),
@@ -123,15 +137,41 @@ def _aggregate_form_rows(rows: list[sqlite3.Row]) -> dict[str, float]:
             "pace": 78.0,
             "fga": 0.0,
             "fga_allowed": 0.0,
+            "misses": 0.0,
+            "misses_allowed": 0.0,
+            "oreb_rate": 0.0,
+            "oreb_allowed_rate": 0.0,
             "turnover_rate": 0.0,
             "forced_turnover_rate": 0.0,
         }
+    miss_values = [_misses(row, made_key="field_goals_made", attempted_key="field_goals_attempted") for row in rows]
+    miss_allowed_values = [_misses(row, made_key="opponent_field_goals_made", attempted_key="opponent_field_goals_attempted") for row in rows]
     return {
         "off_rating": _mean([_off_rating(row) for row in rows]),
         "def_rating": _mean([_def_rating(row) for row in rows]),
         "pace": _mean([float(row["possessions"] or 78.0) for row in rows]),
         "fga": _mean([float(row["field_goals_attempted"] or 0.0) for row in rows]),
         "fga_allowed": _mean([float(row["opponent_field_goals_attempted"] or 0.0) for row in rows]),
+        "misses": _mean(miss_values),
+        "misses_allowed": _mean(miss_allowed_values),
+        "oreb_rate": _mean([
+            _rebound_rate(
+                row,
+                offensive_key="offensive_rebounds",
+                own_miss_key="field_goals_attempted",
+                own_made_key="field_goals_made",
+            )
+            for row in rows
+        ]),
+        "oreb_allowed_rate": _mean([
+            _rebound_rate(
+                row,
+                offensive_key="opponent_offensive_rebounds",
+                own_miss_key="opponent_field_goals_attempted",
+                own_made_key="opponent_field_goals_made",
+            )
+            for row in rows
+        ]),
         "turnover_rate": _mean([_turnover_rate(row, "team_turnovers_total") for row in rows]),
         "forced_turnover_rate": _mean([_turnover_rate(row, "opponent_turnovers_total") for row in rows]),
     }
@@ -150,6 +190,25 @@ def _def_rating(row: sqlite3.Row) -> float:
 def _turnover_rate(row: sqlite3.Row, key: str) -> float:
     possessions = max(float(row["possessions"] or 78.0), 1.0)
     return float(row[key] or 0.0) / possessions
+
+
+def _misses(row: sqlite3.Row, *, made_key: str, attempted_key: str) -> float:
+    attempted = float(row[attempted_key] or 0.0)
+    made = float(row[made_key] or 0.0)
+    return max(attempted - made, 0.0)
+
+
+def _rebound_rate(
+    row: sqlite3.Row,
+    *,
+    offensive_key: str,
+    own_miss_key: str,
+    own_made_key: str,
+) -> float:
+    misses = _misses(row, made_key=own_made_key, attempted_key=own_miss_key)
+    if misses <= 0.0:
+        return 0.0
+    return float(row[offensive_key] or 0.0) / misses
 
 
 def _mean(values: list[float]) -> float:
@@ -173,6 +232,10 @@ def _empty_team_form_regime() -> dict[str, float]:
         "pace_form_delta": 0.0,
         "fga_form_delta": 0.0,
         "fga_allowed_form_delta": 0.0,
+        "miss_form_delta": 0.0,
+        "miss_allowed_form_delta": 0.0,
+        "oreb_rate_form_delta": 0.0,
+        "oreb_allowed_rate_form_delta": 0.0,
         "turnover_rate_form_delta": 0.0,
         "forced_turnover_rate_form_delta": 0.0,
         "off_form_volatility": 0.0,

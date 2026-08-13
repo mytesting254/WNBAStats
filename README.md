@@ -143,6 +143,20 @@ The app is built around a provider-backed pregame workflow:
 - Player props now train and infer against both team and opponent regime states, plus their matchup deltas.
 - Segment and game models inherit the same regime payload through shared matchup pregame features.
 
+### Player Role Curation
+
+- Manual player-opportunity overrides now live in `player_role_bucket_overrides`.
+- This layer is intended for role concepts raw box scores do not capture cleanly:
+  - primary vs secondary handling
+  - rebound-role specialization
+  - shot-volume role changes after injuries, transfers, or rotation shifts
+- Current learned player-prop runtime now uses curated role signals in two places:
+  - archetype classification still consults overrides before finalizing scorer / rebound-big / assist-guard tags
+  - explicit learned prop features now include role-bucket flags plus curated FGA / OREB / DREB bias multipliers
+- On Thursday, August 13, 2026, the prop stack also tested a separate team-opportunity feature block built from recent misses and rebound-share context.
+  That block was removed from the active prop model after the walk-forward comparison showed the role features helped while the team-opportunity block hurt out-of-sample prop performance.
+- Current operator docs for this layer live in [PLAYER_ROLE_CURATION.md](PLAYER_ROLE_CURATION.md).
+
 ### DFS First-Half Props
 
 - Current DFS first-half estimates are built from full-game prop lines plus curated first-half history.

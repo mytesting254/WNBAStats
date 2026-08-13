@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover - fallback remains exercised without num
     np = None
 
 from .odds import american_to_implied_probability
+from .player_role_curation import get_player_role_profile
 from .team_form_regime import build_team_form_regime
 from .timezone_utils import APP_TIMEZONE
 
@@ -87,6 +88,10 @@ FEATURE_NAMES = [
     "opponent_fga_form_delta",
     "team_fga_allowed_form_delta",
     "opponent_fga_allowed_form_delta",
+    "team_miss_form_delta",
+    "opponent_miss_form_delta",
+    "team_oreb_rate_form_delta",
+    "opponent_oreb_rate_form_delta",
     "team_turnover_rate_form_delta",
     "opponent_turnover_rate_form_delta",
     "team_forced_turnover_rate_form_delta",
@@ -110,8 +115,34 @@ FEATURE_NAMES = [
     "opponent_hot_defense_flag",
     "team_slump_defense_flag",
     "opponent_slump_defense_flag",
+    "role_primary_handler",
+    "role_secondary_handler",
+    "role_finisher",
+    "role_interior",
+    "role_crash_big",
+    "role_alpha_shot",
+    "role_fga_bias",
+    "role_oreb_bias",
+    "role_dreb_bias",
 ]
 FEATURE_INDEX = {name: idx for idx, name in enumerate(FEATURE_NAMES)}
+ROLE_FEATURE_NAMES = [
+    "role_primary_handler",
+    "role_secondary_handler",
+    "role_finisher",
+    "role_interior",
+    "role_crash_big",
+    "role_alpha_shot",
+    "role_fga_bias",
+    "role_oreb_bias",
+    "role_dreb_bias",
+]
+TEAM_PRESSURE_FEATURE_NAMES = [
+    "team_miss_form_delta",
+    "opponent_miss_form_delta",
+    "team_oreb_rate_form_delta",
+    "opponent_oreb_rate_form_delta",
+]
 MINUTES_FEATURE_NAMES = [
     "ewma_minutes",
     "recent_minutes_avg",
@@ -882,6 +913,10 @@ def _team_form_regime_feature_values(
     opponent_fga_form_delta = float(opponent_payload.get("fga_form_delta") or 0.0)
     team_fga_allowed_form_delta = float(team_payload.get("fga_allowed_form_delta") or 0.0)
     opponent_fga_allowed_form_delta = float(opponent_payload.get("fga_allowed_form_delta") or 0.0)
+    team_miss_form_delta = float(team_payload.get("miss_form_delta") or 0.0)
+    opponent_miss_form_delta = float(opponent_payload.get("miss_form_delta") or 0.0)
+    team_oreb_rate_form_delta = float(team_payload.get("oreb_rate_form_delta") or 0.0)
+    opponent_oreb_rate_form_delta = float(opponent_payload.get("oreb_rate_form_delta") or 0.0)
     team_turnover_rate_form_delta = float(team_payload.get("turnover_rate_form_delta") or 0.0)
     opponent_turnover_rate_form_delta = float(opponent_payload.get("turnover_rate_form_delta") or 0.0)
     team_forced_turnover_rate_form_delta = float(team_payload.get("forced_turnover_rate_form_delta") or 0.0)
@@ -897,6 +932,10 @@ def _team_form_regime_feature_values(
         opponent_fga_form_delta,
         team_fga_allowed_form_delta,
         opponent_fga_allowed_form_delta,
+        team_miss_form_delta,
+        opponent_miss_form_delta,
+        team_oreb_rate_form_delta,
+        opponent_oreb_rate_form_delta,
         team_turnover_rate_form_delta,
         opponent_turnover_rate_form_delta,
         team_forced_turnover_rate_form_delta,
@@ -1086,6 +1125,13 @@ def feature_snapshot(
     team_transition = shared["team_transition"]
     lineup_context = list(shared.get("lineup_context") or [0.0, 0.5, 0.0])
     opportunity_context = list(shared.get("opportunity_context") or [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    role_context = _player_role_feature_context(
+        conn,
+        player_id=player_id,
+        team_id=int(context["team_id"]) if context else 0,
+        reference_game_date=reference_game_date,
+        history_rows=history_rows,
+    )
     market_context_features = _market_context_features(
         market,
         lineup_context=lineup_context,
@@ -1135,6 +1181,7 @@ def feature_snapshot(
         recent_opponent_def_rating_factor,
         matchup_net_rating_diff,
         *team_form_features,
+        *role_context["features"],
     ]
     archetype_note = ", ".join(archetype.labels()) or "balanced"
     reason = (
@@ -1154,6 +1201,7 @@ def feature_snapshot(
         f" Minutes projection: {minutes_note}."
         f" Lineup share {float(lineup_context[0]):.2f}, lineup rank {float(lineup_context[1]):.2f}, position share {float(lineup_context[2]):.2f}."
         f" Opportunity unavailable {float(opportunity_context[0]):.1f}, key outs {float(opportunity_context[1]):.1f}, persistence {float(opportunity_context[2]):.2f}, competition {float(opportunity_context[3]):.1f}."
+        f" Role buckets: {role_context['label']} with biases fga/oreb/dreb {float(role_context['features'][6]):.2f}/{float(role_context['features'][7]):.2f}/{float(role_context['features'][8]):.2f}."
         f" Recent opponent {recent_opponent_factor:.2f}. Ratings: team off {team_off_rating_factor:.2f}, opp def {opponent_def_rating_factor:.2f}, recent opp def {recent_opponent_def_rating_factor:.2f}, net diff {matchup_net_rating_diff:+.1f}."
         f" Team form: off {team_form_features[0]:+.1f}, def {team_form_features[2]:+.1f}, pace {team_form_features[4]:+.1f};"
         f" opponent form: off {team_form_features[1]:+.1f}, def {team_form_features[3]:+.1f}, pace {team_form_features[5]:+.1f}."
@@ -1167,6 +1215,104 @@ def feature_snapshot(
     )
 
 
+def _player_role_feature_context(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    team_id: int,
+    reference_game_date: str | None,
+    history_rows: list[sqlite3.Row],
+) -> dict[str, object]:
+    current_team_rows: list[sqlite3.Row] = []
+    for row in history_rows:
+        if _historical_row_team_id(row) != team_id:
+            break
+        current_team_rows.append(row)
+    sample = current_team_rows[:8] if current_team_rows else history_rows[:8]
+    sample_count = max(len(sample), 1)
+    avg_points = sum(float(row["points"] or 0.0) for row in sample) / sample_count
+    avg_threes = sum(float(row["threes"] or 0.0) for row in sample) / sample_count
+    avg_assists = sum(float(row["assists"] or 0.0) for row in sample) / sample_count
+    avg_rebounds = sum(float(row["rebounds"] or 0.0) for row in sample) / sample_count
+    avg_minutes = sum(float(row["minutes"] or 0.0) for row in sample) / sample_count
+    position = str(sample[0]["position"] or "").strip().upper()[:1] if sample else ""
+    profile = get_player_role_profile(
+        conn,
+        player_id=player_id,
+        team_id=team_id if team_id > 0 else None,
+        on_date=reference_game_date,
+    )
+
+    ball_bucket = profile.ball_handler_bucket if profile is not None else None
+    rebound_bucket = profile.rebound_bucket if profile is not None else None
+    shot_bucket = profile.shot_volume_bucket if profile is not None else None
+    if ball_bucket is None:
+        if avg_assists >= 6.0:
+            ball_bucket = "primary"
+        elif avg_assists >= 3.5:
+            ball_bucket = "secondary"
+        elif position in {"F", "C"} and avg_rebounds >= 6.0:
+            ball_bucket = "interior"
+        else:
+            ball_bucket = "finisher" if avg_points >= 10.0 or avg_threes >= 1.2 else "low_usage"
+    if rebound_bucket is None:
+        if avg_rebounds >= 7.5 and position in {"F", "C"}:
+            rebound_bucket = "crash_big"
+        elif avg_rebounds >= 5.0:
+            rebound_bucket = "wing_rebounder"
+        elif avg_rebounds >= 4.0 and position == "G":
+            rebound_bucket = "guard_rebounder"
+        else:
+            rebound_bucket = "low_rebound" if avg_rebounds < 3.0 else "leak_out"
+    if shot_bucket is None:
+        if avg_points >= 18.0 or (avg_points >= 15.0 and avg_minutes >= 30.0):
+            shot_bucket = "alpha"
+        elif avg_points >= 13.0 or avg_threes >= 2.0:
+            shot_bucket = "secondary"
+        elif avg_points >= 9.0:
+            shot_bucket = "tertiary"
+        elif position in {"F", "C"}:
+            shot_bucket = "cleanup"
+        else:
+            shot_bucket = "low_usage"
+
+    fga_bias = float(profile.field_goal_attempt_bias) if profile is not None else {
+        "alpha": 1.12,
+        "secondary": 1.06,
+        "tertiary": 1.0,
+        "cleanup": 0.97,
+        "low_usage": 0.9,
+    }.get(shot_bucket, 1.0)
+    oreb_bias = float(profile.offensive_rebound_bias) if profile is not None else {
+        "crash_big": 1.15,
+        "wing_rebounder": 1.05,
+        "guard_rebounder": 1.0,
+        "leak_out": 0.93,
+        "low_rebound": 0.9,
+    }.get(rebound_bucket, 1.0)
+    dreb_bias = float(profile.defensive_rebound_bias) if profile is not None else {
+        "crash_big": 1.12,
+        "wing_rebounder": 1.04,
+        "guard_rebounder": 1.02,
+        "leak_out": 0.92,
+        "low_rebound": 0.92,
+    }.get(rebound_bucket, 1.0)
+
+    features = [
+        1.0 if ball_bucket == "primary" else 0.0,
+        1.0 if ball_bucket == "secondary" else 0.0,
+        1.0 if ball_bucket == "finisher" else 0.0,
+        1.0 if ball_bucket == "interior" else 0.0,
+        1.0 if rebound_bucket == "crash_big" else 0.0,
+        1.0 if shot_bucket == "alpha" else 0.0,
+        float(fga_bias),
+        float(oreb_bias),
+        float(dreb_bias),
+    ]
+    return {
+        "features": features,
+        "label": f"{ball_bucket}/{rebound_bucket}/{shot_bucket}",
+    }
 def _shared_projection_context(
     conn: sqlite3.Connection,
     *,
@@ -1541,7 +1687,7 @@ def _fit_model_from_rows(
     tuning = config or DEFAULT_TUNING_CONFIG
     if len(rows) < 20:
         return None
-    xs = [row[0] for row in rows]
+    xs = [_apply_feature_ablation(row[0]) for row in rows]
     ys = [row[1] for row in rows]
     means, scales, standardized = _standardize_feature_rows(xs, weights=weights)
 
@@ -1744,7 +1890,13 @@ def _is_recent_transfer_team_history(rows: object, target_team_id: int) -> bool:
 def _training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
     from .player_prop_training_db import load_player_prop_training_samples
 
-    return load_player_prop_training_samples(conn, market=market, sample_kind="raw", force_rebuild=False)
+    return load_player_prop_training_samples(
+        conn,
+        market=market,
+        sample_kind="raw",
+        force_rebuild=False,
+        allow_rebuild=False,
+    )
 
 
 def _training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
@@ -1859,7 +2011,13 @@ def _build_residual_training_samples_inline(conn: sqlite3.Connection, market: st
 def _residual_training_samples(conn: sqlite3.Connection, market: str) -> tuple[list[TrainingSample], TrainingSampleDiagnostics]:
     from .player_prop_training_db import load_player_prop_training_samples
 
-    return load_player_prop_training_samples(conn, market=market, sample_kind="residual", force_rebuild=False)
+    return load_player_prop_training_samples(
+        conn,
+        market=market,
+        sample_kind="residual",
+        force_rebuild=False,
+        allow_rebuild=False,
+    )
 
 
 def _residual_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple[list[float], float]]:
@@ -1976,7 +2134,12 @@ def _build_final_projection_samples_inline(conn: sqlite3.Connection, market: str
 def _final_projection_samples(conn: sqlite3.Connection, market: str) -> tuple[list[FinalProjectionSample], TrainingSampleDiagnostics]:
     from .player_prop_training_db import load_player_prop_final_projection_samples
 
-    return load_player_prop_final_projection_samples(conn, market=market, force_rebuild=False)
+    return load_player_prop_final_projection_samples(
+        conn,
+        market=market,
+        force_rebuild=False,
+        allow_rebuild=False,
+    )
 
 
 def _has_complete_training_context(row: sqlite3.Row) -> bool:
@@ -2736,6 +2899,14 @@ def _historical_training_features(
         opportunity_context=opportunity_context,
         recent_opponent_factor=recent_opponent_factor,
     )
+    history_rows_newest_first = list(reversed(recent_rows or []))
+    role_context = _player_role_feature_context(
+        conn,
+        player_id=int(row["player_id"]),
+        team_id=int(context["team_id"]),
+        reference_game_date=current_game_date,
+        history_rows=history_rows_newest_first,
+    )
     return [
         component_projection,
         weighted_recent,
@@ -2764,6 +2935,7 @@ def _historical_training_features(
         recent_opponent_def_rating_factor,
         matchup_net_rating_diff,
         *team_form_features,
+        *role_context["features"],
     ]
 
 
@@ -4498,6 +4670,7 @@ def _solve_linear_system(matrix: list[list[float]], vector: list[float]) -> list
 
 
 def _predict(model: RidgeModel, features: list[float]) -> float:
+    features = _apply_feature_ablation(features)
     if np is not None:
         feature_array = np.asarray(features, dtype=float)
         means = np.asarray(model.feature_means, dtype=float)
@@ -4654,6 +4827,7 @@ def _model_fingerprint(conn: sqlite3.Connection) -> str:
     if isinstance(cached, str) and cached:
         return cached
     parts = [
+        f"ablation={_feature_ablation_label()}",
         _table_signature(
             conn,
             "games",
@@ -4730,6 +4904,32 @@ def _config_fingerprint(config: ModelTuningConfig) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
+def _feature_ablation_label() -> str:
+    return os.getenv("WNBA_PROP_ABLATION", "").strip().lower()
+
+
+def _feature_ablation_indices() -> tuple[int, ...]:
+    label = _feature_ablation_label()
+    if label == "role":
+        names = ROLE_FEATURE_NAMES
+    elif label == "team_pressure":
+        names = TEAM_PRESSURE_FEATURE_NAMES
+    else:
+        return ()
+    return tuple(FEATURE_INDEX[name] for name in names)
+
+
+def _apply_feature_ablation(features: list[float]) -> list[float]:
+    indices = _feature_ablation_indices()
+    if not indices:
+        return list(features)
+    masked = list(features)
+    for idx in indices:
+        if idx < len(masked):
+            masked[idx] = 0.0
+    return masked
+
+
 def _model_cache_key(
     conn: sqlite3.Connection,
     db_path: str,
@@ -4766,7 +4966,7 @@ def _load_cached_model(cache_key: str) -> RidgeModel | None:
     if not isinstance(model, dict):
         return None
     try:
-        return RidgeModel(
+        loaded = RidgeModel(
             market=str(model["market"]),
             rows=int(model["rows"]),
             intercept=float(model["intercept"]),
@@ -4774,6 +4974,14 @@ def _load_cached_model(cache_key: str) -> RidgeModel | None:
             feature_means=[float(value) for value in model["feature_means"]],
             feature_scales=[float(value) for value in model["feature_scales"]],
         )
+        expected_feature_count = _expected_feature_count_for_model(loaded.market)
+        if (
+            len(loaded.coefficients) != expected_feature_count
+            or len(loaded.feature_means) != expected_feature_count
+            or len(loaded.feature_scales) != expected_feature_count
+        ):
+            return None
+        return loaded
     except (KeyError, TypeError, ValueError):
         return None
 
@@ -4794,6 +5002,12 @@ def _store_cached_model(cache_key: str, model: RidgeModel, config: ModelTuningCo
         # Cache is a performance optimization; keep recalc working if the
         # configured cache directory is unavailable or read-only.
         return
+
+
+def _expected_feature_count_for_model(market: str) -> int:
+    if str(market).startswith("minutes:"):
+        return len(MINUTES_FEATURE_NAMES)
+    return len(FEATURE_NAMES)
 
 
 def _adaptive_component_projection(
@@ -5671,7 +5885,13 @@ def _player_archetype_profile(
         tuple(params),
     ).fetchall()
     if not rows:
-        return PlayerArchetypeProfile(False, False, False, False, False)
+        return _apply_curated_role_profile(
+            conn,
+            player_id=player_id,
+            team_id=None,
+            reference_game_date=reference_game_date,
+            current=PlayerArchetypeProfile(False, False, False, False, False),
+        )
 
     sample_count = len(rows)
     avg_minutes = sum(float(row["minutes"] or 0.0) for row in rows) / sample_count
@@ -5689,12 +5909,18 @@ def _player_archetype_profile(
     bench_gunner = rotation_role in {"bench", "rotation"} and avg_points >= 11.5 and avg_threes >= 1.5 and avg_minutes <= 26.0
     stocks_specialist = avg_stocks >= 2.0 and avg_minutes >= 18.0
 
-    return PlayerArchetypeProfile(
+    return _apply_curated_role_profile(
+        conn,
+        player_id=player_id,
+        team_id=None,
+        reference_game_date=reference_game_date,
+        current=PlayerArchetypeProfile(
         usage_scorer=usage_scorer,
         rebound_big=rebound_big,
         assist_guard=assist_guard,
         bench_gunner=bench_gunner,
         stocks_specialist=stocks_specialist,
+        ),
     )
 
 
@@ -5728,6 +5954,31 @@ def _player_archetype_profile_from_rows(
         assist_guard=assist_guard,
         bench_gunner=bench_gunner,
         stocks_specialist=stocks_specialist,
+    )
+
+
+def _apply_curated_role_profile(
+    conn: sqlite3.Connection,
+    *,
+    player_id: int,
+    team_id: int | None,
+    reference_game_date: str | None,
+    current: PlayerArchetypeProfile,
+) -> PlayerArchetypeProfile:
+    role_profile = get_player_role_profile(
+        conn,
+        player_id=player_id,
+        team_id=team_id,
+        on_date=reference_game_date,
+    )
+    if role_profile is None:
+        return current
+    return PlayerArchetypeProfile(
+        usage_scorer=current.usage_scorer or role_profile.shot_volume_bucket in {"alpha", "secondary"},
+        rebound_big=current.rebound_big or role_profile.rebound_bucket == "crash_big",
+        assist_guard=current.assist_guard or role_profile.ball_handler_bucket in {"primary", "secondary"},
+        bench_gunner=current.bench_gunner,
+        stocks_specialist=current.stocks_specialist,
     )
 
 

@@ -30,6 +30,9 @@ Use each document for one purpose:
   - player-prop curated dataset design
   - player-prop curation status
   - player-prop-specific remaining cleanup
+- [PLAYER_ROLE_CURATION.md](/root/WNBAStats/PLAYER_ROLE_CURATION.md)
+  - curated player role buckets and effective-date overrides
+  - manual shot/rebound/ball-handler role labels
 - [STOCKS_PLAN.md](/root/WNBAStats/STOCKS_PLAN.md)
   - Specials/stocks-specific prep, calibration, and performance work
 - [TROUBLESHOOTING.md](/root/WNBAStats/TROUBLESHOOTING.md)
