@@ -3815,8 +3815,10 @@ function InsightsView({
                 </div>
               </div>
               <InsightsEdgeCards matchup={selectedMatchup} />
-              <InsightsComparisonTable matchup={selectedMatchup} windowKey="overall_last_5" title="Overall Last 5" />
-              <InsightsComparisonTable matchup={selectedMatchup} windowKey="context_last_5" title="Venue Context Last 5" />
+              <div className="insights-comparison-grid">
+                <InsightsComparisonTable matchup={selectedMatchup} windowKey="overall_last_5" title="Overall Last 5" />
+                <InsightsComparisonTable matchup={selectedMatchup} windowKey="context_last_5" title="Venue Context Last 5" />
+              </div>
             </article>
           ) : (
             <p className="empty">No scheduled games found.</p>
