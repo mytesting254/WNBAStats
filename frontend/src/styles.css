@@ -1301,6 +1301,50 @@ tbody tr.selected {
   background: linear-gradient(180deg, rgba(248, 251, 254, 0.98), rgba(255, 255, 255, 0.98));
 }
 
+.insights-stat-group-shooting {
+  border-color: rgba(109, 40, 217, 0.22);
+  background:
+    radial-gradient(circle at top right, rgba(168, 85, 247, 0.14), transparent 42%),
+    linear-gradient(180deg, rgba(250, 245, 255, 0.98), rgba(255, 255, 255, 0.98));
+}
+
+.insights-stat-group-shooting .insights-stat-group-header strong {
+  color: #6d28d9;
+}
+
+.insights-stat-group-rebounding {
+  border-color: rgba(15, 157, 138, 0.24);
+  background:
+    radial-gradient(circle at top right, rgba(45, 212, 191, 0.16), transparent 42%),
+    linear-gradient(180deg, rgba(239, 253, 250, 0.98), rgba(255, 255, 255, 0.98));
+}
+
+.insights-stat-group-rebounding .insights-stat-group-header strong {
+  color: #0f766e;
+}
+
+.insights-stat-group-ball-security {
+  border-color: rgba(245, 158, 11, 0.24);
+  background:
+    radial-gradient(circle at top right, rgba(251, 191, 36, 0.18), transparent 42%),
+    linear-gradient(180deg, rgba(255, 251, 235, 0.98), rgba(255, 255, 255, 0.98));
+}
+
+.insights-stat-group-ball-security .insights-stat-group-header strong {
+  color: #b45309;
+}
+
+.insights-stat-group-game-control {
+  border-color: rgba(14, 116, 144, 0.24);
+  background:
+    radial-gradient(circle at top right, rgba(56, 189, 248, 0.16), transparent 42%),
+    linear-gradient(180deg, rgba(240, 249, 255, 0.98), rgba(255, 255, 255, 0.98));
+}
+
+.insights-stat-group-game-control .insights-stat-group-header strong {
+  color: #0f4c81;
+}
+
 .insights-stat-group-header {
   display: flex;
   align-items: center;

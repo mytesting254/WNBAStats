@@ -3915,7 +3915,7 @@ function InsightsComparisonTable({
             .filter((definition): definition is (typeof INSIGHT_STAT_DEFINITIONS)[number] => Boolean(definition));
 
           return (
-            <section key={`${windowKey}-${group.id}`} className="insights-stat-group">
+            <section key={`${windowKey}-${group.id}`} className={`insights-stat-group insights-stat-group-${group.id}`}>
               <div className="insights-stat-group-header">
                 <strong>{group.label}</strong>
               </div>
