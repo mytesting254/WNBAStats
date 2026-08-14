@@ -3713,6 +3713,20 @@ def _build_matchup_payload_item(
     market_payload = _matchup_game_markets(game_context)
     home_team_ratings = team_ratings_by_team_id.get(int(game["home_team_id"]))
     away_team_ratings = team_ratings_by_team_id.get(int(game["away_team_id"]))
+    home_team_insights = _team_matchup_insights_summary(
+        conn,
+        team_id=int(game["home_team_id"]),
+        is_home_context=True,
+        game_date=game["game_date"],
+        scheduled_start_time=game["start_time"],
+    )
+    away_team_insights = _team_matchup_insights_summary(
+        conn,
+        team_id=int(game["away_team_id"]),
+        is_home_context=False,
+        game_date=game["game_date"],
+        scheduled_start_time=game["start_time"],
+    )
     prediction_state = next(
         (prediction_state_by_game.get(int(candidate_id)) for candidate_id in game_ids if prediction_state_by_game.get(int(candidate_id))),
         prediction_state_by_game.get(game_id),
@@ -3758,6 +3772,8 @@ def _build_matchup_payload_item(
         "line_discrepancies": _line_discrepancies_for_games(conn, game_ids),
         "home_team_ratings": home_team_ratings,
         "away_team_ratings": away_team_ratings,
+        "home_team_insights": home_team_insights,
+        "away_team_insights": away_team_insights,
         "rating_differentials": _matchup_rating_differentials(home_team_ratings, away_team_ratings),
         "h2h_segment_summary": _h2h_segment_summary(
             conn,
@@ -10179,6 +10195,121 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
             "away": _segment_average_payload(segment_buckets["away"]),
         },
         "recent_games": recent_games,
+    }
+
+
+def _team_matchup_insights_summary(
+    conn,
+    *,
+    team_id: int,
+    is_home_context: bool,
+    game_date: str | None,
+    scheduled_start_time: str | None,
+) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT
+            b.is_home,
+            b.points,
+            b.rebounds,
+            b.offensive_rebounds,
+            b.defensive_rebounds,
+            b.assists,
+            b.steals,
+            b.blocks,
+            b.turnovers,
+            b.field_goals_made,
+            b.field_goals_attempted,
+            b.threes_made,
+            b.threes_attempted,
+            b.free_throws_made,
+            b.free_throws_attempted,
+            opp.points AS opponent_points,
+            opp.rebounds AS opponent_rebounds,
+            opp.offensive_rebounds AS opponent_offensive_rebounds,
+            opp.defensive_rebounds AS opponent_defensive_rebounds,
+            opp.assists AS opponent_assists,
+            opp.steals AS opponent_steals,
+            opp.blocks AS opponent_blocks,
+            opp.turnovers AS opponent_turnovers,
+            opp.field_goals_made AS opponent_field_goals_made,
+            opp.field_goals_attempted AS opponent_field_goals_attempted,
+            opp.threes_made AS opponent_threes_made,
+            opp.threes_attempted AS opponent_threes_attempted,
+            opp.free_throws_made AS opponent_free_throws_made,
+            opp.free_throws_attempted AS opponent_free_throws_attempted,
+            g.game_date,
+            g.start_time
+        FROM team_game_boxscores b
+        JOIN games g ON g.id = b.game_id
+        JOIN team_game_boxscores opp ON opp.game_id = b.game_id AND opp.team_id != b.team_id
+        WHERE b.team_id = ?
+          AND (
+            COALESCE(g.game_date, '') < COALESCE(?, '9999-12-31')
+            OR (
+                COALESCE(g.game_date, '') = COALESCE(?, '9999-12-31')
+                AND COALESCE(g.start_time, '') < COALESCE(?, '9999-12-31T23:59:59')
+            )
+          )
+        ORDER BY g.game_date DESC, g.start_time DESC, b.game_id DESC
+        LIMIT 10
+        """,
+        (team_id, game_date, game_date, scheduled_start_time),
+    ).fetchall()
+
+    def _window_payload(window_rows: list[Any]) -> dict[str, Any] | None:
+        games = len(window_rows)
+        if games <= 0:
+            return None
+
+        def _avg(key: str) -> float | None:
+            values = [float(row[key]) for row in window_rows if row[key] is not None]
+            if not values:
+                return None
+            return round(sum(values) / len(values), 1)
+
+        def _pct(made_key: str, attempted_key: str) -> float | None:
+            made = sum(float(row[made_key] or 0.0) for row in window_rows)
+            attempted = sum(float(row[attempted_key] or 0.0) for row in window_rows)
+            if attempted <= 0.0:
+                return None
+            return round((100.0 * made) / attempted, 1)
+
+        return {
+            "games": games,
+            "points": _avg("points"),
+            "points_allowed": _avg("opponent_points"),
+            "fg_pct": _pct("field_goals_made", "field_goals_attempted"),
+            "fg_pct_allowed": _pct("opponent_field_goals_made", "opponent_field_goals_attempted"),
+            "three_pct": _pct("threes_made", "threes_attempted"),
+            "three_pct_allowed": _pct("opponent_threes_made", "opponent_threes_attempted"),
+            "free_throw_pct": _pct("free_throws_made", "free_throws_attempted"),
+            "free_throw_pct_allowed": _pct("opponent_free_throws_made", "opponent_free_throws_attempted"),
+            "rebounds": _avg("rebounds"),
+            "rebounds_allowed": _avg("opponent_rebounds"),
+            "offensive_rebounds": _avg("offensive_rebounds"),
+            "offensive_rebounds_allowed": _avg("opponent_offensive_rebounds"),
+            "defensive_rebounds": _avg("defensive_rebounds"),
+            "defensive_rebounds_allowed": _avg("opponent_defensive_rebounds"),
+            "assists": _avg("assists"),
+            "assists_allowed": _avg("opponent_assists"),
+            "threes_made": _avg("threes_made"),
+            "threes_made_allowed": _avg("opponent_threes_made"),
+            "threes_attempted": _avg("threes_attempted"),
+            "threes_attempted_allowed": _avg("opponent_threes_attempted"),
+            "turnovers": _avg("turnovers"),
+            "turnovers_forced": _avg("opponent_turnovers"),
+            "steals": _avg("steals"),
+            "steals_allowed": _avg("opponent_steals"),
+            "blocks": _avg("blocks"),
+            "blocks_allowed": _avg("opponent_blocks"),
+        }
+
+    context_rows = [row for row in rows if bool(int(row["is_home"] or 0)) == bool(is_home_context)]
+    return {
+        "context": "home" if is_home_context else "away",
+        "overall_last_5": _window_payload(list(rows[:5])),
+        "context_last_5": _window_payload(context_rows[:5]),
     }
 
 

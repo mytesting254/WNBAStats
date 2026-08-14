@@ -462,6 +462,8 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 - `Gems`: ranked high-value props combining model edge, EV, and discrepancy signals with conservative/balanced/aggressive presets, optional matchup grouping, per-matchup caps, and recent opponent history.
 - `Watchlist`: low-confidence props that still clear minimum EV/edge thresholds for optional tracking. Player rows include recent opponent history, and if one matchup drops out after settlement, the view automatically falls forward to the next remaining game tab instead of staying pinned to the removed game.
 - `Matchups`: active upcoming games only, with projected score, spread edge, total edge, and confidence.
+- `Insights`: matchup-scoped team comparison built from recent team box scores. Users can switch across the day’s games and compare last-5 overall plus last-5 home/away-context shooting, rebounding, assists, turnovers, and points in one side-by-side matrix. Stronger numbers are highlighted in green, weaker numbers in red, and close calls in amber.
+- `Insights`: includes `Key Matchup Edges` cards that translate the recent-stat contrast into quick betting-style reads such as `clean looks`, `extra 3PA path`, `live on the glass`, `ballhandler risk`, and `assist environment`.
 - `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Player rows include an `L5` strip (last 5 market outcomes) and a `Line H2H` strip (up to 5 prior market outcomes against the current opponent). Both use hit/miss color coding against the current side+line; the H2H strip also shows minutes from those same games. Completed games are removed from this view after the stale-game grace window.
 - `Discrepancies`: cross-book line gaps and price gaps.
 - `Roster`: Rotowire lineup statuses grouped by team, with a manual `Refresh Roster` pull.
@@ -810,6 +812,8 @@ Model-ready `prop_lines` are one row per exact `game_id + player_id + market + l
 ## Daily Matchup Workflow
 
 The Matchups tab reads saved scheduled games from Turso. It does not call ESPN on page load. `/api/matchups` selects rows from `games` where `status = 'scheduled'`, then shows only games whose `start_time` falls on the current local date. If tomorrow's games are already saved, they appear automatically tomorrow when the dashboard reloads.
+
+The `Insights` tab reuses that same `/api/matchups` payload and cache cycle. Each matchup now includes `home_team_insights` and `away_team_insights` windows derived from `team_game_boxscores`, with rolling `overall_last_5` plus venue-specific `context_last_5` summaries for points, shooting percentages, threes, rebounds, assists, steals, blocks, turnovers, and opponent-allowed versions of those stats.
 
 Scheduled game rows are usually created before tip by `Load Saved Odds`, `Refresh Odds`, or `Refresh Covers`. Those importers match existing games by teams and start time, create missing scheduled games, and attach sportsbook props, spread, and total context.
 

@@ -1,4 +1,4 @@
-﻿import { BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
+﻿import { BarChart3, BrainCircuit, CalendarDays, Database, ListChecks, RefreshCw, ShieldCheck, SlidersHorizontal, TrendingUp } from "lucide-react";
 import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import {
   fetchDfsFirstHalf,
@@ -46,6 +46,7 @@ import {
   type GemPerformance,
   type LineDiscrepancy,
   type Matchup,
+  type MatchupInsightsWindow,
   type MissingEspnGame,
   type ModelPerformance,
   type ModelRun,
@@ -95,7 +96,7 @@ const WNBA_TEAM_LOGOS: Record<string, string> = {
   PDX: "/team-logos/por.png"
 };
 
-type DashboardTab = "props" | "dfs" | "gems" | "watchlist" | "matchups" | "parlays" | "special" | "discrepancies" | "roster" | "models" | "data";
+type DashboardTab = "props" | "dfs" | "gems" | "watchlist" | "matchups" | "insights" | "parlays" | "special" | "discrepancies" | "roster" | "models" | "data";
 type CandidateSortField = "expected_value" | "edge" | "projection" | "line" | "projection_gap" | "model_probability" | "confidence" | "player";
 type DiscrepancySortField = "line_gap" | "price_gap" | "books" | "player_name";
 type SpecialStocksSortField =
@@ -135,6 +136,7 @@ const INITIAL_TAB_LOADING: TabLoadingState = {
   gems: false,
   watchlist: false,
   matchups: false,
+  insights: false,
   parlays: false,
   special: false,
   discrepancies: false,
@@ -148,6 +150,7 @@ const CACHE_NAMES_BY_TAB: Record<DashboardTab, string[]> = {
   gems: ["current_value_board.json", "current_matchups.json", "line_discrepancies.json", "gem_performance.json"],
   watchlist: ["current_watchlist.json", "watchlist_performance.json"],
   matchups: ["current_matchups.json"],
+  insights: ["current_matchups.json"],
   parlays: ["current_value_board.json", "current_matchups.json"],
   special: [],
   discrepancies: ["line_discrepancies.json"],
@@ -155,6 +158,28 @@ const CACHE_NAMES_BY_TAB: Record<DashboardTab, string[]> = {
   models: ["model_runs.json", "model_performance.json"],
   data: []
 };
+
+const INSIGHT_STAT_DEFINITIONS = [
+  { key: "fg_pct", label: "FG%", format: "percent", better: "higher" },
+  { key: "fg_pct_allowed", label: "FG% Allowed", format: "percent", better: "lower" },
+  { key: "rebounds", label: "Rebounds", format: "number", better: "higher" },
+  { key: "rebounds_allowed", label: "Rebounds Allowed", format: "number", better: "lower" },
+  { key: "offensive_rebounds", label: "Off Reb", format: "number", better: "higher" },
+  { key: "defensive_rebounds", label: "Def Reb", format: "number", better: "higher" },
+  { key: "three_pct", label: "3PT%", format: "percent", better: "higher" },
+  { key: "three_pct_allowed", label: "3PT% Allowed", format: "percent", better: "lower" },
+  { key: "threes_attempted", label: "3PA", format: "number", better: "higher" },
+  { key: "threes_made", label: "3PM", format: "number", better: "higher" },
+  { key: "threes_made_allowed", label: "3PM Allowed", format: "number", better: "lower" },
+  { key: "assists", label: "Assists", format: "number", better: "higher" },
+  { key: "assists_allowed", label: "Assists Allowed", format: "number", better: "lower" },
+  { key: "turnovers", label: "Turnovers", format: "number", better: "lower" },
+  { key: "turnovers_forced", label: "Turnovers Forced", format: "number", better: "higher" },
+  { key: "steals", label: "Steals", format: "number", better: "higher" },
+  { key: "blocks", label: "Blocks", format: "number", better: "higher" },
+  { key: "points", label: "Points", format: "number", better: "higher" },
+  { key: "points_allowed", label: "Points Allowed", format: "number", better: "lower" },
+] as const;
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -337,6 +362,7 @@ export function App() {
     gems: false,
     watchlist: false,
     matchups: false,
+    insights: false,
     parlays: false,
     special: false,
     discrepancies: false,
@@ -475,7 +501,7 @@ export function App() {
         ]);
         setWatchlist(nextWatchlist);
         setWatchlistPerformance(nextPerformance);
-      } else if (tab === "matchups" || tab === "parlays") {
+      } else if (tab === "matchups" || tab === "insights" || tab === "parlays") {
         setMatchups(await withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups"));
       } else if (tab === "special") {
         const [nextSpecialStocks, nextSpecialPerformance] = await Promise.all([
@@ -1306,6 +1332,10 @@ export function App() {
           <CalendarDays size={18} />
           Matchups
         </button>
+        <button className={activeTab === "insights" ? "active" : ""} onClick={() => setActiveTab("insights")}>
+          <BarChart3 size={18} />
+          Insights
+        </button>
         <button className={activeTab === "parlays" ? "active" : ""} onClick={() => setActiveTab("parlays")}>
           <ListChecks size={18} />
           Parlays
@@ -1336,12 +1366,12 @@ export function App() {
 
       <section className="summary-grid">
         <Metric
-          label={activeTab === "props" ? "Props ranked" : activeTab === "dfs" ? "1H estimates" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "special" ? "Special props" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
-          value={activeTab === "props" ? filtered.length.toString() : activeTab === "dfs" ? dfsFirstHalf.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups, props).toString() : activeTab === "special" ? specialStocks.length.toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
+          label={activeTab === "props" ? "Props ranked" : activeTab === "dfs" ? "1H estimates" : activeTab === "gems" ? "Gem candidates" : activeTab === "watchlist" ? "Watchlist legs" : activeTab === "matchups" || activeTab === "insights" ? "Games" : activeTab === "parlays" ? "Candidate legs" : activeTab === "special" ? "Special props" : activeTab === "discrepancies" ? "Line gaps" : activeTab === "roster" ? "Rostered players" : activeTab === "models" ? "Training rows" : "Missing score dates"}
+          value={activeTab === "props" ? filtered.length.toString() : activeTab === "dfs" ? dfsFirstHalf.length.toString() : activeTab === "gems" ? gems.length.toString() : activeTab === "watchlist" ? watchlist.length.toString() : activeTab === "matchups" || activeTab === "insights" ? matchups.length.toString() : activeTab === "parlays" ? parlayCandidateCount(matchups, props).toString() : activeTab === "special" ? specialStocks.length.toString() : activeTab === "discrepancies" ? discrepancies.length.toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? (latestModelRun?.training_rows ?? 0).toString() : missingEspnDates.length.toString()}
         />
         <Metric
-          label={activeTab === "props" ? "Best EV" : activeTab === "dfs" ? "Top 1H pace" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "parlays" ? "Games with legs" : activeTab === "special" ? "Top stocks" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
-          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "dfs" ? formatNumber(dfsFirstHalf[0]?.pace_ratio ?? null) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups, props).toString() : activeTab === "special" ? formatNumber(topSpecialStocks) : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
+          label={activeTab === "props" ? "Best EV" : activeTab === "dfs" ? "Top 1H pace" : activeTab === "gems" ? "Top gem score" : activeTab === "watchlist" ? "Top watch EV" : activeTab === "matchups" ? "Teams tracked" : activeTab === "insights" ? "Comparison rows" : activeTab === "parlays" ? "Games with legs" : activeTab === "special" ? "Top stocks" : activeTab === "discrepancies" ? "Books compared" : activeTab === "roster" ? "Unavailable players" : activeTab === "models" ? "Latest MAE" : "Upcoming games"}
+          value={activeTab === "props" ? formatPercent(filtered[0]?.expected_value) : activeTab === "dfs" ? formatNumber(dfsFirstHalf[0]?.pace_ratio ?? null) : activeTab === "gems" ? formatNumber(gems[0]?.gem_score ?? null) : activeTab === "watchlist" ? formatPercent(watchlist[0]?.expected_value) : activeTab === "matchups" ? (matchups.length * 2).toString() : activeTab === "insights" ? INSIGHT_STAT_DEFINITIONS.length.toString() : activeTab === "parlays" ? gamesWithParlayCandidates(matchups, props).toString() : activeTab === "special" ? formatNumber(topSpecialStocks) : activeTab === "discrepancies" ? countDiscrepancyBooks(discrepancies).toString() : activeTab === "roster" ? roster.length.toString() : activeTab === "models" ? formatLatestMae(latestModelRun) : matchups.length.toString()}
         />
         <Metric label="Settled props" value={(performance?.total_settled ?? performance?.settled ?? 0).toString()} />
         <Metric
@@ -1388,6 +1418,8 @@ export function App() {
           <WatchlistView watchlist={watchlist} loading={tabLoading.watchlist} error={error} cacheStatus={cacheStatus?.views.watchlist ?? null} />
         ) : activeTab === "matchups" ? (
           <MatchupsView matchups={matchups} loading={tabLoading.matchups} error={error} cacheStatus={cacheStatus?.views.matchups ?? null} />
+        ) : activeTab === "insights" ? (
+          <InsightsView matchups={matchups} loading={tabLoading.insights} error={error} cacheStatus={cacheStatus?.views.insights ?? null} />
         ) : activeTab === "parlays" ? (
           <ParlayCandidatesView
             matchups={matchups}
@@ -3715,6 +3747,184 @@ function MatchupsView({
             <p className="empty">No scheduled games found.</p>
           )}
         </div>
+      </div>
+    </section>
+  );
+}
+
+function InsightsView({
+  matchups,
+  loading,
+  error,
+  cacheStatus,
+}: {
+  matchups: Matchup[];
+  loading: boolean;
+  error: string | null;
+  cacheStatus: CacheViewStatus | null;
+}) {
+  const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
+  const selectedMatchup = matchups.find((matchup) => matchup.id === selectedGameId) ?? matchups[0] ?? null;
+
+  return (
+    <section className="matchup-list">
+      <div className="board-panel insights-panel">
+        <div className="panel-header">
+          <div>
+            <h2>Team Insights</h2>
+            <p>{loading ? "Loading insights" : "Last 5 overall and venue-context team comparison"}</p>
+            <div className="cache-badge-row">
+              <CacheFreshnessBadge label="Insights cache" status={cacheStatus} />
+            </div>
+          </div>
+          <BarChart3 size={20} />
+        </div>
+        {error && <div className="error">{error}</div>}
+        <div className="game-tabs" aria-label="Insights matchup tabs">
+          {matchups.map((matchup) => (
+            <button
+              key={matchup.id}
+              className={selectedMatchup?.id === matchup.id ? "active" : ""}
+              onClick={() => setSelectedGameId(matchup.id)}
+            >
+              <span>{formatDate(matchup.start_time)}</span>
+              <strong>{matchup.away_team} at {matchup.home_team}</strong>
+              <em>{availableLabel(matchup)}</em>
+            </button>
+          ))}
+        </div>
+        <div className="matchup-grid single">
+          {selectedMatchup ? (
+            <article className="insights-card">
+              <div className="insights-card-header">
+                <div>
+                  <p className="eyebrow">{formatDate(selectedMatchup.start_time)}</p>
+                  <div className="matchup-title-row">
+                    <TeamLogo src={selectedMatchup.away_logo_url} alt={`${selectedMatchup.away_team} logo`} />
+                    <h3>{selectedMatchup.away_team} at {selectedMatchup.home_team}</h3>
+                    <TeamLogo src={selectedMatchup.home_logo_url} alt={`${selectedMatchup.home_team} logo`} />
+                  </div>
+                  <p className="insights-subtitle">
+                    Quick read on recent form. Green is stronger, red is weaker, amber is roughly even.
+                  </p>
+                </div>
+                <div className="game-badges">
+                  <span className="game-pill">Overall: last 5</span>
+                  <span className="game-pill">{selectedMatchup.away_team} away last 5</span>
+                  <span className="game-pill">{selectedMatchup.home_team} home last 5</span>
+                </div>
+              </div>
+              <InsightsEdgeCards matchup={selectedMatchup} />
+              <InsightsComparisonTable matchup={selectedMatchup} windowKey="overall_last_5" title="Overall Last 5" />
+              <InsightsComparisonTable matchup={selectedMatchup} windowKey="context_last_5" title="Venue Context Last 5" />
+            </article>
+          ) : (
+            <p className="empty">No scheduled games found.</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function InsightsEdgeCards({ matchup }: { matchup: Matchup }) {
+  const edges = buildKeyMatchupEdges(matchup);
+
+  return (
+    <section className="insights-section">
+      <div className="panel-header compact">
+        <div>
+          <h3>Key Matchup Edges</h3>
+          <p>Fast read on where recent team form creates the clearest contrast.</p>
+        </div>
+      </div>
+      {edges.length ? (
+        <div className="insights-edge-grid">
+          {edges.map((edge) => (
+            <article key={edge.id} className={`insights-edge-card ${edge.teamSide === "away" ? "away" : "home"}`}>
+              <div className="insights-edge-topline">
+                <span className="insights-edge-team">{edge.teamCode}</span>
+                <span className="insights-edge-tag">{edge.angleTag}</span>
+              </div>
+              <strong>{edge.title}</strong>
+              <p>{edge.detail}</p>
+              <div className="insights-edge-meta">
+                <span>{edge.metricLabel}</span>
+                <span>{edge.valueText}</span>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="empty">Not enough recent team box score data to generate matchup edges yet.</p>
+      )}
+    </section>
+  );
+}
+
+function InsightsComparisonTable({
+  matchup,
+  windowKey,
+  title,
+}: {
+  matchup: Matchup;
+  windowKey: "overall_last_5" | "context_last_5";
+  title: string;
+}) {
+  const awayWindow = matchup.away_team_insights?.[windowKey] ?? null;
+  const homeWindow = matchup.home_team_insights?.[windowKey] ?? null;
+  const awayContextLabel = windowKey === "context_last_5" ? "Away" : "Overall";
+  const homeContextLabel = windowKey === "context_last_5" ? "Home" : "Overall";
+
+  if (!awayWindow && !homeWindow) {
+    return (
+      <section className="insights-section">
+        <div className="panel-header compact">
+          <div>
+            <h3>{title}</h3>
+            <p>Not enough historical team box score data yet.</p>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="insights-section">
+      <div className="panel-header compact">
+        <div>
+          <h3>{title}</h3>
+          <p>
+            {matchup.away_team} {awayContextLabel.toLowerCase()} {awayWindow?.games ?? 0} games vs {matchup.home_team} {homeContextLabel.toLowerCase()} {homeWindow?.games ?? 0} games
+          </p>
+        </div>
+      </div>
+      <div className="insights-table-wrap">
+        <table className="insights-table">
+          <thead>
+            <tr>
+              <th>{matchup.away_team}</th>
+              <th>Stat</th>
+              <th>{matchup.home_team}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {INSIGHT_STAT_DEFINITIONS.map((definition) => {
+              const awayValue = awayWindow?.[definition.key] ?? null;
+              const homeValue = homeWindow?.[definition.key] ?? null;
+              const tone = compareInsightValues(awayValue, homeValue, definition.better);
+              return (
+                <tr key={`${windowKey}-${definition.key}`}>
+                  <td className={`insight-value-cell ${tone.away}`}>{formatInsightValue(awayValue, definition.format)}</td>
+                  <td className="insight-stat-cell">
+                    <strong>{definition.label}</strong>
+                  </td>
+                  <td className={`insight-value-cell ${tone.home}`}>{formatInsightValue(homeValue, definition.format)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
       </div>
     </section>
   );
@@ -6122,6 +6332,7 @@ function tabTitle(tab: DashboardTab) {
     gems: "Gem Finder",
     watchlist: "Prop Watchlist",
     matchups: "Pregame Matchups",
+    insights: "Team Insights",
     parlays: "Parlay Candidates",
     special: "Special Props",
     discrepancies: "Line Discrepancies",
@@ -6130,6 +6341,117 @@ function tabTitle(tab: DashboardTab) {
     data: "Data Operations"
   };
   return titles[tab];
+}
+
+function formatInsightValue(value: number | null | undefined, format: "number" | "percent") {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "N/A";
+  }
+  return format === "percent" ? `${value.toFixed(1)}%` : value.toFixed(1);
+}
+
+type InsightWindowStatKey = Exclude<keyof MatchupInsightsWindow, "games">;
+
+type KeyMatchupEdge = {
+  id: string;
+  score: number;
+  teamSide: "away" | "home";
+  teamCode: string;
+  title: string;
+  angleTag: string;
+  detail: string;
+  metricLabel: string;
+  valueText: string;
+};
+
+function compareInsightValues(
+  awayValue: number | null | undefined,
+  homeValue: number | null | undefined,
+  better: "higher" | "lower",
+) {
+  if (typeof awayValue !== "number" || typeof homeValue !== "number") {
+    return { away: "tone-neutral", home: "tone-neutral" };
+  }
+  const diff = awayValue - homeValue;
+  const normalized = better === "higher" ? diff : -diff;
+  const gap = Math.abs(diff);
+  if (gap <= 0.6) {
+    return { away: "tone-balanced", home: "tone-balanced" };
+  }
+  if (normalized > 0) {
+    return { away: gap >= 2.0 ? "tone-strong" : "tone-edge", home: gap >= 2.0 ? "tone-weak" : "tone-balanced" };
+  }
+  return { away: gap >= 2.0 ? "tone-weak" : "tone-balanced", home: gap >= 2.0 ? "tone-strong" : "tone-edge" };
+}
+
+function buildKeyMatchupEdges(matchup: Matchup): KeyMatchupEdge[] {
+  const awayOverall = matchup.away_team_insights?.overall_last_5 ?? null;
+  const homeOverall = matchup.home_team_insights?.overall_last_5 ?? null;
+  const awayContext = matchup.away_team_insights?.context_last_5 ?? null;
+  const homeContext = matchup.home_team_insights?.context_last_5 ?? null;
+
+  const windows = {
+    away: awayContext ?? awayOverall,
+    home: homeContext ?? homeOverall,
+  };
+
+  type EdgeRecipe = {
+    id: string;
+    teamSide: "away" | "home";
+    title: string;
+    angleTag: string;
+    metricLabel: string;
+    offenseKey: InsightWindowStatKey;
+    defenseKey: InsightWindowStatKey;
+    format?: "number" | "percent";
+  };
+
+  const recipes: EdgeRecipe[] = [
+    { id: "fg", teamSide: "away", title: `${matchup.away_team} shot quality edge`, angleTag: "clean looks", metricLabel: "FG% vs FG% allowed", offenseKey: "fg_pct", defenseKey: "fg_pct_allowed", format: "percent" },
+    { id: "fg", teamSide: "home", title: `${matchup.home_team} shot quality edge`, angleTag: "clean looks", metricLabel: "FG% vs FG% allowed", offenseKey: "fg_pct", defenseKey: "fg_pct_allowed", format: "percent" },
+    { id: "three-volume", teamSide: "away", title: `${matchup.away_team} 3-point volume edge`, angleTag: "extra 3PA path", metricLabel: "3PA vs 3PA allowed", offenseKey: "threes_attempted", defenseKey: "threes_attempted_allowed" },
+    { id: "three-volume", teamSide: "home", title: `${matchup.home_team} 3-point volume edge`, angleTag: "extra 3PA path", metricLabel: "3PA vs 3PA allowed", offenseKey: "threes_attempted", defenseKey: "threes_attempted_allowed" },
+    { id: "three-efficiency", teamSide: "away", title: `${matchup.away_team} 3-point efficiency edge`, angleTag: "live from deep", metricLabel: "3PT% vs 3PT% allowed", offenseKey: "three_pct", defenseKey: "three_pct_allowed", format: "percent" },
+    { id: "three-efficiency", teamSide: "home", title: `${matchup.home_team} 3-point efficiency edge`, angleTag: "live from deep", metricLabel: "3PT% vs 3PT% allowed", offenseKey: "three_pct", defenseKey: "three_pct_allowed", format: "percent" },
+    { id: "glass", teamSide: "away", title: `${matchup.away_team} glass control edge`, angleTag: "live on the glass", metricLabel: "Rebounds vs rebounds allowed", offenseKey: "rebounds", defenseKey: "rebounds_allowed" },
+    { id: "glass", teamSide: "home", title: `${matchup.home_team} glass control edge`, angleTag: "live on the glass", metricLabel: "Rebounds vs rebounds allowed", offenseKey: "rebounds", defenseKey: "rebounds_allowed" },
+    { id: "ball-pressure", teamSide: "away", title: `${matchup.away_team} turnover pressure edge`, angleTag: "ballhandler risk", metricLabel: "Turnovers forced vs turnovers", offenseKey: "turnovers_forced", defenseKey: "turnovers" },
+    { id: "ball-pressure", teamSide: "home", title: `${matchup.home_team} turnover pressure edge`, angleTag: "ballhandler risk", metricLabel: "Turnovers forced vs turnovers", offenseKey: "turnovers_forced", defenseKey: "turnovers" },
+    { id: "playmaking", teamSide: "away", title: `${matchup.away_team} playmaking edge`, angleTag: "assist environment", metricLabel: "Assists vs assists allowed", offenseKey: "assists", defenseKey: "assists_allowed" },
+    { id: "playmaking", teamSide: "home", title: `${matchup.home_team} playmaking edge`, angleTag: "assist environment", metricLabel: "Assists vs assists allowed", offenseKey: "assists", defenseKey: "assists_allowed" },
+  ];
+
+  const edges = recipes.flatMap((recipe) => {
+    const teamWindow = windows[recipe.teamSide];
+    const opponentWindow = windows[recipe.teamSide === "away" ? "home" : "away"];
+    const teamCode = recipe.teamSide === "away" ? matchup.away_team : matchup.home_team;
+    const opponentCode = recipe.teamSide === "away" ? matchup.home_team : matchup.away_team;
+    const offenseValue = teamWindow?.[recipe.offenseKey];
+    const defenseValue = opponentWindow?.[recipe.defenseKey];
+    if (typeof offenseValue !== "number" || typeof defenseValue !== "number") {
+      return [];
+    }
+    const edgeValue = offenseValue - defenseValue;
+    const score = Math.abs(edgeValue);
+    if (score < (recipe.format === "percent" ? 1.2 : 1.5)) {
+      return [];
+    }
+    return [{
+      id: `${recipe.teamSide}-${recipe.id}`,
+      score,
+      teamSide: recipe.teamSide,
+      teamCode,
+      title: recipe.title,
+      angleTag: recipe.angleTag,
+      detail: `${teamCode} recent ${recipe.metricLabel.toLowerCase()} is shaping up better than what ${opponentCode} has been allowing.`,
+      metricLabel: recipe.metricLabel,
+      valueText: `${formatInsightValue(offenseValue, recipe.format === "percent" ? "percent" : "number")} vs ${formatInsightValue(defenseValue, recipe.format === "percent" ? "percent" : "number")}`,
+    }];
+  });
+
+  return edges
+    .sort((left, right) => right.score - left.score || left.teamCode.localeCompare(right.teamCode))
+    .slice(0, 4);
 }
 
 function buildGems(props: ValueProp[], discrepancies: LineDiscrepancy[]): GemProp[] {

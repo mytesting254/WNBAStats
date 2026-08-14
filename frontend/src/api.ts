@@ -378,6 +378,7 @@ export type CacheStatus = {
     props: CacheViewStatus;
     watchlist: CacheViewStatus;
     matchups: CacheViewStatus;
+    insights?: CacheViewStatus;
     parlays: {
       matchups: CacheViewStatus;
       props: CacheViewStatus;
@@ -786,6 +787,42 @@ export type TeamRatings = {
   pace_rank?: number | null;
 };
 
+export type MatchupInsightsWindow = {
+  games: number;
+  points?: number | null;
+  points_allowed?: number | null;
+  fg_pct?: number | null;
+  fg_pct_allowed?: number | null;
+  three_pct?: number | null;
+  three_pct_allowed?: number | null;
+  free_throw_pct?: number | null;
+  free_throw_pct_allowed?: number | null;
+  rebounds?: number | null;
+  rebounds_allowed?: number | null;
+  offensive_rebounds?: number | null;
+  offensive_rebounds_allowed?: number | null;
+  defensive_rebounds?: number | null;
+  defensive_rebounds_allowed?: number | null;
+  assists?: number | null;
+  assists_allowed?: number | null;
+  threes_made?: number | null;
+  threes_made_allowed?: number | null;
+  threes_attempted?: number | null;
+  threes_attempted_allowed?: number | null;
+  turnovers?: number | null;
+  turnovers_forced?: number | null;
+  steals?: number | null;
+  steals_allowed?: number | null;
+  blocks?: number | null;
+  blocks_allowed?: number | null;
+};
+
+export type MatchupInsights = {
+  context: "home" | "away";
+  overall_last_5?: MatchupInsightsWindow | null;
+  context_last_5?: MatchupInsightsWindow | null;
+};
+
 export type Matchup = {
   id: number;
   game_date: string;
@@ -847,6 +884,8 @@ export type Matchup = {
   away: TeamLast10;
   home_team_ratings?: TeamRatings | null;
   away_team_ratings?: TeamRatings | null;
+  home_team_insights?: MatchupInsights | null;
+  away_team_insights?: MatchupInsights | null;
   rating_differentials?: {
     season_net_diff?: number | null;
     season_off_diff?: number | null;
