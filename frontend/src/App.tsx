@@ -6464,7 +6464,13 @@ function buildKeyMatchupEdges(matchup: Matchup): KeyMatchupEdge[] {
       teamCode,
       title: recipe.title,
       angleTag: recipe.angleTag,
-      detail: `${teamCode} recent ${recipe.metricLabel.toLowerCase()} is shaping up better than what ${opponentCode} has been allowing.`,
+      detail: buildInsightEdgeNarrative(
+        recipe,
+        teamCode,
+        opponentCode,
+        offenseValue,
+        defenseValue,
+      ),
       metricLabel: recipe.metricLabel,
       valueText: `${formatInsightValue(offenseValue, recipe.format === "percent" ? "percent" : "number")} vs ${formatInsightValue(defenseValue, recipe.format === "percent" ? "percent" : "number")}`,
     }];
@@ -6473,6 +6479,45 @@ function buildKeyMatchupEdges(matchup: Matchup): KeyMatchupEdge[] {
   return edges
     .sort((left, right) => right.score - left.score || left.teamCode.localeCompare(right.teamCode))
     .slice(0, 4);
+}
+
+function buildInsightEdgeNarrative(
+  recipe: {
+    id: string;
+    format?: "number" | "percent";
+  },
+  teamCode: string,
+  opponentCode: string,
+  offenseValue: number,
+  defenseValue: number,
+) {
+  const gap = Math.abs(offenseValue - defenseValue);
+  const strength =
+    gap >= (recipe.format === "percent" ? 8 : 5)
+      ? "strong"
+      : gap >= (recipe.format === "percent" ? 4 : 2.5)
+        ? "clear"
+        : "modest";
+
+  if (recipe.id === "fg") {
+    return `${teamCode} is at ${offenseValue.toFixed(1)}% from the field over this window, while ${opponentCode} has been allowing ${defenseValue.toFixed(1)}%. That is a ${strength} shot-quality signal if the same finishing profile carries over.`;
+  }
+  if (recipe.id === "three-volume") {
+    return `${teamCode} is taking ${offenseValue.toFixed(1)} threes per game, and ${opponentCode} has been giving up ${defenseValue.toFixed(1)} opponent attempts. That creates a ${strength} lane for perimeter volume rather than just hot shooting variance.`;
+  }
+  if (recipe.id === "three-efficiency") {
+    return `${teamCode} is hitting ${offenseValue.toFixed(1)}% from three lately, and ${opponentCode} has allowed ${defenseValue.toFixed(1)}% from deep. That reads as a ${strength} perimeter-efficiency spot if the shot diet holds.`;
+  }
+  if (recipe.id === "glass") {
+    return `${teamCode} is averaging ${offenseValue.toFixed(1)} rebounds, while ${opponentCode} has been allowing ${defenseValue.toFixed(1)}. That points to a ${strength} rebounding environment and extra-possession upside.`;
+  }
+  if (recipe.id === "ball-pressure") {
+    return `${teamCode} is forcing ${offenseValue.toFixed(1)} turnovers per game, and ${opponentCode} is committing ${defenseValue.toFixed(1)}. That profiles as a ${strength} pressure spot with real ball-security risk on the other side.`;
+  }
+  if (recipe.id === "playmaking") {
+    return `${teamCode} is averaging ${offenseValue.toFixed(1)} assists, while ${opponentCode} has been allowing ${defenseValue.toFixed(1)}. That sets up a ${strength} assisted-scoring environment if pace stays intact.`;
+  }
+  return `${teamCode} has a ${strength} recent edge against ${opponentCode} in this area.`;
 }
 
 function buildGems(props: ValueProp[], discrepancies: LineDiscrepancy[]): GemProp[] {

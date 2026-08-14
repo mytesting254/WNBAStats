@@ -1361,6 +1361,7 @@ tbody tr.selected {
 .insight-value-chip strong {
   color: inherit;
   font-size: 15px;
+  font-weight: 900;
 }
 
 .insight-value-chip.tone-strong {
