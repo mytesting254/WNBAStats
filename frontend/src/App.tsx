@@ -181,6 +181,13 @@ const INSIGHT_STAT_DEFINITIONS = [
   { key: "points_allowed", label: "Points Allowed", format: "number", better: "lower" },
 ] as const;
 
+const INSIGHT_STAT_GROUPS = [
+  { id: "shooting", label: "Shooting", statKeys: ["fg_pct", "fg_pct_allowed", "three_pct", "three_pct_allowed", "threes_attempted", "threes_made", "threes_made_allowed"] },
+  { id: "rebounding", label: "Rebounding", statKeys: ["rebounds", "rebounds_allowed", "offensive_rebounds", "defensive_rebounds"] },
+  { id: "ball-security", label: "Ball Security", statKeys: ["turnovers", "turnovers_forced", "assists", "assists_allowed"] },
+  { id: "game-control", label: "Game Control", statKeys: ["points", "points_allowed", "steals", "blocks"] },
+] as const;
+
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = window.setTimeout(() => {
@@ -3901,32 +3908,44 @@ function InsightsComparisonTable({
           </p>
         </div>
       </div>
-      <div className="insights-table-wrap">
-        <table className="insights-table">
-          <thead>
-            <tr>
-              <th>{matchup.away_team}</th>
-              <th>Stat</th>
-              <th>{matchup.home_team}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {INSIGHT_STAT_DEFINITIONS.map((definition) => {
-              const awayValue = awayWindow?.[definition.key] ?? null;
-              const homeValue = homeWindow?.[definition.key] ?? null;
-              const tone = compareInsightValues(awayValue, homeValue, definition.better);
-              return (
-                <tr key={`${windowKey}-${definition.key}`}>
-                  <td className={`insight-value-cell ${tone.away}`}>{formatInsightValue(awayValue, definition.format)}</td>
-                  <td className="insight-stat-cell">
-                    <strong>{definition.label}</strong>
-                  </td>
-                  <td className={`insight-value-cell ${tone.home}`}>{formatInsightValue(homeValue, definition.format)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="insights-group-stack">
+        {INSIGHT_STAT_GROUPS.map((group) => {
+          const stats = group.statKeys
+            .map((key) => INSIGHT_STAT_DEFINITIONS.find((definition) => definition.key === key))
+            .filter((definition): definition is (typeof INSIGHT_STAT_DEFINITIONS)[number] => Boolean(definition));
+
+          return (
+            <section key={`${windowKey}-${group.id}`} className="insights-stat-group">
+              <div className="insights-stat-group-header">
+                <strong>{group.label}</strong>
+              </div>
+              <div className="insights-cells-grid">
+                {stats.map((definition) => {
+                  const awayValue = awayWindow?.[definition.key] ?? null;
+                  const homeValue = homeWindow?.[definition.key] ?? null;
+                  const tone = compareInsightValues(awayValue, homeValue, definition.better);
+                  return (
+                    <article key={`${windowKey}-${definition.key}`} className="insights-stat-card">
+                      <div className="insights-stat-card-header">
+                        <strong>{definition.label}</strong>
+                      </div>
+                      <div className="insights-stat-values">
+                        <div className={`insight-value-chip ${tone.away}`}>
+                          <span>{matchup.away_team}</span>
+                          <strong>{formatInsightValue(awayValue, definition.format)}</strong>
+                        </div>
+                        <div className={`insight-value-chip ${tone.home}`}>
+                          <span>{matchup.home_team}</span>
+                          <strong>{formatInsightValue(homeValue, definition.format)}</strong>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })}
       </div>
     </section>
   );

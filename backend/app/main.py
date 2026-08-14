@@ -10210,7 +10210,7 @@ def _team_matchup_insights_summary(
         """
         SELECT
             b.is_home,
-            b.points,
+            COALESCE(b.points, r.points) AS points,
             b.rebounds,
             b.offensive_rebounds,
             b.defensive_rebounds,
@@ -10224,7 +10224,7 @@ def _team_matchup_insights_summary(
             b.threes_attempted,
             b.free_throws_made,
             b.free_throws_attempted,
-            opp.points AS opponent_points,
+            COALESCE(opp.points, r.opponent_points) AS opponent_points,
             opp.rebounds AS opponent_rebounds,
             opp.offensive_rebounds AS opponent_offensive_rebounds,
             opp.defensive_rebounds AS opponent_defensive_rebounds,
@@ -10242,6 +10242,7 @@ def _team_matchup_insights_summary(
             g.start_time
         FROM team_game_boxscores b
         JOIN games g ON g.id = b.game_id
+        LEFT JOIN team_game_results r ON r.game_id = b.game_id AND r.team_id = b.team_id
         JOIN team_game_boxscores opp ON opp.game_id = b.game_id AND opp.team_id != b.team_id
         WHERE b.team_id = ?
           AND (
