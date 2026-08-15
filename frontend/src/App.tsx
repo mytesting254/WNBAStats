@@ -3793,6 +3793,7 @@ function InsightsView({
   cacheStatus: CacheViewStatus | null;
 }) {
   const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
+  const [insightView, setInsightView] = useState<"team" | "player">("team");
   const selectedMatchup = matchups.find((matchup) => matchup.id === selectedGameId) ?? matchups[0] ?? null;
 
   return (
@@ -3800,8 +3801,8 @@ function InsightsView({
       <div className="board-panel insights-panel">
         <div className="panel-header">
           <div>
-            <h2>Team Insights</h2>
-            <p>{loading ? "Loading insights" : "Last 5 overall and venue-context team comparison"}</p>
+            <h2>{insightView === "team" ? "Team Insights" : "Player Insights"}</h2>
+            <p>{loading ? "Loading insights" : insightView === "team" ? "Last 5 overall and venue-context team comparison" : "Player-facing matchup reads from team trends and position allowance splits"}</p>
             <div className="cache-badge-row">
               <CacheFreshnessBadge label="Insights cache" status={cacheStatus} />
             </div>
@@ -3809,6 +3810,16 @@ function InsightsView({
           <BarChart3 size={20} />
         </div>
         {error && <div className="error">{error}</div>}
+        <div className="insights-subtabs">
+          <div className="segmented" aria-label="Insights view tabs">
+            <button className={insightView === "team" ? "active" : ""} onClick={() => setInsightView("team")}>
+              Team Insights
+            </button>
+            <button className={insightView === "player" ? "active" : ""} onClick={() => setInsightView("player")}>
+              Player Insights
+            </button>
+          </div>
+        </div>
         <div className="game-tabs" aria-label="Insights matchup tabs">
           {matchups.map((matchup) => (
             <button
@@ -3843,15 +3854,20 @@ function InsightsView({
                   <span className="game-pill">{selectedMatchup.home_team} home last 5</span>
                 </div>
               </div>
-              <InsightsEdgeCards matchup={selectedMatchup} />
-              <div className="insights-comparison-grid">
-                <InsightsComparisonTable matchup={selectedMatchup} windowKey="overall_last_5" title="Overall Last 5" />
-                <InsightsComparisonTable matchup={selectedMatchup} windowKey="context_last_5" title="Venue Context Last 5" />
-              </div>
-              <div className="insights-comparison-grid">
-                <PositionFamilyAllowancesTable matchup={selectedMatchup} windowKey="overall_last_5" title="Allowed By Position: Overall Last 5" />
-                <PositionFamilyAllowancesTable matchup={selectedMatchup} windowKey="context_last_5" title="Allowed By Position: Venue Context Last 5" />
-              </div>
+              {insightView === "team" ? (
+                <div className="insights-comparison-grid">
+                  <InsightsComparisonTable matchup={selectedMatchup} windowKey="overall_last_5" title="Overall Last 5" />
+                  <InsightsComparisonTable matchup={selectedMatchup} windowKey="context_last_5" title="Venue Context Last 5" />
+                </div>
+              ) : (
+                <>
+                  <InsightsEdgeCards matchup={selectedMatchup} />
+                  <div className="insights-comparison-grid">
+                    <PositionFamilyAllowancesTable matchup={selectedMatchup} windowKey="overall_last_5" title="Allowed By Position: Overall Last 5" />
+                    <PositionFamilyAllowancesTable matchup={selectedMatchup} windowKey="context_last_5" title="Allowed By Position: Venue Context Last 5" />
+                  </div>
+                </>
+              )}
             </article>
           ) : (
             <p className="empty">No scheduled games found.</p>

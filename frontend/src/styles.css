@@ -558,6 +558,10 @@ h3 {
   margin-top: 10px;
 }
 
+.insights-subtabs {
+  padding: 16px 18px 0;
+}
+
 .cache-badge {
   display: inline-flex;
   flex-direction: column;
