@@ -1360,6 +1360,14 @@ tbody tr.selected {
   text-transform: uppercase;
 }
 
+.insights-group-meta {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .insights-stat-card {
   padding: 12px;
   border: 1px solid rgba(130, 157, 183, 0.16);

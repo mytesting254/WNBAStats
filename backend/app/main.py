@@ -3727,6 +3727,20 @@ def _build_matchup_payload_item(
         game_date=game["game_date"],
         scheduled_start_time=game["start_time"],
     )
+    home_team_position_allowances = _team_position_family_allowance_summary(
+        conn,
+        team_id=int(game["home_team_id"]),
+        is_home_context=True,
+        game_date=game["game_date"],
+        scheduled_start_time=game["start_time"],
+    )
+    away_team_position_allowances = _team_position_family_allowance_summary(
+        conn,
+        team_id=int(game["away_team_id"]),
+        is_home_context=False,
+        game_date=game["game_date"],
+        scheduled_start_time=game["start_time"],
+    )
     prediction_state = next(
         (prediction_state_by_game.get(int(candidate_id)) for candidate_id in game_ids if prediction_state_by_game.get(int(candidate_id))),
         prediction_state_by_game.get(game_id),
@@ -3774,6 +3788,8 @@ def _build_matchup_payload_item(
         "away_team_ratings": away_team_ratings,
         "home_team_insights": home_team_insights,
         "away_team_insights": away_team_insights,
+        "home_team_position_allowances": home_team_position_allowances,
+        "away_team_position_allowances": away_team_position_allowances,
         "rating_differentials": _matchup_rating_differentials(home_team_ratings, away_team_ratings),
         "h2h_segment_summary": _h2h_segment_summary(
             conn,
@@ -10311,6 +10327,167 @@ def _team_matchup_insights_summary(
         "context": "home" if is_home_context else "away",
         "overall_last_5": _window_payload(list(rows[:5])),
         "context_last_5": _window_payload(context_rows[:5]),
+    }
+
+
+def _position_bucket_from_text(position: Any) -> str:
+    text = str(position or "").strip().upper()
+    if "G" in text:
+        return "guard"
+    if "C" in text and "G" not in text:
+        return "big"
+    return "wing"
+
+
+def _team_position_family_allowance_summary(
+    conn,
+    *,
+    team_id: int,
+    is_home_context: bool,
+    game_date: str | None,
+    scheduled_start_time: str | None,
+) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        WITH defensive_games AS (
+            SELECT
+                tr.game_id,
+                tr.is_home,
+                g.game_date,
+                g.start_time
+            FROM team_game_results tr
+            JOIN games g ON g.id = tr.game_id
+            WHERE tr.team_id = ?
+              AND (
+                COALESCE(g.game_date, '') < COALESCE(?, '9999-12-31')
+                OR (
+                    COALESCE(g.game_date, '') = COALESCE(?, '9999-12-31')
+                    AND COALESCE(g.start_time, '') < COALESCE(?, '9999-12-31T23:59:59')
+                )
+              )
+            ORDER BY g.game_date DESC, g.start_time DESC, tr.game_id DESC
+            LIMIT 10
+        )
+        SELECT
+            dg.game_id,
+            dg.is_home AS defense_is_home,
+            dg.game_date,
+            dg.start_time,
+            p.position,
+            p.team_id AS player_current_team_id,
+            pgs.points,
+            pgs.rebounds,
+            pgs.assists,
+            pgs.threes,
+            pgs.steals,
+            pgs.blocks,
+            pgs.turnovers,
+            (
+                SELECT h.team_id
+                FROM player_team_history h
+                WHERE h.player_id = pgs.player_id AND h.game_id = pgs.game_id
+                ORDER BY h.id DESC
+                LIMIT 1
+            ) AS historical_team_id
+        FROM defensive_games dg
+        JOIN player_game_stats pgs ON pgs.game_id = dg.game_id
+        JOIN players p ON p.id = pgs.player_id
+        """
+    ,
+        (team_id, game_date, game_date, scheduled_start_time),
+    ).fetchall()
+
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        opponent_team_id = row["historical_team_id"] if row["historical_team_id"] is not None else row["player_current_team_id"]
+        if opponent_team_id is None or int(opponent_team_id) == int(team_id):
+            continue
+        normalized_rows.append(
+            {
+                "game_id": int(row["game_id"]),
+                "defense_is_home": int(row["defense_is_home"] or 0),
+                "position_bucket": _position_bucket_from_text(row["position"]),
+                "points": float(row["points"] or 0.0),
+                "rebounds": float(row["rebounds"] or 0.0),
+                "assists": float(row["assists"] or 0.0),
+                "threes": float(row["threes"] or 0.0),
+                "steals": float(row["steals"] or 0.0),
+                "blocks": float(row["blocks"] or 0.0),
+                "turnovers": float(row["turnovers"] or 0.0),
+            }
+        )
+
+    def _window_payload(window_rows: list[dict[str, Any]], game_count: int) -> dict[str, Any] | None:
+        if game_count <= 0 or not window_rows:
+            return None
+        buckets: dict[str, dict[str, Any]] = {}
+        for bucket in ("guard", "wing", "big"):
+            bucket_rows = [row for row in window_rows if row["position_bucket"] == bucket]
+            sample_count = len(bucket_rows)
+            if sample_count <= 0:
+                buckets[bucket] = {
+                    "games": game_count,
+                    "samples": 0,
+                    "points": None,
+                    "rebounds": None,
+                    "assists": None,
+                    "threes": None,
+                    "turnovers": None,
+                    "steals": None,
+                    "blocks": None,
+                    "points_rebounds": None,
+                    "points_assists": None,
+                    "rebounds_assists": None,
+                    "points_rebounds_assists": None,
+                    "blocks_steals": None,
+                }
+                continue
+
+            def _avg(fn: Any) -> float:
+                return round(sum(float(fn(row)) for row in bucket_rows) / sample_count, 1)
+
+            buckets[bucket] = {
+                "games": game_count,
+                "samples": sample_count,
+                "points": _avg(lambda row: row["points"]),
+                "rebounds": _avg(lambda row: row["rebounds"]),
+                "assists": _avg(lambda row: row["assists"]),
+                "threes": _avg(lambda row: row["threes"]),
+                "turnovers": _avg(lambda row: row["turnovers"]),
+                "steals": _avg(lambda row: row["steals"]),
+                "blocks": _avg(lambda row: row["blocks"]),
+                "points_rebounds": _avg(lambda row: row["points"] + row["rebounds"]),
+                "points_assists": _avg(lambda row: row["points"] + row["assists"]),
+                "rebounds_assists": _avg(lambda row: row["rebounds"] + row["assists"]),
+                "points_rebounds_assists": _avg(lambda row: row["points"] + row["rebounds"] + row["assists"]),
+                "blocks_steals": _avg(lambda row: row["blocks"] + row["steals"]),
+            }
+        return {
+            "games": game_count,
+            "buckets": buckets,
+        }
+
+    ordered_game_ids: list[int] = []
+    for row in normalized_rows:
+        game_id = int(row["game_id"])
+        if game_id not in ordered_game_ids:
+            ordered_game_ids.append(game_id)
+    overall_game_ids = ordered_game_ids[:5]
+    context_game_ids: list[int] = []
+    for row in normalized_rows:
+        if bool(int(row["defense_is_home"] or 0)) != bool(is_home_context):
+            continue
+        game_id = int(row["game_id"])
+        if game_id not in context_game_ids:
+            context_game_ids.append(game_id)
+        if len(context_game_ids) >= 5:
+            break
+    overall_rows = [row for row in normalized_rows if row["game_id"] in set(overall_game_ids)]
+    context_rows = [row for row in normalized_rows if row["game_id"] in set(context_game_ids)]
+    return {
+        "context": "home" if is_home_context else "away",
+        "overall_last_5": _window_payload(overall_rows, len(overall_game_ids)),
+        "context_last_5": _window_payload(context_rows, len(context_game_ids)),
     }
 
 

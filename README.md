@@ -1416,6 +1416,8 @@ Each training action saves both runs to `model_runs` with rows, markets, MAE, RM
 
 Learned player, minutes, residual, and game-model training defaults to a rolling previous-season window: January 1 of the prior Eastern calendar year through the latest ingested history. For example, 2026 runs train on rows dated `2025-01-01` or later. Set `WNBA_TRAINING_START_DATE=YYYY-MM-DD` for a one-off override. The resolved training start date is part of the model cache key and `model_runs` data signature, so changing the window cannot reuse stale cached models or stale Model Lab results.
 
+Player-prop training now has an optional opponent-by-position allowance slice behind `WNBA_ENABLE_POSITION_ALLOWANCE_FEATURES=1`. When enabled, the learned model adds `guard / wing / big` opponent allowance ratios for the player's prop family using historically resolved opponent rosters, plus venue-context allowance deltas from the opponent's recent home/away defensive samples. Leave the flag unset to keep those features neutral while the feature family is evaluated.
+
 In-place game-market repairs also participate in player-model invalidation. The model fingerprint includes populated-row counts and aggregate values for both `games.spread_home` and `games.game_total`, so a spread/total repair rebuilds derived training examples instead of silently reusing examples generated while that context was missing.
 
 Historical-window audit completed on `2026-08-02` after repairing regular-season 2024-2025 market context. Two isolated, freshly derived runs used the same repaired production snapshot and compared their common 2026 holdout:

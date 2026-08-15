@@ -823,6 +823,38 @@ export type MatchupInsights = {
   context_last_5?: MatchupInsightsWindow | null;
 };
 
+export type MatchupPositionFamilyBucket = {
+  games: number;
+  samples: number;
+  points?: number | null;
+  rebounds?: number | null;
+  assists?: number | null;
+  threes?: number | null;
+  turnovers?: number | null;
+  steals?: number | null;
+  blocks?: number | null;
+  points_rebounds?: number | null;
+  points_assists?: number | null;
+  rebounds_assists?: number | null;
+  points_rebounds_assists?: number | null;
+  blocks_steals?: number | null;
+};
+
+export type MatchupPositionFamilyWindow = {
+  games: number;
+  buckets: {
+    guard: MatchupPositionFamilyBucket;
+    wing: MatchupPositionFamilyBucket;
+    big: MatchupPositionFamilyBucket;
+  };
+};
+
+export type MatchupPositionFamilyAllowances = {
+  context: "home" | "away";
+  overall_last_5?: MatchupPositionFamilyWindow | null;
+  context_last_5?: MatchupPositionFamilyWindow | null;
+};
+
 export type Matchup = {
   id: number;
   game_date: string;
@@ -886,6 +918,8 @@ export type Matchup = {
   away_team_ratings?: TeamRatings | null;
   home_team_insights?: MatchupInsights | null;
   away_team_insights?: MatchupInsights | null;
+  home_team_position_allowances?: MatchupPositionFamilyAllowances | null;
+  away_team_position_allowances?: MatchupPositionFamilyAllowances | null;
   rating_differentials?: {
     season_net_diff?: number | null;
     season_off_diff?: number | null;

@@ -47,6 +47,7 @@ import {
   type LineDiscrepancy,
   type Matchup,
   type MatchupInsightsWindow,
+  type MatchupPositionFamilyBucket,
   type MissingEspnGame,
   type ModelPerformance,
   type ModelRun,
@@ -187,6 +188,27 @@ const INSIGHT_STAT_GROUPS = [
   { id: "ball-security", label: "Ball Security", statKeys: ["turnovers", "turnovers_forced", "assists", "assists_allowed"] },
   { id: "game-control", label: "Game Control", statKeys: ["points", "points_allowed", "steals", "blocks"] },
 ] as const;
+
+const POSITION_ALLOWANCE_GROUPS = [
+  { id: "guard", label: "Guards", statKeys: ["points", "rebounds", "assists", "threes", "turnovers", "points_rebounds", "points_assists", "rebounds_assists", "points_rebounds_assists"] },
+  { id: "wing", label: "Wings", statKeys: ["points", "rebounds", "assists", "threes", "turnovers", "points_rebounds", "points_assists", "rebounds_assists", "points_rebounds_assists"] },
+  { id: "big", label: "Bigs", statKeys: ["points", "rebounds", "assists", "blocks", "steals", "blocks_steals", "points_rebounds", "rebounds_assists", "points_rebounds_assists"] },
+] as const;
+
+const POSITION_ALLOWANCE_STAT_LABELS: Record<string, string> = {
+  points: "PTS",
+  rebounds: "REB",
+  assists: "AST",
+  threes: "3PM",
+  turnovers: "TO",
+  steals: "STL",
+  blocks: "BLK",
+  points_rebounds: "P+R",
+  points_assists: "P+A",
+  rebounds_assists: "R+A",
+  points_rebounds_assists: "PRA",
+  blocks_steals: "B+S",
+};
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -3826,6 +3848,10 @@ function InsightsView({
                 <InsightsComparisonTable matchup={selectedMatchup} windowKey="overall_last_5" title="Overall Last 5" />
                 <InsightsComparisonTable matchup={selectedMatchup} windowKey="context_last_5" title="Venue Context Last 5" />
               </div>
+              <div className="insights-comparison-grid">
+                <PositionFamilyAllowancesTable matchup={selectedMatchup} windowKey="overall_last_5" title="Allowed By Position: Overall Last 5" />
+                <PositionFamilyAllowancesTable matchup={selectedMatchup} windowKey="context_last_5" title="Allowed By Position: Venue Context Last 5" />
+              </div>
             </article>
           ) : (
             <p className="empty">No scheduled games found.</p>
@@ -3937,6 +3963,85 @@ function InsightsComparisonTable({
                         <div className={`insight-value-chip ${tone.home}`}>
                           <span>{matchup.home_team}</span>
                           <strong>{formatInsightValue(homeValue, definition.format)}</strong>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function PositionFamilyAllowancesTable({
+  matchup,
+  windowKey,
+  title,
+}: {
+  matchup: Matchup;
+  windowKey: "overall_last_5" | "context_last_5";
+  title: string;
+}) {
+  const awayWindow = matchup.away_team_position_allowances?.[windowKey] ?? null;
+  const homeWindow = matchup.home_team_position_allowances?.[windowKey] ?? null;
+
+  if (!awayWindow && !homeWindow) {
+    return (
+      <section className="insights-section">
+        <div className="panel-header compact">
+          <div>
+            <h3>{title}</h3>
+            <p>Not enough historical player-position data yet.</p>
+          </div>
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="insights-section">
+      <div className="panel-header compact">
+        <div>
+          <h3>{title}</h3>
+          <p>
+            What each defense has been allowing by uncurated `G / W / B` buckets over the selected window.
+          </p>
+        </div>
+      </div>
+      <div className="insights-group-stack">
+        {POSITION_ALLOWANCE_GROUPS.map((group) => {
+          const awayBucket = awayWindow?.buckets[group.id] ?? null;
+          const homeBucket = homeWindow?.buckets[group.id] ?? null;
+          return (
+            <section key={`${windowKey}-${group.id}`} className={`insights-stat-group insights-stat-group-${group.id}`}>
+              <div className="insights-stat-group-header">
+                <strong>{group.label}</strong>
+                <span className="insights-group-meta">
+                  {matchup.away_team} def {awayBucket?.samples ?? 0} rows | {matchup.home_team} def {homeBucket?.samples ?? 0} rows
+                </span>
+              </div>
+              <div className="insights-cells-grid">
+                {group.statKeys.map((statKey) => {
+                  const awayValue = positionAllowanceValue(awayBucket, statKey);
+                  const homeValue = positionAllowanceValue(homeBucket, statKey);
+                  const tone = compareInsightValues(awayValue, homeValue, "lower");
+                  return (
+                    <article key={`${windowKey}-${group.id}-${statKey}`} className="insights-stat-card">
+                      <div className="insights-stat-card-header">
+                        <strong>{POSITION_ALLOWANCE_STAT_LABELS[statKey] ?? statKey}</strong>
+                      </div>
+                      <div className="insights-stat-values">
+                        <div className={`insight-value-chip ${tone.away}`}>
+                          <span>{matchup.away_team} DEF</span>
+                          <strong>{formatInsightValue(awayValue, "number")}</strong>
+                        </div>
+                        <div className={`insight-value-chip ${tone.home}`}>
+                          <span>{matchup.home_team} DEF</span>
+                          <strong>{formatInsightValue(homeValue, "number")}</strong>
                         </div>
                       </div>
                     </article>
@@ -6369,6 +6474,17 @@ function formatInsightValue(value: number | null | undefined, format: "number" |
     return "N/A";
   }
   return format === "percent" ? `${value.toFixed(1)}%` : value.toFixed(1);
+}
+
+function positionAllowanceValue(
+  bucket: MatchupPositionFamilyBucket | null,
+  statKey: string,
+) {
+  if (!bucket) {
+    return null;
+  }
+  const value = (bucket as Record<string, number | null | undefined>)[statKey];
+  return typeof value === "number" ? value : null;
 }
 
 type InsightWindowStatKey = Exclude<keyof MatchupInsightsWindow, "games">;

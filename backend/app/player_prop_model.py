@@ -21,9 +21,10 @@ from .team_form_regime import build_team_form_regime
 from .timezone_utils import APP_TIMEZONE
 
 
-MODEL_VERSION = "adaptive-context-v12-team-form-regime"
+MODEL_VERSION = "adaptive-context-v13-position-allowance"
 COMPONENT_MODEL_VERSION = "component-pregame-v2"
 MODEL_CACHE_PREFIX = "learned_prop_model"
+POSITION_ALLOWANCE_FEATURES_ENABLED = os.getenv("WNBA_ENABLE_POSITION_ALLOWANCE_FEATURES", "0").strip().lower() in {"1", "true", "yes"}
 TRAINING_MARKETS = [
     "points",
     "rebounds",
@@ -52,6 +53,10 @@ FEATURE_NAMES = [
     "is_home",
     "pace_factor",
     "opponent_factor",
+    "position_allowance_overall_ratio",
+    "position_allowance_context_ratio",
+    "position_allowance_context_delta",
+    "position_allowance_sample_strength",
     "common_opponent_factor",
     "h2h_factor",
     "blowout_minutes_delta",
@@ -962,6 +967,33 @@ def _team_form_regime_feature_values(
     ]
 
 
+def _position_allowance_bucket(position: str | None) -> str:
+    position_text = str(position or "").strip().upper()
+    if "G" in position_text:
+        return "guard"
+    if "C" in position_text and "G" not in position_text:
+        return "big"
+    return "wing"
+
+
+def _position_allowance_market_key(market: str) -> str | None:
+    if market in {
+        "points",
+        "rebounds",
+        "assists",
+        "points_rebounds",
+        "points_assists",
+        "rebounds_assists",
+        "points_rebounds_assists",
+        "threes",
+        "steals",
+        "blocks",
+        "blocks_steals",
+    }:
+        return market
+    return None
+
+
 def feature_snapshot(
     conn: sqlite3.Connection,
     player_id: int,
@@ -1037,6 +1069,18 @@ def feature_snapshot(
     pace_factor = _cached_pace_factor(conn, context["team_id"], context["opponent_id"]) if context else 1.0
     opponent_factor = _cached_opponent_factor(conn, context["opponent_id"], market) if context else 1.0
     recent_opponent_factor = _cached_recent_opponent_factor(conn, context["opponent_id"], market) if context else 1.0
+    position_allowance_features = (
+        _cached_position_allowance_features(
+            conn,
+            opponent_id=int(context["opponent_id"]),
+            market=market,
+            position=str(history_rows[0]["position"] or "") if history_rows else "",
+            before_game_date=reference_game_date,
+            defense_is_home=not bool(context["is_home"]),
+        )
+        if context
+        else [1.0, 1.0, 0.0, 0.0]
+    )
     team_rating_context = _cached_team_rating_context(conn, int(context["team_id"]), reference_game_date) if context else None
     opponent_rating_context = _cached_team_rating_context(conn, int(context["opponent_id"]), reference_game_date) if context else None
     league_rating_context = _cached_league_rating_context(conn, reference_game_date) if context else None
@@ -1168,6 +1212,7 @@ def feature_snapshot(
         1.0 if context and context["is_home"] else 0.0,
         pace_factor,
         opponent_factor,
+        *position_allowance_features,
         common_opponent_factor,
         h2h_factor,
         blowout["minutes_delta"],
@@ -1189,6 +1234,7 @@ def feature_snapshot(
         f"last 10 {last_10_avg:.1f}, rate x minutes {rate_projection:.1f} on {projected_minutes:.1f} projected minutes. "
         f"Minutes trend {minutes_trend:+.1f}, minute volatility {minute_volatility:.1f}, value volatility {value_volatility:.1f}, consistency {consistency_score:.2f}. "
         f"Context: pace {pace_factor:.2f}, opponent {opponent_factor:.2f}, "
+        f"pos allow {position_allowance_features[0]:.2f}/{position_allowance_features[1]:.2f}, "
         f"common opponents {common_opponent_factor:.2f}, h2h {h2h_factor:.2f}, blowout {blowout['risk']} "
         f"({blowout['minutes_delta']:+.1f} min), "
         f"{'home' if context and context['is_home'] else 'away'} {home_factor:.2f}, "
@@ -2734,6 +2780,14 @@ def _historical_training_features(
     pace_factor = _cached_pace_factor(conn, int(context["team_id"]), int(context["opponent_id"]))
     opponent_factor = _cached_opponent_factor(conn, int(context["opponent_id"]), market)
     recent_opponent_factor = _cached_recent_opponent_factor(conn, int(context["opponent_id"]), market)
+    position_allowance_features = _cached_position_allowance_features(
+        conn,
+        opponent_id=int(context["opponent_id"]),
+        market=market,
+        position=str(_row_mapping_value(row, "position") or ""),
+        before_game_date=current_game_date,
+        defense_is_home=not bool(context["is_home"]),
+    )
     team_rating_context = _cached_team_rating_context(conn, int(context["team_id"]), current_game_date)
     opponent_rating_context = _cached_team_rating_context(conn, int(context["opponent_id"]), current_game_date)
     league_rating_context = _cached_league_rating_context(conn, current_game_date)
@@ -2922,6 +2976,7 @@ def _historical_training_features(
         1.0 if is_home else 0.0,
         pace_factor,
         opponent_factor,
+        *position_allowance_features,
         common_opponent_factor,
         h2h_factor,
         float(blowout["minutes_delta"]),
@@ -6076,6 +6131,36 @@ def _cached_opponent_factor(conn: sqlite3.Connection, opponent_id: int, market: 
     return float(cache[key])
 
 
+def _cached_position_allowance_features(
+    conn: sqlite3.Connection,
+    *,
+    opponent_id: int,
+    market: str,
+    position: str | None,
+    before_game_date: str | None,
+    defense_is_home: bool,
+) -> list[float]:
+    cache = _connection_training_cache_bucket(conn, "position_allowance_features")
+    key = (
+        int(opponent_id),
+        str(market),
+        _position_allowance_bucket(position),
+        str(before_game_date or ""),
+        1 if defense_is_home else 0,
+        1 if POSITION_ALLOWANCE_FEATURES_ENABLED else 0,
+    )
+    if key not in cache:
+        cache[key] = _position_allowance_features(
+            conn,
+            opponent_id=int(opponent_id),
+            market=str(market),
+            position=position,
+            before_game_date=before_game_date,
+            defense_is_home=defense_is_home,
+        )
+    return list(cache[key])  # type: ignore[return-value]
+
+
 def _cached_common_opponent_factor(
     conn: sqlite3.Connection,
     player_id: int,
@@ -6744,6 +6829,112 @@ def _opponent_factor(conn: sqlite3.Connection, opponent_id: int, market: str) ->
     opponent_allowed = sum(_market_value(row, market) for row in opponent_rows) / len(opponent_rows)
     league_allowed = sum(_market_value(row, market) for row in league_rows) / len(league_rows)
     return _clamp(opponent_allowed / league_allowed, 0.90, 1.10) if league_allowed > 0 else 1.0
+
+
+def _position_allowance_features(
+    conn: sqlite3.Connection,
+    *,
+    opponent_id: int,
+    market: str,
+    position: str | None,
+    before_game_date: str | None,
+    defense_is_home: bool,
+) -> list[float]:
+    if not POSITION_ALLOWANCE_FEATURES_ENABLED:
+        return [1.0, 1.0, 0.0, 0.0]
+    market_key = _position_allowance_market_key(market)
+    if market_key is None:
+        return [1.0, 1.0, 0.0, 0.0]
+    bucket = _position_allowance_bucket(position)
+    date_filter = "AND g.game_date < ?" if before_game_date is not None else ""
+    game_params: list[object] = [int(opponent_id)]
+    if before_game_date is not None:
+        game_params.append(before_game_date)
+    overall_game_rows = conn.execute(
+        f"""
+        SELECT tgr.game_id, tgr.is_home
+        FROM team_game_results tgr
+        JOIN games g ON g.id = tgr.game_id
+        WHERE tgr.team_id = ?
+          {date_filter}
+        ORDER BY g.game_date DESC, tgr.game_id DESC
+        LIMIT 10
+        """,
+        game_params,
+    ).fetchall()
+    if not overall_game_rows:
+        return [1.0, 1.0, 0.0, 0.0]
+    overall_game_ids = [int(row["game_id"]) for row in overall_game_rows]
+    context_game_ids = [
+        int(row["game_id"])
+        for row in overall_game_rows
+        if bool(int(row["is_home"])) == bool(defense_is_home)
+    ][:5]
+    stat_placeholders = ",".join("?" for _ in overall_game_ids)
+    stat_params: list[object] = [*overall_game_ids, int(opponent_id)]
+    stat_rows = conn.execute(
+        f"""
+        SELECT
+            s.*,
+            p.position,
+            COALESCE((
+                SELECT h.team_id
+                FROM player_team_history h
+                WHERE h.player_id = s.player_id AND h.game_id = s.game_id
+                ORDER BY h.id DESC
+                LIMIT 1
+            ), p.team_id) AS resolved_team_id
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        WHERE s.game_id IN ({stat_placeholders})
+          AND COALESCE((
+                SELECT h.team_id
+                FROM player_team_history h
+                WHERE h.player_id = s.player_id AND h.game_id = s.game_id
+                ORDER BY h.id DESC
+                LIMIT 1
+            ), p.team_id) != ?
+        """,
+        stat_params,
+    ).fetchall()
+    bucket_rows = [row for row in stat_rows if _position_allowance_bucket(row["position"]) == bucket]
+    if not bucket_rows:
+        return [1.0, 1.0, 0.0, 0.0]
+    context_game_id_set = set(context_game_ids)
+    context_rows = [row for row in bucket_rows if int(row["game_id"]) in context_game_id_set]
+    league_params: list[object] = [bucket]
+    league_date_filter = "WHERE g.game_date < ?" if before_game_date is not None else ""
+    if before_game_date is not None:
+        league_params.append(before_game_date)
+    league_rows = conn.execute(
+        f"""
+        SELECT s.*, p.position
+        FROM player_game_stats s
+        JOIN players p ON p.id = s.player_id
+        JOIN games g ON g.id = s.game_id
+        {league_date_filter}
+        ORDER BY g.game_date DESC, s.game_id DESC
+        LIMIT 1500
+        """,
+        league_params[1:] if before_game_date is not None else [],
+    ).fetchall()
+    league_bucket_rows = [row for row in league_rows if _position_allowance_bucket(row["position"]) == bucket]
+    if not league_bucket_rows:
+        return [1.0, 1.0, 0.0, 0.0]
+    overall_allowed = sum(_market_value(row, market_key) for row in bucket_rows) / max(len(bucket_rows), 1)
+    context_allowed = (
+        sum(_market_value(row, market_key) for row in context_rows) / len(context_rows)
+        if context_rows
+        else overall_allowed
+    )
+    league_allowed = sum(_market_value(row, market_key) for row in league_bucket_rows) / len(league_bucket_rows)
+    if league_allowed <= 0:
+        return [1.0, 1.0, 0.0, 0.0]
+    overall_ratio = _clamp(overall_allowed / league_allowed, 0.85, 1.15)
+    context_ratio = _clamp(context_allowed / league_allowed, 0.82, 1.18)
+    context_delta = _clamp(context_ratio - overall_ratio, -0.18, 0.18)
+    sample_strength = min(len(context_rows) / 18.0, 1.0)
+    return [overall_ratio, context_ratio, context_delta, sample_strength]
 
 
 def _recent_opponent_factor(conn: sqlite3.Connection, opponent_id: int, market: str) -> float:
