@@ -1416,8 +1416,9 @@ tbody tr.selected {
 
 .insight-value-chip strong {
   color: inherit;
-  font-size: 15px;
-  font-weight: 900;
+  font-size: 16px;
+  font-weight: 950;
+  line-height: 1.05;
 }
 
 .insight-value-chip.tone-strong {
