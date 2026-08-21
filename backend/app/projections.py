@@ -9,7 +9,7 @@ from typing import Callable
 from .db import sqlite_write_lock
 from .odds import american_to_implied_probability, expected_value
 from .player_prop_model import MODEL_VERSION as LEARNED_MODEL_VERSION
-from .player_prop_model import clear_model_cache, predict_player_prop, prewarm_model_cache
+from .player_prop_model import SPECIALTY_MARKETS, clear_model_cache, market_family, predict_player_prop, prewarm_model_cache
 from .timezone_utils import APP_TIMEZONE
 
 
@@ -54,6 +54,39 @@ SIDE_PROJECTION_BIAS_MIN_SAMPLES = 12
 SIDE_PROJECTION_BIAS_BLEND_WEIGHT = 0.35
 SIDE_PROJECTION_BIAS_MAX_ADJUSTMENT = 0.75
 SCORING_OVER_EDGE_PENALTY = 0.02
+HIGH_CONFIDENCE_MIN_SAMPLE_COUNT = 12
+HIGH_CONFIDENCE_MIN_AVG_MINUTES = 22.0
+MEDIUM_CONFIDENCE_MIN_SAMPLE_COUNT = 8
+MEDIUM_CONFIDENCE_MIN_AVG_MINUTES = 18.0
+LIMITED_SAMPLE_MEDIUM_EDGE = 0.14
+LIMITED_SAMPLE_MEDIUM_MARGIN = 1.35
+SPECIALTY_HIGH_CONFIDENCE_MARKETS = frozenset()
+CONFIDENCE_FAMILY_POLICY = {
+    "core": {
+        "high_edge": 0.14,
+        "high_margin": 1.25,
+        "medium_edge": 0.09,
+        "medium_margin": 0.95,
+        "limited_medium_edge": 0.14,
+        "limited_medium_margin": 1.35,
+    },
+    "combo": {
+        "high_edge": 0.16,
+        "high_margin": 1.35,
+        "medium_edge": 0.10,
+        "medium_margin": 1.0,
+        "limited_medium_edge": 0.15,
+        "limited_medium_margin": 1.4,
+    },
+    "specialty": {
+        "high_edge": 0.18,
+        "high_margin": 1.45,
+        "medium_edge": 0.12,
+        "medium_margin": 1.1,
+        "limited_medium_edge": 0.16,
+        "limited_medium_margin": 1.45,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -1036,15 +1069,36 @@ def _confidence(
     sample_count, avg_minutes = _player_sample_quality(conn, player_id, game_id)
     normalized_margin = stat_margin / max(sigma, 1.0)
     market_key = str(market).lower()
+    family_policy = CONFIDENCE_FAMILY_POLICY[market_family(market_key)]
     side_key = str(side).lower()
     base_confidence = "low"
-    if sample_count < 7 or avg_minutes < 16:
-        if edge >= 0.12 and normalized_margin >= 1.25:
+    if sample_count < MEDIUM_CONFIDENCE_MIN_SAMPLE_COUNT or avg_minutes < MEDIUM_CONFIDENCE_MIN_AVG_MINUTES:
+        if (
+            edge >= float(family_policy["limited_medium_edge"])
+            and normalized_margin >= float(family_policy["limited_medium_margin"])
+        ):
             base_confidence = "medium"
-    elif edge >= 0.11 and normalized_margin >= 1.10:
+    elif (
+        sample_count >= HIGH_CONFIDENCE_MIN_SAMPLE_COUNT
+        and avg_minutes >= HIGH_CONFIDENCE_MIN_AVG_MINUTES
+        and edge >= float(family_policy["high_edge"])
+        and normalized_margin >= float(family_policy["high_margin"])
+    ):
         base_confidence = "high"
-    elif edge >= 0.07 and normalized_margin >= 0.85:
+    elif edge >= float(family_policy["medium_edge"]) and normalized_margin >= float(family_policy["medium_margin"]):
         base_confidence = "medium"
+
+    if market_key in SPECIALTY_MARKETS and market_key not in SPECIALTY_HIGH_CONFIDENCE_MARKETS:
+        if base_confidence == "high":
+            base_confidence = "medium"
+        if base_confidence == "medium" and (edge < 0.11 or normalized_margin < 1.05):
+            base_confidence = "low"
+    if market_family(market_key) == "combo":
+        if base_confidence == "high":
+            if sample_count < 16 or avg_minutes < 26.0 or edge < 0.18 or normalized_margin < 1.45:
+                base_confidence = "medium"
+        if base_confidence == "medium" and (edge < 0.11 or normalized_margin < 1.08):
+            base_confidence = "low"
 
     if (
         base_confidence == "medium"
@@ -1060,6 +1114,8 @@ def _confidence(
         and (edge < 0.10 or normalized_margin < 1.0)
     ):
         return "low"
+    if base_confidence == "high" and (edge < 0.16 or normalized_margin < 1.35):
+        return "medium"
     return base_confidence
 
 

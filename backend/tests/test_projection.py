@@ -4650,6 +4650,37 @@ def test_walk_forward_training_reuses_cached_run_when_data_unchanged(monkeypatch
     assert first_row_count == second_row_count
 
 
+def test_walk_forward_training_forces_curated_training_db_refresh(monkeypatch) -> None:
+    forced: list[tuple[str, bool]] = []
+
+    def record_prepare(_conn, *, force_rebuild: bool = False):
+        forced.append(("prepare", force_rebuild))
+        return {"minutes": {}, "game": {}, "player_prop": {}}
+
+    monkeypatch.setattr(training_module, "_prepare_curated_training_dbs", record_prepare)
+    monkeypatch.setattr(
+        training_module,
+        "_latest_matching_run",
+        lambda *_args, **_kwargs: {
+            "model_version": MODEL_VERSION,
+            "run_type": "walk_forward_segments",
+            "status": "completed",
+            "started_at": "2026-08-20T00:00:00+00:00",
+            "finished_at": "2026-08-20T00:00:01+00:00",
+            "training_rows": 1,
+            "markets": [],
+            "metrics": {},
+            "notes": "cached",
+        },
+    )
+
+    with connect() as conn:
+        result = run_walk_forward_training(conn)
+
+    assert result["status"] == "completed"
+    assert forced == [("prepare", True)]
+
+
 def test_run_parameter_tuning_returns_ranked_candidates() -> None:
     load_test_history()
     with connect() as conn:
@@ -4843,6 +4874,84 @@ def test_model_diagnostics_defaults_to_current_model_version(monkeypatch) -> Non
     assert result["model_version"] == MODEL_VERSION
     assert captured_versions
     assert all(version == MODEL_VERSION for version in captured_versions)
+
+
+def test_projection_accuracy_review_filters_to_normal_minutes_and_reports_worst_misses() -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (2101, "Normal Minutes Scorer", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (2102, "Low Minutes Scorer", 10, "G", "starter"),
+        )
+        conn.executemany(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)",
+            [
+                (21001, "2026-05-10", "2026-05-10T19:00:00Z", 10, 3, -2.5, 151.5),
+                (21002, "2026-05-11", "2026-05-11T19:00:00Z", 10, 3, -2.5, 151.5),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO team_game_results (team_id, game_id, is_home, points, opponent_points, possessions, closing_spread, closing_total, ats_result, total_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (10, 21001, 1, 81, 75, 79.0, -2.5, 151.5, "cover", "over"),
+                (10, 21002, 1, 81, 75, 79.0, -2.5, 151.5, "cover", "over"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO player_game_stats (player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (2101, 21001, 34, 30, 6, 5, 2, 1, 0, 2),
+                (2102, 21002, 6, 0, 0, 0, 0, 0, 0, 0),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (21001, 21001, 2101, 'DraftKings', 'points', 22.5, -110, -110, datetime.now(timezone.utc).isoformat()),
+                (21002, 21002, 2102, 'DraftKings', 'points', 18.5, -110, -110, datetime.now(timezone.utc).isoformat()),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (210011, 21001, MODEL_VERSION, "2026-05-10T15:00:00Z", 12.0, "under", 0.58, 0.50, 0.08, 0.03, "medium", "normal miss"),
+                (210021, 21002, MODEL_VERSION, "2026-05-11T15:00:00Z", 19.0, "over", 0.57, 0.50, 0.07, 0.02, "medium", "low-minute miss"),
+            ],
+        )
+        settle_completed_props(conn)
+
+        payload = main_module._projection_accuracy_review_payload(
+            conn,
+            model_version=MODEL_VERSION,
+            min_minutes=11.0,
+            top_n=10,
+            markets=None,
+        )
+
+    assert payload["model_version"] == MODEL_VERSION
+    assert payload["total_predictions"] == 1
+    assert payload["mae"] == 18.0
+    assert payload["market_breakdown"] == [
+        {
+            "market": "points",
+            "predictions": 1,
+            "mae": 18.0,
+            "bias": -18.0,
+            "miss8_rate": 1.0,
+            "miss12_rate": 1.0,
+        }
+    ]
+    assert payload["worst_misses"][0]["player_name"] == "Normal Minutes Scorer"
+    assert payload["worst_misses"][0]["player_minutes"] == 34.0
+    assert payload["worst_by_market"]["points"][0]["abs_error"] == 18.0
 
 
 def test_settle_completed_props_writes_actual_results() -> None:
@@ -5255,6 +5364,153 @@ def test_predict_player_prop_uses_component_only_when_market_policy_rejects_lear
     assert model_version == COMPONENT_MODEL_VERSION
 
 
+def test_predict_player_prop_applies_role_minutes_safety_floor_to_nonpositive_component_output(monkeypatch) -> None:
+    feature_values = [0.0 for _ in FEATURE_NAMES]
+    feature_values[FEATURE_INDEX["weighted_recent"]] = 22.0
+    feature_values[FEATURE_INDEX["last_10_avg"]] = 21.0
+    feature_values[FEATURE_INDEX["rate_projection"]] = 20.0
+    feature_values[FEATURE_INDEX["ewma_minutes"]] = 31.0
+    feature_values[FEATURE_INDEX["minutes_trend"]] = 1.0
+    snapshot = FeatureSnapshot(values=feature_values, component_projection=0.0, reason="snapshot reason")
+    learned_model = RidgeModel("points", 200, 0.0, [], [0.0 for _ in FEATURE_NAMES], [1.0 for _ in FEATURE_NAMES])
+
+    monkeypatch.setattr("backend.app.player_prop_model.feature_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr("backend.app.player_prop_model._player_sample_quality", lambda *_args, **_kwargs: (12, 30.0))
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_model", lambda *_args, **_kwargs: learned_model)
+    monkeypatch.setattr(
+        "backend.app.player_prop_model._market_overlay_decision",
+        lambda *_args, **_kwargs: {"mode": "component_only", "note": "walk-forward gate failed"},
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._component_market_line_weight", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_combo_market_projection", lambda learned, *_args, **_kwargs: learned)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_learned_projection", lambda learned, *_args, **_kwargs: (learned, "no stabilization"))
+
+    with connect() as conn:
+        projection, reason, model_version = predict_player_prop(
+            conn,
+            player_id=1001,
+            market="points",
+            game_id=100,
+            line=None,
+            over_odds=None,
+            under_odds=None,
+        )
+
+    assert projection == pytest.approx(12.76, abs=0.01)
+    assert "role/minutes safety floor" in reason
+    assert model_version == COMPONENT_MODEL_VERSION
+
+
+def test_predict_player_prop_preserves_more_scoring_ceiling_for_star_usage_profiles(monkeypatch) -> None:
+    feature_values = [0.0 for _ in FEATURE_NAMES]
+    feature_values[FEATURE_INDEX["weighted_recent"]] = 22.0
+    feature_values[FEATURE_INDEX["last_10_avg"]] = 21.0
+    feature_values[FEATURE_INDEX["rate_projection"]] = 20.0
+    feature_values[FEATURE_INDEX["ewma_minutes"]] = 31.0
+    feature_values[FEATURE_INDEX["minutes_trend"]] = 1.0
+    feature_values[FEATURE_INDEX["arch_usage_scorer"]] = 1.0
+    feature_values[FEATURE_INDEX["role_primary_handler"]] = 1.0
+    feature_values[FEATURE_INDEX["role_alpha_shot"]] = 1.0
+    feature_values[FEATURE_INDEX["recent_position_minute_share"]] = 0.62
+    feature_values[FEATURE_INDEX["same_position_unavailable_minutes"]] = 16.0
+    snapshot = FeatureSnapshot(values=feature_values, component_projection=0.0, reason="snapshot reason")
+    learned_model = RidgeModel("points", 200, 0.0, [], [0.0 for _ in FEATURE_NAMES], [1.0 for _ in FEATURE_NAMES])
+
+    monkeypatch.setattr("backend.app.player_prop_model.feature_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr("backend.app.player_prop_model._player_sample_quality", lambda *_args, **_kwargs: (12, 30.0))
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_model", lambda *_args, **_kwargs: learned_model)
+    monkeypatch.setattr(
+        "backend.app.player_prop_model._market_overlay_decision",
+        lambda *_args, **_kwargs: {"mode": "component_only", "note": "walk-forward gate failed"},
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._component_market_line_weight", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_combo_market_projection", lambda learned, *_args, **_kwargs: learned)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_learned_projection", lambda learned, *_args, **_kwargs: (learned, "no stabilization"))
+
+    with connect() as conn:
+        projection, reason, model_version = predict_player_prop(
+            conn,
+            player_id=1001,
+            market="points",
+            game_id=100,
+            line=None,
+            over_odds=None,
+            under_odds=None,
+        )
+
+    assert projection == pytest.approx(15.4, abs=0.01)
+    assert "role/minutes safety floor" in reason
+    assert model_version == COMPONENT_MODEL_VERSION
+
+
+def test_predict_player_prop_applies_combo_safety_floor_to_implausibly_low_projection(monkeypatch) -> None:
+    feature_values = [0.0 for _ in FEATURE_NAMES]
+    feature_values[FEATURE_INDEX["weighted_recent"]] = 31.0
+    feature_values[FEATURE_INDEX["last_10_avg"]] = 29.0
+    feature_values[FEATURE_INDEX["rate_projection"]] = 30.0
+    feature_values[FEATURE_INDEX["ewma_minutes"]] = 33.0
+    feature_values[FEATURE_INDEX["minutes_trend"]] = 0.0
+    snapshot = FeatureSnapshot(values=feature_values, component_projection=14.0, reason="snapshot reason")
+    learned_model = RidgeModel("points_rebounds", 200, 0.0, [], [0.0 for _ in FEATURE_NAMES], [1.0 for _ in FEATURE_NAMES])
+
+    monkeypatch.setattr("backend.app.player_prop_model.feature_snapshot", lambda *_args, **_kwargs: snapshot)
+    monkeypatch.setattr("backend.app.player_prop_model._player_sample_quality", lambda *_args, **_kwargs: (12, 31.0))
+    monkeypatch.setattr("backend.app.player_prop_model.train_market_model", lambda *_args, **_kwargs: learned_model)
+    monkeypatch.setattr(
+        "backend.app.player_prop_model._market_overlay_decision",
+        lambda *_args, **_kwargs: {"mode": "component_only", "note": "walk-forward gate failed"},
+    )
+    monkeypatch.setattr("backend.app.player_prop_model._component_market_line_weight", lambda *_args, **_kwargs: 0.0)
+    monkeypatch.setattr("backend.app.player_prop_model._predict", lambda *_args, **_kwargs: 2.0)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_combo_market_projection", lambda learned, *_args, **_kwargs: learned)
+    monkeypatch.setattr("backend.app.player_prop_model._stabilize_learned_projection", lambda learned, *_args, **_kwargs: (learned, "no stabilization"))
+
+    with connect() as conn:
+        projection, reason, model_version = predict_player_prop(
+            conn,
+            player_id=1001,
+            market="points_rebounds",
+            game_id=100,
+            line=None,
+            over_odds=None,
+            under_odds=None,
+        )
+
+    assert projection == pytest.approx(22.32, abs=0.01)
+    assert "role/minutes safety floor" in reason
+    assert model_version == COMPONENT_MODEL_VERSION
+
+
+def test_stabilize_combo_market_projection_applies_stronger_floor_for_scoring_combos() -> None:
+    values = [0.0 for _ in FEATURE_NAMES]
+    values[FEATURE_INDEX["weighted_recent"]] = 30.0
+    values[FEATURE_INDEX["last_10_avg"]] = 28.0
+    values[FEATURE_INDEX["rate_projection"]] = 29.0
+    values[FEATURE_INDEX["ewma_minutes"]] = 32.0
+    values[FEATURE_INDEX["minutes_trend"]] = 0.0
+    snapshot = FeatureSnapshot(values=values, component_projection=24.0, reason="test")
+
+    adjusted = player_prop_model_module._stabilize_combo_market_projection(18.0, snapshot, "points_rebounds")
+
+    assert adjusted == pytest.approx(25.2, abs=0.01)
+
+
+def test_stabilize_combo_market_projection_caps_pra_overshoot() -> None:
+    values = [0.0 for _ in FEATURE_NAMES]
+    values[FEATURE_INDEX["weighted_recent"]] = 30.0
+    values[FEATURE_INDEX["last_10_avg"]] = 29.0
+    values[FEATURE_INDEX["rate_projection"]] = 28.0
+    values[FEATURE_INDEX["ewma_minutes"]] = 31.0
+    values[FEATURE_INDEX["minutes_trend"]] = 0.0
+    snapshot = FeatureSnapshot(values=values, component_projection=27.0, reason="test")
+
+    adjusted = player_prop_model_module._stabilize_combo_market_projection(40.0, snapshot, "points_rebounds_assists")
+
+    assert adjusted == pytest.approx(34.8, abs=0.01)
+
+
 def test_market_overlay_decision_honors_component_only_policy_even_when_gate_passes(monkeypatch) -> None:
     monkeypatch.setattr(
         player_prop_model_module,
@@ -5273,7 +5529,51 @@ def test_market_overlay_decision_honors_component_only_policy_even_when_gate_pas
         decision = player_prop_model_module._market_overlay_decision(conn, "points_rebounds")
 
     assert decision["mode"] == "component_only"
-    assert "market policy holds component baseline live" in str(decision["note"])
+    assert "component baseline live" in str(decision["note"])
+
+
+def test_market_overlay_decision_applies_family_policy_to_combo_markets(monkeypatch) -> None:
+    monkeypatch.setattr(
+        player_prop_model_module,
+        "_market_overlay_metrics",
+        lambda _conn: {
+            "points_assists": {
+                "rows": 2400,
+                "mae_improvement": 0.18,
+                "rmse_improvement": 0.09,
+                "bias": 0.02,
+            }
+        },
+    )
+
+    with connect() as conn:
+        decision = player_prop_model_module._market_overlay_decision(conn, "points_assists")
+
+    assert decision["mode"] == "component_only"
+    assert "component baseline live" in str(decision["note"])
+
+
+def test_market_overlay_decision_keeps_specialty_markets_on_component_without_final_support(monkeypatch) -> None:
+    monkeypatch.setattr(
+        player_prop_model_module,
+        "_market_overlay_metrics",
+        lambda _conn: {
+            "steals": {
+                "rows": 2400,
+                "mae_improvement": 0.18,
+                "rmse_improvement": 0.09,
+                "bias": 0.02,
+                "final_rows": 0,
+                "residual_rows": 0,
+            }
+        },
+    )
+
+    with connect() as conn:
+        decision = player_prop_model_module._market_overlay_decision(conn, "steals")
+
+    assert decision["mode"] == "component_only"
+    assert "lacks learned final/residual support" in str(decision["note"])
 
 
 def test_predict_player_prop_blends_component_and_learned_when_market_policy_passes(monkeypatch) -> None:
@@ -5307,6 +5607,78 @@ def test_predict_player_prop_blends_component_and_learned_when_market_policy_pas
     assert projection == pytest.approx(19.5)
     assert "learned/component blend 25%" in reason
     assert model_version == MODEL_VERSION
+
+
+def test_prop_confidence_requires_stronger_support_for_high_confidence(monkeypatch) -> None:
+    monkeypatch.setattr(projections_module, "_player_sample_quality", lambda *_args, **_kwargs: (12, 24.0))
+
+    with connect() as conn:
+        confidence = projections_module._confidence(
+            edge=0.145,
+            stat_margin=1.28,
+            sigma=1.0,
+            player_id=1001,
+            game_id=100,
+            conn=conn,
+            market="points",
+            side="over",
+        )
+
+    assert confidence == "medium"
+
+
+def test_prop_confidence_caps_specialty_markets_below_high(monkeypatch) -> None:
+    monkeypatch.setattr(projections_module, "_player_sample_quality", lambda *_args, **_kwargs: (18, 28.0))
+
+    with connect() as conn:
+        confidence = projections_module._confidence(
+            edge=0.18,
+            stat_margin=1.5,
+            sigma=1.0,
+            player_id=1001,
+            game_id=100,
+            conn=conn,
+            market="steals",
+            side="under",
+        )
+
+    assert confidence == "medium"
+
+
+def test_prop_confidence_requires_stronger_support_for_combo_markets(monkeypatch) -> None:
+    monkeypatch.setattr(projections_module, "_player_sample_quality", lambda *_args, **_kwargs: (18, 28.0))
+
+    with connect() as conn:
+        confidence = projections_module._confidence(
+            edge=0.145,
+            stat_margin=1.28,
+            sigma=1.0,
+            player_id=1001,
+            game_id=100,
+            conn=conn,
+            market="points_rebounds",
+            side="over",
+        )
+
+    assert confidence == "medium"
+
+
+def test_prop_confidence_demotes_combo_market_without_strong_margin(monkeypatch) -> None:
+    monkeypatch.setattr(projections_module, "_player_sample_quality", lambda *_args, **_kwargs: (18, 28.0))
+
+    with connect() as conn:
+        confidence = projections_module._confidence(
+            edge=0.105,
+            stat_margin=1.02,
+            sigma=1.0,
+            player_id=1001,
+            game_id=100,
+            conn=conn,
+            market="points_rebounds",
+            side="over",
+        )
+
+    assert confidence == "low"
 
 
 def test_build_prop_projection_penalizes_thin_combo_under_recommendations(monkeypatch) -> None:
@@ -5443,6 +5815,105 @@ def test_build_prop_projection_penalizes_thin_rebounds_over_recommendations(monk
 
     assert projection.projection == 8.8
     assert projection.recommended_side == "under"
+
+
+def test_value_board_requires_stronger_ev_for_scoring_combo_markets() -> None:
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "high",
+            "market": "points_rebounds",
+            "recommended_side": "over",
+            "edge": 0.11,
+            "expected_value": 0.05,
+        }
+    ) is False
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "high",
+            "market": "points_rebounds",
+            "recommended_side": "over",
+            "edge": 0.11,
+            "expected_value": 0.08,
+        }
+    ) is True
+
+
+def test_value_board_tightens_points_thresholds() -> None:
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "low",
+            "market": "points",
+            "recommended_side": "under",
+            "edge": 0.06,
+            "expected_value": 0.03,
+        }
+    ) is False
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "low",
+            "market": "points",
+            "recommended_side": "under",
+            "edge": 0.07,
+            "expected_value": 0.03,
+        }
+    ) is True
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "high",
+            "market": "points",
+            "recommended_side": "over",
+            "edge": 0.12,
+            "expected_value": 0.03,
+        }
+    ) is False
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "high",
+            "market": "points",
+            "recommended_side": "over",
+            "edge": 0.13,
+            "expected_value": 0.03,
+        }
+    ) is True
+
+
+def test_value_board_tightens_points_rebounds_thresholds() -> None:
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "low",
+            "market": "points_rebounds",
+            "recommended_side": "over",
+            "edge": 0.07,
+            "expected_value": 0.10,
+        }
+    ) is False
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "low",
+            "market": "points_rebounds",
+            "recommended_side": "over",
+            "edge": 0.08,
+            "expected_value": 0.10,
+        }
+    ) is True
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "medium",
+            "market": "points_rebounds",
+            "recommended_side": "over",
+            "edge": 0.10,
+            "expected_value": 0.11,
+        }
+    ) is False
+    assert main_module._include_value_board_pick(
+        {
+            "confidence": "medium",
+            "market": "points_rebounds",
+            "recommended_side": "over",
+            "edge": 0.11,
+            "expected_value": 0.11,
+        }
+    ) is True
 
 
 def test_predict_player_prop_uses_reduced_transfer_blend_when_transfer_slice_underperforms(monkeypatch) -> None:
@@ -10644,6 +11115,89 @@ def test_model_performance_uses_latest_value_board_pick_per_prop_line() -> None:
     assert performance["game_totals"]["settled"] == 0
 
 
+def test_model_performance_splits_low_minute_cohort() -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (2003, "Normal Minutes Player", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (2004, "Zero Minute Player", 10, "G", "starter"),
+        )
+        conn.executemany(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)",
+            [
+                (20003, "2026-05-03", "2026-05-03T19:00:00Z", 10, 3, -2.5, 151.5),
+                (20004, "2026-05-04", "2026-05-04T19:00:00Z", 10, 3, -2.5, 151.5),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO team_game_results (team_id, game_id, is_home, points, opponent_points, possessions, closing_spread, closing_total, ats_result, total_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (10, 20003, 1, 81, 75, 79.0, -2.5, 151.5, "cover", "over"),
+                (10, 20004, 1, 81, 75, 79.0, -2.5, 151.5, "cover", "over"),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO player_game_stats (player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (2003, 20003, 34, 24, 6, 5, 1, 2, 0, 1),
+                (2004, 20004, 0, 0, 0, 0, 0, 0, 0, 0),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (20003, 20003, 2003, "DraftKings", "points", 23.5, -110, -110, datetime.now(timezone.utc).isoformat()),
+                (20004, 20004, 2004, "DraftKings", "points", 18.5, -110, -110, datetime.now(timezone.utc).isoformat()),
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (200031, 20003, MODEL_VERSION, "2026-05-03T15:00:00Z", 25.0, "over", 0.62, 0.50, 0.12, 0.03, "high", "normal"),
+                (200041, 20004, MODEL_VERSION, "2026-05-04T15:00:00Z", 19.0, "over", 0.62, 0.50, 0.12, 0.025, "high", "low-minute"),
+            ],
+        )
+        settle_completed_props(conn)
+
+    performance = model_performance()
+    cohorts = performance["minutes_cohorts"]
+    assert cohorts["normal_minutes"]["qualified"] == 1
+    assert cohorts["normal_minutes"]["wins"] == 1
+    assert cohorts["normal_minutes"]["win_rate"] == 1.0
+    assert cohorts["normal_minutes"]["average_ev"] == 0.03
+    assert cohorts["normal_minutes"]["by_market"] == [
+        {"market": "points", "qualified": 1, "wins": 1, "win_rate": 1.0, "average_ev": 0.03}
+    ]
+    assert cohorts["low_minutes"]["qualified"] == 1
+    assert cohorts["low_minutes"]["wins"] == 0
+    assert cohorts["low_minutes"]["win_rate"] == 0.0
+    assert cohorts["low_minutes"]["average_ev"] == 0.025
+    assert cohorts["low_minutes"]["by_market"] == [
+        {"market": "points", "qualified": 1, "wins": 0, "win_rate": 0.0, "average_ev": 0.025}
+    ]
+    assert cohorts["unknown_minutes"]["qualified"] == 0
+    assert cohorts["unknown_minutes"]["wins"] == 0
+    assert cohorts["unknown_minutes"]["win_rate"] is None
+    assert cohorts["unknown_minutes"]["average_ev"] is None
+    assert cohorts["unknown_minutes"]["by_market"] == []
+    scoring = performance["scoring_market_normal_minutes"]
+    assert scoring["qualified"] == 1
+    assert scoring["wins"] == 1
+    assert scoring["win_rate"] == 1.0
+    assert scoring["average_ev"] == 0.03
+    assert scoring["markets"] == [
+        {"market": "points", "qualified": 1, "wins": 1, "win_rate": 1.0, "average_ev": 0.03}
+    ]
+
+
 def test_model_performance_includes_live_game_totals_tracking() -> None:
     with connect() as conn:
         conn.execute(
@@ -10724,6 +11278,52 @@ def test_model_performance_includes_live_game_totals_tracking() -> None:
     assert totals["by_edge"] == [{"label": "2.5-5", "settled": 1, "wins": 1, "win_rate": 1.0}]
     assert totals["by_confidence"] == [{"label": "high", "settled": 1, "wins": 1, "win_rate": 1.0}]
     assert GAME_MODEL_VERSION in totals["message"]
+
+
+def test_model_performance_includes_learned_vs_component_comparison() -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO players (id, full_name, team_id, position, rotation_role) VALUES (?, ?, ?, ?, ?)",
+            (2012, "Comparison Player", 10, "G", "starter"),
+        )
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status, rest_days_home, rest_days_away, spread_home, game_total) VALUES (?, ?, ?, ?, ?, 'final', 2, 2, ?, ?)",
+            (20120, "2026-08-10", "2026-08-10T19:00:00Z", 10, 3, -1.5, 156.5),
+        )
+        conn.execute(
+            "INSERT INTO team_game_results (team_id, game_id, is_home, points, opponent_points, possessions, closing_spread, closing_total, ats_result, total_result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (10, 20120, 1, 82, 78, 79.0, -1.5, 156.5, "cover", "over"),
+        )
+        conn.execute(
+            "INSERT INTO player_game_stats (player_id, game_id, minutes, points, rebounds, assists, threes, steals, blocks, turnovers) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (2012, 20120, 35, 22, 5, 6, 2, 1, 0, 2),
+        )
+        conn.execute(
+            "INSERT INTO prop_lines (id, game_id, player_id, sportsbook, market, line, over_odds, under_odds, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (20120, 20120, 2012, "DraftKings", "points", 20.5, -110, -110, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.executemany(
+            """
+            INSERT INTO prop_predictions (
+                id, prop_line_id, model_version, prediction_time, projection, recommended_side,
+                model_probability, implied_probability, edge, expected_value, confidence, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (201201, 20120, MODEL_VERSION, "2026-08-10T15:00:00Z", 22.2, "over", 0.58, 0.50, 0.08, 0.03, "medium", "learned"),
+                (201202, 20120, COMPONENT_MODEL_VERSION, "2026-08-10T15:00:00Z", 19.7, "under", 0.53, 0.50, 0.03, 0.01, "low", "component"),
+            ],
+        )
+        settle_completed_props(conn)
+
+    performance = model_performance()
+    comparison = performance["prop_model_comparison"]
+    assert comparison["models"] == [MODEL_VERSION, COMPONENT_MODEL_VERSION]
+    latest_window = next(item for item in comparison["windows"] if item["days"] == 30)
+    assert latest_window["models"][MODEL_VERSION]["settled"] == 1
+    assert latest_window["models"][MODEL_VERSION]["win_rate"] == 1.0
+    assert latest_window["models"][COMPONENT_MODEL_VERSION]["win_rate"] == 0.0
+    assert latest_window["families"]["core"][MODEL_VERSION]["mae"] == 0.2
 
 
 def test_assemble_direct_game_features_includes_market_prices_and_pregame_aggregates() -> None:

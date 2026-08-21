@@ -241,6 +241,38 @@ DEFAULT_MARKET_OVERLAY_POLICY = {
     "recent_transfer_min_mae_improvement": 0.0,
     "recent_transfer_blend_weight": 0.15,
 }
+CORE_MARKETS = {"points", "rebounds", "assists", "threes"}
+COMBO_MARKETS = {
+    "points_rebounds",
+    "points_assists",
+    "rebounds_assists",
+    "points_rebounds_assists",
+}
+SPECIALTY_MARKETS = {"steals", "blocks", "blocks_steals"}
+MARKET_FAMILY_OVERLAY_POLICY = {
+    "core": {
+        "min_rows": 1800,
+        "min_mae_improvement": 0.04,
+        "min_rmse_improvement": 0.01,
+        "max_abs_bias": 0.15,
+    },
+    "combo": {
+        "mode": "component_only",
+        "min_rows": 1800,
+        "min_mae_improvement": 0.10,
+        "min_rmse_improvement": 0.04,
+        "max_abs_bias": 0.15,
+        "recent_transfer_blend_weight": 0.08,
+    },
+    "specialty": {
+        "mode": "component_only",
+        "min_rows": 1800,
+        "min_mae_improvement": 0.04,
+        "min_rmse_improvement": 0.0,
+        "max_abs_bias": 0.08,
+        "recent_transfer_blend_weight": 0.05,
+    },
+}
 MARKET_OVERLAY_POLICY = {
     "points": {
         "mode": "blend",
@@ -346,6 +378,15 @@ MARKET_OVERLAY_POLICY = {
         "recent_transfer_blend_weight": 0.05,
     },
 }
+
+
+def market_family(market: str) -> str:
+    market_key = str(market or "").strip().lower()
+    if market_key in SPECIALTY_MARKETS:
+        return "specialty"
+    if market_key in COMBO_MARKETS:
+        return "combo"
+    return "core"
 
 @dataclass(frozen=True)
 class ModelTuningConfig:
@@ -619,6 +660,16 @@ def predict_player_prop(
     if snapshot.hard_cap_zero:
         projection = 0.0
         market_note = f"{market_note}; player marked OUT"
+    else:
+        projection, safety_note = _apply_projection_safety_floor(
+            projection,
+            snapshot=snapshot,
+            market=market,
+            sample_count=sample_count,
+            avg_minutes=avg_minutes,
+        )
+        if safety_note:
+            market_note = f"{market_note}; {safety_note}"
 
     if overlay_mode == "component_only":
         reason = (
@@ -661,10 +712,27 @@ def _market_overlay_metrics(conn: sqlite3.Connection) -> dict[str, dict]:
 
 
 def _market_overlay_decision(conn: sqlite3.Connection, market: str) -> dict[str, object]:
-    policy = {**DEFAULT_MARKET_OVERLAY_POLICY, **MARKET_OVERLAY_POLICY.get(str(market), {})}
-    metrics = _market_overlay_metrics(conn).get(str(market))
+    market_key = str(market)
+    family = market_family(market_key)
+    policy = {
+        **DEFAULT_MARKET_OVERLAY_POLICY,
+        **MARKET_FAMILY_OVERLAY_POLICY.get(family, {}),
+        **MARKET_OVERLAY_POLICY.get(market_key, {}),
+    }
+    metrics = _market_overlay_metrics(conn).get(market_key)
     if not isinstance(metrics, dict):
         return {"mode": "component_only", "note": "no saved walk-forward metrics"}
+    if market_key in SPECIALTY_MARKETS:
+        final_rows = int(metrics.get("final_rows") or 0)
+        residual_rows = int(metrics.get("residual_rows") or 0)
+        if final_rows <= 0 or residual_rows <= 0:
+            return {
+                "mode": "component_only",
+                "note": (
+                    f"specialty market lacks learned final/residual support "
+                    f"(final {final_rows}, residual {residual_rows})"
+                ),
+            }
     rows = int(metrics.get("rows") or 0)
     mae_improvement = metrics.get("mae_improvement")
     rmse_improvement = metrics.get("rmse_improvement")
@@ -718,7 +786,7 @@ def _market_overlay_decision(conn: sqlite3.Connection, market: str) -> dict[str,
         return {
             "mode": "component_only",
             "note": (
-                f"market policy holds component baseline live ({rows} rows, MAE {float(mae_improvement):+.3f}, "
+                f"{family} market policy holds component baseline live ({rows} rows, MAE {float(mae_improvement):+.3f}, "
                 f"RMSE {float(rmse_improvement):+.3f})"
             ),
         }
@@ -800,12 +868,23 @@ def _stabilize_combo_market_projection(learned: float, snapshot: FeatureSnapshot
 
     anchor = max(weighted_recent, last_10_avg, rate_projection)
     severe_downside_drift = learned < (anchor * 0.70)
+    scoring_combo = market in {"points_assists", "points_rebounds", "points_rebounds_assists"}
 
     # If minutes are projected down or learned output drifts too far under recent anchors,
     # apply a partial floor for combo markets to avoid implausible collapses.
     if minute_ratio < 0.98 or severe_downside_drift:
-        floor = anchor * 0.78
+        floor_ratio = 0.84 if scoring_combo else 0.78
+        if minute_ratio < 0.92:
+            floor_ratio -= 0.03
+        floor = anchor * floor_ratio
         return max(learned, floor)
+    if scoring_combo:
+        high_ratio = learned / max(anchor, 0.01)
+        high_guard = 1.16 if market == "points_rebounds_assists" else 1.20
+        if minute_ratio < 0.95:
+            high_guard -= 0.03
+        if high_ratio > high_guard:
+            return min(learned, anchor * high_guard)
     return learned
 
 
@@ -859,15 +938,132 @@ def _stabilize_learned_projection(
     return learned, "no stabilization"
 
 
+def _apply_projection_safety_floor(
+    projection: float,
+    *,
+    snapshot: FeatureSnapshot,
+    market: str,
+    sample_count: int,
+    avg_minutes: float,
+) -> tuple[float, str]:
+    safe_projection = max(0.0, float(projection))
+    if len(snapshot.values) < len(FEATURE_NAMES):
+        return safe_projection, "projection floored to nonnegative" if safe_projection != projection else ""
+
+    projected_minutes = max(
+        float(snapshot.values[FEATURE_INDEX["ewma_minutes"]]) + (0.35 * float(snapshot.values[FEATURE_INDEX["minutes_trend"]])),
+        0.0,
+    )
+    if projected_minutes < 18.0 or avg_minutes < 18.0 or sample_count < 5:
+        return safe_projection, "projection floored to nonnegative" if safe_projection != projection else ""
+
+    floor_value, floor_note = _projection_safety_floor_value(
+        snapshot,
+        market=market,
+        sample_count=sample_count,
+        avg_minutes=avg_minutes,
+        projected_minutes=projected_minutes,
+    )
+    recent_anchor = _projection_recent_anchor(snapshot)
+    if floor_value is None or safe_projection >= floor_value:
+        return safe_projection, "projection floored to nonnegative" if safe_projection != projection else ""
+    if recent_anchor <= 0.0:
+        return safe_projection, "projection floored to nonnegative" if safe_projection != projection else ""
+    projection_ratio = safe_projection / max(recent_anchor, 0.01)
+    family = market_family(market)
+    stable_minutes = projected_minutes >= 26.0 and avg_minutes >= 24.0 and sample_count >= 8
+    moderate_minutes = projected_minutes >= 22.0 and avg_minutes >= 20.0 and sample_count >= 6
+    if not (stable_minutes or moderate_minutes):
+        return safe_projection, "projection floored to nonnegative" if safe_projection != projection else ""
+    implausible_threshold = 0.50 if family == "combo" and stable_minutes else 0.42 if family == "combo" else 0.34 if stable_minutes else 0.30
+    if projection_ratio > implausible_threshold and safe_projection > 0.0:
+        return safe_projection, "projection floored to nonnegative" if safe_projection != projection else ""
+    final_note = floor_note
+    if safe_projection != projection:
+        final_note = f"projection floored to nonnegative; {floor_note}"
+    return floor_value, final_note
+
+
+def _projection_safety_floor_value(
+    snapshot: FeatureSnapshot,
+    *,
+    market: str,
+    sample_count: int,
+    avg_minutes: float,
+    projected_minutes: float,
+) -> tuple[float | None, str]:
+    weighted_recent = max(0.0, float(snapshot.values[FEATURE_INDEX["weighted_recent"]]))
+    last_10_avg = max(0.0, float(snapshot.values[FEATURE_INDEX["last_10_avg"]]))
+    rate_projection = max(0.0, float(snapshot.values[FEATURE_INDEX["rate_projection"]]))
+    component_projection = max(0.0, float(snapshot.component_projection))
+    market_key = str(market).lower()
+    stable_minutes = projected_minutes >= 26.0 and avg_minutes >= 24.0 and sample_count >= 8
+    moderate_minutes = projected_minutes >= 22.0 and avg_minutes >= 20.0 and sample_count >= 6
+    if not stable_minutes and not moderate_minutes:
+        return None, ""
+
+    recent_anchor = max(weighted_recent, last_10_avg, rate_projection, component_projection)
+    family = market_family(market_key)
+    if family == "combo":
+        floor_ratio = 0.72 if stable_minutes else 0.66
+        minimum_floor = 4.0
+    else:
+        floor_ratio = 0.58 if stable_minutes else 0.52
+        minimum_floor = 1.0 if market_key == "threes" else 2.0
+    if market_key in {"points", "points_rebounds", "points_assists", "points_rebounds_assists"}:
+        floor_ratio += _star_usage_floor_ratio_bonus(snapshot, market_key)
+
+    floor_value = max(minimum_floor, recent_anchor * floor_ratio)
+    if recent_anchor <= 0.0 or component_projection <= 0.0 and rate_projection <= 0.0 and last_10_avg <= 0.0:
+        return None, ""
+    return round(floor_value, 2), f"role/minutes safety floor {floor_value:.1f} applied"
+
+
+def _projection_recent_anchor(snapshot: FeatureSnapshot) -> float:
+    if len(snapshot.values) < len(FEATURE_NAMES):
+        return max(0.0, float(snapshot.component_projection))
+    return max(
+        0.0,
+        float(snapshot.values[FEATURE_INDEX["weighted_recent"]]),
+        float(snapshot.values[FEATURE_INDEX["last_10_avg"]]),
+        float(snapshot.values[FEATURE_INDEX["rate_projection"]]),
+        float(snapshot.component_projection),
+    )
+
+
+def _star_usage_floor_ratio_bonus(snapshot: FeatureSnapshot, market: str) -> float:
+    if len(snapshot.values) < len(FEATURE_NAMES):
+        return 0.0
+    usage_scorer = float(snapshot.values[FEATURE_INDEX["arch_usage_scorer"]])
+    primary_handler = float(snapshot.values[FEATURE_INDEX["role_primary_handler"]])
+    alpha_shot = float(snapshot.values[FEATURE_INDEX["role_alpha_shot"]])
+    position_share = float(snapshot.values[FEATURE_INDEX["recent_position_minute_share"]])
+    vacancy_minutes = float(snapshot.values[FEATURE_INDEX["same_position_unavailable_minutes"]])
+    if usage_scorer < 0.5 and primary_handler < 0.5 and alpha_shot < 0.5:
+        return 0.0
+    bonus = 0.04
+    if usage_scorer >= 1.0 or alpha_shot >= 1.0:
+        bonus += 0.03
+    if primary_handler >= 1.0 and market in {"points", "points_assists", "points_rebounds_assists"}:
+        bonus += 0.02
+    if position_share >= 0.5:
+        bonus += 0.02
+    if vacancy_minutes >= 12.0:
+        bonus += 0.02
+    return min(0.12, bonus)
+
+
 def _market_stabilization_profile(market: str) -> tuple[float, float]:
     if market in {"points", "rebounds", "assists"}:
         return 0.80, 1.28
     if market == "threes":
         return 0.82, 1.22
-    if market in {"points_rebounds", "points_assists", "rebounds_assists"}:
-        return 0.85, 1.18
+    if market in {"points_rebounds", "points_assists"}:
+        return 0.90, 1.14
+    if market == "rebounds_assists":
+        return 0.87, 1.16
     if market == "points_rebounds_assists":
-        return 0.88, 1.15
+        return 0.92, 1.10
     if market in {"steals", "blocks", "blocks_steals"}:
         return 0.90, 1.12
     return 0.84, 1.20

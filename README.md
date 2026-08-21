@@ -387,6 +387,7 @@ GET  /api/odds/cache
 GET  /api/line-discrepancies
 GET  /api/model-performance
 GET  /api/model-diagnostics
+GET  /api/projection-accuracy-review
 GET  /api/model-loss-breakdown
 GET  /api/models/runs
 GET  /api/matchups
@@ -906,7 +907,15 @@ Rolling diagnostics from settled props:
 ```text
 GET /api/model-diagnostics
 GET /api/model-diagnostics?model_version=adaptive-context-v3-team-transition&windows=7,14,30
+GET /api/projection-accuracy-review
+GET /api/projection-accuracy-review?model_version=adaptive-context-v1&min_minutes=11&markets=points,points_rebounds,points_assists,points_rebounds_assists
 ```
+
+Projection-quality review notes:
+
+- `/api/model-performance` now includes `minutes_cohorts` and `scoring_market_normal_minutes` so early-exit games can be separated from normal-minute scoring markets.
+- `/api/projection-accuracy-review` is the raw projection-error path for settled props. It filters by minimum minutes and optional market list, then reports market MAE/bias plus the worst misses overall and by market.
+- For recent scoring-market work, deploy runtime projection-path changes first and use these diagnostics on fresh settled rows before deciding whether a full retrain is still justified.
 
 Loss concentration breakdowns from settled props:
 

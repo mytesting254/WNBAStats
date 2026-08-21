@@ -734,7 +734,7 @@ def _direct_game_features(
         away_team_id=away_team_id,
         game_id=game_id,
         game_date=game_date,
-        use_injury_context=False,
+        use_injury_context=True,
         runtime_cache=cache.runtime_cache,
     )
     return _assemble_direct_game_features(
@@ -1232,7 +1232,7 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                 away_team_id=away_team_id,
                 game_id=int(row["id"]),
                 game_date=str(row["game_date"] or "") or None,
-                use_injury_context=False,
+                use_injury_context=True,
                 runtime_cache=runtime_cache,
             )
             direct_features = _assemble_direct_game_features(

@@ -93,6 +93,7 @@ from .stocks_tracking import (
     settle_stocks,
 )
 from .player_prop_model import (
+    COMPONENT_MODEL_VERSION,
     MODEL_VERSION,
     _blowout_adjustment,
     _classify_minutes_role,
@@ -107,6 +108,7 @@ from .player_prop_model import (
     _recent_trend,
     _team_transition_features_from_player_rows,
     _training_start_date,
+    market_family,
     prewarm_model_cache,
 )
 from .training import latest_model_run, list_model_runs, run_parameter_tuning, run_walk_forward_training
@@ -3300,6 +3302,7 @@ def _model_runs_payload(conn) -> dict:
 
 
 def _model_performance_payload(conn) -> dict:
+        prop_model_comparison = _prop_model_comparison_payload(conn)
         total_settled_row = conn.execute(
                 "SELECT COUNT(*) AS count FROM settled_props"
         ).fetchone()
@@ -3323,13 +3326,16 @@ def _model_performance_payload(conn) -> dict:
                     r.edge,
                     r.confidence,
                     r.market,
-                    sp.winning_side
+                    sp.winning_side,
+                    sp.player_minutes
                 FROM ranked r
                 JOIN settled_props sp ON sp.prop_line_id = r.prop_line_id
                 WHERE r.rn = 1
                 """
         ).fetchall()
         qualified = [row for row in rows if _include_value_board_pick(dict(row))]
+        minutes_cohorts = _prop_minutes_cohort_payload(qualified)
+        scoring_market_normal_minutes = _scoring_market_normal_minutes_payload(qualified)
         evaluated = len(qualified)
         if total_settled == 0:
                 payload = {
@@ -3340,6 +3346,9 @@ def _model_performance_payload(conn) -> dict:
                         "average_ev": None,
                         "message": "No settled props yet. Settle completed games to evaluate the model.",
                 }
+                payload["prop_model_comparison"] = prop_model_comparison
+                payload["minutes_cohorts"] = minutes_cohorts
+                payload["scoring_market_normal_minutes"] = scoring_market_normal_minutes
                 payload["game_totals"] = _game_total_performance_payload(conn)
                 return payload
         if evaluated == 0:
@@ -3351,6 +3360,9 @@ def _model_performance_payload(conn) -> dict:
                         "average_ev": None,
                         "message": f"{total_settled} settled prop{'s' if total_settled != 1 else ''} exist, but there are no matching model predictions.",
                 }
+                payload["prop_model_comparison"] = prop_model_comparison
+                payload["minutes_cohorts"] = minutes_cohorts
+                payload["scoring_market_normal_minutes"] = scoring_market_normal_minutes
                 payload["game_totals"] = _game_total_performance_payload(conn)
                 return payload
         wins = sum(1 for row in qualified if row["recommended_side"] == row["winning_side"])
@@ -3363,8 +3375,198 @@ def _model_performance_payload(conn) -> dict:
                 "average_ev": round(avg_ev, 4),
                 "message": f"Evaluated {evaluated} settled value-board pick{'s' if evaluated != 1 else ''}.",
         }
+        payload["prop_model_comparison"] = prop_model_comparison
+        payload["minutes_cohorts"] = minutes_cohorts
+        payload["scoring_market_normal_minutes"] = scoring_market_normal_minutes
         payload["game_totals"] = _game_total_performance_payload(conn)
         return payload
+
+
+def _prop_minutes_cohort_payload(rows: list[sqlite3.Row]) -> dict[str, Any]:
+        cohorts = {
+                "normal_minutes": {"qualified": 0, "wins": 0, "sum_ev": 0.0, "by_market": {}},
+                "low_minutes": {"qualified": 0, "wins": 0, "sum_ev": 0.0, "by_market": {}},
+                "unknown_minutes": {"qualified": 0, "wins": 0, "sum_ev": 0.0, "by_market": {}},
+        }
+        for row in rows:
+                raw_minutes = row["player_minutes"]
+                if raw_minutes is None:
+                        key = "unknown_minutes"
+                elif float(raw_minutes) <= 10.0:
+                        key = "low_minutes"
+                else:
+                        key = "normal_minutes"
+                bucket = cohorts[key]
+                bucket["qualified"] += 1
+                bucket["wins"] += int(str(row["recommended_side"]) == str(row["winning_side"]))
+                bucket["sum_ev"] += float(row["expected_value"] or 0.0)
+                market = str(row["market"] or "unknown")
+                market_bucket = bucket["by_market"].setdefault(market, {"qualified": 0, "wins": 0, "sum_ev": 0.0})
+                market_bucket["qualified"] += 1
+                market_bucket["wins"] += int(str(row["recommended_side"]) == str(row["winning_side"]))
+                market_bucket["sum_ev"] += float(row["expected_value"] or 0.0)
+
+        payload: dict[str, Any] = {}
+        for key, bucket in cohorts.items():
+                qualified = int(bucket["qualified"])
+                payload[key] = {
+                        "qualified": qualified,
+                        "wins": int(bucket["wins"]),
+                        "win_rate": round(float(bucket["wins"]) / qualified, 4) if qualified else None,
+                        "average_ev": round(float(bucket["sum_ev"]) / qualified, 4) if qualified else None,
+                        "by_market": _finalize_prop_minutes_market_buckets(bucket["by_market"]),
+                }
+        return payload
+
+
+def _finalize_prop_minutes_market_buckets(by_market: dict[str, dict[str, float]]) -> list[dict[str, Any]]:
+        payload: list[dict[str, Any]] = []
+        for market, bucket in sorted(by_market.items(), key=lambda item: (-int(item[1]["qualified"]), item[0])):
+                qualified = int(bucket["qualified"])
+                payload.append(
+                        {
+                                "market": market,
+                                "qualified": qualified,
+                                "wins": int(bucket["wins"]),
+                                "win_rate": round(float(bucket["wins"]) / qualified, 4) if qualified else None,
+                                "average_ev": round(float(bucket["sum_ev"]) / qualified, 4) if qualified else None,
+                        }
+                )
+        return payload
+
+
+def _scoring_market_normal_minutes_payload(rows: list[sqlite3.Row]) -> dict[str, Any]:
+        scoring_markets = {"points", "points_rebounds", "points_assists", "points_rebounds_assists"}
+        filtered = [
+                row
+                for row in rows
+                if row["player_minutes"] is not None
+                and float(row["player_minutes"]) > 10.0
+                and str(row["market"] or "").strip().lower() in scoring_markets
+        ]
+        by_market: dict[str, dict[str, float]] = {}
+        for row in filtered:
+                market = str(row["market"] or "unknown").strip().lower()
+                bucket = by_market.setdefault(market, {"qualified": 0, "wins": 0, "sum_ev": 0.0})
+                bucket["qualified"] += 1
+                bucket["wins"] += int(str(row["recommended_side"]) == str(row["winning_side"]))
+                bucket["sum_ev"] += float(row["expected_value"] or 0.0)
+        markets = _finalize_prop_minutes_market_buckets(by_market)
+        qualified = len(filtered)
+        wins = sum(int(str(row["recommended_side"]) == str(row["winning_side"])) for row in filtered)
+        avg_ev = sum(float(row["expected_value"] or 0.0) for row in filtered) / qualified if qualified else None
+        return {
+                "qualified": qualified,
+                "wins": wins,
+                "win_rate": round(wins / qualified, 4) if qualified else None,
+                "average_ev": round(float(avg_ev), 4) if avg_ev is not None else None,
+                "markets": markets,
+        }
+
+
+def _prop_model_comparison_payload(conn) -> dict[str, Any]:
+        model_versions = [MODEL_VERSION, COMPONENT_MODEL_VERSION]
+        today = datetime.now(timezone.utc).date()
+        windows = [30, 60, 120]
+        rows = conn.execute(
+                """
+                WITH ranked AS (
+                    SELECT
+                        pp.prop_line_id,
+                        pp.model_version,
+                        pp.prediction_time,
+                        pp.projection,
+                        pp.recommended_side,
+                        pp.confidence,
+                        pl.market,
+                        g.game_date,
+                        sp.actual_result,
+                        sp.winning_side,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY pp.prop_line_id, pp.model_version
+                            ORDER BY pp.prediction_time DESC, pp.id DESC
+                        ) AS rn
+                    FROM prop_predictions pp
+                    JOIN prop_lines pl ON pl.id = pp.prop_line_id
+                    JOIN games g ON g.id = pl.game_id
+                    JOIN settled_props sp ON sp.prop_line_id = pp.prop_line_id
+                    WHERE pp.model_version IN (?, ?)
+                )
+                SELECT *
+                FROM ranked
+                WHERE rn = 1
+                """,
+                (model_versions[0], model_versions[1]),
+        ).fetchall()
+        if not rows:
+                return {"windows": [], "models": model_versions, "message": "No settled comparison rows for learned vs component models yet."}
+
+        def _empty_stats() -> dict[str, Any]:
+                return {"settled": 0, "wins": 0, "sum_abs_error": 0.0, "sum_bias": 0.0}
+
+        window_payloads: list[dict[str, Any]] = []
+        for days in windows:
+                cutoff = today - timedelta(days=days)
+                bucket_rows = []
+                for row in rows:
+                        game_date_raw = str(row["game_date"] or "").strip()
+                        if not game_date_raw:
+                                continue
+                        try:
+                                game_date = datetime.fromisoformat(game_date_raw).date() if "T" in game_date_raw else datetime.strptime(game_date_raw, "%Y-%m-%d").date()
+                        except ValueError:
+                                continue
+                        if game_date >= cutoff:
+                                bucket_rows.append(row)
+                model_stats: dict[str, dict[str, Any]] = {version: _empty_stats() for version in model_versions}
+                family_stats: dict[str, dict[str, dict[str, Any]]] = {}
+                for row in bucket_rows:
+                        version = str(row["model_version"])
+                        family = market_family(str(row["market"]))
+                        stats = model_stats.setdefault(version, _empty_stats())
+                        stats["settled"] += 1
+                        stats["wins"] += int(str(row["recommended_side"]).lower() == str(row["winning_side"]).lower())
+                        error = float(row["projection"] or 0.0) - float(row["actual_result"] or 0.0)
+                        stats["sum_abs_error"] += abs(error)
+                        stats["sum_bias"] += error
+                        family_bucket = family_stats.setdefault(family, {item: _empty_stats() for item in model_versions})
+                        family_version_stats = family_bucket.setdefault(version, _empty_stats())
+                        family_version_stats["settled"] += 1
+                        family_version_stats["wins"] += int(str(row["recommended_side"]).lower() == str(row["winning_side"]).lower())
+                        family_version_stats["sum_abs_error"] += abs(error)
+                        family_version_stats["sum_bias"] += error
+
+                def _finalize(stats: dict[str, Any]) -> dict[str, Any]:
+                        settled = int(stats["settled"])
+                        return {
+                                "settled": settled,
+                                "wins": int(stats["wins"]),
+                                "win_rate": round(float(stats["wins"]) / settled, 4) if settled else None,
+                                "mae": round(float(stats["sum_abs_error"]) / settled, 4) if settled else None,
+                                "bias": round(float(stats["sum_bias"]) / settled, 4) if settled else None,
+                        }
+
+                finalized_models = {version: _finalize(stats) for version, stats in model_stats.items()}
+                finalized_families = {
+                        family: {version: _finalize(stats) for version, stats in versions.items()}
+                        for family, versions in family_stats.items()
+                }
+                learned = finalized_models.get(MODEL_VERSION, {})
+                component = finalized_models.get(COMPONENT_MODEL_VERSION, {})
+                delta: dict[str, Any] = {}
+                if learned.get("win_rate") is not None and component.get("win_rate") is not None:
+                        delta["win_rate"] = round(float(learned["win_rate"]) - float(component["win_rate"]), 4)
+                if learned.get("mae") is not None and component.get("mae") is not None:
+                        delta["mae"] = round(float(component["mae"]) - float(learned["mae"]), 4)
+                window_payloads.append(
+                        {
+                                "days": days,
+                                "models": finalized_models,
+                                "families": finalized_families,
+                                "delta_learned_minus_component": delta,
+                        }
+                )
+        return {"windows": window_payloads, "models": model_versions}
 
 
 def _game_total_performance_payload(conn) -> dict:
@@ -6436,6 +6638,168 @@ def model_diagnostics(model_version: str = MODEL_VERSION, windows: str = "7,14,3
             }
             for key, report in by_window.items()
         },
+    }
+
+
+@app.get("/api/projection-accuracy-review")
+def projection_accuracy_review(
+    model_version: str = MODEL_VERSION,
+    min_minutes: float = 11.0,
+    top_n: int = 25,
+    markets: str = "",
+) -> dict:
+    parsed_markets = [item.strip().lower() for item in markets.split(",") if item.strip()]
+    with connect() as conn:
+        return _projection_accuracy_review_payload(
+            conn,
+            model_version=model_version,
+            min_minutes=min_minutes,
+            top_n=top_n,
+            markets=parsed_markets or None,
+        )
+
+
+def _projection_accuracy_review_payload(
+    conn: sqlite3.Connection,
+    *,
+    model_version: str,
+    min_minutes: float = 11.0,
+    top_n: int = 25,
+    markets: list[str] | None = None,
+) -> dict[str, Any]:
+    if top_n <= 0:
+        raise HTTPException(status_code=400, detail="top_n must be positive")
+    params: list[object] = [model_version, float(min_minutes)]
+    market_filter = ""
+    if markets:
+        placeholders = ",".join("?" for _ in markets)
+        market_filter = f" AND lower(pl.market) IN ({placeholders})"
+        params.extend([str(item).strip().lower() for item in markets])
+    rows = conn.execute(
+        f"""
+        WITH ranked AS (
+            SELECT
+                pp.prop_line_id,
+                pp.model_version,
+                pp.prediction_time,
+                pp.projection,
+                pp.confidence,
+                pp.edge,
+                pp.recommended_side,
+                pl.market,
+                pl.line,
+                pl.player_id,
+                pl.game_id,
+                p.full_name,
+                p.rotation_role,
+                g.game_date,
+                sp.actual_result,
+                sp.winning_side,
+                sp.player_minutes,
+                ROW_NUMBER() OVER (
+                    PARTITION BY pp.prop_line_id
+                    ORDER BY pp.prediction_time DESC, pp.id DESC
+                ) AS rn
+            FROM prop_predictions pp
+            JOIN prop_lines pl ON pl.id = pp.prop_line_id
+            JOIN players p ON p.id = pl.player_id
+            JOIN games g ON g.id = pl.game_id
+            JOIN settled_props sp ON sp.prop_line_id = pp.prop_line_id
+            WHERE pp.model_version = ?
+              AND sp.player_minutes IS NOT NULL
+              AND sp.player_minutes >= ?
+              {market_filter}
+        )
+        SELECT *
+        FROM ranked
+        WHERE rn = 1
+        ORDER BY game_date DESC, full_name ASC
+        """,
+        params,
+    ).fetchall()
+
+    serialized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        projection = float(row["projection"] or 0.0)
+        actual = float(row["actual_result"] or 0.0)
+        error = projection - actual
+        serialized_rows.append(
+            {
+                "prop_line_id": int(row["prop_line_id"]),
+                "player_id": int(row["player_id"]),
+                "player_name": str(row["full_name"]),
+                "rotation_role": str(row["rotation_role"] or ""),
+                "market": str(row["market"]).lower(),
+                "game_date": str(row["game_date"]),
+                "projection": round(projection, 3),
+                "actual_result": round(actual, 3),
+                "line": float(row["line"] or 0.0),
+                "error": round(error, 3),
+                "abs_error": round(abs(error), 3),
+                "confidence": str(row["confidence"] or ""),
+                "edge": round(float(row["edge"] or 0.0), 4),
+                "recommended_side": str(row["recommended_side"] or ""),
+                "winning_side": str(row["winning_side"] or ""),
+                "player_minutes": round(float(row["player_minutes"] or 0.0), 3),
+            }
+        )
+
+    overall_rows = len(serialized_rows)
+    if not serialized_rows:
+        return {
+            "model_version": model_version,
+            "min_minutes": float(min_minutes),
+            "markets": markets or [],
+            "total_predictions": 0,
+            "mae": None,
+            "bias": None,
+            "market_breakdown": [],
+            "worst_misses": [],
+            "worst_by_market": {},
+        }
+
+    market_buckets: dict[str, list[dict[str, Any]]] = {}
+    for item in serialized_rows:
+        market_buckets.setdefault(str(item["market"]), []).append(item)
+
+    def _market_summary(market_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        count = len(market_rows)
+        mae = sum(float(item["abs_error"]) for item in market_rows) / count
+        bias = sum(float(item["error"]) for item in market_rows) / count
+        miss8 = sum(1 for item in market_rows if float(item["abs_error"]) >= 8.0) / count
+        miss12 = sum(1 for item in market_rows if float(item["abs_error"]) >= 12.0) / count
+        return {
+            "predictions": count,
+            "mae": round(mae, 3),
+            "bias": round(bias, 3),
+            "miss8_rate": round(miss8, 3),
+            "miss12_rate": round(miss12, 3),
+        }
+
+    market_breakdown = [
+        {"market": market, **_market_summary(items)}
+        for market, items in sorted(
+            market_buckets.items(),
+            key=lambda entry: (-_market_summary(entry[1])["mae"], entry[0]),
+        )
+    ]
+    worst_misses = sorted(serialized_rows, key=lambda item: float(item["abs_error"]), reverse=True)[:top_n]
+    worst_by_market = {
+        market: sorted(items, key=lambda item: float(item["abs_error"]), reverse=True)[: min(5, top_n)]
+        for market, items in sorted(market_buckets.items())
+    }
+    mae = sum(float(item["abs_error"]) for item in serialized_rows) / overall_rows
+    bias = sum(float(item["error"]) for item in serialized_rows) / overall_rows
+    return {
+        "model_version": model_version,
+        "min_minutes": float(min_minutes),
+        "markets": markets or [],
+        "total_predictions": overall_rows,
+        "mae": round(mae, 3),
+        "bias": round(bias, 3),
+        "market_breakdown": market_breakdown,
+        "worst_misses": worst_misses,
+        "worst_by_market": worst_by_market,
     }
 
 
@@ -9986,25 +10350,42 @@ def _include_value_board_pick(item: dict) -> bool:
     # require a stronger edge before surfacing them on the board.
     if _requires_stricter_over_edge(market, side) and edge < 0.08:
         return False
+    scoring_combo_markets = {"points_rebounds", "points_assists", "points_rebounds_assists"}
 
     # Medium confidence has underperformed in rebounds; require stricter admission.
     if confidence == "medium":
         if market == "rebounds":
             return edge >= 0.14 and edge < LOW_CONFIDENCE_EDGE_MAX
+        if market == "points_rebounds":
+            return ev >= 0.11 and edge >= 0.11 and edge < LOW_CONFIDENCE_EDGE_MAX
+        if market == "points":
+            return ev >= 0.04 and edge >= 0.15 and edge < LOW_CONFIDENCE_EDGE_MAX
+        if market in scoring_combo_markets:
+            return ev >= 0.09 and edge >= 0.10 and edge < LOW_CONFIDENCE_EDGE_MAX
         return edge >= 0.12 and edge < LOW_CONFIDENCE_EDGE_MAX
     if confidence == "high":
+        if market == "points_rebounds":
+            return ev >= 0.08 and edge >= 0.11 and edge < max(LOW_CONFIDENCE_EDGE_MAX, 0.25)
+        if market == "points":
+            return ev >= 0.03 and edge >= 0.13 and edge < max(LOW_CONFIDENCE_EDGE_MAX, 0.25)
+        if market in scoring_combo_markets:
+            return ev >= 0.07 and edge >= 0.10 and edge < max(LOW_CONFIDENCE_EDGE_MAX, 0.25)
         return edge >= 0.10 and edge < max(LOW_CONFIDENCE_EDGE_MAX, 0.25)
     if confidence != "low":
         return False
 
     # Market-aware low-confidence admission gates, tuned from settled calibration.
     if market == "points":
-        return edge >= 0.05 and edge < 0.12
+        return ev >= 0.03 and edge >= 0.07 and edge < 0.12
     if market == "rebounds":
         return edge >= 0.08 and edge < LOW_CONFIDENCE_EDGE_MAX
+    if market == "points_rebounds":
+        return ev >= 0.10 and edge >= 0.06 and edge < LOW_CONFIDENCE_EDGE_MAX
     if market == "threes":
         return (edge >= 0.05 and edge < 0.08) or (edge >= 0.12 and edge < LOW_CONFIDENCE_EDGE_MAX)
-    if market in {"assists", "points_assists", "points_rebounds", "rebounds_assists", "points_rebounds_assists"}:
+    if market in scoring_combo_markets:
+        return ev >= 0.09 and edge >= 0.05 and edge < LOW_CONFIDENCE_EDGE_MAX
+    if market in {"assists", "rebounds_assists"}:
         return ev >= 0.07 and edge >= 0.04 and edge < LOW_CONFIDENCE_EDGE_MAX
 
     return edge >= LOW_CONFIDENCE_EDGE_MIN and edge < LOW_CONFIDENCE_EDGE_MAX

@@ -35,7 +35,7 @@ DEFAULT_TRAINING_MAX_WORKERS = 2
 
 
 def run_walk_forward_training(conn: sqlite3.Connection) -> dict:
-    _prepare_curated_training_dbs(conn)
+    _prepare_curated_training_dbs(conn, force_rebuild=True)
     data_signature = _training_data_signature(conn)
     cached_learned = _latest_matching_run(
         conn,
@@ -115,7 +115,7 @@ def run_parameter_tuning(
     stabilization_scales: list[float] | None = None,
     recency_weight_scales: list[float] | None = None,
 ) -> dict:
-    _prepare_curated_training_dbs(conn)
+    _prepare_curated_training_dbs(conn, force_rebuild=True)
     started_at = datetime.now(timezone.utc).isoformat()
     candidates = _tuning_candidates(
         ridge_penalties=ridge_penalties,
@@ -276,7 +276,11 @@ def _persist_model_run(run: dict) -> None:
             write_conn.commit()
 
 
-def _prepare_curated_training_dbs(conn: sqlite3.Connection) -> dict[str, dict[str, object]]:
+def _prepare_curated_training_dbs(
+    conn: sqlite3.Connection,
+    *,
+    force_rebuild: bool = False,
+) -> dict[str, dict[str, object]]:
     from .game_training_db import ensure_game_training_db
     from .minutes_training_db import ensure_minutes_training_db
     from .player_prop_training_db import ensure_player_prop_training_db
@@ -291,9 +295,9 @@ def _prepare_curated_training_dbs(conn: sqlite3.Connection) -> dict[str, dict[st
     # Prepare shared curated DBs once in the parent process before any
     # parallel market workers start reading them.
     return {
-        "minutes": ensure_minutes_training_db(conn, force=False),
-        "game": ensure_game_training_db(conn, force=False),
-        "player_prop": ensure_player_prop_training_db(conn, force=False, allow_rebuild=True),
+        "minutes": ensure_minutes_training_db(conn, force=force_rebuild),
+        "game": ensure_game_training_db(conn, force=force_rebuild),
+        "player_prop": ensure_player_prop_training_db(conn, force=force_rebuild, allow_rebuild=True),
     }
 
 

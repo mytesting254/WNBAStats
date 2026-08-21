@@ -291,7 +291,7 @@ def _rebuild_game_training_examples(
             away_team_id=away_team_id,
             game_id=int(row["id"]),
             game_date=game_date,
-            use_injury_context=False,
+            use_injury_context=True,
             runtime_cache=runtime_cache,
         )
         features = gp._assemble_direct_game_features(
