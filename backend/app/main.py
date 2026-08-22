@@ -3854,7 +3854,11 @@ def _scheduled_matchup_game_groups(conn, game_ids: list[int] | None = None) -> l
         """,
         params,
     ).fetchall()
-    games = [game for game in games if _is_today_active_game_time(game["start_time"])]
+    games = [
+        game
+        for game in games
+        if _is_today_slate_game(game["game_date"], game["start_time"])
+    ]
     return _coalesce_matchup_games(games)
 
 
@@ -4494,7 +4498,7 @@ def _active_slate_game_ids(conn) -> list[int]:
         {
             int(game["id"])
             for game in games
-            if int(game["id"]) > 0 and _is_today_active_game_time(game["start_time"])
+            if int(game["id"]) > 0 and _is_today_slate_game(game["game_date"], game["start_time"])
         }
     )
 
@@ -11198,3 +11202,7 @@ def _is_today_active_game_time(value: str | None) -> bool:
     cutoff = now_utc - timedelta(hours=COMPLETED_GAME_GRACE_HOURS)
     next_slate_cutoff = now_utc + timedelta(hours=18)
     return cutoff <= start_utc <= next_slate_cutoff
+
+
+def _is_today_slate_game(game_date: Any, start_time: Any) -> bool:
+    return _app_local_game_date(game_date, start_time) == _local_today_iso()
