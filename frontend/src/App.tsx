@@ -6237,9 +6237,20 @@ function mergePropSyncProgress(previous: PropSyncHealth | null, next: PropSyncHe
 
   const previousJobId = previous.job_id ?? null;
   const nextJobId = next.job_id ?? null;
+  const nextIsExplicitIdleReset = !next.running
+    && nextJobId == null
+    && !next.started_at
+    && !next.finished_at
+    && !next.stage
+    && !next.message
+    && !next.updated_at;
   const previousUpdatedAt = Date.parse(previous.updated_at ?? "");
   const nextUpdatedAt = Date.parse(next.updated_at ?? "");
   const nextFinishedAt = Date.parse(next.finished_at ?? "");
+
+  if (nextIsExplicitIdleReset) {
+    return next;
+  }
 
   if (previousJobId != null && nextJobId != null && previousJobId !== nextJobId) {
     const previousStartedAt = Date.parse(previous.started_at ?? "");
