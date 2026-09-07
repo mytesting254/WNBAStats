@@ -20,7 +20,7 @@ Environment:
   WNBA_APP_TIMEZONE
                 App-local timezone for slate decisions. Default: America/New_York
   WNBA_TRAIN_POLL_TIMEOUT_SECONDS
-                Max seconds to wait for background model training. Default: 1200
+                Max seconds to wait for background model training. Default: 7200
   WNBA_TRAIN_POLL_INTERVAL_SECONDS
                 Seconds between training-status polls. Default: 5
   WNBA_USE_LIVE_CONTAINER=true
@@ -142,13 +142,49 @@ train_status() {
   python3 -c 'import json, sys; payload = json.load(sys.stdin); print(payload.get("status") or "")'
 }
 
+training_change_count() {
+  local payload_kind="$1"
+  python3 -c '
+import json
+import sys
+
+kind = sys.argv[1]
+payload = json.load(sys.stdin)
+
+def count(mapping, *keys):
+    if not isinstance(mapping, dict):
+        return 0
+    return sum(int(mapping.get(key) or 0) for key in keys)
+
+total = 0
+if kind == "history":
+    for item in payload.get("scoreboards") or []:
+        total += count(item, "inserted_team_game_results", "updated_game_segment_results")
+    for item in payload.get("player_stats") or []:
+        total += count(item, "inserted_player_game_stats", "updated_team_game_boxscores", "updated_player_first_half_stats")
+    total += count(payload.get("settlements"), "settled", "repaired")
+    total += count(payload.get("game_settlements"), "settled", "repaired")
+    total += count(payload.get("special_settlements"), "settled")
+    total += count(payload.get("dfs_settlements"), "settled")
+elif kind == "settlement":
+    total += count(payload.get("props"), "settled", "repaired")
+    total += count(payload.get("games"), "settled", "repaired")
+    total += count(payload.get("special"), "settled")
+    total += count(payload.get("dfs"), "settled")
+else:
+    raise SystemExit(f"unknown payload kind: {kind}")
+
+print(total)
+' "$payload_kind"
+}
+
 model_health_summary() {
   python3 -c 'import json, sys; payload = json.load(sys.stdin); job = payload.get("model_training") or {}; print(json.dumps({"running": job.get("running"), "started_at": job.get("started_at"), "status": job.get("status"), "last_error": job.get("last_error"), "finished_at": job.get("finished_at"), "last_result": job.get("last_result")}, separators=(",", ":")))'
 }
 
 wait_for_model_training() {
   local started_at="$1"
-  local timeout_seconds="${WNBA_TRAIN_POLL_TIMEOUT_SECONDS:-1200}"
+  local timeout_seconds="${WNBA_TRAIN_POLL_TIMEOUT_SECONDS:-7200}"
   local poll_interval="${WNBA_TRAIN_POLL_INTERVAL_SECONDS:-5}"
   local deadline=$(( $(date +%s) + timeout_seconds ))
 
@@ -193,7 +229,10 @@ require_api_key_for_prod_hint() {
 run_settle() {
   require_api_key_for_prod_hint
   echo "[$(timestamp)] settling completed props"
-  api_post "/api/settle-props"
+  local payload
+  payload="$(api_post "/api/settle-props")"
+  printf '%s\n' "$payload"
+  SETTLEMENT_TRAINING_CHANGES="$(printf '%s' "$payload" | training_change_count settlement)"
   echo
 }
 
@@ -215,7 +254,10 @@ run_refresh_completed_results() {
   local selected_dates
   selected_dates="$(python3 -c 'from datetime import datetime, timedelta; from zoneinfo import ZoneInfo; today = datetime.now(ZoneInfo("America/New_York")).date(); print(",".join((today - timedelta(days=offset)).isoformat() for offset in range(7)))')"
   echo "[$(timestamp)] refreshing ESPN completed results for ${selected_dates}"
-  api_post "/api/history/import/espn?force_refresh=true&include_player_stats=true&missing_only=true&selected_dates=${selected_dates}"
+  local payload
+  payload="$(api_post "/api/history/import/espn?force_refresh=true&include_player_stats=true&missing_only=true&selected_dates=${selected_dates}")"
+  printf '%s\n' "$payload"
+  REFRESH_TRAINING_CHANGES="$(printf '%s' "$payload" | training_change_count history)"
   echo
 }
 
@@ -249,7 +291,7 @@ run_train_model_core() {
   require_api_key_for_prod_hint
   echo "[$(timestamp)] queueing core model training"
   local payload
-  payload="$(api_post "/api/models/train?include_dfs=false")"
+  payload="$(api_post "/api/models/train?include_dfs=false&disposable_process=true")"
   printf '%s\n' "$payload"
   local started_at
   started_at="$(printf '%s' "$payload" | train_started_at)"
@@ -279,12 +321,20 @@ run_train_dfs() {
 }
 
 run_settle_and_train() {
+  REFRESH_TRAINING_CHANGES=0
+  SETTLEMENT_TRAINING_CHANGES=0
   run_refresh_completed_results
   if ! run_refresh_rosters; then
     echo "[$(timestamp)] ESPN roster refresh failed; continuing with the last saved assignments" >&2
   fi
   run_prune_specials
   run_settle
+  local training_changes=$((REFRESH_TRAINING_CHANGES + SETTLEMENT_TRAINING_CHANGES))
+  if [ "$training_changes" -le 0 ]; then
+    echo "[$(timestamp)] no new completed-game, player-stat, or settlement data; skipping model training"
+    return 0
+  fi
+  echo "[$(timestamp)] detected ${training_changes} training-data change(s)"
   run_train_model_core
 }
 
@@ -350,4 +400,6 @@ main() {
   esac
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi

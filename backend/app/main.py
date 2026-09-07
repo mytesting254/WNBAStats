@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -108,6 +110,7 @@ from .player_prop_model import (
     _recent_trend,
     _team_transition_features_from_player_rows,
     _training_start_date,
+    clear_connection_training_cache,
     market_family,
     prewarm_model_cache,
 )
@@ -915,7 +918,44 @@ def _mutate_dfs_prewarm_state(
         }
 
 
-def _queue_model_training_job(request: Request | None = None, *, include_dfs: bool = True) -> dict[str, Any]:
+def _run_model_training_worker() -> dict[str, Any]:
+    root_dir = Path(__file__).resolve().parents[2]
+    env = os.environ.copy()
+    env.update(
+        {
+            "WNBA_TRAINING_MAX_WORKERS": "1",
+            "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+        }
+    )
+    process = subprocess.run(
+        [sys.executable, "scripts/run_model_training.py", "--skip-prewarm", "--max-workers", "1"],
+        cwd=root_dir,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=7200,
+        check=False,
+    )
+    if process.returncode != 0:
+        detail = (process.stderr or process.stdout or "model-training worker failed").strip()
+        raise RuntimeError(f"Model-training worker exited {process.returncode}: {detail[-2000:]}")
+    with connect() as conn:
+        result = latest_model_run(conn)
+    if result is None:
+        raise RuntimeError("Model-training worker completed without publishing a model run")
+    result["execution_mode"] = "disposable_process"
+    return result
+
+
+def _queue_model_training_job(
+    request: Request | None = None,
+    *,
+    include_dfs: bool = True,
+    disposable_process: bool = False,
+) -> dict[str, Any]:
     with _MODEL_TRAIN_LOCK:
         if _MODEL_TRAIN_STATE.get("running"):
             return {
@@ -930,7 +970,11 @@ def _queue_model_training_job(request: Request | None = None, *, include_dfs: bo
         request=request,
         trigger_action="api.models.train" if request is not None else "internal.model_training",
         source_path=request.url.path if request is not None else "/api/models/train",
-        metadata={"started_at": started_at, "include_dfs": bool(include_dfs)},
+        metadata={
+            "started_at": started_at,
+            "include_dfs": bool(include_dfs),
+            "disposable_process": bool(disposable_process),
+        },
     )
     _mutate_model_training_state(
         running=True,
@@ -955,10 +999,16 @@ def _queue_model_training_job(request: Request | None = None, *, include_dfs: bo
         )
         _append_job_run_event(job_run_id, "job.running", "Model training started.")
         try:
-            with connect() as conn:
-                result = run_walk_forward_training(conn)
-                if include_dfs:
-                    result["dfs_prewarm"] = prewarm_dfs_half_cache(conn)
+            if disposable_process:
+                result = _run_model_training_worker()
+            else:
+                with connect() as conn:
+                    try:
+                        result = run_walk_forward_training(conn)
+                        if include_dfs:
+                            result["dfs_prewarm"] = prewarm_dfs_half_cache(conn)
+                    finally:
+                        clear_connection_training_cache(conn)
             _invalidate_read_caches()
             with sqlite_write_lock():
                 with connect() as conn:
@@ -7275,12 +7325,16 @@ def model_loss_breakdown(model_version: str = MODEL_VERSION, top_n_players: int 
 
 
 @app.post("/api/models/train", dependencies=[Depends(_protect_mutation)])
-def train_model(request: Request, include_dfs: bool = True) -> dict:
+def train_model(request: Request, include_dfs: bool = True, disposable_process: bool = False) -> dict:
     return _run_audited_mutation(
         request,
         "models.train",
-        lambda: _queue_model_training_job(request, include_dfs=include_dfs),
-        details={"include_dfs": include_dfs},
+        lambda: _queue_model_training_job(
+            request,
+            include_dfs=include_dfs,
+            disposable_process=disposable_process,
+        ),
+        details={"include_dfs": include_dfs, "disposable_process": disposable_process},
     )
 
 

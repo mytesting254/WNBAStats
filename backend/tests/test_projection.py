@@ -108,6 +108,56 @@ from backend.app.settlement import settle_completed_props
 from backend.app.training import run_parameter_tuning, run_walk_forward_training
 
 
+def test_clear_connection_training_cache_only_releases_target_connection() -> None:
+    first = sqlite3.connect(":memory:")
+    second = sqlite3.connect(":memory:")
+    first.row_factory = sqlite3.Row
+    second.row_factory = sqlite3.Row
+    try:
+        first_bucket = player_prop_model_module._connection_training_cache_bucket(first, "test")
+        second_bucket = player_prop_model_module._connection_training_cache_bucket(second, "test")
+        first_bucket[(1,)] = ["large", "training", "payload"]
+        second_bucket[(2,)] = ["keep"]
+
+        player_prop_model_module.clear_connection_training_cache(first)
+
+        first_key = (id(first), player_prop_model_module._connection_training_cache_db_marker(first))
+        second_key = (id(second), player_prop_model_module._connection_training_cache_db_marker(second))
+        assert first_key not in player_prop_model_module._CONNECTION_TRAINING_CACHE
+        assert second_key in player_prop_model_module._CONNECTION_TRAINING_CACHE
+    finally:
+        player_prop_model_module.clear_connection_training_cache(first)
+        player_prop_model_module.clear_connection_training_cache(second)
+        first.close()
+        second.close()
+
+
+def test_model_training_worker_uses_single_process_and_returns_published_run(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+
+    class DummyConn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        observed["env"] = kwargs["env"]
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(main_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module, "latest_model_run", lambda conn: {"status": "completed", "training_rows": 12})
+
+    result = main_module._run_model_training_worker()
+
+    assert observed["command"][-3:] == ["--skip-prewarm", "--max-workers", "1"]
+    assert observed["env"]["WNBA_TRAINING_MAX_WORKERS"] == "1"
+    assert result["execution_mode"] == "disposable_process"
+
+
 @pytest.fixture(autouse=True)
 def isolated_db(tmp_path, monkeypatch):
     monkeypatch.setenv("USE_LOCAL_DB", "true")

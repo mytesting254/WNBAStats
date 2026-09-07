@@ -1807,6 +1807,21 @@ def clear_model_cache() -> None:
     _CONNECTION_TRAINING_CACHE.clear()
 
 
+def clear_connection_training_cache(conn: sqlite3.Connection) -> None:
+    """Release training rows retained for a connection after a background job."""
+    conn_id = id(conn)
+    marker = _connection_training_cache_db_marker(conn)
+    _CONNECTION_TRAINING_CACHE.pop((conn_id, marker), None)
+    _CONNECTION_GAME_TOTAL_MEAN_CACHE.pop(conn_id, None)
+    for cache in (
+        _CONNECTION_MODEL_CACHE,
+        _CONNECTION_RESIDUAL_MODEL_CACHE,
+        _CONNECTION_MINUTES_MODEL_CACHE,
+    ):
+        for key in [key for key in cache if key[0] == conn_id]:
+            cache.pop(key, None)
+
+
 def _train_market_model_uncached(
     conn: sqlite3.Connection,
     market: str,
