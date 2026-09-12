@@ -39,8 +39,9 @@ timestamp() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
-odds_api_today_event_count() {
-  python3 - "$ODDS_API_BASE_URL" "$ODDS_API_KEY_VALUE" "$APP_TIMEZONE" <<'PY'
+odds_api_event_count_for_date() {
+  local target_date="$1"
+  python3 - "$ODDS_API_BASE_URL" "$ODDS_API_KEY_VALUE" "$APP_TIMEZONE" "$target_date" <<'PY'
 import json
 import sys
 from datetime import datetime
@@ -49,13 +50,12 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
-base_url, api_key, tz_name = sys.argv[1:4]
+base_url, api_key, tz_name, target_date = sys.argv[1:5]
 if not api_key:
     sys.stderr.write("ODDS_API_KEY is empty; cannot precheck Odds API events.\n")
     raise SystemExit(1)
 
 target_tz = ZoneInfo(tz_name)
-today_local = datetime.now(target_tz).date()
 url = f"{base_url}/sports/basketball_wnba/events?{urlencode({'apiKey': api_key, 'dateFormat': 'iso'})}"
 
 try:
@@ -83,11 +83,17 @@ for item in payload if isinstance(payload, list) else []:
         continue
     if start.tzinfo is None:
         continue
-    if start.astimezone(target_tz).date() == today_local:
+    if start.astimezone(target_tz).date().isoformat() == target_date:
         count += 1
 
 sys.stdout.write(str(count))
 PY
+}
+
+odds_api_today_event_count() {
+  local today_local
+  today_local="$(TZ="$APP_TIMEZONE" date +%F)"
+  odds_api_event_count_for_date "$today_local"
 }
 
 api_request() {

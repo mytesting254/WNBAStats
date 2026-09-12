@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 USE_LIVE_CONTAINER="${WNBA_USE_LIVE_CONTAINER:-false}"
+APP_TIMEZONE="${WNBA_APP_TIMEZONE:-America/New_York}"
+ODDS_API_BASE_URL="${WNBA_ODDS_API_BASE_URL:-https://api.the-odds-api.com/v4}"
+ODDS_API_KEY_VALUE="${ODDS_API_KEY:-${THE_ODDS_API_KEY:-}}"
+
+# Keep the stocks-prep slate gate identical to the main daily flow.
+source "$ROOT_DIR/scripts/live_daily_props.sh"
 
 usage() {
   cat >&2 <<'EOF'
@@ -23,15 +29,53 @@ timestamp() {
   date -u +"%Y-%m-%dT%H:%M:%SZ"
 }
 
+require_odds_events_for_date() {
+  local target_date="$1"
+  if [ -z "$ODDS_API_KEY_VALUE" ]; then
+    echo "[$(timestamp)] ODDS_API_KEY is empty; cannot precheck Odds API events" >&2
+    return 1
+  fi
+  echo "[$(timestamp)] checking WNBA Odds API events for ${target_date} in ${APP_TIMEZONE}"
+  local count
+  count="$(odds_api_event_count_for_date "$target_date")"
+  if [ "$count" -le 0 ]; then
+    echo "[$(timestamp)] no WNBA events found for ${target_date} in ${APP_TIMEZONE}; skipping stocks prep"
+    return 10
+  fi
+  echo "[$(timestamp)] found ${count} WNBA event(s) for ${target_date}; continuing stocks prep"
+}
+
+tomorrow_local_date() {
+  TZ="$APP_TIMEZONE" date -d 'tomorrow' +%F
+}
+
 run_prepare() {
   local mode="$1"
   shift || true
   case "$mode" in
     tomorrow)
+      if require_odds_events_for_date "$(tomorrow_local_date)"; then
+        :
+      else
+        local gate_status=$?
+        if [ "$gate_status" -eq 10 ]; then
+          return 0
+        fi
+        return "$gate_status"
+      fi
       echo "[$(timestamp)] preparing Specials stocks data for tomorrow"
       exec python3 scripts/prepare_stocks_data.py --tomorrow-only
       ;;
     today)
+      if require_odds_events_for_date "$(TZ="$APP_TIMEZONE" date +%F)"; then
+        :
+      else
+        local gate_status=$?
+        if [ "$gate_status" -eq 10 ]; then
+          return 0
+        fi
+        return "$gate_status"
+      fi
       echo "[$(timestamp)] preparing Specials stocks data for today"
       exec python3 scripts/prepare_stocks_data.py --today-only
       ;;
@@ -83,4 +127,6 @@ main() {
   run_prepare "${1:-help}" "${@:2}"
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  main "$@"
+fi
