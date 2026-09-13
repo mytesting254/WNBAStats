@@ -7223,6 +7223,32 @@ def test_rebuild_team_prep_context_populates_tracking_cache(monkeypatch, tmp_pat
     assert float(row["turnover_pressure_factor"]) > 0.0
 
 
+def test_rebuild_team_prep_context_skips_same_team_games(monkeypatch, tmp_path) -> None:
+    load_test_history()
+    tracking_path = tmp_path / "stocks-tracking.sqlite"
+    monkeypatch.setenv("WNBA_STOCKS_TRACKING_DB", str(tracking_path))
+
+    stocks_tracking_module.ensure_tracking_schema()
+    with sqlite3.connect(tracking_path) as tracking:
+        tracking.execute(
+            """
+            INSERT INTO prepared_games (
+                game_id, game_date, start_time, home_team_id, away_team_id, espn_event_id, prepared_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (999001, "2026-06-01", "2026-06-01T23:00:00+00:00", 20, 20, 999001, "2026-06-01T00:00:00+00:00"),
+        )
+
+    with connect() as conn:
+        built = stocks_tracking_module.rebuild_team_prep_context(conn, target_dates=["2026-06-01"])
+
+    assert built == 0
+    with sqlite3.connect(tracking_path) as tracking:
+        assert tracking.execute(
+            "SELECT COUNT(*) FROM team_prep_context WHERE game_id = ?", (999001,)
+        ).fetchone()[0] == 0
+
+
 def test_prepare_stocks_data_targets_selected_dates(monkeypatch, tmp_path) -> None:
     load_test_history()
     tracking_path = tmp_path / "stocks-tracking.sqlite"

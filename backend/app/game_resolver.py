@@ -30,6 +30,8 @@ def resolve_or_create_game(
     away_team_id = ensure_team(conn, away_team)
     if not home_team_id or not away_team_id:
         return None
+    if int(home_team_id) == int(away_team_id):
+        return None
 
     parsed_start = _parse_game_start(start_time)
     resolved_date = game_date or _game_date_from_start(start_time)

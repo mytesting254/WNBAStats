@@ -89,6 +89,8 @@ def import_espn_scoreboard(
         away_team_id = _team_id(conn, away)
         if not home_team_id or not away_team_id:
             continue
+        if int(home_team_id) == int(away_team_id):
+            continue
 
         start_time = str(event.get("date") or competition.get("date") or "")
         game_date = _game_date_from_start_time(start_time)

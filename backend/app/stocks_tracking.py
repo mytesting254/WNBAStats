@@ -1145,6 +1145,7 @@ def rebuild_prepared_games(
                 g.espn_event_id
             FROM games g
             WHERE g.status = 'scheduled'
+              AND g.home_team_id != g.away_team_id
             """
             + filter_sql
             + """
@@ -1789,6 +1790,8 @@ def rebuild_team_prep_context(
             game_date = str(row["game_date"])
             home_team_id = int(row["home_team_id"])
             away_team_id = int(row["away_team_id"])
+            if home_team_id == away_team_id:
+                continue
             for team_id, opponent_id, is_home in (
                 (home_team_id, away_team_id, 1),
                 (away_team_id, home_team_id, 0),
