@@ -6,9 +6,11 @@ import argparse
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -16,10 +18,32 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from backend.app.db import connect
-from backend.app.odds_import import _backfill_provider_player_ids, _event_rows, _match_or_create_local_game, sync_prop_lines_from_sportsbook
+from backend.app.odds_import import (
+    GAME_MARKETS,
+    _backfill_provider_player_ids,
+    _event_rows,
+    _match_or_create_local_game,
+    _update_game_market_from_event,
+    sync_prop_lines_from_sportsbook,
+)
 from backend.app.settlement import settle_completed_props
 
-MARKETS = "player_points,player_rebounds,player_assists,player_threes,player_points_rebounds,player_points_assists,player_rebounds_assists,player_points_rebounds_assists,player_steals,player_blocks,player_blocks_steals"
+MARKETS = ",".join(
+    (
+        *GAME_MARKETS,
+        "player_points",
+        "player_rebounds",
+        "player_assists",
+        "player_threes",
+        "player_points_rebounds",
+        "player_points_assists",
+        "player_rebounds_assists",
+        "player_points_rebounds_assists",
+        "player_steals",
+        "player_blocks",
+        "player_blocks_steals",
+    )
+)
 
 
 def main() -> None:
@@ -56,8 +80,9 @@ def main() -> None:
             if not args.start_date <= game_date <= args.end_date:
                 continue
             game_id = _match_or_create_local_game(conn, event)
+            _update_game_market_from_event(conn, event, game_id)
             rows = _event_rows(event, datetime.now(timezone.utc).isoformat(), game_id=game_id)
-            if not rows:
+            if not rows and game_id is None:
                 continue
             event_id = str(event["id"])
             market_keys = sorted({str(row[10]) for row in rows})
@@ -77,8 +102,20 @@ def main() -> None:
 
 
 def _fetch(url: str) -> dict:
-    with urlopen(url, timeout=60) as response:
-        return json.loads(response.read())
+    for attempt in range(4):
+        try:
+            with urlopen(url, timeout=60) as response:
+                return json.loads(response.read())
+        except HTTPError as exc:
+            if exc.code != 429 or attempt == 3:
+                raise
+            retry_after = exc.headers.get("Retry-After")
+            try:
+                delay = max(2.0, min(30.0, float(retry_after))) if retry_after else 5.0 * (attempt + 1)
+            except ValueError:
+                delay = 5.0 * (attempt + 1)
+            time.sleep(delay)
+    raise RuntimeError("Odds API fetch retry loop exhausted")
 
 
 if __name__ == "__main__":
