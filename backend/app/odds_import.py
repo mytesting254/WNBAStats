@@ -10,6 +10,7 @@ from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
+from uuid import uuid4
 
 from dotenv import load_dotenv
 
@@ -30,6 +31,8 @@ LOCAL_TZ = APP_TIMEZONE
 DEFAULT_REGIONS = "us"
 DEFAULT_BOOKMAKERS = "draftkings,fanduel,betmgm,caesars,espnbet,fanatics,betrivers"
 RAW_CACHE_NAME = "sportsbook_props_raw.json"
+ODDS_PULL_ARCHIVE_DIR = "odds_api_pulls"
+ODDS_PULL_INDEX_NAME = "odds_api_pull_index.json"
 HISTORICAL_GAME_MARKETS_CACHE_PREFIX = "historical_game_markets_"
 COMPLETED_GAME_GRACE_HOURS = 4
 GAME_MARKETS = ("h2h", "spreads", "totals")
@@ -343,9 +346,16 @@ def _import_the_odds_api_provider_rows(
 
     merged_payload = _merge_event_cache(cached_payload, fetched_payload)
     should_persist_payload = bool(fetched_payload) or not errors
+    archive_record = None
     if should_persist_payload:
         write_json_cache(RAW_CACHE_NAME, merged_payload)
         persisted_payload = read_json_cache(RAW_CACHE_NAME)
+        archive_record = _archive_odds_api_pull(
+            fetched_payload,
+            captured_at=captured_at,
+            selected_date=today,
+            force_refresh=force_refresh,
+        )
     else:
         persisted_payload = cached_payload
     if progress_callback is not None:
@@ -386,8 +396,85 @@ def _import_the_odds_api_provider_rows(
         "captured_at": captured_at,
         "errors": errors,
         "message": message,
+        "archive": archive_record,
         "prop_sync_eligible": prop_sync_eligible,
     }
+
+
+def _archive_odds_api_pull(
+    payload: list[dict],
+    *,
+    captured_at: str,
+    selected_date: str | None,
+    force_refresh: bool,
+) -> dict:
+    """Persist one immutable provider pull and index it for later replay/audit.
+
+    ``sportsbook_props_raw.json`` remains the rolling cache used by the UI. The
+    archive stores only the events returned by this specific provider pull, so
+    multiple refreshes on the same day remain distinguishable.
+    """
+    try:
+        captured = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+        pull_id = captured.strftime("%Y%m%dT%H%M%S%fZ") + f"_{uuid4().hex[:8]}"
+        game_dates = sorted(
+            {
+                game_date
+                for event in payload
+                for game_date in [_game_date(str(event.get("commence_time") or ""))]
+                if game_date
+            }
+        )
+        iso_weeks = sorted(
+            {
+                f"{datetime.fromisoformat(game_date).date().isocalendar().year:04d}-W"
+                f"{datetime.fromisoformat(game_date).date().isocalendar().week:02d}"
+                for game_date in game_dates
+            }
+        )
+        payload_name = f"{ODDS_PULL_ARCHIVE_DIR}/odds_api_pull_{pull_id}.json"
+        write_json_cache(payload_name, payload)
+
+        index = read_json_cache(f"{ODDS_PULL_ARCHIVE_DIR}/{ODDS_PULL_INDEX_NAME}")
+        if not isinstance(index, list):
+            index = []
+        record = {
+            "pull_id": pull_id,
+            "captured_at": captured_at,
+            "pull_date": captured.astimezone(LOCAL_TZ).date().isoformat(),
+            "selected_date": selected_date,
+            "game_dates": game_dates,
+            "iso_weeks": iso_weeks,
+            "events": len(payload),
+            "force_refresh": force_refresh,
+            "payload_file": payload_name,
+        }
+        index.append(record)
+        index.sort(key=lambda item: str(item.get("captured_at") or ""))
+        write_json_cache(f"{ODDS_PULL_ARCHIVE_DIR}/{ODDS_PULL_INDEX_NAME}", index)
+        return {"status": "archived", **record}
+    except (OSError, TypeError, ValueError) as exc:
+        return {"status": "archive_error", "error": str(exc), "events": len(payload)}
+
+
+def list_odds_api_pull_archives(
+    *,
+    pull_date: str | None = None,
+    iso_week: str | None = None,
+    selected_date: str | None = None,
+) -> list[dict]:
+    """List immutable Odds API pulls filtered by pull day or game date/week."""
+    index = read_json_cache(f"{ODDS_PULL_ARCHIVE_DIR}/{ODDS_PULL_INDEX_NAME}")
+    if not isinstance(index, list):
+        return []
+    return [
+        item
+        for item in index
+        if isinstance(item, dict)
+        and (pull_date is None or item.get("pull_date") == pull_date)
+        and (iso_week is None or iso_week in (item.get("iso_weeks") or []))
+        and (selected_date is None or item.get("selected_date") == selected_date)
+    ]
 
 
 def _sync_props_after_import(

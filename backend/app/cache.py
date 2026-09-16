@@ -16,6 +16,7 @@ def write_json_cache(name: str, payload: Any) -> Path:
     cache_dir = get_cache_dir()
     cache_dir.mkdir(parents=True, exist_ok=True)
     path = cache_dir / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(f"{path.name}.{uuid4().hex}.tmp")
     tmp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     tmp_path.replace(path)
