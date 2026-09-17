@@ -31,10 +31,10 @@ from .player_prop_model import (
 )
 
 
-DFS_HALF_MODEL_VERSION = "dfs-first-half-ridge-v4"
+DFS_HALF_MODEL_VERSION = "dfs-first-half-ridge-v5"
 DFS_HALF_MODEL_CACHE_PREFIX = "dfs_first_half_model"
 DFS_HALF_EVAL_CACHE_PREFIX = "dfs_first_half_eval"
-DFS_HALF_EVAL_VERSION = "dfs-first-half-walk-forward-v2"
+DFS_HALF_EVAL_VERSION = "dfs-first-half-walk-forward-v3"
 DFS_HALF_REQUIRE_OBSERVED_TARGETS = True
 DFS_HALF_EVAL_MIN_HISTORY_ROWS = 200
 DFS_HALF_EVAL_MIN_SEGMENT_ROWS = 10
@@ -64,6 +64,8 @@ DFS_HALF_EXTRA_FEATURES = [
     "prior_observed_fg_pct_avg_5",
     "prior_observed_rebound_share_avg_5",
     "prior_observed_assist_share_avg_5",
+    "prior_observed_three_rate_avg_5",
+    "prior_observed_assists_per_fga_avg_5",
 ]
 DFS_HALF_MARKETS = [
     "points",
@@ -599,6 +601,8 @@ def _predict_current_half_estimate(
         prior_observed_fg_pct_avg_5=history_features["fg_pct_avg_5"],
         prior_observed_rebound_share_avg_5=history_features["rebound_share_avg_5"],
         prior_observed_assist_share_avg_5=history_features["assist_share_avg_5"],
+        prior_observed_three_rate_avg_5=history_features["three_rate_avg_5"],
+        prior_observed_assists_per_fga_avg_5=history_features["assists_per_fga_avg_5"],
     )
     learned_estimate = max(0.0, _predict(model, features))
     expected_halfway_line = line_value * 0.5
@@ -1077,6 +1081,8 @@ def _dfs_half_eval_samples(conn: sqlite3.Connection, market: str) -> list[DfsHal
                     prior_observed_fg_pct_avg_5=_nullable_float(half_row["prior_observed_fg_pct_avg_5"]),
                     prior_observed_rebound_share_avg_5=_nullable_float(half_row["prior_observed_rebound_share_avg_5"]),
                     prior_observed_assist_share_avg_5=_nullable_float(half_row["prior_observed_assist_share_avg_5"]),
+                    prior_observed_three_rate_avg_5=_nullable_float(half_row["prior_observed_three_rate_avg_5"]),
+                    prior_observed_assists_per_fga_avg_5=_nullable_float(half_row["prior_observed_assists_per_fga_avg_5"]),
                 ),
                 target=float(half_row["estimated_first_half_result"] or 0.0),
                 line_value=float(half_row["line_value"] or 0.0),
@@ -1138,6 +1144,8 @@ def _dfs_half_training_rows(conn: sqlite3.Connection, market: str) -> list[tuple
                     prior_observed_fg_pct_avg_5=_nullable_float(half_row["prior_observed_fg_pct_avg_5"]),
                     prior_observed_rebound_share_avg_5=_nullable_float(half_row["prior_observed_rebound_share_avg_5"]),
                     prior_observed_assist_share_avg_5=_nullable_float(half_row["prior_observed_assist_share_avg_5"]),
+                    prior_observed_three_rate_avg_5=_nullable_float(half_row["prior_observed_three_rate_avg_5"]),
+                    prior_observed_assists_per_fga_avg_5=_nullable_float(half_row["prior_observed_assists_per_fga_avg_5"]),
                 ),
                 float(half_row["estimated_first_half_result"] or 0.0),
             )
@@ -1179,6 +1187,8 @@ def _dfs_half_feature_row(
     prior_observed_fg_pct_avg_5: float | None,
     prior_observed_rebound_share_avg_5: float | None,
     prior_observed_assist_share_avg_5: float | None,
+    prior_observed_three_rate_avg_5: float | None,
+    prior_observed_assists_per_fga_avg_5: float | None,
 ) -> list[float]:
     return [
         *base_features,
@@ -1202,6 +1212,8 @@ def _dfs_half_feature_row(
         float(prior_observed_fg_pct_avg_5 if prior_observed_fg_pct_avg_5 is not None else 0.0),
         float(prior_observed_rebound_share_avg_5 if prior_observed_rebound_share_avg_5 is not None else 0.0),
         float(prior_observed_assist_share_avg_5 if prior_observed_assist_share_avg_5 is not None else 0.0),
+        float(prior_observed_three_rate_avg_5 if prior_observed_three_rate_avg_5 is not None else 0.0),
+        float(prior_observed_assists_per_fga_avg_5 if prior_observed_assists_per_fga_avg_5 is not None else 0.0),
     ]
 
 
@@ -1231,6 +1243,8 @@ def _current_player_first_half_history_features(
     fg_pct_values: list[float] = []
     rebound_share_values: list[float] = []
     assist_share_values: list[float] = []
+    three_rate_values: list[float] = []
+    assists_per_fga_values: list[float] = []
     if game_date:
         rows = conn.execute(
             """
@@ -1271,6 +1285,8 @@ def _current_player_first_half_history_features(
             fg_pct_values.append((fgm / fga) if fga > 0 else 0.0)
             rebound_share_values.append((rebounds / team_rebounds) if team_rebounds > 0 else 0.0)
             assist_share_values.append((assists / team_fgm) if team_fgm > 0 else 0.0)
+            three_rate_values.append((float(row["first_half_threes"] or 0.0) / fga) if fga > 0 else 0.0)
+            assists_per_fga_values.append((assists / fga) if fga > 0 else 0.0)
     summary = {
         "count": len(values),
         "last": values[-1] if values else None,
@@ -1284,6 +1300,8 @@ def _current_player_first_half_history_features(
         "fg_pct_avg_5": _window_average(fg_pct_values, 5),
         "rebound_share_avg_5": _window_average(rebound_share_values, 5),
         "assist_share_avg_5": _window_average(assist_share_values, 5),
+        "three_rate_avg_5": _window_average(three_rate_values, 5),
+        "assists_per_fga_avg_5": _window_average(assists_per_fga_values, 5),
     }
     if bucket is not None:
         bucket[cache_key] = dict(summary)

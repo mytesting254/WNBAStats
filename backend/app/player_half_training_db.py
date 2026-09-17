@@ -10,7 +10,7 @@ from pathlib import Path
 from .paths import get_player_half_training_db_path
 
 
-PLAYER_HALF_TRAINING_DB_VERSION = "v3"
+PLAYER_HALF_TRAINING_DB_VERSION = "v4"
 _PLAYER_HALF_TRAINING_DB_LOCK = threading.RLock()
 DEFAULT_TEAM_FIRST_HALF_SHARE = float(os.getenv("WNBA_DEFAULT_TEAM_FIRST_HALF_SHARE", "0.5"))
 
@@ -268,6 +268,8 @@ def _init_training_db(conn: sqlite3.Connection) -> None:
             prior_observed_fg_pct_avg_5 REAL,
             prior_observed_rebound_share_avg_5 REAL,
             prior_observed_assist_share_avg_5 REAL,
+            prior_observed_three_rate_avg_5 REAL,
+            prior_observed_assists_per_fga_avg_5 REAL,
             share_details_json TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
@@ -304,6 +306,10 @@ def _init_training_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_rebound_share_avg_5 REAL")
     if "prior_observed_assist_share_avg_5" not in prop_columns:
         conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_assist_share_avg_5 REAL")
+    if "prior_observed_three_rate_avg_5" not in prop_columns:
+        conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_three_rate_avg_5 REAL")
+    if "prior_observed_assists_per_fga_avg_5" not in prop_columns:
+        conn.execute("ALTER TABLE player_half_prop_examples ADD COLUMN prior_observed_assists_per_fga_avg_5 REAL")
     conn.commit()
 
 
@@ -491,6 +497,8 @@ def _rebuild_player_half_training_examples(
         fg_pct_history = player_proxy_history.get((int(row["source_player_id"]), "fg_pct"), [])
         rebound_share_history = player_proxy_history.get((int(row["source_player_id"]), "rebound_share"), [])
         assist_share_history = player_proxy_history.get((int(row["source_player_id"]), "assist_share"), [])
+        three_rate_history = player_proxy_history.get((int(row["source_player_id"]), "three_rate"), [])
+        assists_per_fga_history = player_proxy_history.get((int(row["source_player_id"]), "assists_per_fga"), [])
         line_value = float(row["line_value"] or 0.0)
         expected_halfway_line = line_value * 0.5 if line_value else None
         line_progress_ratio = estimated_half / line_value if line_value else None
@@ -537,6 +545,8 @@ def _rebuild_player_half_training_examples(
                 _window_average(fg_pct_history, 5),
                 _window_average(rebound_share_history, 5),
                 _window_average(assist_share_history, 5),
+                _window_average(three_rate_history, 5),
+                _window_average(assists_per_fga_history, 5),
                 str(lookup["share_details_json"]),
                 built_at,
             )
@@ -550,7 +560,7 @@ def _rebuild_player_half_training_examples(
             player_market_history.setdefault(history_key, []).append(float(observed_value))
             seen_player_market_games.add(seen_key)
         if isinstance(proxy_lookup, dict):
-            for proxy_name in ("fga", "fg_pct", "rebound_share", "assist_share"):
+            for proxy_name in ("fga", "fg_pct", "rebound_share", "assist_share", "three_rate", "assists_per_fga"):
                 proxy_value = proxy_lookup.get(proxy_name)
                 if proxy_value is not None:
                     player_proxy_history.setdefault((int(row["source_player_id"]), proxy_name), []).append(float(proxy_value))
@@ -566,8 +576,9 @@ def _rebuild_player_half_training_examples(
                 winning_side, final_margin, prior_observed_count, prior_observed_last, prior_observed_avg_3,
                 prior_observed_avg_5, prior_observed_avg_10, prior_observed_std_5, prior_observed_fga_last,
                 prior_observed_fga_avg_3, prior_observed_fga_avg_5, prior_observed_fg_pct_avg_5,
-                prior_observed_rebound_share_avg_5, prior_observed_assist_share_avg_5, share_details_json, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                prior_observed_rebound_share_avg_5, prior_observed_assist_share_avg_5,
+                prior_observed_three_rate_avg_5, prior_observed_assists_per_fga_avg_5, share_details_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             prop_insert_rows,
         )
@@ -825,11 +836,15 @@ def _observed_half_proxy_values_from_player_row(
     fg_pct = (fgm / fga) if fga > 0 else 0.0
     rebound_share = (rebounds / team_rebounds) if team_rebounds > 0 else 0.0
     assist_share = (assists / team_fgm) if team_fgm > 0 else 0.0
+    three_rate = (float(row["first_half_threes"] or 0.0) / fga) if fga > 0 else 0.0
+    assists_per_fga = (assists / fga) if fga > 0 else 0.0
     return {
         "fga": round(fga, 3),
         "fg_pct": round(fg_pct, 3),
         "rebound_share": round(rebound_share, 3),
         "assist_share": round(assist_share, 3),
+        "three_rate": round(three_rate, 3),
+        "assists_per_fga": round(assists_per_fga, 3),
     }
 
 
