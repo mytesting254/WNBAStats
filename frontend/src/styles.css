@@ -2020,6 +2020,96 @@ tbody tr.selected {
   margin-bottom: 12px;
 }
 
+.dfs-performance-card {
+  margin: 0 0 16px;
+  padding: 16px;
+  border: 1px solid rgba(109, 164, 199, 0.24);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(245, 251, 255, 0.98), rgba(232, 247, 250, 0.96));
+  box-shadow: 0 14px 30px rgba(7, 20, 37, 0.1);
+}
+
+.dfs-performance-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.dfs-performance-header h3 {
+  margin: 3px 0 3px;
+  color: #172033;
+  font-size: 20px;
+}
+
+.dfs-performance-header p,
+.dfs-performance-mini-card small {
+  color: #667085;
+  font-size: 12px;
+}
+
+.dfs-performance-header p {
+  margin: 0;
+}
+
+.dfs-performance-total {
+  text-align: right;
+}
+
+.dfs-performance-total strong {
+  display: block;
+  color: #0f9d8a;
+  font-size: 28px;
+}
+
+.dfs-performance-total span {
+  color: #667085;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dfs-performance-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.dfs-performance-mini-card {
+  min-width: 0;
+  padding: 11px;
+  border: 1px solid rgba(15, 157, 138, 0.18);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.dfs-performance-mini-card span,
+.dfs-performance-mini-card strong,
+.dfs-performance-mini-card small {
+  display: block;
+}
+
+.dfs-performance-mini-card span {
+  overflow: hidden;
+  color: #667085;
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.dfs-performance-mini-card strong {
+  margin: 5px 0 2px;
+  color: #172033;
+  font-size: 22px;
+}
+
+.dfs-performance-empty {
+  color: #667085;
+  font-size: 13px;
+}
+
 .candidate-tabs button {
   min-width: auto;
   padding: 0 10px;

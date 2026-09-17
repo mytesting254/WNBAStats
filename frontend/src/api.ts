@@ -1065,6 +1065,32 @@ export async function fetchDfsFirstHalf(): Promise<DfsFirstHalfEstimate[]> {
   return response.json();
 }
 
+export type DfsPerformanceMarket = {
+  market: string;
+  settled: number;
+  hits: number;
+  misses: number;
+  hit_rate: number | null;
+  last_settled_at?: string | null;
+};
+
+export type DfsPerformance = {
+  settled: number;
+  hits: number;
+  misses: number;
+  hit_rate: number | null;
+  last_settled_at?: string | null;
+  markets: DfsPerformanceMarket[];
+};
+
+export async function fetchDfsPerformance(): Promise<DfsPerformance> {
+  const response = await apiFetch("/api/dfs/performance");
+  if (!response.ok) {
+    throw new Error("Failed to load DFS performance");
+  }
+  return response.json();
+}
+
 export async function fetchPlayerFirstHalfLines(limit = 200): Promise<PlayerFirstHalfLine[]> {
   const response = await apiFetch(`/api/player-first-half-lines?limit=${limit}`);
   if (!response.ok) {

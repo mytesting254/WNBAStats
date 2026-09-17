@@ -5871,6 +5871,55 @@ def dfs_first_half(response: Response) -> list[dict[str, Any]]:
     return payload
 
 
+@app.get("/api/dfs/performance")
+def dfs_performance() -> dict[str, Any]:
+    """Return settled DFS first-half hit rates, grouped by market."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                lower(snap.market) AS market,
+                COUNT(*) AS settled,
+                SUM(CASE WHEN settlement.correct_side = 1 THEN 1 ELSE 0 END) AS hits,
+                MAX(settlement.settled_at) AS last_settled_at
+            FROM dfs_first_half_projection_settlements settlement
+            JOIN dfs_first_half_projection_snapshots snap ON snap.id = settlement.snapshot_id
+            GROUP BY lower(snap.market)
+            ORDER BY lower(snap.market)
+            """
+        ).fetchall()
+    markets: list[dict[str, Any]] = []
+    total_settled = 0
+    total_hits = 0
+    last_settled_at: str | None = None
+    for row in rows:
+        settled = int(row["settled"] or 0)
+        hits = int(row["hits"] or 0)
+        total_settled += settled
+        total_hits += hits
+        value = str(row["last_settled_at"] or "") or None
+        if value and (last_settled_at is None or value > last_settled_at):
+            last_settled_at = value
+        markets.append(
+            {
+                "market": str(row["market"] or ""),
+                "settled": settled,
+                "hits": hits,
+                "misses": max(0, settled - hits),
+                "hit_rate": (hits / settled) if settled else None,
+                "last_settled_at": value,
+            }
+        )
+    return {
+        "settled": total_settled,
+        "hits": total_hits,
+        "misses": max(0, total_settled - total_hits),
+        "hit_rate": (total_hits / total_settled) if total_settled else None,
+        "last_settled_at": last_settled_at,
+        "markets": markets,
+    }
+
+
 @app.get("/api/player-first-half-history")
 def player_first_half_history(
     player_name: str = Query(..., min_length=2),

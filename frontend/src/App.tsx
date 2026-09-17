@@ -2,6 +2,7 @@
 import { Component, useEffect, useMemo, useRef, useState, type ErrorInfo, type ReactNode } from "react";
 import {
   fetchDfsFirstHalf,
+  fetchDfsPerformance,
   fetchAuthState,
   fetchUnsettledPropAudit,
   voidDnpProps,
@@ -43,6 +44,7 @@ import {
   type CoversRecordRow,
   type DbLockAudit,
   type DfsFirstHalfEstimate,
+  type DfsPerformance,
   type GemPerformance,
   type LineDiscrepancy,
   type Matchup,
@@ -147,7 +149,7 @@ const INITIAL_TAB_LOADING: TabLoadingState = {
 };
 const CACHE_NAMES_BY_TAB: Record<DashboardTab, string[]> = {
   props: ["current_value_board.json"],
-  dfs: [],
+  dfs: ["model_performance.json"],
   gems: ["current_value_board.json", "current_matchups.json", "line_discrepancies.json", "gem_performance.json"],
   watchlist: ["current_watchlist.json", "watchlist_performance.json"],
   matchups: ["current_matchups.json"],
@@ -339,6 +341,7 @@ class DashboardErrorBoundary extends Component<
 export function App() {
   const [props, setProps] = useState<ValueProp[]>([]);
   const [dfsFirstHalf, setDfsFirstHalf] = useState<DfsFirstHalfEstimate[]>([]);
+  const [dfsPerformance, setDfsPerformance] = useState<DfsPerformance | null>(null);
   const [watchlist, setWatchlist] = useState<WatchlistProp[]>([]);
   const [matchups, setMatchups] = useState<Matchup[]>([]);
   const [specialStocks, setSpecialStocks] = useState<SpecialStocksSnapshot[]>([]);
@@ -504,12 +507,14 @@ export function App() {
         setDiscrepancies(nextDiscrepancies);
         setGemPerformance(nextPerformance);
       } else if (tab === "dfs") {
-        const [nextDfs, nextMatchups] = await Promise.all([
+        const [nextDfs, nextMatchups, nextPerformance] = await Promise.all([
           withTimeout(fetchDfsFirstHalf(), INITIAL_LOAD_TIMEOUT_MS, "DFS first-half estimates"),
-          withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups")
+          withTimeout(fetchMatchups(), INITIAL_LOAD_TIMEOUT_MS, "matchups"),
+          withTimeout(fetchDfsPerformance(), INITIAL_LOAD_TIMEOUT_MS, "DFS performance")
         ]);
         setDfsFirstHalf(nextDfs);
         setMatchups(nextMatchups);
+        setDfsPerformance(nextPerformance);
       } else if (tab === "watchlist") {
         const [nextWatchlist, nextPerformance] = await Promise.all([
           withTimeout(fetchWatchlist(), INITIAL_LOAD_TIMEOUT_MS, "watchlist"),
@@ -1425,7 +1430,7 @@ export function App() {
             setPropsSortDirection={setPropsSortDirection}
           />
         ) : activeTab === "dfs" ? (
-          <DfsView estimates={dfsFirstHalf} matchups={matchups} loading={tabLoading.dfs} error={error} />
+          <DfsView estimates={dfsFirstHalf} matchups={matchups} performance={dfsPerformance} loading={tabLoading.dfs} error={error} />
         ) : activeTab === "gems" ? (
           <GemsView gems={gems} matchups={matchups} loading={tabLoading.gems} error={error} />
         ) : activeTab === "watchlist" ? (
@@ -4789,11 +4794,13 @@ function WatchlistView({
 function DfsView({
   estimates,
   matchups,
+  performance,
   loading,
   error,
 }: {
   estimates: DfsFirstHalfEstimate[];
   matchups: Matchup[];
+  performance: DfsPerformance | null;
   loading: boolean;
   error: string | null;
 }) {
@@ -4852,6 +4859,7 @@ function DfsView({
           <BrainCircuit size={20} />
         </div>
         {error ? <div className="error">{error}</div> : null}
+        <DfsPerformanceCard performance={performance} loading={loading} />
         <div className="game-tabs" aria-label="DFS matchup tabs">
           {groupedEstimateRows.map((group) => (
             <button
@@ -4948,6 +4956,49 @@ function DfsView({
             </div>
           </div>
         </div>
+      </div>
+    </section>
+  );
+}
+
+function DfsPerformanceCard({ performance, loading }: { performance: DfsPerformance | null; loading: boolean }) {
+  const marketOrder = [
+    "points",
+    "rebounds",
+    "assists",
+    "points_rebounds",
+    "points_assists",
+    "rebounds_assists",
+    "points_rebounds_assists",
+    "threes",
+    "turnovers",
+  ];
+  const marketMap = new Map((performance?.markets ?? []).map((item) => [item.market, item]));
+  const marketsWithData = marketOrder.map((market) => marketMap.get(market)).filter(Boolean) as NonNullable<DfsPerformance["markets"][number]>[];
+
+  return (
+    <section className="dfs-performance-card" aria-label="DFS settled performance">
+      <div className="dfs-performance-header">
+        <div>
+          <span className="eyebrow">Settled performance</span>
+          <h3>DFS Hit Rates</h3>
+          <p>{performance?.last_settled_at ? `Updated ${formatRelativeAge(performance.last_settled_at)}` : "Rates update as first-half props settle."}</p>
+        </div>
+        <div className="dfs-performance-total">
+          <strong>{performance?.hit_rate == null ? "Pending" : formatPercent(performance.hit_rate)}</strong>
+          <span>{performance ? `${performance.hits} hits / ${performance.settled} settled` : loading ? "Loading" : "No settled props"}</span>
+        </div>
+      </div>
+      <div className="dfs-performance-grid">
+        {marketsWithData.length ? marketsWithData.map((item) => (
+          <article className="dfs-performance-mini-card" key={`dfs-performance-${item.market}`}>
+            <span>{marketLabel(item.market)}</span>
+            <strong>{formatPercent(item.hit_rate ?? undefined)}</strong>
+            <small>{item.hits}-{item.misses} · {item.settled} settled</small>
+          </article>
+        )) : (
+          <div className="dfs-performance-empty">No settled DFS props yet.</div>
+        )}
       </div>
     </section>
   );
