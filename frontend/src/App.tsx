@@ -372,7 +372,6 @@ export function App() {
   const [sportsbookFilter, setSportsbookFilter] = useState("all");
   const [propsSort, setPropsSort] = useState<CandidateSortField>("expected_value");
   const [propsSortDirection, setPropsSortDirection] = useState<SortDirection>("desc");
-  const [selected, setSelected] = useState<ValueProp | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [operationStatus, setOperationStatus] = useState<string | null>(null);
   const [stalePayloadAudit, setStalePayloadAudit] = useState<StalePayloadAudit | null>(null);
@@ -476,18 +475,6 @@ export function App() {
       }
 
       setProps(board);
-      setSelected((current) => {
-        if (board.length === 0) {
-          return null;
-        }
-        if (current) {
-          const matchingProp = board.find((item) => item.id === current.id);
-          if (matchingProp) {
-            return matchingProp;
-          }
-        }
-        return board[0] ?? null;
-      });
       setLoadedTabs((current) => ({ ...current, props: true }));
     } catch (err) {
       if (requestId === loadRequestIdRef.current) {
@@ -1430,14 +1417,12 @@ export function App() {
             sportsbookFilter={sportsbookFilter}
             propsSort={propsSort}
             propsSortDirection={propsSortDirection}
-            selected={selected}
             setMarket={setMarket}
             setSideFilter={setSideFilter}
             setConfidence={setConfidence}
             setSportsbookFilter={setSportsbookFilter}
             setPropsSort={setPropsSort}
             setPropsSortDirection={setPropsSortDirection}
-            setSelected={setSelected}
           />
         ) : activeTab === "dfs" ? (
           <DfsView estimates={dfsFirstHalf} matchups={matchups} loading={tabLoading.dfs} error={error} />
@@ -2854,14 +2839,12 @@ function PropsView({
   sportsbookFilter,
   propsSort,
   propsSortDirection,
-  selected,
   setMarket,
   setSideFilter,
   setConfidence,
   setSportsbookFilter,
   setPropsSort,
   setPropsSortDirection,
-  setSelected
 }: {
   items: ValueProp[];
   filtered: ValueProp[];
@@ -2874,14 +2857,12 @@ function PropsView({
   sportsbookFilter: string;
   propsSort: CandidateSortField;
   propsSortDirection: SortDirection;
-  selected: ValueProp | null;
   setMarket: (market: string) => void;
   setSideFilter: (side: string) => void;
   setConfidence: (confidence: string) => void;
   setSportsbookFilter: (sportsbook: string) => void;
   setPropsSort: (field: CandidateSortField) => void;
   setPropsSortDirection: (order: SortDirection) => void;
-  setSelected: (prop: ValueProp) => void;
 }) {
   const sportsbookOptions = useMemo(
     () =>
@@ -2997,7 +2978,7 @@ function PropsView({
             </thead>
             <tbody>
               {filtered.map((prop) => (
-                <tr key={prop.id} className={selected?.id === prop.id ? "selected" : ""} onClick={() => setSelected(prop)}>
+                <tr key={prop.id}>
                   <td>
                     <div className="player-cell">
                       <TeamLogo src={prop.team_logo_url} alt={`${prop.team} logo`} />
@@ -3023,51 +3004,6 @@ function PropsView({
         </div>
       </div>
 
-      <aside className="detail-panel">
-        <div className="panel-header">
-          <div>
-            <h2>Prop Detail</h2>
-            <p>Projection context and pricing</p>
-          </div>
-          <TrendingUp size={20} />
-        </div>
-
-        {selected ? (
-          <div className="detail-content">
-            <div>
-              <div className="detail-title">
-                <TeamLogo src={selected.team_logo_url} alt={`${selected.team} logo`} />
-                <div>
-                  <p className="eyebrow sportsbook-inline">
-                    <span>{selected.team} | </span>
-                    <SportsbookLogo name={displaySportsbookName(selected)} />
-                  </p>
-                  <h3><PlayerLabel name={selected.player} position={selected.position} increasedRole={selected.increased_role} /></h3>
-                </div>
-              </div>
-              <p className="recommendation">
-                {selected.recommended_side.toUpperCase()} {selected.line.toFixed(1)} {marketLabel(selected.market)}
-              </p>
-            </div>
-              <div className="detail-grid">
-                <Metric label="Projection" value={selected.projection.toFixed(1)} />
-                <Metric label="Model probability" value={formatPercent(selected.model_probability)} />
-                <Metric label="Book implied" value={formatPercent(selected.implied_probability)} />
-                <Metric label="Rest" value={restLabel(selected.rest_days)} />
-                <Metric label="Blowout" value={selected.blowout_risk} />
-                <Metric label="Min impact" value={formatMinutes(selected.blowout_minutes_impact)} />
-                <Metric label="Confidence" value={selected.confidence} />
-              </div>
-            <p className="reason">{selected.reason}</p>
-            <div className="timestamps">
-              <span>Prediction: {formatDate(selected.prediction_time)}</span>
-              <span>Tipoff: {formatDate(selected.start_time)}</span>
-            </div>
-          </div>
-        ) : (
-          <p className="empty">No prop selected.</p>
-        )}
-      </aside>
     </section>
   );
 }
