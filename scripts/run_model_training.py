@@ -4,8 +4,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
+
+# When this file is executed directly (including from the disposable training
+# worker), Python puts only /app/scripts on sys.path. Add the repository root so
+# the sibling backend package remains importable.
+ROOT_DIR = Path(__file__).resolve().parents[1]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from backend.app.paths import get_db_path
 
