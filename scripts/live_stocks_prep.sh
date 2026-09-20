@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 USE_LIVE_CONTAINER="${WNBA_USE_LIVE_CONTAINER:-false}"
 APP_TIMEZONE="${WNBA_APP_TIMEZONE:-America/New_York}"
 ODDS_API_BASE_URL="${WNBA_ODDS_API_BASE_URL:-https://api.the-odds-api.com/v4}"
-ODDS_API_KEY_VALUE="${ODDS_API_KEY:-${THE_ODDS_API_KEY:-}}"
+ODDS_API_KEY_VALUE="${ODDS_API_KEY:-}"
 
 # Keep the stocks-prep slate gate identical to the main daily flow.
 source "$ROOT_DIR/scripts/live_daily_props.sh"
@@ -64,7 +64,7 @@ run_prepare() {
         return "$gate_status"
       fi
       echo "[$(timestamp)] preparing Specials stocks data for tomorrow"
-      exec python3 scripts/prepare_stocks_data.py --tomorrow-only
+      exec python3 scripts/prepare_stocks_data.py --tomorrow-only --odds-events
       ;;
     today)
       if require_odds_events_for_date "$(TZ="$APP_TIMEZONE" date +%F)"; then
@@ -77,7 +77,7 @@ run_prepare() {
         return "$gate_status"
       fi
       echo "[$(timestamp)] preparing Specials stocks data for today"
-      exec python3 scripts/prepare_stocks_data.py --today-only
+      exec python3 scripts/prepare_stocks_data.py --today-only --odds-events
       ;;
     today-and-tomorrow)
       echo "[$(timestamp)] preparing Specials stocks data for today and tomorrow"

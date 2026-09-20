@@ -1664,23 +1664,6 @@ def _match_or_create_local_game(conn: sqlite3.Connection, event: dict) -> int | 
         return None
     commence_time_text = str(event["commence_time"])
     game_date = _game_date(commence_time_text)
-    commence_time = _parse_utc(commence_time_text)
-    rows = conn.execute(
-        """
-        SELECT g.id, g.start_time
-        FROM games g
-        JOIN teams home ON home.id = g.home_team_id
-        JOIN teams away ON away.id = g.away_team_id
-        WHERE home.abbreviation = ?
-          AND away.abbreviation = ?
-        ORDER BY g.start_time
-        """,
-        (home, away),
-    ).fetchall()
-    for row in rows:
-        existing_start = _parse_game_start(str(row["start_time"]))
-        if existing_start and abs((existing_start - commence_time).total_seconds()) < 60:
-            return int(row["id"])
     return resolve_or_create_game(
         conn,
         home_team=str(event.get("home_team", "")),
@@ -1688,6 +1671,45 @@ def _match_or_create_local_game(conn: sqlite3.Connection, event: dict) -> int | 
         start_time=commence_time_text,
         game_date=game_date,
     )
+
+
+def discover_odds_api_game_ids(
+    conn: sqlite3.Connection,
+    *,
+    target_dates: list[str],
+) -> list[int]:
+    """Resolve upcoming Odds API events into local game IDs.
+
+    The events endpoint is intentionally used here instead of the odds
+    endpoint: it supplies the upcoming slate without consuming usage credits.
+    Local game IDs remain authoritative for downstream ESPN/statistics work.
+    """
+    load_dotenv()
+    api_key = os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")
+    if not api_key:
+        raise RuntimeError("ODDS_API_KEY is empty; cannot discover upcoming games")
+
+    dates = {str(value).strip() for value in target_dates if str(value).strip()}
+    if not dates:
+        return []
+    events = _fetch_json(
+        f"{BASE_URL}/sports/{SPORT_KEY}/events?{urlencode({'apiKey': api_key, 'dateFormat': 'iso'})}"
+    )
+    if not isinstance(events, list):
+        return []
+
+    game_ids: set[int] = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        commence_time = str(event.get("commence_time") or "")
+        if not commence_time or _game_date(commence_time) not in dates:
+            continue
+        game_id = _match_or_create_local_game(conn, event)
+        if game_id is not None:
+            game_ids.add(int(game_id))
+    conn.commit()
+    return sorted(game_ids)
 
 
 def _game_date(commence_time: str) -> str:

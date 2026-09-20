@@ -65,6 +65,7 @@ from backend.app.odds_import import (
     SyncPropLinesResult,
     _merge_event_cache,
     _fuzzy_player_name_match,
+    discover_odds_api_game_ids,
     import_the_odds_api_props,
     line_discrepancies,
     list_sportsbook_props,
@@ -9614,6 +9615,38 @@ def test_odds_import_requires_api_key(monkeypatch) -> None:
         result = import_the_odds_api_props(conn)
     assert result["status"] == "missing_api_key"
     assert result["imported"] == 0
+
+
+def test_discover_odds_api_game_ids_filters_by_local_game_date(monkeypatch) -> None:
+    load_test_history()
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setattr(
+        "backend.app.odds_import._fetch_json",
+        lambda _: [
+            {
+                "id": "target-event",
+                "commence_time": "2026-05-08T23:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+            },
+            {
+                "id": "other-event",
+                "commence_time": "2026-05-09T04:30:00Z",
+                "home_team": "New York Liberty",
+                "away_team": "Connecticut Sun",
+            },
+        ],
+    )
+    seen: list[str] = []
+
+    def fake_match(conn, event):
+        seen.append(str(event["id"]))
+        return 2010
+
+    monkeypatch.setattr("backend.app.odds_import._match_or_create_local_game", fake_match)
+    with connect() as conn:
+        assert discover_odds_api_game_ids(conn, target_dates=["2026-05-08"]) == [2010]
+    assert seen == ["target-event"]
 
 
 def test_odds_import_loads_saved_json_without_api_key(monkeypatch) -> None:

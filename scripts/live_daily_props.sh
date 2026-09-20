@@ -8,7 +8,7 @@ API_KEY="${WNBA_API_KEY:-${DEV_API_KEY:-${API_KEY:-}}}"
 USE_LIVE_CONTAINER="${WNBA_USE_LIVE_CONTAINER:-false}"
 APP_TIMEZONE="${WNBA_APP_TIMEZONE:-America/New_York}"
 ODDS_API_BASE_URL="${WNBA_ODDS_API_BASE_URL:-https://api.the-odds-api.com/v4}"
-ODDS_API_KEY_VALUE="${ODDS_API_KEY:-${THE_ODDS_API_KEY:-}}"
+ODDS_API_KEY_VALUE="${ODDS_API_KEY:-}"
 
 usage() {
   cat >&2 <<'EOF'
@@ -41,8 +41,9 @@ timestamp() {
 
 odds_api_event_count_for_date() {
   local target_date="$1"
-  python3 - "$ODDS_API_BASE_URL" "$ODDS_API_KEY_VALUE" "$APP_TIMEZONE" "$target_date" <<'PY'
+  ODDS_API_KEY_FOR_QUERY="$ODDS_API_KEY_VALUE" python3 - "$ODDS_API_BASE_URL" "$APP_TIMEZONE" "$target_date" <<'PY'
 import json
+import os
 import sys
 from datetime import datetime
 from urllib.error import HTTPError, URLError
@@ -50,7 +51,8 @@ from urllib.parse import urlencode
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
-base_url, api_key, tz_name, target_date = sys.argv[1:5]
+base_url, tz_name, target_date = sys.argv[1:4]
+api_key = os.environ.get("ODDS_API_KEY_FOR_QUERY", "")
 if not api_key:
     sys.stderr.write("ODDS_API_KEY is empty; cannot precheck Odds API events.\n")
     raise SystemExit(1)
@@ -99,13 +101,15 @@ odds_api_today_event_count() {
 api_request() {
   local method="$1"
   local path="$2"
-  python3 - "$method" "${API_BASE}${path}" "$API_KEY" <<'PY'
+  APP_API_KEY_FOR_REQUEST="$API_KEY" python3 - "$method" "${API_BASE}${path}" <<'PY'
 import json
+import os
 import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-method, url, api_key = sys.argv[1:4]
+method, url = sys.argv[1:3]
+api_key = os.environ.get("APP_API_KEY_FOR_REQUEST", "")
 headers = {}
 if api_key:
     headers["X-API-Key"] = api_key

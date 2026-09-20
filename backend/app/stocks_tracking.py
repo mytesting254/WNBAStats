@@ -5,9 +5,15 @@ import math
 import os
 import sqlite3
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - production runs on Linux
+    fcntl = None
 
 from .db import connect
 from .espn_history import fetch_summary
@@ -28,6 +34,7 @@ _SNAPSHOT_JOB_LOCK = threading.Lock()
 _SNAPSHOT_JOB_RUNNING = False
 _PREP_JOB_LOCK = threading.Lock()
 _PREP_JOB_RUNNING = False
+_STOCKS_PREP_THREAD_LOCK = threading.RLock()
 _SCHEMA_INIT_LOCK = threading.Lock()
 _STOCKS_RECENT_WINDOW_GAMES = 12
 _STOCKS_STABILITY_WINDOW_GAMES = 24
@@ -76,6 +83,27 @@ def get_tracking_db_path() -> Path:
     if configured:
         return Path(configured)
     return get_db_path().with_name("stocks_tracking.sqlite")
+
+
+@contextmanager
+def _stocks_prep_lock():
+    """Serialize the complete stocks rebuild across threads and processes.
+
+    The lock file lives beside the tracking DB, so it is shared by cron, API
+    workers, and containers attached to the same runtime volume. The existing
+    in-process job lock is not sufficient for those separate processes.
+    """
+    with _STOCKS_PREP_THREAD_LOCK:
+        lock_path = get_tracking_db_path().with_suffix(".prep.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def ensure_tracking_schema() -> Path:
@@ -1154,8 +1182,8 @@ def rebuild_prepared_games(
             params,
         ).fetchall()
         prepared_at = datetime.now(timezone.utc).isoformat()
-        prepared_rows = [
-            (
+        prepared_by_game_id = {
+            int(row["game_id"]): (
                 int(row["game_id"]),
                 str(row["game_date"]),
                 str(row["start_time"]),
@@ -1165,7 +1193,8 @@ def rebuild_prepared_games(
                 prepared_at,
             )
             for row in rows
-        ]
+        }
+        prepared_rows = list(prepared_by_game_id.values())
         with tracking:
             if normalized_game_ids:
                 placeholders = ",".join("?" for _ in normalized_game_ids)
@@ -1187,6 +1216,13 @@ def rebuild_prepared_games(
                         espn_event_id,
                         prepared_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(game_id) DO UPDATE SET
+                        game_date = excluded.game_date,
+                        start_time = excluded.start_time,
+                        home_team_id = excluded.home_team_id,
+                        away_team_id = excluded.away_team_id,
+                        espn_event_id = excluded.espn_event_id,
+                        prepared_at = excluded.prepared_at
                     """,
                     prepared_rows,
                 )
@@ -1822,6 +1858,11 @@ def rebuild_team_prep_context(
                         built_at,
                     )
                 )
+        context_by_key = {
+            (int(row[0]), int(row[2])): row
+            for row in context_rows
+        }
+        context_rows = list(context_by_key.values())
         with tracking:
             if normalized_game_ids:
                 placeholders = ",".join("?" for _ in normalized_game_ids)
@@ -1858,6 +1899,27 @@ def rebuild_team_prep_context(
                         turnover_pressure_factor,
                         built_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(game_id, team_id) DO UPDATE SET
+                        game_date = excluded.game_date,
+                        opponent_id = excluded.opponent_id,
+                        is_home = excluded.is_home,
+                        pace_factor = excluded.pace_factor,
+                        steals_allowed_factor = excluded.steals_allowed_factor,
+                        steals_allowed_guard_factor = excluded.steals_allowed_guard_factor,
+                        steals_allowed_wing_factor = excluded.steals_allowed_wing_factor,
+                        steals_allowed_big_factor = excluded.steals_allowed_big_factor,
+                        blocks_allowed_factor = excluded.blocks_allowed_factor,
+                        blocks_allowed_guard_factor = excluded.blocks_allowed_guard_factor,
+                        blocks_allowed_wing_factor = excluded.blocks_allowed_wing_factor,
+                        blocks_allowed_big_factor = excluded.blocks_allowed_big_factor,
+                        stocks_allowed_factor = excluded.stocks_allowed_factor,
+                        stocks_allowed_guard_factor = excluded.stocks_allowed_guard_factor,
+                        stocks_allowed_wing_factor = excluded.stocks_allowed_wing_factor,
+                        stocks_allowed_big_factor = excluded.stocks_allowed_big_factor,
+                        team_turnover_rate_factor = excluded.team_turnover_rate_factor,
+                        forced_turnover_rate_factor = excluded.forced_turnover_rate_factor,
+                        turnover_pressure_factor = excluded.turnover_pressure_factor,
+                        built_at = excluded.built_at
                     """,
                     context_rows,
                 )
@@ -2505,7 +2567,7 @@ def default_prep_dates(*, include_tomorrow: bool = True) -> list[str]:
     return dates
 
 
-def prepare_stocks_data(
+def _prepare_stocks_data_locked(
     conn: sqlite3.Connection,
     *,
     target_dates: list[str] | None = None,
@@ -2631,6 +2693,16 @@ def prepare_stocks_data(
             error_message=str(exc),
         )
         raise
+
+
+def prepare_stocks_data(
+    conn: sqlite3.Connection,
+    *,
+    target_dates: list[str] | None = None,
+    game_ids: list[int] | None = None,
+) -> dict[str, Any]:
+    with _stocks_prep_lock():
+        return _prepare_stocks_data_locked(conn, target_dates=target_dates, game_ids=game_ids)
 
 
 def queue_prepare_stocks_data(target_dates: list[str] | None = None) -> bool:
