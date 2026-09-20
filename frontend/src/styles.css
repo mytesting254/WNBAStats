@@ -2695,6 +2695,8 @@ tbody tr.selected {
 
 .covers-records-list-header h4 {
   margin: 0;
+  align-self: stretch;
+  text-align: left;
 }
 
 .covers-records-summary-strip {
