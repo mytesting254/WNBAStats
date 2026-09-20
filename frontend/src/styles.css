@@ -2683,23 +2683,22 @@ tbody tr.selected {
 }
 
 .covers-records-list-header {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
-  justify-content: space-between;
   gap: 10px;
-  flex-wrap: wrap;
   margin-bottom: 8px;
   text-align: center;
 }
 
 .covers-records-list-header h4 {
   margin: 0;
-  align-self: stretch;
+  grid-column: 1;
   text-align: left;
 }
 
 .covers-records-summary-strip {
+  grid-column: 2;
   display: flex;
   align-items: center;
   justify-content: center;
