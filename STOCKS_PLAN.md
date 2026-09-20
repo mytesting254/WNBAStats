@@ -58,6 +58,9 @@ Current implementation notes:
 - `scripts/backfill_stocks_snapshot_context.py` can reconstruct and backfill those durable snapshot fields for older historical rows
 - Special-tracking `game_date` should stay aligned to the canonical slate date from `games.game_date` (ET slate date), even when late games cross midnight in UTC
 - specials calibration now uses smaller neighborhood windows plus explicit minimum total-history floors before any empirical blend can activate
+- stocks prep now discovers the selected slate from the Odds API events endpoint (which does not consume usage credits), then reconciles those events into local game IDs before building derived rows
+- the full stocks prep pipeline is serialized with a lock file beside `stocks_tracking.sqlite`, covering cron, API, and shared-volume worker processes
+- `prepared_games` and `team_prep_context` use deduplicated, conflict-safe writes so malformed or repeated source rows cannot abort a prep run
 - historical prep/projection inputs now downweight blowout rows by role and winsorize per-market tails before recent/stability anchors are blended
 - starter-heavy prep/projection paths now also drop only `20+` margin blowout rows once at least `5` competitive games remain, so stars keep enough sample while late-game noise stops inflating anchors
 - Specials stats now expose support-gated threshold-fit scaffolding for `high` and `watch` cutoffs from settled `2+ stocks` snapshot history, while falling back to `55% / 45%` defaults when the sample is too thin
@@ -210,6 +213,8 @@ Current status:
 - settled-history calibration is now split by market and threshold instead of only applying to `2+ stocks`
 - `steals`, `blocks`, `2+ stocks`, and `3+ stocks` each now use their own support thresholds, sample limits, and blend weights
 - the player-history blend remains specific to `2+ stocks`, while long-tail `3+` outputs stay more conservative
+- separate rolling calibration now uses only prior settled snapshots and is support-gated to avoid current-slate leakage
+- combined stocks probabilities now use a dedicated joint historical estimator matched on projected steals and projected blocks before final calibration
 
 ## Quality Controls
 
@@ -220,6 +225,8 @@ The four-track optimization pass now keeps these safeguards:
 - wide candidate discovery should happen in prep, not in user-facing requests
 - `stocks 3+` stays conservative and support-aware
 - matchup boosts should be bounded so single noisy opponent splits do not overtake the baseline
+- combined-stocks calibration must use the joint steals/blocks outcome history rather than assuming independent Poisson components
+- failed prep runs must be followed by an event-driven rebuild for the affected slate; historical settled snapshots should not be deleted
 
 ## Target Architecture
 
@@ -331,6 +338,7 @@ The dependency flow should stay one-way:
 - build tomorrow candidate pools
 - compute recent summaries
 - generate tomorrow baseline snapshots
+- use Odds API events as the upcoming-game gate and schedule-discovery source, then reconcile to local game IDs
 - install via `deploy/wnba-stocks-prep.cron`
 - command: `WNBA_USE_LIVE_CONTAINER=true scripts/live_stocks_prep.sh tomorrow`
 

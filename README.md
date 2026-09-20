@@ -1216,7 +1216,11 @@ For automated production backups, prefer a host scheduler instead of an app-proc
 - `deploy/wnba-live-snapshot.timer`
 
 For `Special` stocks prep, use the host-cron wrapper instead of app-local
-timers so prep runs against the same live mounted runtime as the backend:
+timers so prep runs against the same live mounted runtime as the backend. The
+wrapper gates on the Odds API events endpoint and the prep script reconciles
+those upcoming events into local game IDs before generating stocks data. The
+events endpoint supplies event identity, teams, and commence time without
+consuming Odds API usage credits.
 
 ```cron
 0 * * * * cd /root/WNBAStats && [ "$(TZ=America/New_York date +\%H)" = 23 ] && WNBA_USE_LIVE_CONTAINER=true scripts/live_stocks_prep.sh tomorrow >> /var/log/wnba-stocks-prep.log 2>&1
@@ -1227,12 +1231,15 @@ template is available at `deploy/wnba-stocks-prep.cron`, and the wrapper also
 supports `today`, `today-and-tomorrow`, and explicit `dates` modes for manual
 or follow-up refreshes.
 
-The current Specials prep path reads scheduled games from canonical
-`wnba.sqlite`, copies the selected slate into `stocks_tracking.sqlite`, and
-then runs a fast component-based stocks estimator over the copied slate. The
-current live prep estimator uses a last-`10`-game recent window, up to `20`
-games for stabilization, and blends same-home/away plus scheduled-game
-`rest_days` context. Scheduled prep now also persists richer player-side
+The current Specials prep path resolves the provider event slate into
+canonical local `games` records, copies the selected game IDs into
+`stocks_tracking.sqlite`, and then runs a fast component-based stocks
+estimator over the copied slate. The prep pipeline is serialized by a shared
+lock beside the tracking database so cron and API-triggered rebuilds cannot
+race. Prepared-game and team-context writes are also deduplicated and
+conflict-safe. The current live prep estimator uses a last-`12`-game recent
+window, up to `24` games for stabilization, and blends same-home/away plus
+scheduled-game `rest_days` context. Scheduled prep now also persists richer player-side
 Specials inputs in `player_prep_features`, including projected minutes,
 minute volatility, injury status/usage deltas, and opportunity context, so
 future calibration work can use them without re-querying the live runtime.
@@ -1257,6 +1264,10 @@ The `Special Props` tab now exposes calibration tables for both `2+ Stocks Prob`
 and `3+ Stocks Prob`. Each table shows settled count, hits, average predicted
 probability, and realized hit rate by probability bucket so the UI can compare
 how the 2+ and 3+ models are tracking separately.
+The live probability path keeps separate steals and blocks projections, then
+uses a dedicated joint estimator for combined stocks matched on both projected
+components and prior settled outcomes. Rolling calibration uses only earlier
+settled dates and requires minimum support before changing a probability.
 When support is too thin for a threshold fit, the board now falls back to more
 conservative `High`/`Watch` defaults of `55%` and `45%` instead of the original
 `50%` / `40%`.

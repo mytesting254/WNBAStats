@@ -1675,6 +1675,147 @@ def _calibrated_special_probability(
     return max(0.0, min(1.0, blended_probability))
 
 
+def _special_probability_column(market: str, threshold: int) -> str:
+    if market == "steals":
+        return "steal_prob_1_plus" if threshold <= 1 else "steal_prob_2_plus"
+    if market == "blocks":
+        return "block_prob_1_plus" if threshold <= 1 else "block_prob_2_plus"
+    return "stocks_prob_2_plus" if threshold <= 2 else "stocks_prob_3_plus"
+
+
+def _rolling_special_probability_calibration(
+    tracking: sqlite3.Connection,
+    *,
+    market: str,
+    threshold: int,
+    probability: float,
+    game_date: str,
+    calibration_cache: dict[tuple, tuple[int, int]] | None = None,
+) -> float:
+    """Shrink current probabilities toward prior settled empirical outcomes.
+
+    Calibration is strictly historical (``game_date < target``) and support
+    gated. This prevents current-slate leakage while correcting small,
+    persistent overconfidence in probability bands.
+    """
+    safe_probability = max(0.0, min(1.0, float(probability)))
+    bucket = min(9, int(safe_probability * 10.0))
+    lower = bucket / 10.0
+    upper = 1.0 if bucket == 9 else (bucket + 1) / 10.0
+    cache = calibration_cache if calibration_cache is not None else {}
+    cache_key = ("rolling", market, int(threshold), str(game_date), bucket)
+    cached = cache.get(cache_key)
+    if cached is None:
+        probability_column = _special_probability_column(market, threshold)
+        upper_operator = "<=" if bucket == 9 else "<"
+        row = tracking.execute(
+            f"""
+            WITH settled_latest AS (
+                SELECT
+                    ps.{probability_column} AS predicted_probability,
+                    st.actual_steals,
+                    st.actual_blocks,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ps.game_id, ps.player_id
+                        ORDER BY ps.captured_at DESC, ps.id DESC
+                    ) AS snapshot_rank
+                FROM projection_snapshots ps
+                JOIN settlements st ON st.snapshot_id = ps.id
+                WHERE ps.game_date < ?
+            )
+            SELECT
+                COUNT(*) AS support,
+                SUM(
+                    CASE
+                        WHEN ({"actual_steals" if market == "steals" else "actual_blocks" if market == "blocks" else "actual_steals + actual_blocks"}) >= ?
+                        THEN 1 ELSE 0
+                    END
+                ) AS hits
+            FROM settled_latest
+            WHERE snapshot_rank = 1
+              AND predicted_probability >= ?
+              AND predicted_probability {upper_operator} ?
+            """,
+            (str(game_date), int(threshold), lower, upper),
+        ).fetchone()
+        cached = (int(row[0] or 0), int(row[1] or 0)) if row is not None else (0, 0)
+        cache[cache_key] = cached
+    support, hits = cached
+    if support < 30:
+        return safe_probability
+    empirical_probability = hits / float(support)
+    blend_weight = min(0.35, support / 120.0)
+    calibrated = ((1.0 - blend_weight) * safe_probability) + (blend_weight * empirical_probability)
+    return max(0.0, min(1.0, calibrated))
+
+
+def _joint_stocks_probability(
+    tracking: sqlite3.Connection,
+    *,
+    threshold: int,
+    projected_steals: float,
+    projected_blocks: float,
+    raw_probability: float,
+    game_date: str,
+    calibration_cache: dict[tuple, object] | None = None,
+) -> float:
+    """Estimate combined-stocks probability from the joint component shape."""
+    safe_probability = max(0.0, min(1.0, float(raw_probability)))
+    steals_key = round(float(projected_steals), 2)
+    blocks_key = round(float(projected_blocks), 2)
+    cache = calibration_cache if calibration_cache is not None else {}
+    cache_key = ("joint", int(threshold), str(game_date), steals_key, blocks_key)
+    rows = cache.get(cache_key)
+    if rows is None:
+        rows = tracking.execute(
+            """
+            WITH settled_latest AS (
+                SELECT
+                    ps.projected_steals,
+                    ps.projected_blocks,
+                    st.actual_steals,
+                    st.actual_blocks,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ps.game_id, ps.player_id
+                        ORDER BY ps.captured_at DESC, ps.id DESC
+                    ) AS snapshot_rank
+                FROM projection_snapshots ps
+                JOIN settlements st ON st.snapshot_id = ps.id
+                WHERE ps.game_date < ?
+            )
+            SELECT
+                projected_steals,
+                projected_blocks,
+                actual_steals,
+                actual_blocks,
+                ((projected_steals - ?) * (projected_steals - ?)
+                 + (projected_blocks - ?) * (projected_blocks - ?)) AS distance
+            FROM settled_latest
+            WHERE snapshot_rank = 1
+            ORDER BY distance ASC
+            LIMIT 60
+            """,
+            (str(game_date), steals_key, steals_key, blocks_key, blocks_key),
+        ).fetchall()
+        cache[cache_key] = rows
+    if len(rows) < 20:
+        return safe_probability
+    weighted_hits = 0.0
+    total_weight = 0.0
+    for row in rows:
+        distance = max(0.0, float(row[4] or 0.0))
+        weight = 1.0 / (1.0 + distance)
+        actual_stocks = int(row[2] or 0) + int(row[3] or 0)
+        weighted_hits += weight * (1.0 if actual_stocks >= int(threshold) else 0.0)
+        total_weight += weight
+    if total_weight <= 0:
+        return safe_probability
+    empirical_probability = weighted_hits / total_weight
+    blend_weight = min(0.60, len(rows) / 100.0)
+    calibrated = ((1.0 - blend_weight) * safe_probability) + (blend_weight * empirical_probability)
+    return max(0.0, min(1.0, calibrated))
+
+
 def _player_recent_stocks_hit_rate(
     conn: sqlite3.Connection,
     *,
@@ -2268,7 +2409,7 @@ def snapshot_stocks(
     try:
         shared_runtime_cache: dict[str, dict[tuple, object]] = runtime_cache if runtime_cache is not None else {}
         component_snapshot_cache = shared_runtime_cache.setdefault("stocks_component_snapshot", {})
-        calibration_history_cache: dict[tuple[str, str], int] = {}
+        calibration_history_cache: dict[tuple, object] = {}
         rows = _candidate_players_for_snapshot(conn, tracking, game_ids=game_ids, target_dates=target_dates)
         now = datetime.now(timezone.utc).isoformat()
         latest_rows = _latest_snapshot_rows_by_pair(tracking, game_ids=game_ids, target_dates=target_dates)
@@ -2390,6 +2531,72 @@ def snapshot_stocks(
                 raw_probability=_poisson_at_least(projected_stocks, 3),
                 game_date=str(game_date),
                 history_count_cache=calibration_history_cache,
+            )
+            steal_prob_1_plus = _rolling_special_probability_calibration(
+                tracking,
+                market="steals",
+                threshold=1,
+                probability=steal_prob_1_plus,
+                game_date=str(game_date),
+                calibration_cache=calibration_history_cache,
+            )
+            steal_prob_2_plus = _rolling_special_probability_calibration(
+                tracking,
+                market="steals",
+                threshold=2,
+                probability=steal_prob_2_plus,
+                game_date=str(game_date),
+                calibration_cache=calibration_history_cache,
+            )
+            block_prob_1_plus = _rolling_special_probability_calibration(
+                tracking,
+                market="blocks",
+                threshold=1,
+                probability=block_prob_1_plus,
+                game_date=str(game_date),
+                calibration_cache=calibration_history_cache,
+            )
+            block_prob_2_plus = _rolling_special_probability_calibration(
+                tracking,
+                market="blocks",
+                threshold=2,
+                probability=block_prob_2_plus,
+                game_date=str(game_date),
+                calibration_cache=calibration_history_cache,
+            )
+            stocks_prob_2_plus = _joint_stocks_probability(
+                tracking,
+                threshold=2,
+                projected_steals=steals,
+                projected_blocks=blocks,
+                raw_probability=stocks_prob_2_plus,
+                game_date=str(game_date),
+                calibration_cache=calibration_history_cache,
+            )
+            stocks_prob_3_plus = _joint_stocks_probability(
+                tracking,
+                threshold=3,
+                projected_steals=steals,
+                projected_blocks=blocks,
+                raw_probability=stocks_prob_3_plus,
+                game_date=str(game_date),
+                calibration_cache=calibration_history_cache,
+            )
+            stocks_prob_2_plus = _rolling_special_probability_calibration(
+                tracking,
+                market="blocks_steals",
+                threshold=2,
+                probability=stocks_prob_2_plus,
+                game_date=str(game_date),
+                calibration_cache=calibration_history_cache,
+            )
+            stocks_prob_3_plus = _rolling_special_probability_calibration(
+                tracking,
+                market="blocks_steals",
+                threshold=3,
+                probability=stocks_prob_3_plus,
+                game_date=str(game_date),
+                calibration_cache=calibration_history_cache,
             )
             context_penalty = _stocks_probability_context_penalty(
                 projected_stocks=projected_stocks,
