@@ -4527,14 +4527,16 @@ function summarizeCoversTeamRows(rows: CoversRecordRow[] | undefined) {
     else if (result === "T") ties += 1;
 
     const atsLabel = (row.ats ?? "").trim().toLowerCase();
-    if (["w", "win", "cover"].includes(atsLabel)) atsWins += 1;
-    else if (["l", "loss", "no cover"].includes(atsLabel)) atsLosses += 1;
-    else if (["p", "push"].includes(atsLabel)) atsPushes += 1;
+    const atsToken = atsLabel.split(/\s+/)[0];
+    if (["w", "win", "cover"].includes(atsToken)) atsWins += 1;
+    else if (["l", "loss", "no", "no_cover"].includes(atsToken)) atsLosses += 1;
+    else if (["p", "push"].includes(atsToken)) atsPushes += 1;
 
     const ouLabel = (row.total ?? "").trim().toLowerCase();
-    if (["o", "over"].includes(ouLabel)) overs += 1;
-    else if (["u", "under"].includes(ouLabel)) unders += 1;
-    else if (["p", "push"].includes(ouLabel)) ouPushes += 1;
+    const ouToken = ouLabel.charAt(0);
+    if (["o"].includes(ouToken) || ouLabel === "over") overs += 1;
+    else if (["u"].includes(ouToken) || ouLabel === "under") unders += 1;
+    else if (["p"].includes(ouToken) || ouLabel === "push") ouPushes += 1;
   }
   return {
     record: ties ? `${wins}-${losses}-${ties}` : `${wins}-${losses}`,
