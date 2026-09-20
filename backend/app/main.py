@@ -3932,6 +3932,14 @@ def _build_matchup_payload_item(
         (covers_records.get(int(candidate_id)) for candidate_id in game_ids if covers_records.get(int(candidate_id))),
         covers_records.get(game_id),
     )
+    local_covers_records = _local_covers_records(
+        conn,
+        home_team_id=int(game["home_team_id"]),
+        away_team_id=int(game["away_team_id"]),
+        game_date=game["game_date"],
+        start_time=game["start_time"],
+    )
+    group_covers_records = _merge_covers_records(group_covers_records, local_covers_records)
     home_rest_days = _rest_days_before_game(conn, int(game["home_team_id"]), game["start_time"], game["game_date"])
     away_rest_days = _rest_days_before_game(conn, int(game["away_team_id"]), game["start_time"], game["game_date"])
     game_context = dict(game)
@@ -10549,8 +10557,10 @@ def _blowout_label(probability: float) -> str:
 
 
 def _team_last_10_summary(conn, team_id: int) -> dict:
+    team_ids = _team_history_identity_ids(conn, team_id)
+    team_placeholders = ",".join("?" for _ in team_ids)
     rows = conn.execute(
-        """
+        f"""
         SELECT
             r.*,
             g.game_date,
@@ -10581,16 +10591,17 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
             ELSE g.home_team_id
         END
         LEFT JOIN game_segment_results segments ON segments.game_id = g.id
-        WHERE r.team_id = ?
+        WHERE r.team_id IN ({team_placeholders})
         ORDER BY g.game_date DESC, g.start_time DESC
         LIMIT 10
         """,
-        (team_id,),
+        team_ids,
     ).fetchall()
 
     recent_games = []
     count = len(rows)
     wins = 0
+    ties = 0
     ats_wins = 0
     ats_losses = 0
     ats_pushes = 0
@@ -10612,11 +10623,16 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
 
         if points > opponent_points:
             wins += 1
+        elif points == opponent_points:
+            ties += 1
         if row["is_home"]:
             home_games += 1
 
-        ats_result = _team_ats_result(row)
-        total_result = _game_total_result(row)
+        # team_game_results stores the settled result using the closing line.
+        # Recomputing from games.spread_home/game_total can silently change old
+        # records when a line is refreshed or when the opening line is absent.
+        ats_result = str(row["ats_result"] or "unknown")
+        total_result = str(row["total_result"] or "unknown")
         item = dict(row)
         item["ats_result"] = ats_result
         item["total_result"] = total_result
@@ -10682,7 +10698,8 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
     return {
         "games": count,
         "wins": wins,
-        "losses": count - wins,
+        "losses": count - wins - ties,
+        "ties": ties,
         "home_games": home_games,
         "away_games": count - home_games,
         "ats_wins": ats_wins,
@@ -10700,6 +10717,184 @@ def _team_last_10_summary(conn, team_id: int) -> dict:
         },
         "recent_games": recent_games,
     }
+
+
+def _merge_covers_records(primary: Any, fallback: dict[str, Any]) -> dict[str, Any]:
+    """Fill incomplete Covers records from local ESPN history without replacing good rows."""
+    source = dict(primary) if isinstance(primary, dict) else {}
+    merged = dict(source)
+    for key in ("head_to_head", "away_last_10", "home_last_10", "team_table"):
+        if not isinstance(merged.get(key), list) or not merged[key]:
+            merged[key] = fallback.get(key, [])
+    return merged
+
+
+def _local_covers_records(
+    conn,
+    *,
+    home_team_id: int,
+    away_team_id: int,
+    game_date: str | None,
+    start_time: str | None,
+) -> dict[str, Any]:
+    home_rows = _local_team_record_rows(conn, home_team_id, game_date=game_date, start_time=start_time)
+    away_rows = _local_team_record_rows(conn, away_team_id, game_date=game_date, start_time=start_time)
+    return {
+        "team_table": _local_team_table(conn, home_team_id, away_team_id, game_date=game_date, start_time=start_time),
+        "home_last_10": home_rows,
+        "away_last_10": away_rows,
+        "head_to_head": _local_head_to_head_rows(
+            conn,
+            home_team_id,
+            away_team_id,
+            game_date=game_date,
+            start_time=start_time,
+        ),
+    }
+
+
+def _local_team_record_rows(conn, team_id: int, *, game_date: str | None, start_time: str | None) -> list[dict[str, Any]]:
+    team_ids = _team_history_identity_ids(conn, team_id)
+    placeholders = ",".join("?" for _ in team_ids)
+    rows = conn.execute(
+        f"""
+        SELECT g.game_date, g.start_time, opp.abbreviation AS opponent,
+               opp.logo_url AS opponent_logo_url, r.is_home, r.points,
+               r.opponent_points, r.ats_result, r.total_result,
+               g.spread_home, g.game_total
+        FROM team_game_results r
+        JOIN games g ON g.id = r.game_id
+        JOIN teams opp ON opp.id = CASE
+            WHEN r.team_id = g.home_team_id THEN g.away_team_id
+            ELSE g.home_team_id
+        END
+        WHERE r.team_id IN ({placeholders})
+          AND (
+            COALESCE(g.game_date, '') < COALESCE(?, '9999-12-31')
+            OR (
+              COALESCE(g.game_date, '') = COALESCE(?, '9999-12-31')
+              AND COALESCE(g.start_time, '') < COALESCE(?, '9999-12-31T23:59:59')
+            )
+          )
+        ORDER BY g.game_date DESC, g.start_time DESC, g.id DESC
+        LIMIT 10
+        """,
+        (*team_ids, game_date, game_date, start_time),
+    ).fetchall()
+    return [_local_team_record_payload(row) for row in rows]
+
+
+def _local_team_record_payload(row) -> dict[str, Any]:
+    points = int(row["points"])
+    opponent_points = int(row["opponent_points"])
+    return {
+        "date": row["game_date"],
+        "opponent": row["opponent"],
+        "opponent_logo_url": row["opponent_logo_url"],
+        "location": "home" if int(row["is_home"]) else "away",
+        "result": "W" if points > opponent_points else "L" if points < opponent_points else "T",
+        "score": f"{points}-{opponent_points}",
+        "ats": _local_record_label(row["ats_result"]),
+        "total": _local_total_label(row["total_result"]),
+    }
+
+
+def _local_record_label(value: Any) -> str:
+    return {"cover": "Cover", "no_cover": "No cover", "push": "Push"}.get(str(value or ""), "N/A")
+
+
+def _local_total_label(value: Any) -> str:
+    return {"over": "Over", "under": "Under", "push": "Push"}.get(str(value or ""), "N/A")
+
+
+def _local_head_to_head_rows(
+    conn,
+    home_team_id: int,
+    away_team_id: int,
+    *,
+    game_date: str | None,
+    start_time: str | None,
+) -> list[dict[str, Any]]:
+    home_ids = _team_history_identity_ids(conn, home_team_id)
+    away_ids = _team_history_identity_ids(conn, away_team_id)
+    home_placeholders = ",".join("?" for _ in home_ids)
+    away_placeholders = ",".join("?" for _ in away_ids)
+    rows = conn.execute(
+        f"""
+        SELECT g.game_date, g.start_time, home.abbreviation AS home_team,
+               home.logo_url AS home_logo_url, away.abbreviation AS away_team,
+               away.logo_url AS away_logo_url, hr.points AS home_points,
+               ar.points AS away_points, hr.ats_result, hr.total_result
+        FROM games g
+        JOIN teams home ON home.id = g.home_team_id
+        JOIN teams away ON away.id = g.away_team_id
+        JOIN team_game_results hr ON hr.game_id = g.id AND hr.team_id = g.home_team_id
+        JOIN team_game_results ar ON ar.game_id = g.id AND ar.team_id = g.away_team_id
+        WHERE ((g.home_team_id IN ({home_placeholders}) AND g.away_team_id IN ({away_placeholders}))
+            OR (g.home_team_id IN ({away_placeholders}) AND g.away_team_id IN ({home_placeholders})))
+          AND (
+            COALESCE(g.game_date, '') < COALESCE(?, '9999-12-31')
+            OR (COALESCE(g.game_date, '') = COALESCE(?, '9999-12-31')
+                AND COALESCE(g.start_time, '') < COALESCE(?, '9999-12-31T23:59:59'))
+          )
+        ORDER BY g.game_date DESC, g.start_time DESC, g.id DESC
+        LIMIT 10
+        """,
+        (*home_ids, *away_ids, *away_ids, *home_ids, game_date, game_date, start_time),
+    ).fetchall()
+    payload = []
+    for row in rows:
+        home_points, away_points = int(row["home_points"]), int(row["away_points"])
+        winner = row["home_team"] if home_points > away_points else row["away_team"] if away_points > home_points else "Tie"
+        payload.append({
+            "date": row["game_date"],
+            "home": row["home_team"],
+            "home_logo_url": row["home_logo_url"],
+            "away": row["away_team"],
+            "away_logo_url": row["away_logo_url"],
+            "score": f"{away_points}-{home_points}",
+            "winner": winner,
+            "ats": _local_record_label(row["ats_result"]),
+            "total": _local_total_label(row["total_result"]),
+        })
+    return payload
+
+
+def _local_team_table(conn, home_team_id: int, away_team_id: int, *, game_date: str | None, start_time: str | None) -> list[dict[str, str]]:
+    table = []
+    for team_id in (away_team_id, home_team_id):
+        rows = _local_team_record_rows(conn, team_id, game_date=game_date, start_time=start_time)
+        wins = sum(row["result"] == "W" for row in rows)
+        losses = sum(row["result"] == "L" for row in rows)
+        ats = [row["ats"] for row in rows if row["ats"] != "N/A"]
+        totals = [row["total"] for row in rows if row["total"] != "N/A"]
+        team = conn.execute("SELECT abbreviation FROM teams WHERE id = ?", (team_id,)).fetchone()
+        table.append({
+            "team": team["abbreviation"] if team else str(team_id),
+            "record": f"{wins}-{losses}",
+            "ats": f"{sum(value == 'Cover' for value in ats)}-{sum(value == 'No cover' for value in ats)}-{sum(value == 'Push' for value in ats)}",
+            "ou": f"{sum(value == 'Over' for value in totals)}-{sum(value == 'Under' for value in totals)}-{sum(value == 'Push' for value in totals)}",
+            "away": "-",
+            "home": "-",
+        })
+    return table
+
+
+def _team_history_identity_ids(conn, team_id: int) -> tuple[int, ...]:
+    row = conn.execute("SELECT name, abbreviation FROM teams WHERE id = ?", (int(team_id),)).fetchone()
+    if row is None:
+        return (int(team_id),)
+    name = str(row["name"] or "").strip().lower()
+    abbreviation = str(row["abbreviation"] or "").strip().upper()
+    aliases = {abbreviation, name}
+    aliases.discard("")
+    related = {int(team_id)}
+    for candidate in conn.execute("SELECT id, name, abbreviation FROM teams").fetchall():
+        candidate_name = str(candidate["name"] or "").strip().lower()
+        candidate_abbreviation = str(candidate["abbreviation"] or "").strip().upper()
+        if candidate_name in aliases or candidate_abbreviation in aliases:
+            related.add(int(candidate["id"]))
+    return tuple(sorted(related))
 
 
 def _team_matchup_insights_summary(

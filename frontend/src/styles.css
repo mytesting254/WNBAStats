@@ -2682,6 +2682,51 @@ tbody tr.selected {
   margin-bottom: 8px;
 }
 
+.covers-records-list-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.covers-records-list-header h4 {
+  margin: 0;
+}
+
+.covers-records-summary-strip {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.covers-records-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 1px solid #eaecf0;
+  border-radius: 999px;
+  background: #ffffff;
+}
+
+.covers-records-summary-chip span {
+  color: #667085;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.covers-records-summary-chip strong {
+  color: #1b1f29;
+  font-size: 12px;
+  font-weight: 800;
+}
+
 .covers-records-table-wrap {
   margin-top: 0;
   flex: 1 1 auto;

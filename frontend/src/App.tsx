@@ -4128,7 +4128,10 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         )}
       </div>
       <div className="covers-records-list">
-        <h4>{matchup.away_team} Last 10</h4>
+        <div className="covers-records-list-header">
+          <h4>{matchup.away_team} Last 10</h4>
+          <RecordSummaryStrip summary={summarizeCoversTeamRows(awayRows)} />
+        </div>
         <div className="table-wrap covers-records-table-wrap">
           <table>
             <thead>
@@ -4162,7 +4165,10 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         </div>
       </div>
       <div className="covers-records-list">
-        <h4>{matchup.home_team} Last 10</h4>
+        <div className="covers-records-list-header">
+          <h4>{matchup.home_team} Last 10</h4>
+          <RecordSummaryStrip summary={summarizeCoversTeamRows(homeRows)} />
+        </div>
         <div className="table-wrap covers-records-table-wrap">
           <table>
             <thead>
@@ -4195,6 +4201,19 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
           </table>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RecordSummaryStrip({ summary }: { summary: ReturnType<typeof summarizeCoversTeamRows> }) {
+  if (!summary) {
+    return null;
+  }
+  return (
+    <div className="covers-records-summary-strip" aria-label="Last 10 summary">
+      <span className="covers-records-summary-chip"><span>W/L</span><strong>{summary.record}</strong></span>
+      <span className="covers-records-summary-chip"><span>ATS</span><strong>{summary.ats}</strong></span>
+      <span className="covers-records-summary-chip"><span>O/U</span><strong>{summary.ou}</strong></span>
     </div>
   );
 }
@@ -4494,6 +4513,7 @@ function summarizeCoversTeamRows(rows: CoversRecordRow[] | undefined) {
   }
   let wins = 0;
   let losses = 0;
+  let ties = 0;
   let atsWins = 0;
   let atsLosses = 0;
   let atsPushes = 0;
@@ -4504,19 +4524,20 @@ function summarizeCoversTeamRows(rows: CoversRecordRow[] | undefined) {
     const result = (row.result ?? "").toUpperCase();
     if (result === "W") wins += 1;
     else if (result === "L") losses += 1;
+    else if (result === "T") ties += 1;
 
-    const atsToken = (row.ats ?? "").trim().charAt(0).toUpperCase();
-    if (atsToken === "W") atsWins += 1;
-    else if (atsToken === "L") atsLosses += 1;
-    else if (atsToken === "P") atsPushes += 1;
+    const atsLabel = (row.ats ?? "").trim().toLowerCase();
+    if (["w", "win", "cover"].includes(atsLabel)) atsWins += 1;
+    else if (["l", "loss", "no cover"].includes(atsLabel)) atsLosses += 1;
+    else if (["p", "push"].includes(atsLabel)) atsPushes += 1;
 
-    const ouToken = (row.total ?? "").trim().charAt(0).toLowerCase();
-    if (ouToken === "o") overs += 1;
-    else if (ouToken === "u") unders += 1;
-    else if (ouToken === "p") ouPushes += 1;
+    const ouLabel = (row.total ?? "").trim().toLowerCase();
+    if (["o", "over"].includes(ouLabel)) overs += 1;
+    else if (["u", "under"].includes(ouLabel)) unders += 1;
+    else if (["p", "push"].includes(ouLabel)) ouPushes += 1;
   }
   return {
-    record: `${wins}-${losses}`,
+    record: ties ? `${wins}-${losses}-${ties}` : `${wins}-${losses}`,
     ats: `${atsWins}-${atsLosses}-${atsPushes}`,
     ou: `${overs}-${unders}-${ouPushes}`
   };
