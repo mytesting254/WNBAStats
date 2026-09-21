@@ -4044,7 +4044,7 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         total: totalLabel(game.total_result)
       }));
   const h2hOwner = h2hMatchupOwner(h2hRows, matchup);
-  const h2hSummary = summarizeCoversTeamRows(h2hRows);
+  const h2hSummary = summarizeH2HRows(h2hRows, matchup, h2hOwner.owner);
   if (!h2hRows.length && !awayRows.length && !homeRows.length) {
     return null;
   }
@@ -4079,7 +4079,7 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
       ) : null}
       <div className="covers-records-list">
         <div className="covers-records-list-header">
-          <h4>{h2hOwner.owner} Last 10</h4>
+          <h4>H2H Last 10</h4>
           <RecordSummaryStrip summary={h2hSummary} />
         </div>
         {!h2hRows.length ? (
@@ -4537,6 +4537,46 @@ function summarizeCoversTeamRows(rows: CoversRecordRow[] | undefined) {
   }
   return {
     record: ties ? `${wins}-${losses}-${ties}` : `${wins}-${losses}`,
+    ats: `${atsWins}-${atsLosses}-${atsPushes}`,
+    ou: `${overs}-${unders}-${ouPushes}`
+  };
+}
+
+function summarizeH2HRows(rows: CoversRecordRow[] | undefined, matchup: Matchup, owner: string) {
+  if (!rows?.length) {
+    return null;
+  }
+  const ownerCode = normalizeTeamCode(owner) && owner !== "Even" && owner !== "No edge"
+    ? normalizeTeamCode(owner)
+    : normalizeTeamCode(matchup.home_team);
+  const awayCode = normalizeTeamCode(matchup.away_team);
+  const homeCode = normalizeTeamCode(matchup.home_team);
+  let wins = 0;
+  let losses = 0;
+  let atsWins = 0;
+  let atsLosses = 0;
+  let atsPushes = 0;
+  let overs = 0;
+  let unders = 0;
+  let ouPushes = 0;
+  for (const row of rows) {
+    const winner = normalizeTeamCode(row.winner);
+    if (winner === ownerCode) wins += 1;
+    else if (winner === awayCode || winner === homeCode) losses += 1;
+
+    const atsToken = (row.ats ?? "").trim().toLowerCase().split(/\s+/)[0];
+    if (["w", "win", "cover"].includes(atsToken)) atsWins += 1;
+    else if (["l", "loss", "no", "no_cover"].includes(atsToken)) atsLosses += 1;
+    else if (["p", "push"].includes(atsToken)) atsPushes += 1;
+
+    const ouLabel = (row.total ?? "").trim().toLowerCase();
+    const ouToken = ouLabel.charAt(0);
+    if (ouToken === "o" || ouLabel === "over") overs += 1;
+    else if (ouToken === "u" || ouLabel === "under") unders += 1;
+    else if (ouToken === "p" || ouLabel === "push") ouPushes += 1;
+  }
+  return {
+    record: `${wins}-${losses}`,
     ats: `${atsWins}-${atsLosses}-${atsPushes}`,
     ou: `${overs}-${unders}-${ouPushes}`
   };
