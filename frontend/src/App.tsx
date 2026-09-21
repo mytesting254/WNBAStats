@@ -4079,8 +4079,8 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
       ) : null}
       <div className="covers-records-list">
         <div className="covers-records-list-header">
-          <h4>{h2hOwner.owner} H2H Last 10</h4>
-          <RecordSummaryStrip summary={h2hSummary} perspective={h2hOwner.owner} />
+          <h4>H2H Last 10</h4>
+          <RecordSummaryStrip summary={h2hSummary} perspective={h2hOwner.owner} ownerLabel />
         </div>
         {!h2hRows.length ? (
           <p className="empty">No prior head-to-head meetings.</p>
@@ -4205,17 +4205,19 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
 function RecordSummaryStrip({
   summary,
   perspective,
+  ownerLabel = false,
 }: {
   summary: ReturnType<typeof summarizeCoversTeamRows>;
   perspective?: string;
+  ownerLabel?: boolean;
 }) {
   if (!summary) {
     return null;
   }
   return (
     <div className="covers-records-summary-strip" aria-label="Last 10 summary">
-      <span className="covers-records-summary-chip"><span>W/L</span><strong>{summary.record}</strong></span>
-      <span className="covers-records-summary-chip"><span>{perspective ? `ATS (${perspective})` : "ATS"}</span><strong>{summary.ats}</strong></span>
+      <span className="covers-records-summary-chip"><span>{ownerLabel && perspective ? `${perspective} W/L` : "W/L"}</span><strong>{summary.record}</strong></span>
+      <span className="covers-records-summary-chip"><span>{ownerLabel && perspective ? `ATS (${perspective} perspective)` : "ATS"}</span><strong>{summary.ats}</strong></span>
       <span className="covers-records-summary-chip"><span>O/U</span><strong>{summary.ou}</strong></span>
     </div>
   );
