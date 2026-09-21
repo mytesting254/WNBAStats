@@ -4051,12 +4051,6 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
 
   return (
     <div className="covers-records-panel">
-      <div className="covers-owner-strip">
-        <span className="owner-label">Matchup Owner</span>
-        <strong className="owner-team">{h2hOwner.owner}</strong>
-        <span className="owner-record">{h2hOwner.record}</span>
-        <span className="owner-record">H2H O/U {h2hSummary?.ou ?? "N/A"}</span>
-      </div>
       {h2hSegments ? (
         <div className="h2h-segment-strip">
           <div className="h2h-segment-strip-header">
@@ -4084,7 +4078,10 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
         </div>
       ) : null}
       <div className="covers-records-list">
-        <h4>H2H Last 10</h4>
+        <div className="covers-records-list-header">
+          <h4>{h2hOwner.owner} Last 10</h4>
+          <RecordSummaryStrip summary={h2hSummary} />
+        </div>
         {!h2hRows.length ? (
           <p className="empty">No prior head-to-head meetings.</p>
         ) : singleH2HRow ? (
