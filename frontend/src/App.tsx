@@ -4216,8 +4216,9 @@ function RecordSummaryStrip({
   }
   return (
     <div className="covers-records-summary-strip" aria-label="Last 10 summary">
-      <span className="covers-records-summary-chip"><span>{ownerLabel && perspective ? `${perspective} W/L` : "W/L"}</span><strong>{summary.record}</strong></span>
-      <span className="covers-records-summary-chip"><span>{ownerLabel && perspective ? `ATS (${perspective} perspective)` : "ATS"}</span><strong>{summary.ats}</strong></span>
+      {ownerLabel && perspective ? <span className="covers-records-summary-chip"><strong>{perspective}</strong></span> : null}
+      <span className="covers-records-summary-chip"><span>W/L</span><strong>{summary.record}</strong></span>
+      <span className="covers-records-summary-chip"><span>{ownerLabel && perspective ? `ATS (${perspective})` : "ATS"}</span><strong>{summary.ats}</strong></span>
       <span className="covers-records-summary-chip"><span>O/U</span><strong>{summary.ou}</strong></span>
     </div>
   );
