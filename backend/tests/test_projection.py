@@ -2062,39 +2062,38 @@ def test_rotowire_refresh_route_skips_repair_when_roster_snapshot_is_unchanged(m
     assert result["specials"] == {"status": "not_needed", "target_game_ids": []}
 
 
-def test_covers_refresh_route_does_not_queue_prop_sync_after_failed_import(monkeypatch) -> None:
-    connect_calls = 0
+def test_covers_refresh_route_queues_provider_fetch_without_saved_cache(monkeypatch) -> None:
+    provider_called = False
+    queue_calls: list[tuple[str | None, object]] = []
 
-    class DummyConn:
-        def __enter__(self):
-            nonlocal connect_calls
-            connect_calls += 1
-            return self
+    def fail_provider(*args, **kwargs):
+        nonlocal provider_called
+        provider_called = True
+        raise AssertionError("provider fetch must run in the background worker")
 
-        def __exit__(self, exc_type, exc, tb):
-            return None
-
-    monkeypatch.setattr(main_module, "connect", lambda: DummyConn())
+    monkeypatch.setattr(main_module, "_load_saved_covers_payload_into_runtime", lambda conn, update_game_markets=True: None)
+    monkeypatch.setattr(main_module, "_import_covers_provider_rows", fail_provider)
     monkeypatch.setattr(
         main_module,
-        "_import_covers_provider_rows",
-        lambda conn, selected_date=None, force_refresh=False, update_game_markets=True: {
-            "status": "failed",
-            "source": "covers",
-            "message": "Fresh Covers scrape failed.",
-            "prop_sync_eligible": False,
-        },
+        "_start_covers_refresh_if_needed",
+        lambda selected_date=None, request=None: queue_calls.append((selected_date, request)) or True,
     )
-    monkeypatch.setattr(main_module, "_start_prop_sync_if_needed", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sync should not queue")))
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
-    monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"matchups": 1})
 
     result = main_module._import_covers_impl(request=None, selected_date=None, force_refresh=True)
 
-    assert connect_calls == 2
-    assert result["sync_started"] is False
-    assert result["published_payloads"] == {"matchups": 1}
-    assert result["message"] == "Fresh Covers scrape failed."
+    assert provider_called is False
+    assert queue_calls == [(None, None)]
+    assert result == {
+        "events": 0,
+        "imported": 0,
+        "captured_at": None,
+        "synced_props": 0,
+        "status": "queued",
+        "source": "covers",
+        "sync_started": True,
+        "message": "Fresh Covers refresh queued in background.",
+    }
 
 
 def test_covers_refresh_route_does_not_queue_prop_sync_for_game_markets_only(monkeypatch) -> None:
@@ -2124,7 +2123,7 @@ def test_covers_refresh_route_does_not_queue_prop_sync_for_game_markets_only(mon
     monkeypatch.setattr(main_module, "_invalidate_read_caches", lambda: None)
     monkeypatch.setattr(main_module, "_publish_post_mutation_read_payloads", lambda conn: {"matchups": 1})
 
-    result = main_module._import_covers_impl(request=None, selected_date=None, force_refresh=True)
+    result = main_module._import_covers_impl(request=None, selected_date=None, force_refresh=False)
 
     assert connect_calls == 2
     assert result["sync_started"] is False

@@ -7444,6 +7444,33 @@ def _import_covers_impl(*, request: Request | None, selected_date: str | None, f
             else:
                 cached_result["message"] = "Loaded Covers props from saved JSON. Fresh Covers refresh was not queued."
             return cached_result
+        # A fresh scrape can require multiple sequential provider requests and
+        # must never run inside the browser-facing request. Without a saved
+        # payload, queue the same background worker used by the cache path and
+        # let the UI follow its durable progress state.
+        sync_started = _start_covers_refresh_if_needed(selected_date=selected_date, request=request)
+        _invalidate_read_caches()
+        if sync_started:
+            return {
+                "events": 0,
+                "imported": 0,
+                "captured_at": None,
+                "synced_props": 0,
+                "status": "queued",
+                "source": "covers",
+                "sync_started": True,
+                "message": "Fresh Covers refresh queued in background.",
+            }
+        return {
+            "events": 0,
+            "imported": 0,
+            "captured_at": None,
+            "synced_props": 0,
+            "status": "busy",
+            "source": "covers",
+            "sync_started": False,
+            "message": "Fresh Covers refresh was not queued because another pipeline is running.",
+        }
     with connect() as conn:
         result = _import_covers_provider_rows(conn, selected_date=selected_date, force_refresh=force_refresh, update_game_markets=True)
     ingestion = build_covers_provider_ingestion(result)
