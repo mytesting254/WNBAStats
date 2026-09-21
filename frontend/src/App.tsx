@@ -4079,8 +4079,8 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
       ) : null}
       <div className="covers-records-list">
         <div className="covers-records-list-header">
-          <h4>H2H Last 10</h4>
-          <RecordSummaryStrip summary={h2hSummary} />
+          <h4>{h2hOwner.owner} H2H Last 10</h4>
+          <RecordSummaryStrip summary={h2hSummary} perspective={h2hOwner.owner} />
         </div>
         {!h2hRows.length ? (
           <p className="empty">No prior head-to-head meetings.</p>
@@ -4202,14 +4202,20 @@ function CoversRecordsPanel({ matchup }: { matchup: Matchup }) {
   );
 }
 
-function RecordSummaryStrip({ summary }: { summary: ReturnType<typeof summarizeCoversTeamRows> }) {
+function RecordSummaryStrip({
+  summary,
+  perspective,
+}: {
+  summary: ReturnType<typeof summarizeCoversTeamRows>;
+  perspective?: string;
+}) {
   if (!summary) {
     return null;
   }
   return (
     <div className="covers-records-summary-strip" aria-label="Last 10 summary">
       <span className="covers-records-summary-chip"><span>W/L</span><strong>{summary.record}</strong></span>
-      <span className="covers-records-summary-chip"><span>ATS</span><strong>{summary.ats}</strong></span>
+      <span className="covers-records-summary-chip"><span>{perspective ? `ATS (${perspective})` : "ATS"}</span><strong>{summary.ats}</strong></span>
       <span className="covers-records-summary-chip"><span>O/U</span><strong>{summary.ou}</strong></span>
     </div>
   );
@@ -4564,9 +4570,12 @@ function summarizeH2HRows(rows: CoversRecordRow[] | undefined, matchup: Matchup,
     if (winner === ownerCode) wins += 1;
     else if (winner === awayCode || winner === homeCode) losses += 1;
 
-    const atsToken = (row.ats ?? "").trim().toLowerCase().split(/\s+/)[0];
-    if (["w", "win", "cover"].includes(atsToken)) atsWins += 1;
-    else if (["l", "loss", "no", "no_cover"].includes(atsToken)) atsLosses += 1;
+    const atsToken = (row.ats ?? "").trim().split(/\s+/)[0];
+    const atsTeam = normalizeTeamCode(atsToken);
+    if (atsTeam === ownerCode) atsWins += 1;
+    else if (atsTeam === awayCode || atsTeam === homeCode) atsLosses += 1;
+    else if (["W", "WIN", "COVER"].includes(atsToken.toUpperCase())) atsWins += 1;
+    else if (["L", "LOSS", "NO", "NO_COVER"].includes(atsToken.toUpperCase())) atsLosses += 1;
     else if (["p", "push"].includes(atsToken)) atsPushes += 1;
 
     const ouLabel = (row.total ?? "").trim().toLowerCase();
