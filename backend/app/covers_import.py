@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import json
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ from .timezone_utils import APP_TIMEZONE, local_today_iso
 PROVIDER = "covers"
 RAW_CACHE_NAME = "covers_props_raw.json"
 RAW_PAGE_CACHE_NAME = "covers_pages_raw.json"
+CONTEXT_CACHE_PREFIX = "covers_context_"
+COVERS_HISTORY_RETENTION_DAYS = 2
 COVERS_BASE_URL = "https://www.covers.com"
 COVERS_MATCHUPS_URL = f"{COVERS_BASE_URL}/sports/wnba/matchups"
 COVERS_ODDS_URL = f"{COVERS_BASE_URL}/sport/basketball/wnba/odds"
@@ -120,6 +123,76 @@ class CoversMetadata:
     under_total: float | None = None
     under_price: float | None = None
     records: dict | None = None
+
+
+def covers_context_cache_name(selected_date: str) -> str:
+    return f"{CONTEXT_CACHE_PREFIX}{selected_date}.json"
+
+
+def import_covers_team_history(
+    conn: sqlite3.Connection,
+    *,
+    selected_date: str | None = None,
+    force_refresh: bool = False,
+) -> dict:
+    """Fetch Covers matchup records once per selected slate and persist them for reuse."""
+    resolved_date = selected_date or _today_local()
+    cached_records = _persisted_covers_history(conn, resolved_date)
+    retention_cutoff = (datetime.now(LOCAL_TZ).date() - timedelta(days=COVERS_HISTORY_RETENTION_DAYS)).isoformat()
+    if resolved_date < retention_cutoff:
+        cached_records = {}
+    if cached_records and not force_refresh:
+        return {
+            "status": "loaded_from_snapshot",
+            "source": "snapshot",
+            "selected_date": resolved_date,
+            "games": len(cached_records),
+            "message": f"Loaded saved Covers team history for {resolved_date} without scraping.",
+        }
+
+    cached_context = read_json_cache(covers_context_cache_name(resolved_date))
+    if not force_refresh and _covers_context_is_current(cached_context, resolved_date):
+        games = cached_context.get("games", [])
+        _persist_covers_history_snapshots(
+            conn,
+            games=games,
+            selected_date=resolved_date,
+            captured_at=str(cached_context.get("captured_at") or datetime.now(timezone.utc).isoformat()),
+        )
+        return {
+            "status": "loaded_from_cache",
+            "source": "cache",
+            "selected_date": resolved_date,
+            "games": len(games),
+            "message": f"Loaded saved Covers team history for {resolved_date}.",
+        }
+
+    captured_at = datetime.now(timezone.utc).isoformat()
+    games: list[dict] = []
+    errors: list[dict[str, str]] = []
+    for game in covers_matchup_links(resolved_date):
+        try:
+            page = _fetch_text(game.matchup_url or game.odds_url.removesuffix("/odds"))
+            metadata = _metadata_from_page(conn, game, page)
+            games.append(_metadata_to_row(metadata))
+        except Exception as exc:
+            errors.append({"event_id": game.event_id, "error": str(exc)})
+    _persist_covers_history_snapshots(conn, games=games, selected_date=resolved_date, captured_at=captured_at)
+    write_json_cache(covers_context_cache_name(resolved_date), {
+        "provider": PROVIDER,
+        "selected_date": resolved_date,
+        "cache_date": _today_local(),
+        "captured_at": captured_at,
+        "games": games,
+    })
+    return {
+        "status": "imported",
+        "source": PROVIDER,
+        "selected_date": resolved_date,
+        "games": len(games),
+        "errors": errors,
+        "message": f"Saved Covers team history for {len(games)} game(s) on {resolved_date}.",
+    }
 
 
 def import_covers_props(
@@ -1280,6 +1353,75 @@ def _metadata_to_row(row: CoversMetadata) -> dict:
         "under_price": row.under_price,
         "records": row.records,
     }
+
+
+def _covers_context_is_current(payload: object, selected_date: str) -> bool:
+    return (
+        isinstance(payload, dict)
+        and payload.get("provider") == PROVIDER
+        and payload.get("selected_date") == selected_date
+        and payload.get("cache_date") == _today_local()
+        and isinstance(payload.get("games"), list)
+        and bool(payload.get("games"))
+    )
+
+
+def _persisted_covers_history(conn: sqlite3.Connection, selected_date: str) -> dict[int, dict]:
+    rows = conn.execute(
+        "SELECT game_id, records_json FROM covers_matchup_history_snapshots WHERE selected_date = ?",
+        (selected_date,),
+    ).fetchall()
+    records: dict[int, dict] = {}
+    for row in rows:
+        try:
+            parsed = json.loads(str(row["records_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(parsed, dict):
+            records[int(row["game_id"])] = parsed
+    return records
+
+
+def _persist_covers_history_snapshots(
+    conn: sqlite3.Connection,
+    *,
+    games: object,
+    selected_date: str,
+    captured_at: str,
+) -> None:
+    if not isinstance(games, list):
+        return
+    payloads_by_game: dict[int, tuple] = {}
+    for game in games:
+        if not isinstance(game, dict) or game.get("game_id") is None:
+            continue
+        records = game.get("records")
+        if not isinstance(records, dict):
+            continue
+        game_id = int(game["game_id"])
+        payloads_by_game[game_id] = (
+            selected_date,
+            game_id,
+            str(game.get("provider_event_id") or "") or None,
+            captured_at,
+            json.dumps(records),
+        )
+    if payloads_by_game:
+        conn.executemany(
+            """
+            INSERT INTO covers_matchup_history_snapshots (
+                selected_date, game_id, provider_event_id, captured_at, records_json
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(selected_date, game_id) DO UPDATE SET
+                provider_event_id = excluded.provider_event_id,
+                captured_at = excluded.captured_at,
+                records_json = excluded.records_json
+            """,
+            list(payloads_by_game.values()),
+        )
+    cutoff = (datetime.now(LOCAL_TZ).date() - timedelta(days=COVERS_HISTORY_RETENTION_DAYS)).isoformat()
+    conn.execute("DELETE FROM covers_matchup_history_snapshots WHERE selected_date < ?", (cutoff,))
+    conn.commit()
 
 
 def _today_local() -> str:

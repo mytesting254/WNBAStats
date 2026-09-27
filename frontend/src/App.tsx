@@ -25,6 +25,7 @@ import {
   fetchWatchlistPerformance,
   fetchWatchlist,
   importCoversOdds,
+  importCoversTeamHistory,
   createGemSnapshot,
   importEspnHistory,
   importMissingEspnScores,
@@ -357,6 +358,7 @@ export function App() {
   const [training, setTraining] = useState(false);
   const [importingOdds, setImportingOdds] = useState(false);
   const [importingCoversOdds, setImportingCoversOdds] = useState(false);
+  const [importingCoversHistory, setImportingCoversHistory] = useState(false);
   const [refreshingResults, setRefreshingResults] = useState(false);
   const [refreshingMissingScores, setRefreshingMissingScores] = useState(false);
   const [refreshingRoster, setRefreshingRoster] = useState(false);
@@ -1067,6 +1069,22 @@ export function App() {
     }
   }
 
+  async function handleImportCoversHistory(forceRefresh = false) {
+    setImportingCoversHistory(true);
+    setError(null);
+    setOperationStatus(null);
+    try {
+      const result = await importCoversTeamHistory(forceRefresh);
+      await load();
+      const errors = result.errors?.length ?? 0;
+      setOperationStatus(`${result.message ?? `Covers team history saved for today (${result.games ?? 0} games).`}${errors ? ` ${errors} scrape errors.` : ""}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to import Covers team history");
+    } finally {
+      setImportingCoversHistory(false);
+    }
+  }
+
   async function handleRefreshResults(
     forceRefresh = false,
     includePlayerStats = true,
@@ -1475,6 +1493,7 @@ export function App() {
             status={operationStatus}
             importingOdds={importingOdds}
             importingCoversOdds={importingCoversOdds}
+            importingCoversHistory={importingCoversHistory}
             refreshingResults={refreshingResults}
             refreshingMissingScores={refreshingMissingScores}
             recalculating={recalculating}
@@ -1496,6 +1515,7 @@ export function App() {
             stalePayloadAck={stalePayloadAck}
             onImportOdds={handleImportOdds}
             onImportCoversOdds={handleImportCoversOdds}
+            onImportCoversHistory={handleImportCoversHistory}
             onRefreshResults={handleRefreshResults}
             onScanMissingScores={handleScanMissingScores}
             onImportMissingScores={handleImportMissingScores}
@@ -1564,6 +1584,7 @@ function DataView({
   status,
   importingOdds,
   importingCoversOdds,
+  importingCoversHistory,
   refreshingResults,
   refreshingMissingScores,
   recalculating,
@@ -1585,6 +1606,7 @@ function DataView({
   stalePayloadAck,
   onImportOdds,
   onImportCoversOdds,
+  onImportCoversHistory,
   onRefreshResults,
   onScanMissingScores,
   onImportMissingScores,
@@ -1625,6 +1647,7 @@ function DataView({
   status: string | null;
   importingOdds: boolean;
   importingCoversOdds: boolean;
+  importingCoversHistory: boolean;
   refreshingResults: boolean;
   refreshingMissingScores: boolean;
   recalculating: boolean;
@@ -1646,6 +1669,7 @@ function DataView({
   stalePayloadAck: string;
   onImportOdds: (forceRefresh: boolean) => void;
   onImportCoversOdds: (forceRefresh: boolean) => void;
+  onImportCoversHistory: (forceRefresh: boolean) => void;
   onRefreshResults: (
     forceRefresh: boolean,
     includePlayerStats?: boolean,
@@ -1680,6 +1704,7 @@ function DataView({
     refreshingMissingScores ||
     importingOdds ||
     importingCoversOdds ||
+    importingCoversHistory ||
     loading ||
     settlingProps ||
     auditingStalePayloads ||
@@ -1882,6 +1907,16 @@ function DataView({
             disabled={importingOdds || importingCoversOdds || refreshingResults || settlingProps || loading}
             onPrimary={() => onImportCoversOdds(false)}
             onSecondary={() => onImportCoversOdds(true)}
+          />
+          <OperationCard
+            title="Covers Team History"
+            description="Save today's Covers team records, home and away splits, head-to-head, ATS, and totals. The dashboard reuses this snapshot all day."
+            metrics={`${matchupsCount} upcoming games`}
+            primaryLabel={importingCoversHistory ? "Loading" : "Load Saved History"}
+            secondaryLabel="Refresh History"
+            disabled={busy || importingCoversHistory}
+            onPrimary={() => onImportCoversHistory(false)}
+            onSecondary={() => onImportCoversHistory(true)}
           />
           <OperationCard
             title="ESPN Completed Games"
@@ -5938,8 +5973,9 @@ function TeamSummary({
   const contextDerived = summarizeCoversContextRecord(coversLast10Rows, context);
   const contextAtsDerived = summarizeCoversContextAts(coversLast10Rows, context);
   const contextOuDerived = summarizeCoversContextOu(coversLast10Rows, context);
-  const contextRecord = coversTeamRow
-    ? (context === "home" ? coversTeamRow.home : coversTeamRow.away)
+  const coversContextRecord = context === "home" ? coversTeamRow?.home : coversTeamRow?.away;
+  const contextRecord = coversContextRecord && coversContextRecord !== "-"
+    ? coversContextRecord
     : contextDerived ?? (context === "home" ? `${summary.home_games}` : `${summary.away_games}`);
   const venueRatings = context === "home" ? ratings?.home : ratings?.away;
   const segmentAverages = context === "home" ? summary.segment_averages?.home : summary.segment_averages?.away;

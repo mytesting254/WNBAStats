@@ -1177,6 +1177,7 @@ export async function fetchRoster(): Promise<RosterPlayer[]> {
 
 export type OddsImportResult = {
   status: string;
+  games?: number;
   imported?: number;
   synced_props?: number;
   message?: string;
@@ -1204,6 +1205,15 @@ export async function importCoversOdds(forceRefresh = false): Promise<OddsImport
   if (!response.ok) {
     const detail = await readErrorDetail(response);
     throw new Error(detail || "Failed to import Covers odds");
+  }
+  return response.json();
+}
+
+export async function importCoversTeamHistory(forceRefresh = false): Promise<OddsImportResult> {
+  const response = await apiFetch(`/api/covers/history/import?force_refresh=${forceRefresh ? "true" : "false"}`, { method: "POST" });
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new Error(detail || "Failed to import Covers team history");
   }
   return response.json();
 }

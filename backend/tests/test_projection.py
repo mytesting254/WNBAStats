@@ -12213,6 +12213,57 @@ def test_covers_records_by_game_falls_back_to_saved_pages(monkeypatch) -> None:
     }
 
 
+def test_covers_team_history_is_reused_from_daily_snapshot(monkeypatch) -> None:
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE games (id INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO games (id) VALUES (401856966)")
+    conn.execute(
+        """
+        CREATE TABLE covers_matchup_history_snapshots (
+            id INTEGER PRIMARY KEY,
+            selected_date TEXT NOT NULL,
+            game_id INTEGER NOT NULL,
+            provider_event_id TEXT,
+            captured_at TEXT NOT NULL,
+            records_json TEXT NOT NULL,
+            UNIQUE(selected_date, game_id)
+        )
+        """
+    )
+    selected_date = datetime.now(covers_import_module.LOCAL_TZ).date().isoformat()
+    expected_records = {
+        "team_table": [{"team": "ATL", "record": "12-3", "away": "5-2", "home": "7-1"}],
+        "head_to_head": [],
+        "away_last_10": [],
+        "home_last_10": [],
+    }
+    game = CoversGame(event_id="covers-1", odds_url="https://example.test/odds", matchup_url="https://example.test/matchup")
+    monkeypatch.setattr(covers_import_module, "covers_matchup_links", lambda date: [game])
+    monkeypatch.setattr(covers_import_module, "_fetch_text", lambda url: "saved page")
+    monkeypatch.setattr(
+        covers_import_module,
+        "_metadata_from_page",
+        lambda conn, game, page: SimpleNamespace(game_id=401856966, records=expected_records),
+    )
+    monkeypatch.setattr(
+        covers_import_module,
+        "_metadata_to_row",
+        lambda metadata: {"game_id": metadata.game_id, "provider_event_id": game.event_id, "records": metadata.records},
+    )
+    monkeypatch.setattr(covers_import_module, "read_json_cache", lambda name: None)
+    monkeypatch.setattr(covers_import_module, "write_json_cache", lambda name, payload: None)
+
+    first = covers_import_module.import_covers_team_history(conn, selected_date=selected_date)
+    monkeypatch.setattr(covers_import_module, "covers_matchup_links", lambda date: (_ for _ in ()).throw(AssertionError("snapshot should be reused")))
+    second = covers_import_module.import_covers_team_history(conn, selected_date=selected_date)
+
+    assert first["status"] == "imported"
+    assert second["status"] == "loaded_from_snapshot"
+    assert covers_import_module._persisted_covers_history(conn, selected_date) == {401856966: expected_records}
+    conn.close()
+
+
 def test_covers_market_title_aliases() -> None:
     assert _market_from_title("3 Pointers Made") == "3-pointers_made"
     assert _market_from_title("Total Steals") == "total_steals"

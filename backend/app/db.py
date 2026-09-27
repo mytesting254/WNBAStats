@@ -314,6 +314,26 @@ def init_db() -> None:
             ON player_team_history(team_id)
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS covers_matchup_history_snapshots (
+                id INTEGER PRIMARY KEY,
+                selected_date TEXT NOT NULL,
+                game_id INTEGER NOT NULL,
+                provider_event_id TEXT,
+                captured_at TEXT NOT NULL,
+                records_json TEXT NOT NULL,
+                FOREIGN KEY (game_id) REFERENCES games(id),
+                UNIQUE(selected_date, game_id)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_covers_matchup_history_date_game
+            ON covers_matchup_history_snapshots(selected_date, game_id)
+            """
+        )
         game_columns = {row["name"] for row in conn.execute("PRAGMA table_info(games)").fetchall()}
         if "rest_days_home" not in game_columns:
             conn.execute("ALTER TABLE games ADD COLUMN rest_days_home INTEGER DEFAULT 2")

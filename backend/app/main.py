@@ -35,7 +35,7 @@ from .auth import (
 )
 from .bootstrap import ensure_teams, normalize_team_abbreviation
 from .cache import delete_json_cache, read_json_cache, write_json_cache
-from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, _replace_covers_rows, import_covers_props
+from .covers_import import CoversGame, RAW_CACHE_NAME as COVERS_RAW_CACHE_NAME, _game_market_from_page, _import_covers_provider_rows, _metadata_from_page, _replace_covers_rows, import_covers_props, import_covers_team_history
 from .db import connect, ensure_dfs_runtime_schema, init_db, sqlite_write_lock, using_turso
 from .dfs_model import (
     DFS_HALF_MODEL_VERSION,
@@ -7430,6 +7430,26 @@ def import_covers(request: Request, selected_date: str | None = None, force_refr
     )
 
 
+@app.post("/api/covers/history/import", dependencies=[Depends(_protect_mutation)])
+def import_covers_history(request: Request, selected_date: str | None = None, force_refresh: bool = False) -> dict:
+    resolved_date = selected_date or datetime.now(LOCAL_TZ).date().isoformat()
+    return _run_audited_mutation(
+        request,
+        "covers.history.import",
+        lambda: _import_covers_history_impl(resolved_date, force_refresh),
+        details={"selected_date": resolved_date, "force_refresh": force_refresh},
+    )
+
+
+def _import_covers_history_impl(selected_date: str, force_refresh: bool) -> dict[str, Any]:
+    with connect() as conn:
+        result = import_covers_team_history(conn, selected_date=selected_date, force_refresh=force_refresh)
+    _invalidate_read_caches()
+    with connect() as conn:
+        result["published_payloads"] = _publish_post_mutation_read_payloads(conn)
+    return result
+
+
 def _import_covers_impl(*, request: Request | None, selected_date: str | None, force_refresh: bool) -> dict[str, Any]:
     if force_refresh:
         with connect() as conn:
@@ -9036,27 +9056,25 @@ def _start_covers_refresh_if_needed(
 
 
 def _covers_records_by_game(conn) -> dict[int, dict]:
+    records_by_game = _persisted_covers_records_by_game(conn)
     payload = read_json_cache("covers_props_raw.json")
     today_local = datetime.now(LOCAL_TZ).date().isoformat()
     if isinstance(payload, dict) and payload.get("cache_date") != today_local:
         delete_json_cache("covers_props_raw.json")
-    records_by_game = {}
     if isinstance(payload, dict):
         for item in payload.get("games", []):
             if not isinstance(item, dict) or item.get("game_id") is None:
                 continue
             records = item.get("records")
             if isinstance(records, dict):
-                records_by_game[int(item["game_id"])] = records
-    if records_by_game:
-        return records_by_game
+                records_by_game.setdefault(int(item["game_id"]), records)
 
     pages_payload = read_json_cache("covers_pages_raw.json")
     if not isinstance(pages_payload, dict):
-        return {}
+        return records_by_game
     if pages_payload.get("cache_date") != today_local:
         delete_json_cache("covers_pages_raw.json")
-        return {}
+        return records_by_game
     for item in pages_payload.get("games", []):
         if not isinstance(item, dict):
             continue
@@ -9078,7 +9096,32 @@ def _covers_records_by_game(conn) -> dict[int, dict]:
         except Exception:
             continue
         if metadata.game_id is not None and isinstance(metadata.records, dict):
-            records_by_game[int(metadata.game_id)] = metadata.records
+            records_by_game.setdefault(int(metadata.game_id), metadata.records)
+    return records_by_game
+
+
+def _persisted_covers_records_by_game(conn) -> dict[int, dict]:
+    selected_date = datetime.now(LOCAL_TZ).date().isoformat()
+    rows = conn.execute(
+        """
+        SELECT game_id, records_json
+        FROM covers_matchup_history_snapshots
+        WHERE selected_date = ?
+        ORDER BY captured_at DESC
+        """,
+        (selected_date,),
+    ).fetchall()
+    records_by_game: dict[int, dict] = {}
+    for row in rows:
+        game_id = int(row["game_id"])
+        if game_id in records_by_game:
+            continue
+        try:
+            records = json.loads(str(row["records_json"]))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if isinstance(records, dict):
+            records_by_game[game_id] = records
     return records_by_game
 
 
