@@ -4,6 +4,7 @@ import html
 import json
 import re
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urljoin
@@ -14,6 +15,7 @@ import requests
 
 from .bootstrap import ensure_team, normalize_team_abbreviation
 from .cache import read_json_cache, write_json_cache
+from .db import sqlite_write_lock
 from .game_resolver import resolve_or_create_game
 from .odds_import import _backfill_provider_player_ids, sync_prop_lines_from_sportsbook
 from .timezone_utils import APP_TIMEZONE, local_today_iso
@@ -129,6 +131,30 @@ def covers_context_cache_name(selected_date: str) -> str:
     return f"{CONTEXT_CACHE_PREFIX}{selected_date}.json"
 
 
+def _covers_db_write(conn, operation, *, max_attempts: int = 4):
+    """Keep Covers writes short and retry contention without repeating HTTP requests."""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with sqlite_write_lock():
+                # Acquire the writer before reading team/game identity. In WAL mode,
+                # upgrading a stale read snapshot can fail without waiting at all.
+                if isinstance(conn, sqlite3.Connection) and not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                try:
+                    result = operation()
+                    conn.commit()
+                    return result
+                except Exception:
+                    conn.rollback()
+                    raise
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if not any(value in message for value in ("database is locked", "database table is locked", "database schema is locked")) or attempt == max_attempts:
+                raise
+            print(f"[covers] SQLite write locked on attempt {attempt}/{max_attempts}; retrying in {2.0 * attempt:.1f}s.")
+            time.sleep(2.0 * attempt)
+
+
 def import_covers_team_history(
     conn: sqlite3.Connection,
     *,
@@ -173,8 +199,10 @@ def import_covers_team_history(
     for game in covers_matchup_links(resolved_date):
         try:
             page = _fetch_text(game.matchup_url or game.odds_url.removesuffix("/odds"))
-            metadata = _metadata_from_page(conn, game, page)
+            metadata = _covers_db_write(conn, lambda: _metadata_from_page(conn, game, page))
             games.append(_metadata_to_row(metadata))
+        except sqlite3.Error:
+            raise
         except Exception as exc:
             errors.append({"event_id": game.event_id, "error": str(exc)})
     _persist_covers_history_snapshots(conn, games=games, selected_date=resolved_date, captured_at=captured_at)
@@ -296,12 +324,19 @@ def _import_covers_provider_rows(
                     "market_fragments": fragments,
                 }
             )
-            metadata = _metadata_from_page(conn, game, matchup_page, fallback_page=odds_page)
+            # Resolution writes team/game rows. Commit before fetching the next
+            # matchup so slow HTTP requests never retain SQLite's writer lock.
+            metadata = _covers_db_write(
+                conn,
+                lambda: _metadata_from_page(conn, game, matchup_page, fallback_page=odds_page),
+            )
             if odds_board:
                 metadata = _merge_moneylines_from_board(metadata, odds_board)
             metadata_rows.append(metadata)
             market_html = odds_page + "".join(fragments)
             imported_rows.extend(_event_rows(metadata, market_html, captured_at))
+        except sqlite3.Error:
+            raise
         except Exception as exc:
             errors.append({"event_id": game.event_id, "error": str(exc)})
             continue
@@ -324,8 +359,7 @@ def _import_covers_provider_rows(
     if not row_payload:
         if game_payload:
             if update_game_markets:
-                _update_covers_game_markets(conn, game_payload)
-            conn.commit()
+                _covers_db_write(conn, lambda: _update_covers_game_markets(conn, game_payload))
             return {
                 "events": len(game_payload),
                 "imported": 0,
@@ -400,6 +434,19 @@ def _replace_covers_rows(
     *,
     update_game_markets: bool = True,
 ) -> dict:
+    return _covers_db_write(
+        conn,
+        lambda: _replace_covers_rows_once(conn, row_payload, game_payload, update_game_markets=update_game_markets),
+    )
+
+
+def _replace_covers_rows_once(
+    conn: sqlite3.Connection,
+    row_payload: list[dict],
+    game_payload: list[dict] | None = None,
+    *,
+    update_game_markets: bool = True,
+) -> dict:
     rows = [_row_to_tuple(row) for row in row_payload if isinstance(row, dict)]
     if update_game_markets:
         _update_covers_game_markets(conn, game_payload or [])
@@ -423,7 +470,6 @@ def _replace_covers_rows(
         rows,
     )
     provider_player_ids_filled = _backfill_provider_player_ids(conn, provider=PROVIDER)
-    conn.commit()
     return {
         "events": len({row[1] for row in rows}),
         "imported": len(rows),

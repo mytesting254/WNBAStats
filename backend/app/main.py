@@ -8951,6 +8951,9 @@ def _start_covers_refresh_if_needed(
                     ),
                 )
                 touched_game_ids = list(pipeline_result.target_game_ids)
+                # Progress callbacks can leave writes pending on this connection.
+                # Job events use another connection, so release the writer first.
+                conn.commit()
                 _append_job_run_event(
                     job_run_id,
                     "pipeline.sync.done",
