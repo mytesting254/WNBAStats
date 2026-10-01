@@ -732,10 +732,13 @@ def _persist_prop_sync_job_snapshot(snapshot: dict[str, Any], *, conn=None) -> N
     job_id = snapshot.get("job_id")
     if not job_id:
         return
+    owns_connection = conn is None
+    db_conn = None
+    had_transaction = False
     try:
-        owns_connection = conn is None
         with sqlite_write_lock():
             db_conn = conn if conn is not None else connect()
+            had_transaction = bool(getattr(db_conn, "in_transaction", False))
             db_conn.execute(
                 """
                 UPDATE prop_sync_jobs
@@ -776,11 +779,17 @@ def _persist_prop_sync_job_snapshot(snapshot: dict[str, Any], *, conn=None) -> N
                     int(job_id),
                 ),
             )
-            if owns_connection:
+            # A progress-only transaction must finish before slow projection
+            # work resumes. Preserve a caller's existing business transaction.
+            if owns_connection or not had_transaction:
                 db_conn.commit()
-                db_conn.close()
     except Exception as exc:
+        if db_conn is not None and (owns_connection or not had_transaction):
+            db_conn.rollback()
         print(f"[prop-sync] unable to persist job snapshot: {exc}")
+    finally:
+        if owns_connection and db_conn is not None:
+            db_conn.close()
 
 
 def _mutate_prop_sync_state(

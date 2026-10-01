@@ -1741,6 +1741,7 @@ function DataView({
       ? Math.max(0, Math.min(100, Math.round((backendPipelineSync?.percent ?? 0) * 100)))
       : 15
     : Math.max(0, Math.min(100, Math.round((propSync?.percent ?? 0) * 100)));
+  const propSyncFailed = !propSync?.running && Boolean(propSync?.last_error);
   const pipelineLabel = pipelineRunning
     ? activePipeline!.label
     : propSync == null
@@ -1748,7 +1749,7 @@ function DataView({
       : propSync.running
         ? "Background Prop Sync"
         : propSync.finished_at
-          ? "Last Completed"
+          ? propSyncFailed ? "Last Failed" : "Last Completed"
           : "Clear";
   const pipelineDetail = pipelineRunning
     ? activePipeline!.waitingForBackground
@@ -1762,9 +1763,9 @@ function DataView({
   const progressPercent = Math.max(0, Math.min(100, Math.round((propSync?.percent ?? 0) * 100)));
   const progressStageLabel = formatPropSyncStage(propSync?.stage);
   const queueLabel = propSync == null ? "Unknown" : propSync.running ? "Running" : "Clear";
-  const queueDisplayLabel = propSync == null ? "Unknown" : propSync.running ? "Running" : propSync.finished_at ? "Completed" : "Clear";
-  const pipelineRequestState = pipelineRunning ? "Active" : propSync?.finished_at ? "Completed" : "Idle";
-  const pipelineBackgroundState = pipelineRunning ? (activePipeline?.waitingForBackground ? "Queued" : "None") : (propSync?.running ? "Running" : propSync?.finished_at ? "Finished" : "Idle");
+  const queueDisplayLabel = propSync == null ? "Unknown" : propSync.running ? "Running" : propSyncFailed ? "Failed" : propSync.finished_at ? "Completed" : "Clear";
+  const pipelineRequestState = pipelineRunning ? "Active" : propSyncFailed ? "Failed" : propSync?.finished_at ? "Completed" : "Idle";
+  const pipelineBackgroundState = pipelineRunning ? (activePipeline?.waitingForBackground ? "Queued" : "None") : (propSync?.running ? "Running" : propSyncFailed ? "Failed" : propSync?.finished_at ? "Finished" : "Idle");
   const queueDetail = propSync == null
     ? "Operations health unavailable."
     : propSync.running
