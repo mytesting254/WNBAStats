@@ -1673,6 +1673,49 @@ def _match_or_create_local_game(conn: sqlite3.Connection, event: dict) -> int | 
     )
 
 
+def current_odds_api_events() -> list[dict] | None:
+    """Return the provider slate, or None when discovery is unavailable.
+
+    Cache the events endpoint separately from prop odds: an event belongs to
+    the slate even when no bookmaker has posted player markets yet.
+    """
+    cache_name = "odds_api_events.json"
+    now = datetime.now(timezone.utc)
+    cached = read_json_cache(cache_name)
+    cached_events = None
+    if isinstance(cached, dict) and cached.get("cache_date") == local_today_iso():
+        events = cached.get("events")
+        if isinstance(events, list):
+            cached_events = events
+            captured = _parse_game_start(str(cached.get("captured_at") or ""))
+            if captured is not None and 0 <= (now - captured).total_seconds() < 300:
+                return cached_events
+    load_dotenv()
+    api_key = os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")
+    if not api_key or api_key.startswith("your_"):
+        return cached_events
+    try:
+        events = _fetch_json(
+            f"{BASE_URL}/sports/{SPORT_KEY}/events?{urlencode({'apiKey': api_key, 'dateFormat': 'iso'})}"
+        )
+        if not isinstance(events, list) or any(
+            not isinstance(event, dict)
+            or not event.get("home_team")
+            or not event.get("away_team")
+            or _parse_game_start(str(event.get("commence_time") or "")) is None
+            for event in events
+        ):
+            return cached_events
+        write_json_cache(cache_name, {
+            "cache_date": local_today_iso(),
+            "captured_at": now.isoformat(),
+            "events": events,
+        })
+        return events
+    except (RuntimeError, OSError, ValueError):
+        return cached_events
+
+
 def discover_odds_api_game_ids(
     conn: sqlite3.Connection,
     *,

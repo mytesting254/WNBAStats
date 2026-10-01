@@ -55,6 +55,7 @@ from .game_prediction_tracking import (
 from .game_predictions import _GamePredictionCache, _team_injury_impact, project_game
 from .odds_import import (
     _fuzzy_player_name_match,
+    current_odds_api_events,
     import_historical_odds_api_game_markets,
     RAW_CACHE_NAME as ODDS_RAW_CACHE_NAME,
     SyncPropLinesResult,
@@ -3909,6 +3910,24 @@ def _scheduled_matchup_game_groups(conn, game_ids: list[int] | None = None) -> l
         for game in games
         if _is_today_slate_game(game["game_date"], game["start_time"])
     ]
+    events = current_odds_api_events()
+    if events is not None:
+        event_keys = {
+            (
+                _normalized_start_key(event.get("commence_time")),
+                str(event.get("home_team") or "").strip().casefold(),
+                str(event.get("away_team") or "").strip().casefold(),
+            )
+            for event in events
+        }
+        games = [
+            game for game in games
+            if (
+                _normalized_start_key(game["start_time"]),
+                str(game["home_team_name"]).strip().casefold(),
+                str(game["away_team_name"]).strip().casefold(),
+            ) in event_keys
+        ]
     return _coalesce_matchup_games(games)
 
 
