@@ -3649,7 +3649,7 @@ function MatchupsView({
           <ShieldCheck size={20} />
         </div>
         {error && <div className="error">{error}</div>}
-        <div className="matchup-grid single">
+        <div className="matchup-grid">
           {matchups.length ? (
             matchups.map((matchup) => {
               const coversRecords = normalizeCoversRecords(matchup.covers_records);
