@@ -3635,10 +3635,6 @@ function MatchupsView({
   error: string | null;
   cacheStatus: CacheViewStatus | null;
 }) {
-  const [selectedGameId, setSelectedGameId] = useState<number | null>(null);
-  const selectedMatchup = matchups.find((matchup) => matchup.id === selectedGameId) ?? matchups[0] ?? null;
-  const selectedCoversRecords = normalizeCoversRecords(selectedMatchup?.covers_records);
-
   return (
     <section className="matchup-list">
       <div className="board-panel">
@@ -3653,102 +3649,84 @@ function MatchupsView({
           <ShieldCheck size={20} />
         </div>
         {error && <div className="error">{error}</div>}
-        <div className="game-tabs matchup-game-tabs" aria-label="Game tabs">
-          {matchups.map((matchup) => {
-            const winnerCode = normalizeTeamCode(matchup.winner_pick);
-            const homeCode = normalizeTeamCode(matchup.home_team);
-            const awayCode = normalizeTeamCode(matchup.away_team);
-            const winnerClass =
-              winnerCode === homeCode ? "winner-home" : winnerCode === awayCode ? "winner-away" : "winner-none";
-            const activeClass = selectedMatchup?.id === matchup.id ? "active" : "";
-            return (
-            <button
-              key={matchup.id}
-              className={`${activeClass} ${winnerClass}`.trim()}
-              onClick={() => setSelectedGameId(matchup.id)}
-            >
-              <span>{formatDate(matchup.start_time)}</span>
-              <strong>{matchup.away_team} at {matchup.home_team}</strong>
-              <em>{availableLabel(matchup)}</em>
-            </button>
-            );
-          })}
-        </div>
         <div className="matchup-grid single">
-          {selectedMatchup ? (
-            <article className="matchup-card" key={selectedMatchup.id}>
+          {matchups.length ? (
+            matchups.map((matchup) => {
+              const coversRecords = normalizeCoversRecords(matchup.covers_records);
+              return <article className="matchup-card" key={matchup.id}>
               <div className="matchup-card-header">
                 <div className="matchup-header-top">
                   <div className="matchup-header-main">
-                    <p className="eyebrow">{formatDate(selectedMatchup.start_time)}</p>
+                    <p className="eyebrow">{formatDate(matchup.start_time)}</p>
                     <div className="matchup-title-row">
-                      <TeamLogo src={selectedMatchup.away_logo_url} alt={`${selectedMatchup.away_team} logo`} />
-                      <h3>{selectedMatchup.away_team} at {selectedMatchup.home_team}</h3>
-                      <TeamLogo src={selectedMatchup.home_logo_url} alt={`${selectedMatchup.home_team} logo`} />
+                      <TeamLogo src={matchup.away_logo_url} alt={`${matchup.away_team} logo`} />
+                      <h3>{matchup.away_team} at {matchup.home_team}</h3>
+                      <TeamLogo src={matchup.home_logo_url} alt={`${matchup.home_team} logo`} />
                     </div>
                   </div>
                 </div>
                 <div className="matchup-market-badges">
-                  <span className={`risk-pill ${riskClass(selectedMatchup.blowout_risk)}`}>
-                    Blowout {selectedMatchup.blowout_risk}
+                  <span className={`risk-pill ${riskClass(matchup.blowout_risk)}`}>
+                    Blowout {matchup.blowout_risk}
                   </span>
                   <span className="market-pill">
-                    {formatSpreadMarket(selectedMatchup)}
+                    {formatSpreadMarket(matchup)}
                   </span>
                   <span className="market-pill">
-                    {formatTotalMarket(selectedMatchup)}
+                    {formatTotalMarket(matchup)}
                   </span>
                   <span className="market-pill">
-                    {formatMoneylineMarket(selectedMatchup)}
+                    {formatMoneylineMarket(matchup)}
                   </span>
                 </div>
               </div>
               <div className="team-comparison">
                 <TeamSummary
                   label="Away"
-                  team={selectedMatchup.away_team_name}
-                  teamCode={selectedMatchup.away_team}
-                  logoUrl={selectedMatchup.away_logo_url}
-                  restDays={selectedMatchup.away_rest_days}
-                  summary={selectedMatchup.away}
-                  ratings={selectedMatchup.away_team_ratings}
+                  team={matchup.away_team_name}
+                  teamCode={matchup.away_team}
+                  logoUrl={matchup.away_logo_url}
+                  restDays={matchup.away_rest_days}
+                  summary={matchup.away}
+                  ratings={matchup.away_team_ratings}
                   context="away"
-                  coversTeamRow={selectedCoversRecords.team_table.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.away_team))}
-                  coversLast10Rows={selectedCoversRecords.away_last_10}
+                  coversTeamRow={coversRecords.team_table.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(matchup.away_team))}
+                  coversLast10Rows={coversRecords.away_last_10}
                 />
                 <TeamSummary
                   label="Home"
-                  team={selectedMatchup.home_team_name}
-                  teamCode={selectedMatchup.home_team}
-                  logoUrl={selectedMatchup.home_logo_url}
-                  restDays={selectedMatchup.home_rest_days}
-                  summary={selectedMatchup.home}
-                  ratings={selectedMatchup.home_team_ratings}
+                  team={matchup.home_team_name}
+                  teamCode={matchup.home_team}
+                  logoUrl={matchup.home_logo_url}
+                  restDays={matchup.home_rest_days}
+                  summary={matchup.home}
+                  ratings={matchup.home_team_ratings}
                   context="home"
-                  coversTeamRow={selectedCoversRecords.team_table.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(selectedMatchup.home_team))}
-                  coversLast10Rows={selectedCoversRecords.home_last_10}
+                  coversTeamRow={coversRecords.team_table.find((item) => normalizeTeamCode(item.team) === normalizeTeamCode(matchup.home_team))}
+                  coversLast10Rows={coversRecords.home_last_10}
                 />
               </div>
               <div className="prediction-strip">
-                <MiniStat label="Projected Score" value={formatProjectedScore(selectedMatchup)} />
-                <MiniStat label="Model Winner" value={selectedMatchup.winner_pick} />
-                <MiniStat label="ATS Pick" value={selectedMatchup.ats_pick} />
-                <MiniStat label="ATS Pick Edge" value={formatAtsPickEdge(selectedMatchup)} />
-                <MiniStat label="Projected Total" value={formatProjectedTotal(selectedMatchup)} />
-                <MiniStat label="O/U Pick" value={selectedMatchup.total_pick} />
-                <MiniStat label="Q1 Total Proj" value={formatSegmentTotal(selectedMatchup.projected_q1_total)} />
-                <MiniStat label="1H Total Proj" value={formatSegmentTotal(selectedMatchup.projected_first_half_total)} />
-                <MiniStat label="O/U Edge" value={formatNullableEdge(selectedMatchup.total_edge)} />
-                <MiniStat label="O/U Conf" value={selectedMatchup.total_confidence ?? selectedMatchup.game_confidence} />
-                <MiniStat label="Game Conf" value={selectedMatchup.game_confidence} />
+                <MiniStat label="Projected Score" value={formatProjectedScore(matchup)} />
+                <MiniStat label="Model Winner" value={matchup.winner_pick} />
+                <MiniStat label="ATS Pick" value={matchup.ats_pick} />
+                <MiniStat label="ATS Pick Edge" value={formatAtsPickEdge(matchup)} />
+                <MiniStat label="Projected Total" value={formatProjectedTotal(matchup)} />
+                <MiniStat label="O/U Pick" value={matchup.total_pick} />
+                <MiniStat label="Q1 Total Proj" value={formatSegmentTotal(matchup.projected_q1_total)} />
+                <MiniStat label="1H Total Proj" value={formatSegmentTotal(matchup.projected_first_half_total)} />
+                <MiniStat label="O/U Edge" value={formatNullableEdge(matchup.total_edge)} />
+                <MiniStat label="O/U Conf" value={matchup.total_confidence ?? matchup.game_confidence} />
+                <MiniStat label="Game Conf" value={matchup.game_confidence} />
                 <MiniStat
-                  label={seasonNetDiffLabel(selectedMatchup)}
-                  value={formatSignedNumber(selectedMatchup.rating_differentials?.season_net_diff)}
-                  className={signedValueTone(selectedMatchup.rating_differentials?.season_net_diff)}
+                  label={seasonNetDiffLabel(matchup)}
+                  value={formatSignedNumber(matchup.rating_differentials?.season_net_diff)}
+                  className={signedValueTone(matchup.rating_differentials?.season_net_diff)}
                 />
               </div>
-              <CoversRecordsPanel matchup={selectedMatchup} />
-            </article>
+              <CoversRecordsPanel matchup={matchup} />
+            </article>;
+            })
           ) : (
             <p className="empty">No scheduled games found.</p>
           )}
