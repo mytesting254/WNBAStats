@@ -1349,6 +1349,45 @@ def _latest_recoverable_stale_prop_sync_job(*, conn=None) -> dict[str, Any] | No
     return None
 
 
+def _claim_stale_prop_sync_job(job_id: int) -> bool:
+    """Claim a stale job for recovery so multiple app workers cannot retry it."""
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        with sqlite_write_lock():
+            with connect() as conn:
+                cursor = conn.execute(
+                    """
+                    UPDATE prop_sync_jobs
+                    SET status = 'recovering', updated_at = ?, message = ?
+                    WHERE id = ? AND status = 'stale'
+                    """,
+                    (now, "Retrying stale background job.", int(job_id)),
+                )
+                conn.commit()
+                return cursor.rowcount == 1
+    except Exception as exc:
+        print(f"[prop-sync] unable to claim stale job {job_id}: {exc}")
+        return False
+
+
+def _release_stale_prop_sync_job(job_id: int, message: str) -> None:
+    """Make a claimed job retryable if its replacement could not be queued."""
+    try:
+        with sqlite_write_lock():
+            with connect() as conn:
+                conn.execute(
+                    """
+                    UPDATE prop_sync_jobs
+                    SET status = 'stale', updated_at = ?, message = ?
+                    WHERE id = ? AND status = 'recovering'
+                    """,
+                    (datetime.now(timezone.utc).isoformat(), message, int(job_id)),
+                )
+                conn.commit()
+    except Exception as exc:
+        print(f"[prop-sync] unable to release stale job {job_id}: {exc}")
+
+
 def _latest_prop_sync_job_state() -> dict[str, Any] | None:
     try:
         with connect() as conn:
@@ -1714,19 +1753,30 @@ def _start_read_payload_prewarm() -> None:
 
 
 def _start_prop_sync_resume_worker() -> None:
-    def _worker() -> None:
+    def _recover_once() -> None:
+        claimed_job_id: int | None = None
         try:
-            time.sleep(2.0)
+            with connect() as conn:
+                recovered_jobs = _recover_stale_prop_sync_jobs(conn=conn)
+            if recovered_jobs:
+                print(f"[prop-sync] recovered {recovered_jobs} stale queued/running job(s).")
+
             with connect() as conn:
                 state = _latest_recoverable_stale_prop_sync_job(conn=conn)
             if state is None:
                 return
+            if _current_prop_sync_state().get("running"):
+                return
+            job_id = int(state.get("job_id") or 0)
+            if not job_id or not _claim_stale_prop_sync_job(job_id):
+                return
+            claimed_job_id = job_id
             scope = str(state.get("scope") or "")
             target_game_ids = [int(game_id) for game_id in (state.get("target_game_ids") or []) if int(game_id) > 0]
             stage = str(state.get("stage") or "")
             resumed = False
             if scope == "covers_import":
-                if stage == "requesting_provider":
+                if stage in {"queued", "requesting_provider"}:
                     resumed = _start_covers_refresh_if_needed(selected_date=None, request=None)
                 else:
                     resumed = _start_prop_sync_if_needed("covers_import", request=None, target_game_ids=target_game_ids or None)
@@ -1742,14 +1792,28 @@ def _start_prop_sync_resume_worker() -> None:
                     f"(started_at={state.get('started_at')}, stage={stage or 'unknown'})."
                 )
             else:
+                _release_stale_prop_sync_job(job_id, "Recovery could not queue a replacement; will retry.")
                 print(
                     f"[prop-sync] stale {scope} job was recoverable but could not be resumed "
                     f"(started_at={state.get('started_at')}, stage={stage or 'unknown'})."
                 )
         except Exception as exc:
-            print(f"[prop-sync] startup resume skipped: {exc}")
+            if claimed_job_id is not None:
+                _release_stale_prop_sync_job(
+                    claimed_job_id,
+                    "Recovery failed before a replacement was queued; will retry.",
+                )
+            print(f"[prop-sync] stale-job recovery pass failed: {exc}")
 
-    thread = threading.Thread(target=_worker, name="prop-sync-startup-resume", daemon=True)
+    def _worker() -> None:
+        # Startup recovery alone leaves jobs stranded if a daemon thread dies
+        # while the API process stays alive. Reconcile the durable job table
+        # periodically so queued work can be retried without a container restart.
+        while True:
+            _recover_once()
+            time.sleep(30.0)
+
+    thread = threading.Thread(target=_worker, name="prop-sync-recovery-watchdog", daemon=True)
     thread.start()
 
 

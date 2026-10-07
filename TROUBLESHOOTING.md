@@ -193,6 +193,7 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - `Refresh Odds` fails or reports missing API key
 - `Refresh Odds` stays queued or previously ended in a `504 Gateway Time-out`
 - `Refresh Odds`, `Refresh Covers`, `Recalculate`, or roster-change repair appears to jump backward in the progress card
+- `Refresh Covers` remains `Queued` at `0%` with prop sync `Running` well beyond the normal queue delay
 - the `Live Pipeline` card stays pinned to an old stage like `Requesting provider data` / `17%` even though the import job actually finished
 - `Refresh Covers` or `Recalculate` completes work, but the `Live Pipeline` card never shows progress for that run
 
@@ -206,6 +207,7 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - the API is returning stale in-memory prop-sync state instead of the newer persisted `prop_sync_jobs` record
 - the frontend is preserving an older running progress snapshot instead of replacing it with a newer finished payload
 - the frontend build is older than the pipeline-attachment fix, so `Recalculate` never registers with the shared progress card and Covers/Odds imports can go visually silent when another prop-sync job is already running
+- a background prop-sync thread did not begin after its queued state was persisted; before the recovery watchdog, stale queued work was only recovered during backend startup
 
 ### What To Check
 
@@ -224,6 +226,8 @@ This is an HTML scrape path, not a stable API integration. Production failures c
 - if same-day Covers cache exists, verify matchup payloads are using Covers game markets only as fallback, not overwriting already-populated Odds API game fields
 - if `POST /api/covers/import?force_refresh=true` returns `Imported Covers matchup lines without player prop rows.`, inspect runtime `covers_pages_raw.json` before assuming the admin control failed
   a current-day `covers_pages_raw.json` with no `covers_props_raw.json` means the refresh ran but the parser extracted zero player-prop rows
+- if a Covers refresh stays queued beyond `PROP_SYNC_STALE_SECONDS` (30 minutes by default), inspect the latest `prop_sync_jobs` row and its job events; a queued row with only `job.queued` means the provider fetch never started
+- the prop-sync recovery watchdog checks for stale jobs every 30 seconds and retries them; a stale Covers job in `queued` or `requesting_provider` is retried as a fresh provider refresh
 - during an active sync, stage-local counts should only move forward inside the current stage; a pattern like `40/176 -> 20/146 -> 40/176` indicates the old backend code is still running
 - if the DB row in `prop_sync_jobs` has already advanced into `rebuilding_predictions` or `publishing_payloads` but the UI still shows `requesting_provider`, the deployed frontend/backend bundle is stale
 
