@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover - fallback remains exercised without num
 from .game_pregame_features import build_matchup_pregame_features
 from .game_training_db import game_training_db_signature, load_game_training_rows
 from .player_prop_model import _before_training_start, _training_start_date
+from .scouting_features import MODEL_SCOUTING_FEATURE_NAMES, matchup_scouting_features, scouting_model_enabled
 
 TOTAL_CALIBRATION_MIN_SAMPLES = 12
 TOTAL_BIAS_CORRECTION_WEIGHT = 0.8
@@ -135,6 +136,7 @@ GAME_DIRECT_FEATURE_NAMES = [
     "away_hot_defense_flag",
     "home_slump_defense_flag",
     "away_slump_defense_flag",
+    *MODEL_SCOUTING_FEATURE_NAMES,
 ]
 GAME_MARGIN_FEATURE_NAMES = [
     "projected_margin",
@@ -737,6 +739,10 @@ def _direct_game_features(
         use_injury_context=True,
         runtime_cache=cache.runtime_cache,
     )
+    scouting_pregame = matchup_scouting_features(
+        cache.conn, home_team_id=home_team_id, away_team_id=away_team_id,
+        game_date=str(game_date or ""), runtime_cache=cache.runtime_cache,
+    ) if scouting_model_enabled() else None
     return _assemble_direct_game_features(
         home_recent_points=home_recent_points,
         away_recent_points=away_recent_points,
@@ -772,6 +778,7 @@ def _direct_game_features(
         over_price=over_price,
         under_price=under_price,
         matchup_pregame=matchup_pregame,
+        scouting_pregame=scouting_pregame,
     )
 
 
@@ -811,6 +818,7 @@ def _assemble_direct_game_features(
     over_price: float | None,
     under_price: float | None,
     matchup_pregame: Mapping[str, float] | None = None,
+    scouting_pregame: Mapping[str, float] | None = None,
 ) -> list[float]:
     recent_scoring_delta = float(home_recent_points) - float(away_recent_points)
     recent_allowed_delta = float(home_recent_allowed) - float(away_recent_allowed)
@@ -977,6 +985,7 @@ def _assemble_direct_game_features(
         away_hot_defense_flag,
         home_slump_defense_flag,
         away_slump_defense_flag,
+        *(float((scouting_pregame or {}).get(name) or 0.0) for name in MODEL_SCOUTING_FEATURE_NAMES),
     ]
 
 
@@ -1235,6 +1244,10 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                 use_injury_context=True,
                 runtime_cache=runtime_cache,
             )
+            scouting_pregame = matchup_scouting_features(
+                conn, home_team_id=home_team_id, away_team_id=away_team_id,
+                game_date=str(row["game_date"] or ""), runtime_cache=runtime_cache,
+            ) if scouting_model_enabled() else None
             direct_features = _assemble_direct_game_features(
                 home_recent_points=home_context["recent_points"],
                 away_recent_points=away_context["recent_points"],
@@ -1270,6 +1283,7 @@ def evaluate_game_residual_models(conn: sqlite3.Connection) -> dict[str, dict]:
                 over_price=_coerce_float(row["over_price"]),
                 under_price=_coerce_float(row["under_price"]),
                 matchup_pregame=matchup_pregame,
+                scouting_pregame=scouting_pregame,
             )
             adjusted_margin = baseline_margin
             adjusted_total = baseline_total

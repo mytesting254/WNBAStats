@@ -1,0 +1,7 @@
+# Add this single line to the existing host crontab. The script starts on
+# 2026-09-24 America/New_York. Set WNBA_SCOUTING_DB_PATH to the verified
+# active runtime volume; never point this job at a repo-local database.
+# A dedicated lock prevents overlap without waiting for the sports maintenance queue.
+0 * * * * [ "$(TZ=America/New_York date +\%H)" = "01" ] && cd /root/WNBAStats && flock -n /tmp/wnba-rotowire-scouting.lock env WNBA_SCOUTING_DB_PATH=/var/lib/docker/volumes/szlkzza4z3gpav4tts72wtqe_wnba-data/_data/wnba.sqlite .venv/bin/python -m scripts.pull_rotowire_scouting >> /var/log/wnba-rotowire-scouting.log 2>&1
+# RotoWire may publish completed-game scouting updates after the 1 a.m. pull.
+0 * * * * [ "$(TZ=America/New_York date +\%H)" = "11" ] && cd /root/WNBAStats && flock -n /tmp/wnba-rotowire-scouting.lock env WNBA_SCOUTING_DB_PATH=/var/lib/docker/volumes/szlkzza4z3gpav4tts72wtqe_wnba-data/_data/wnba.sqlite .venv/bin/python -m scripts.pull_rotowire_scouting >> /var/log/wnba-rotowire-scouting.log 2>&1

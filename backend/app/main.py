@@ -79,6 +79,7 @@ from .prop_ingestion import (
 )
 from .projections import LiveRebuildResult, rebuild_predictions, rebuild_predictions_live
 from .rotowire_import import RAW_CACHE_NAME as ROTOWIRE_RAW_CACHE_NAME, import_rotowire_lineups
+from .rotowire_scouting import ensure_schema as ensure_rotowire_scouting_schema, pull_scouting_reports
 from .settlement import settle_completed_props
 from .segment_predictions import project_game_segments
 from .stocks_tracking import (
@@ -7611,6 +7612,35 @@ def import_rotowire_injuries(request: Request, force_refresh: bool = False) -> d
         lambda: _import_rotowire_injuries_impl(request=request, force_refresh=force_refresh),
         details={"force_refresh": force_refresh},
     )
+
+
+@app.post("/api/scouting/rotowire/pull", dependencies=[Depends(_protect_mutation)])
+def pull_rotowire_scouting(request: Request) -> dict:
+    def run() -> dict:
+        with connect() as conn:
+            result = pull_scouting_reports(conn)
+        if not result["complete"]:
+            raise HTTPException(status_code=502, detail=result)
+        return result
+
+    return _run_audited_mutation(request, "scouting.rotowire.pull", run)
+
+
+@app.get("/api/scouting/rotowire/snapshots")
+def rotowire_scouting_snapshots(team: str | None = None, limit: int = Query(100, ge=1, le=1000)) -> list[dict]:
+    with connect() as conn:
+        ensure_rotowire_scouting_schema(conn)
+        if team:
+            rows = conn.execute("""
+                SELECT * FROM rotowire_scouting_snapshots
+                WHERE team_abbreviation = ? ORDER BY fetched_at DESC LIMIT ?
+            """, (team.strip().upper(), limit)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT * FROM rotowire_scouting_snapshots
+                ORDER BY fetched_at DESC LIMIT ?
+            """, (limit,)).fetchall()
+    return [{**dict(row), "report": json.loads(row["report_json"])} for row in rows]
 
 
 def _import_rotowire_injuries_impl(*, request: Request | None, force_refresh: bool) -> dict[str, Any]:

@@ -12,7 +12,7 @@ ODDS_API_KEY_VALUE="${ODDS_API_KEY:-}"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: scripts/live_daily_props.sh refresh-rosters|refresh-results|prune-specials|settle|train-model|train-model-core|train-dfs|settle-and-train|odds-if-matchups
+Usage: scripts/live_daily_props.sh refresh-rosters|refresh-results|prune-specials|settle|train-model|train-model-core|train-dfs|settle-and-train|odds-if-matchups|scouting
 
 Environment:
   WNBA_API_BASE  Backend base URL. Default: http://127.0.0.1:8010
@@ -366,6 +366,17 @@ run_odds_if_matchups() {
   echo
 }
 
+run_scouting() {
+  local today_local
+  today_local="$(TZ="$APP_TIMEZONE" date +%F)"
+  if [[ "$today_local" < "2026-09-24" ]]; then
+    echo "Scouting pulls begin 2026-09-24 America/New_York."
+    return 0
+  fi
+  api_post "/api/scouting/rotowire/pull"
+  echo
+}
+
 main() {
   cd "$ROOT_DIR"
   if [ "$USE_LIVE_CONTAINER" = "true" ] && [ "${WNBA_INSIDE_LIVE_CONTAINER:-}" != "true" ]; then
@@ -399,6 +410,9 @@ main() {
       ;;
     odds-if-matchups)
       run_odds_if_matchups
+      ;;
+    scouting)
+      run_scouting
       ;;
     -h|--help|help)
       usage

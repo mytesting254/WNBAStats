@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .db import connect, sqlite_write_lock
 from .game_training_db import game_training_db_signature
-from .game_predictions import evaluate_game_residual_models
+from .game_predictions import GAME_DIRECT_FEATURE_NAMES, evaluate_game_residual_models
 from .paths import get_cache_dir
 from .minutes_training_db import minutes_training_db_signature
 from .player_prop_training_db import player_prop_training_db_signature
@@ -440,9 +440,10 @@ def _git_sha() -> str | None:
 
 def _feature_schema_payload() -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "feature_names": list(FEATURE_NAMES),
         "minutes_feature_names": list(MINUTES_FEATURE_NAMES),
+        "game_direct_feature_names": list(GAME_DIRECT_FEATURE_NAMES),
         "default_tuning_config": DEFAULT_TUNING_CONFIG.to_dict(),
     }
 

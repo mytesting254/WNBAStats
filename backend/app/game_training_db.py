@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -9,9 +10,10 @@ from pathlib import Path
 from .game_pregame_features import build_matchup_pregame_features
 from .game_pregame_features import GAME_PREGAME_FEATURE_VERSION
 from .paths import get_training_db_path
+from .scouting_features import SCOUTING_FEATURE_VERSION, matchup_scouting_features, scouting_model_enabled
 
 
-GAME_TRAINING_DB_VERSION = "v4"
+GAME_TRAINING_DB_VERSION = "v5"
 _GAME_TRAINING_DB_LOCK = threading.RLock()
 
 
@@ -294,6 +296,10 @@ def _rebuild_game_training_examples(
             use_injury_context=True,
             runtime_cache=runtime_cache,
         )
+        scouting_pregame = matchup_scouting_features(
+            source_conn, home_team_id=home_team_id, away_team_id=away_team_id,
+            game_date=game_date, runtime_cache=runtime_cache,
+        ) if scouting_model_enabled() else None
         features = gp._assemble_direct_game_features(
             home_recent_points=float(home_context["recent_points"]),
             away_recent_points=float(away_context["recent_points"]),
@@ -329,6 +335,7 @@ def _rebuild_game_training_examples(
             over_price=gp._coerce_float(row["over_price"]),
             under_price=gp._coerce_float(row["under_price"]),
             matchup_pregame=matchup_pregame,
+            scouting_pregame=scouting_pregame,
         )
         baseline_home = gp._baseline_points_from_context(
             team_context=home_context,
@@ -474,6 +481,8 @@ def _source_signature(conn: sqlite3.Connection) -> str:
     payload = {
         "db_version": GAME_TRAINING_DB_VERSION,
         "pregame_feature_version": GAME_PREGAME_FEATURE_VERSION,
+        "scouting_feature_version": SCOUTING_FEATURE_VERSION,
+        "scouting_model_enabled": scouting_model_enabled(),
         "games_final_count": int(row["count"] or 0),
         "games_final_max_id": int(row["max_id"] or 0),
         "games_final_max_date": str(row["max_game_date"] or ""),
@@ -523,8 +532,18 @@ def _source_signature(conn: sqlite3.Connection) -> str:
         "volume_sum": float(boxscore_row["volume_sum"] or 0.0),
         "possessions_sum": float(boxscore_row["possessions_sum"] or 0.0),
     }
+    if scouting_model_enabled() and conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='team_scouting_snapshots'").fetchone():
+        digest = hashlib.sha256()
+        count = 0
+        for scouting_row in conn.execute("""
+            SELECT game_id, team_id, season, game_date, games_played,
+                   offense_json, defense_json, pace, formula_version
+            FROM team_scouting_snapshots ORDER BY game_id, team_id
+        """):
+            digest.update(json.dumps(tuple(scouting_row), separators=(",", ":")).encode("utf-8"))
+            count += 1
+        payload["scouting_snapshots"] = {"row_count": count, "digest": digest.hexdigest()[:16]}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    import hashlib
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16]
 
 
