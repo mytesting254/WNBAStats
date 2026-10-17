@@ -751,19 +751,19 @@ def _odds_from_player(player_html: str, market_key: str) -> list[tuple[str, floa
 def _odds_from_visible_player_table(player_html: str) -> list[tuple[str, float, int, str, str]]:
     rows = []
     cells = re.findall(r'<td[^>]*class="[^"]*\boddsCell\b[^"]*"[^>]*>(.*?)</td>', player_html, re.I | re.S)
-    for side, cell in zip(("over", "under"), cells[:2]):
+    for cell in cells[:2]:
         odds = _odds_from_cell(cell)
         book = _book_from_html(cell)
         if not odds or not book:
             continue
-        rows.append((side, odds[0], odds[1], book[0], book[1]))
+        rows.append((_side_from_cell(cell), odds[0], odds[1], book[0], book[1]))
     return rows
 
 
 def _odds_from_compare_modal(player_html: str) -> list[tuple[str, float, int, str, str]]:
     rows = []
     modal_match = re.search(
-        r'<div class="compareOddsTable[^"]*"[\s\S]*?<tbody>(?P<body>[\s\S]*?)</tbody>',
+        r'<(?:div|table) class="compareOddsTable[^"]*"[\s\S]*?<tbody>(?P<body>[\s\S]*?)</tbody>',
         player_html,
         re.I,
     )
@@ -774,16 +774,21 @@ def _odds_from_compare_modal(player_html: str) -> list[tuple[str, float, int, st
         if not book:
             continue
         cells = re.findall(r'<td[^>]*class="[^"]*\bcompareOddsSide\b[^"]*"[^>]*>(.*?)</td>', row_html, re.I | re.S)
-        for side, cell in zip(("over", "under"), cells[:2]):
+        for cell in cells[:2]:
             odds = _odds_from_cell(cell)
             if not odds:
                 continue
-            rows.append((side, odds[0], odds[1], book[0], book[1]))
+            rows.append((_side_from_cell(cell), odds[0], odds[1], book[0], book[1]))
     return rows
 
 
+def _side_from_cell(cell_html: str) -> str:
+    match = re.search(r'>\s*([ou])\d+(?:\.\d+)?\s*</span>', cell_html, re.I)
+    return "under" if match and match.group(1).lower() == "u" else "over"
+
+
 def _odds_from_cell(cell_html: str) -> tuple[float, int] | None:
-    line_match = re.search(r'<span class="[^"]*\bfs-12\b[^"]*">(?P<line>[ou][0-9]+(?:\.[0-9]+)?)</span>', cell_html, re.I)
+    line_match = re.search(r'<span class="[^"]*\b(?:fs-12|oddsSideLineText)\b[^"]*">\s*(?P<line>[ou][0-9]+(?:\.[0-9]+)?)</span>', cell_html, re.I)
     price_match = re.search(r'<span class="[^"]*\bamericanOdds\b[^"]*">(?P<price>[^<]+)</span>', cell_html, re.I)
     if not line_match or not price_match:
         return None
