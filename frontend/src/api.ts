@@ -232,8 +232,10 @@ export type LineDiscrepancy = {
   line_gap: number;
   price_gap: number;
   recent_values?: number[];
+  recent_minutes?: number[];
   h2h_opponent?: string | null;
   h2h_values?: number[];
+  h2h_minutes?: number[];
   best_price: {
     sportsbook: string;
     line: number;

@@ -13424,7 +13424,10 @@ def test_line_discrepancies_payload_includes_recent_and_h2h_lines() -> None:
     assert rows
     assert rows[0]["recent_values"]
     assert isinstance(rows[0]["recent_values"][0], float)
+    assert len(rows[0]["recent_minutes"]) == len(rows[0]["recent_values"])
+    assert isinstance(rows[0]["recent_minutes"][0], float)
     assert "h2h_values" in rows[0]
+    assert len(rows[0]["h2h_minutes"]) == len(rows[0]["h2h_values"])
     assert "h2h_opponent" in rows[0]
 
 

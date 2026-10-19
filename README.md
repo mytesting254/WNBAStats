@@ -465,7 +465,7 @@ Set `EXPOSE_DEBUG_HEADERS=true` only when you want cache/timing headers exposed 
 - `Matchups`: active upcoming games only, with projected score, spread edge, total edge, and confidence.
 - `Insights`: matchup-scoped team comparison built from recent team box scores. Users can switch across the day’s games and compare last-5 overall plus last-5 home/away-context shooting, rebounding, assists, turnovers, and points in one side-by-side matrix. Stronger numbers are highlighted in green, weaker numbers in red, and close calls in amber.
 - `Insights`: includes `Key Matchup Edges` cards that translate the recent-stat contrast into quick betting-style reads such as `clean looks`, `extra 3PA path`, `live on the glass`, `ballhandler risk`, and `assist environment`.
-- `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Player rows include an `L5` strip (last 5 market outcomes) and a `Line H2H` strip (up to 5 prior market outcomes against the current opponent). Both use hit/miss color coding against the current side+line; the H2H strip also shows minutes from those same games. Completed games are removed from this view after the stale-game grace window.
+- `Parlays`: game-scoped candidate legs and sportsbook line discrepancies. Player rows include dedicated `Last 5` and `Line H2H` columns, with each market outcome stacked above its minutes played. Both use hit/miss color coding against the current side+line. Completed games are removed from this view after the stale-game grace window.
 - `Discrepancies`: cross-book line gaps and price gaps.
 - `Roster`: Rotowire lineup statuses grouped by team, with a manual `Refresh Roster` pull.
 - `Model Lab`: latest training metrics, market metrics, model comparison, and run history. This tab is only shown to authenticated admins.
@@ -482,12 +482,25 @@ Operational expectations:
 
 `Pregame Props` and matchup `props` now suppress low-confidence picks by default unless `edge >= 0.08`.
 
-Modeled prop payloads expose `h2h_opponent`, `h2h_values`, and `h2h_minutes`. The UI displays them in a `Line H2H` column between Player and Market/Pick across Pregame Props, Gems, Watchlist, and matchup/parlay tables. Head-to-head history follows the player across team changes while excluding games in which the player represented the current opponent; rows without prior meetings display `No H2H`.
+Player-prop tables use the column order `Player`, `Last 5`, `Line H2H`, then
+Market/Pick. This applies to Pregame Props, Gems (flat and grouped), Watchlist,
+DFS, Discrepancies, and the shared matchup/parlay candidate tables. Each of up
+to five results sits directly above its corresponding minutes played, following
+the NBA dashboard layout. Missing minutes display `—` without shifting the
+remaining pairs. Results retain hit/miss coloring against the selected side and
+line; DFS uses its expected halfway line. Tables scroll horizontally when needed.
 
-The `Special Props` stocks table also exposes a dedicated `H2H STK` column. It
-shows up to five prior `blocks_steals` results against the current opponent
-plus the minutes from those same games, using the same player/opponent logic as
-the main prop H2H payloads.
+Modeled prop payloads expose `recent_values`, `recent_minutes`, `h2h_opponent`,
+`h2h_values`, and `h2h_minutes`. Discrepancy payloads also include both minutes
+arrays. Head-to-head history follows the player across team changes while
+excluding games in which the player represented the current opponent; rows
+without prior meetings display `No H2H`.
+
+The `Special Props` stocks table also has separate `Last 5` and `H2H STK`
+columns with the same result-above-minutes layout. Stocks results retain neutral
+coloring because these history cells have no single comparison line. `H2H STK`
+shows up to five prior `blocks_steals` results against the current opponent,
+using the same player/opponent logic as the main prop H2H payloads.
 
 `/api/value-board` and `/api/watchlist` use their dedicated short-lived read-through caches and bypass the generic app-response cache. This prevents an older whole-response payload from masking newly published prop fields such as H2H history after a deployment.
 

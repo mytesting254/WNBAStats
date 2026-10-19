@@ -796,6 +796,27 @@ td span {
   text-transform: uppercase;
 }
 
+.prop-history-stacked .prop-history-game {
+  display: grid;
+  grid-template-rows: auto auto;
+  gap: 3px;
+}
+
+.prop-history-stacked .prop-history-game > span {
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+.props-history-table {
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
+}
+
+.props-history-table .prop-history-cell .prop-l5-strip {
+  margin-top: 0;
+}
+
 .prop-l5-strip span.hit {
   color: #027a48;
   background: #e7f7ef;
@@ -1748,7 +1769,11 @@ tbody tr.selected {
 }
 
 .special-props-table .special-col-player {
-  width: 320px;
+  width: 240px;
+}
+
+.special-props-table .special-col-history {
+  width: 220px;
 }
 
 .special-props-table .special-col-tier {
@@ -1799,12 +1824,12 @@ tbody tr.selected {
   background: #f8fbff;
 }
 
-.special-props-table td:nth-child(n + 2):nth-child(-n + 11) {
+.special-props-table td:nth-child(n + 4):nth-child(-n + 13) {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-.special-props-table th:nth-child(n + 2):nth-child(-n + 11) {
+.special-props-table th:nth-child(n + 4):nth-child(-n + 13) {
   text-align: right;
 }
 
@@ -1813,8 +1838,8 @@ tbody tr.selected {
   color: #101828;
 }
 
-.special-props-table th:nth-child(12),
-.special-props-table td:nth-child(12) {
+.special-props-table th:last-child,
+.special-props-table td:last-child {
   min-width: 156px;
 }
 

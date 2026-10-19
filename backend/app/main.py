@@ -9557,8 +9557,10 @@ def _line_discrepancies_payload(conn, game_id: int | None) -> list[dict]:
     context_cache: dict[tuple[int, str], tuple[int | None, int | None]] = {}
     for item in payload:
         item["recent_values"] = []
+        item["recent_minutes"] = []
         item["h2h_opponent"] = None
         item["h2h_values"] = []
+        item["h2h_minutes"] = []
         resolved_game_id = item.get("game_id")
         if resolved_game_id is None:
             continue
@@ -9577,6 +9579,12 @@ def _line_discrepancies_payload(conn, game_id: int | None) -> list[dict]:
             conn,
             player_id=player_id,
             market=str(item["market"]),
+            game_id=int(resolved_game_id),
+            limit=5,
+        )
+        item["recent_minutes"] = _recent_minutes_played(
+            conn,
+            player_id=player_id,
             game_id=int(resolved_game_id),
             limit=5,
         )

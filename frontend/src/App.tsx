@@ -3003,10 +3003,11 @@ function PropsView({
         {error && <div className="error">{error}</div>}
 
         <div className="table-wrap">
-          <table>
+          <table className="props-history-table">
             <thead>
               <tr>
                 <th>Player</th>
+                <th>Last 5</th>
                 <th>Line H2H</th>
                 <th>Market</th>
                 <th className="props-best-col">Best</th>
@@ -3026,11 +3027,11 @@ function PropsView({
                       <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
                         <span>{prop.team}</span>
-                        {renderRecentFormWithMinutes(prop, `${prop.id}-l5`)}
                       </div>
                     </div>
                   </td>
-                  <td>{renderH2HFormWithMinutes(prop, `${prop.id}-h2h`)}</td>
+                  <td className="prop-history-cell">{renderRecentFormWithMinutes(prop, `${prop.id}-l5`)}</td>
+                  <td className="prop-history-cell">{renderH2HFormWithMinutes(prop, `${prop.id}-h2h`)}</td>
                   <td>{marketLabel(prop.market)}</td>
                   <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(prop)} className="compact props-best-logo" /></td>
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
@@ -3049,6 +3050,41 @@ function PropsView({
   );
 }
 
+function renderStackedPropHistory(
+  values: number[],
+  minutes: number[],
+  prop: Pick<ValueProp, "recommended_side" | "line">,
+  keyPrefix: string,
+  label: string,
+  comparisonLine?: number
+) {
+  const targetLine = comparisonLine ?? prop.line;
+  return (
+    <div className="prop-l5-strip prop-history-stacked" aria-label={label}>
+      {values.slice(0, 5).map((value, idx) => {
+        const hit = prop.recommended_side === "over" ? value > targetLine : value < targetLine;
+        const playedMinutes = minutes[idx];
+        return (
+          <div className="prop-history-game" key={`${keyPrefix}-${idx}`}>
+            <span
+              className={hit ? "hit" : "miss"}
+              title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${targetLine.toFixed(1)}`}
+            >
+              {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+            </span>
+            <span
+              className="min-chip"
+              title={playedMinutes == null ? "Minutes unavailable" : `Minutes played: ${playedMinutes.toFixed(1)}`}
+            >
+              {playedMinutes == null ? "—" : playedMinutes.toFixed(1)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function renderRecentFormWithMinutes(
   prop: Pick<ValueProp, "recent_values" | "recent_minutes" | "recommended_side" | "line">,
   keyPrefix: string,
@@ -3057,38 +3093,10 @@ function renderRecentFormWithMinutes(
   if (!Array.isArray(prop.recent_values) || prop.recent_values.length === 0) {
     return null;
   }
-  const targetLine = comparisonLine ?? prop.line;
-  const recentValues = prop.recent_values.slice(0, 5);
-  const recentMinutes = Array.isArray(prop.recent_minutes) ? prop.recent_minutes.slice(0, 5) : [];
-  return (
-    <div className="prop-l5-strip" aria-label="Last 5 results and minutes">
-      {recentValues.map((value, idx) => {
-        const hit = prop.recommended_side === "over" ? value > targetLine : value < targetLine;
-        return (
-          <span
-            key={`${keyPrefix}-${idx}`}
-            className={hit ? "hit" : "miss"}
-            title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${targetLine.toFixed(1)}`}
-          >
-            {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
-          </span>
-        );
-      })}
-      {recentMinutes.length > 0 && (
-        <>
-          <span className="l5-separator" title="Minutes distribution">|</span>
-          {recentMinutes.map((minutes, idx) => (
-            <span
-              key={`${keyPrefix}-min-${idx}`}
-              className="min-chip"
-              title={`Minutes played: ${minutes.toFixed(1)}`}
-            >
-              {minutes.toFixed(1)}
-            </span>
-          ))}
-        </>
-      )}
-    </div>
+  return renderStackedPropHistory(
+    prop.recent_values,
+    Array.isArray(prop.recent_minutes) ? prop.recent_minutes : [],
+    prop, keyPrefix, "Last 5 results, each above its minutes played", comparisonLine
   );
 }
 
@@ -3100,33 +3108,39 @@ function renderH2HFormWithMinutes(
   if (!Array.isArray(prop.h2h_values) || prop.h2h_values.length === 0) {
     return <span className="empty-inline">No H2H</span>;
   }
-  const targetLine = comparisonLine ?? prop.line;
-  const h2hValues = prop.h2h_values.slice(0, 5);
-  const h2hMinutes = Array.isArray(prop.h2h_minutes) ? prop.h2h_minutes.slice(0, 5) : [];
+  return renderStackedPropHistory(
+    prop.h2h_values,
+    Array.isArray(prop.h2h_minutes) ? prop.h2h_minutes : [],
+    prop, keyPrefix,
+    `Last head-to-head results against ${prop.h2h_opponent ?? "opponent"}, each above its minutes played`,
+    comparisonLine
+  );
+}
+
+function renderStackedStocksHistory(
+  values: number[],
+  minutes: number[],
+  keyPrefix: string,
+  label: string
+) {
   return (
-    <div className="prop-l5-strip prop-h2h-strip" aria-label={`Last head-to-head results against ${prop.h2h_opponent ?? "opponent"} and minutes`}>
-      {h2hValues.map((value, idx) => {
-        const hit = prop.recommended_side === "over" ? value > targetLine : value < targetLine;
+    <div className="prop-l5-strip prop-history-stacked" aria-label={label}>
+      {values.slice(0, 5).map((value, idx) => {
+        const playedMinutes = minutes[idx];
         return (
-          <span
-            key={`${keyPrefix}-${idx}`}
-            className={hit ? "hit" : "miss"}
-            title={`${value.toFixed(1)} vs ${prop.recommended_side.toUpperCase()} ${targetLine.toFixed(1)}`}
-          >
-            {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
-          </span>
+          <div className="prop-history-game" key={`${keyPrefix}-${idx}`}>
+            <span className="neutral" title={`Stocks result: ${value.toFixed(1)}`}>
+              {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
+            </span>
+            <span
+              className="min-chip"
+              title={playedMinutes == null ? "Minutes unavailable" : `Minutes played: ${playedMinutes.toFixed(1)}`}
+            >
+              {playedMinutes == null ? "—" : playedMinutes.toFixed(1)}
+            </span>
+          </div>
         );
       })}
-      {h2hMinutes.length > 0 && (
-        <>
-          <span className="l5-separator" title="Head-to-head minutes distribution">|</span>
-          {h2hMinutes.map((minutes, idx) => (
-            <span key={`${keyPrefix}-min-${idx}`} className="min-chip" title={`Minutes played: ${minutes.toFixed(1)}`}>
-              {minutes.toFixed(1)}
-            </span>
-          ))}
-        </>
-      )}
     </div>
   );
 }
@@ -3138,34 +3152,10 @@ function renderRecentOutcomesWithMinutes(
   if (!Array.isArray(snapshot.recent_values) || snapshot.recent_values.length === 0) {
     return <span className="empty-inline">No history</span>;
   }
-  const recentValues = snapshot.recent_values.slice(0, 5);
-  const recentMinutes = Array.isArray(snapshot.recent_minutes) ? snapshot.recent_minutes.slice(0, 5) : [];
-  return (
-    <div className="prop-l5-strip" aria-label="Last 5 outcomes and minutes">
-      {recentValues.map((value, idx) => (
-        <span
-          key={`${keyPrefix}-${idx}`}
-          className="neutral"
-          title={`Stocks result: ${value.toFixed(1)}`}
-        >
-          {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
-        </span>
-      ))}
-      {recentMinutes.length > 0 && (
-        <>
-          <span className="l5-separator" title="Minutes distribution">|</span>
-          {recentMinutes.map((minutes, idx) => (
-            <span
-              key={`${keyPrefix}-min-${idx}`}
-              className="min-chip"
-              title={`Minutes played: ${minutes.toFixed(1)}`}
-            >
-              {minutes.toFixed(1)}
-            </span>
-          ))}
-        </>
-      )}
-    </div>
+  return renderStackedStocksHistory(
+    snapshot.recent_values,
+    Array.isArray(snapshot.recent_minutes) ? snapshot.recent_minutes : [],
+    keyPrefix, "Last 5 stocks results, each above its minutes played"
   );
 }
 
@@ -3176,34 +3166,11 @@ function renderSpecialH2HHistory(
   if (!Array.isArray(snapshot.h2h_values) || snapshot.h2h_values.length === 0) {
     return <span className="empty-inline">No H2H</span>;
   }
-  const h2hValues = snapshot.h2h_values.slice(0, 5);
-  const h2hMinutes = Array.isArray(snapshot.h2h_minutes) ? snapshot.h2h_minutes.slice(0, 5) : [];
-  return (
-    <div className="prop-l5-strip" aria-label={`Head-to-head stocks vs ${snapshot.h2h_opponent ?? "opponent"}`}>
-      {h2hValues.map((value, idx) => (
-        <span
-          key={`${keyPrefix}-h2h-${idx}`}
-          className="neutral"
-          title={`Stocks vs ${snapshot.h2h_opponent ?? "opponent"}: ${value.toFixed(1)}`}
-        >
-          {Number.isInteger(value) ? value.toFixed(0) : value.toFixed(1)}
-        </span>
-      ))}
-      {h2hMinutes.length > 0 && (
-        <>
-          <span className="l5-separator" title="Minutes in head-to-head games">|</span>
-          {h2hMinutes.map((minutes, idx) => (
-            <span
-              key={`${keyPrefix}-h2h-min-${idx}`}
-              className="min-chip"
-              title={`Minutes vs ${snapshot.h2h_opponent ?? "opponent"}: ${minutes.toFixed(1)}`}
-            >
-              {minutes.toFixed(1)}
-            </span>
-          ))}
-        </>
-      )}
-    </div>
+  return renderStackedStocksHistory(
+    snapshot.h2h_values,
+    Array.isArray(snapshot.h2h_minutes) ? snapshot.h2h_minutes : [],
+    keyPrefix,
+    `Head-to-head stocks against ${snapshot.h2h_opponent ?? "opponent"}, each above its minutes played`
   );
 }
 
@@ -3327,10 +3294,11 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
         {error && <div className="error">{error}</div>}
         {!groupedByMatchup ? (
         <div className="table-wrap">
-          <table>
+          <table className="props-history-table">
             <thead>
               <tr>
                 <th>Player</th>
+                <th>Last 5</th>
                 <th>Line H2H</th>
                 <th>Pick</th>
                 <th className="props-best-col">Best</th>
@@ -3349,9 +3317,9 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                   <td>
                     <strong>{g.player}</strong>
                     <span>{g.team} | {marketLabel(g.market)}</span>
-                    {renderRecentFormWithMinutes(g, `${g.id}-gem-flat-l5`)}
                   </td>
-                  <td>{renderH2HFormWithMinutes(g, `${g.id}-gem-flat-h2h`)}</td>
+                  <td className="prop-history-cell">{renderRecentFormWithMinutes(g, `${g.id}-gem-flat-l5`)}</td>
+                  <td className="prop-history-cell">{renderH2HFormWithMinutes(g, `${g.id}-gem-flat-h2h`)}</td>
                   <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
                   <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(g)} className="compact props-best-logo" /></td>
                   <td>{formatPercent(g.edge)}</td>
@@ -3371,7 +3339,7 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
               ))}
               {!shown.length && (
                 <tr>
-                  <td colSpan={11}>No gems pass the {preset} preset right now.</td>
+                  <td colSpan={12}>No gems pass the {preset} preset right now.</td>
                 </tr>
               )}
             </tbody>
@@ -3419,10 +3387,11 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                   );
                 })()}
                 <div className="table-wrap">
-                  <table>
+                  <table className="props-history-table">
                     <thead>
                       <tr>
                         <th>Player</th>
+                        <th>Last 5</th>
                         <th>Line H2H</th>
                         <th>Pick</th>
                         <th className="props-best-col">Best</th>
@@ -3438,9 +3407,9 @@ function GemsView({ gems, matchups, loading, error }: { gems: GemProp[]; matchup
                           <td>
                             <strong>{g.player}</strong>
                             <span>{g.team} | {marketLabel(g.market)}</span>
-                            {renderRecentFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-l5`)}
                           </td>
-                          <td>{renderH2HFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-h2h`)}</td>
+                          <td className="prop-history-cell">{renderRecentFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-l5`)}</td>
+                          <td className="prop-history-cell">{renderH2HFormWithMinutes(g, `${selectedGroup.key}-${g.id}-gem-group-h2h`)}</td>
                           <td><span className={`side ${g.recommended_side}`}>{g.recommended_side} {g.line.toFixed(1)}</span></td>
                           <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(g)} className="compact props-best-logo" /></td>
                           <td>{formatPercent(g.edge)}</td>
@@ -3543,11 +3512,12 @@ function DiscrepanciesView({
         </div>
         {error && <div className="error">{error}</div>}
         <div className="table-wrap">
-          <table>
+          <table className="props-history-table">
             <thead>
               <tr>
                 <th>Matchup</th>
                 <th>Player</th>
+                <th>Last 5</th>
                 <th>Line H2H</th>
                 <th>Market</th>
                 <th>Side</th>
@@ -3566,23 +3536,25 @@ function DiscrepanciesView({
                   <td>
                     <div>
                       <strong>{item.player_name}</strong>
-                      {renderRecentFormWithMinutes(
+                    </div>
+                  </td>
+                  <td className="prop-history-cell">
+                    {renderRecentFormWithMinutes(
                         {
                           recent_values: item.recent_values,
-                          recent_minutes: undefined,
+                          recent_minutes: item.recent_minutes,
                           recommended_side: item.side,
                           line: item.best_price.line
                         },
                         `${item.matchup}-${item.player_name}-${item.market}-${item.side}-l5`
                       )}
-                    </div>
                   </td>
-                  <td>
+                  <td className="prop-history-cell">
                     {renderH2HFormWithMinutes(
                       {
                         h2h_opponent: item.h2h_opponent,
                         h2h_values: item.h2h_values,
-                        h2h_minutes: undefined,
+                        h2h_minutes: item.h2h_minutes,
                         recommended_side: item.side,
                         line: item.best_price.line
                       },
@@ -3613,7 +3585,7 @@ function DiscrepanciesView({
               ))}
               {!filtered.length && (
                 <tr>
-                  <td colSpan={8}>{selectedGroup ? "No line discrepancies match the selected filters." : "No line discrepancies found."}</td>
+                  <td colSpan={9}>{selectedGroup ? "No line discrepancies match the selected filters." : "No line discrepancies found."}</td>
                 </tr>
               )}
             </tbody>
@@ -4841,10 +4813,11 @@ function WatchlistView({
               </div>
             </div>
             <div className="table-wrap">
-              <table>
+              <table className="props-history-table">
                 <thead>
                   <tr>
                     <th>Player</th>
+                    <th>Last 5</th>
                     <th>Line H2H</th>
                     <th>Market</th>
                     <th>Side</th>
@@ -4867,11 +4840,11 @@ function WatchlistView({
                           <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
                         <span>{prop.team}</span>
-                        {renderRecentFormWithMinutes(prop, `${prop.id}-watch-l5`)}
                           </div>
                         </div>
                       </td>
-                      <td>{renderH2HFormWithMinutes(prop, `${prop.id}-watch-h2h`)}</td>
+                      <td className="prop-history-cell">{renderRecentFormWithMinutes(prop, `${prop.id}-watch-l5`)}</td>
+                      <td className="prop-history-cell">{renderH2HFormWithMinutes(prop, `${prop.id}-watch-h2h`)}</td>
                       <td>{marketLabel(prop.market)}</td>
                       <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
                       <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(prop)} className="compact props-best-logo" /></td>
@@ -4886,7 +4859,7 @@ function WatchlistView({
                   ))}
                   {!filtered.length && (
                     <tr>
-                      <td colSpan={12}>No watchlist props match current filters.</td>
+                      <td colSpan={13}>No watchlist props match current filters.</td>
                     </tr>
                   )}
                 </tbody>
@@ -5009,10 +4982,11 @@ function DfsView({
             </div>
             <div className="table-wrap">
               {selectedEstimateGroup ? (
-                <table>
+                <table className="props-history-table">
                   <thead>
                     <tr>
                       <th>Player</th>
+                      <th>Last 5</th>
                       <th>Line H2H</th>
                       <th>Market</th>
                       <th className="props-best-col">Book</th>
@@ -5034,11 +5008,11 @@ function DfsView({
                             <div>
                               <PlayerLabel name={item.player} position={item.position} />
                               <span>{item.team}</span>
-                              {renderRecentFormWithMinutes(item, `dfs-${item.prop_line_id}-l5`, item.expected_halfway_line)}
                             </div>
                           </div>
                         </td>
-                        <td>{renderH2HFormWithMinutes(item, `dfs-${item.prop_line_id}-h2h`, item.expected_halfway_line)}</td>
+                        <td className="prop-history-cell">{renderRecentFormWithMinutes(item, `dfs-${item.prop_line_id}-l5`, item.expected_halfway_line)}</td>
+                        <td className="prop-history-cell">{renderH2HFormWithMinutes(item, `dfs-${item.prop_line_id}-h2h`, item.expected_halfway_line)}</td>
                         <td>{marketLabel(item.market)}</td>
                         <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(item)} className="compact props-best-logo" /></td>
                         <td>{item.line.toFixed(1)}</td>
@@ -5056,7 +5030,7 @@ function DfsView({
                 <table>
                   <tbody>
                     <tr>
-                      <td colSpan={11}>No current first-half estimates available for these filters.</td>
+                      <td colSpan={12}>No current first-half estimates available for these filters.</td>
                     </tr>
                   </tbody>
                 </table>
@@ -5458,10 +5432,11 @@ function SpecialStocksView({
                 </div>
               </div>
               <div className="table-wrap special-props-table-wrap">
-                <table className="props-table special-props-table">
+                <table className="props-table special-props-table props-history-table">
                   <colgroup>
                     <col className="special-col-player" />
-                    <col className="special-col-player" />
+                    <col className="special-col-history" />
+                    <col className="special-col-history" />
                     <col className="special-col-tier" />
                     <col className="special-col-metric" />
                     <col className="special-col-metric" />
@@ -5477,6 +5452,7 @@ function SpecialStocksView({
                   <thead>
                     <tr>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("player_name")}>Player {sortIndicator("player_name")}</button></th>
+                      <th>Last 5</th>
                       <th>H2H STK</th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("tier")}>Tier {sortIndicator("tier")}</button></th>
                       <th><button type="button" className="table-sort-button" onClick={() => toggleSort("projected_steals")}>STL {sortIndicator("projected_steals")}</button></th>
@@ -5509,11 +5485,11 @@ function SpecialStocksView({
                             <div>
                               <PlayerLabel name={snapshot.player_name} position={snapshot.position} />
                               <span>{`${snapshot.team ?? "—"} | ${snapshot.data_quality === "model_only" ? "Model only" : snapshot.data_quality}`}</span>
-                              {renderRecentOutcomesWithMinutes(snapshot, `special-${snapshot.id}`)}
                             </div>
                           </div>
                         </td>
-                        <td>{renderSpecialH2HHistory(snapshot, `special-h2h-${snapshot.id}`)}</td>
+                        <td className="prop-history-cell">{renderRecentOutcomesWithMinutes(snapshot, `special-${snapshot.id}`)}</td>
+                        <td className="prop-history-cell">{renderSpecialH2HHistory(snapshot, `special-h2h-${snapshot.id}`)}</td>
                         <td>
                           {(snapshot.stocks_prob_2_plus ?? 0) >= highConfidenceThreshold
                             ? "High"
@@ -5535,7 +5511,7 @@ function SpecialStocksView({
                     ))}
                     {!selectedCard.players.length && (
                       <tr>
-                        <td colSpan={13}>No special props generated for this game yet.</td>
+                        <td colSpan={14}>No special props generated for this game yet.</td>
                       </tr>
                     )}
                   </tbody>
@@ -5789,10 +5765,11 @@ function MatchupProps({
       )}
       {props.length ? (
         <div className="table-wrap">
-          <table>
+          <table className="props-history-table">
             <thead>
               <tr>
                 <th>Player</th>
+                <th>Last 5</th>
                 <th>Line H2H</th>
                 <th>Market</th>
                 <th>Side</th>
@@ -5815,11 +5792,11 @@ function MatchupProps({
                       <div>
                         <PlayerLabel name={prop.player} position={prop.position} increasedRole={prop.increased_role} />
                         <span>{prop.team}</span>
-                        {renderRecentFormWithMinutes(prop, `${prop.id}-matchup-l5`)}
                       </div>
                     </div>
                   </td>
-                  <td>{renderH2HFormWithMinutes(prop, `${prop.id}-matchup-h2h`)}</td>
+                  <td className="prop-history-cell">{renderRecentFormWithMinutes(prop, `${prop.id}-matchup-l5`)}</td>
+                  <td className="prop-history-cell">{renderH2HFormWithMinutes(prop, `${prop.id}-matchup-h2h`)}</td>
                   <td>{marketLabel(prop.market)}</td>
                   <td><span className={`side ${prop.recommended_side}`}>{prop.recommended_side}</span></td>
                   <td className="props-best-book"><SportsbookLogo name={displaySportsbookName(prop)} className="compact props-best-logo" /></td>
@@ -5834,7 +5811,7 @@ function MatchupProps({
               ))}
               {!visibleProps.length && (
                 <tr>
-                  <td colSpan={12}>No modeled parlay candidates match these filters.</td>
+                  <td colSpan={13}>No modeled parlay candidates match these filters.</td>
                 </tr>
               )}
             </tbody>
