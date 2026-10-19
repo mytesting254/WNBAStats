@@ -3986,21 +3986,25 @@ def _scheduled_matchup_game_groups(conn, game_ids: list[int] | None = None) -> l
     ]
     events = current_odds_api_events()
     if events is not None:
-        event_keys = {
+        event_starts = [
             (
-                _normalized_start_key(event.get("commence_time")),
+                _parse_game_start(event.get("commence_time")),
                 str(event.get("home_team") or "").strip().casefold(),
                 str(event.get("away_team") or "").strip().casefold(),
             )
             for event in events
-        }
+        ]
         games = [
             game for game in games
-            if (
-                _normalized_start_key(game["start_time"]),
-                str(game["home_team_name"]).strip().casefold(),
-                str(game["away_team_name"]).strip().casefold(),
-            ) in event_keys
+            if (game_start := _parse_game_start(game["start_time"])) is not None
+            and any(
+                event_start is not None
+                # Providers can disagree on advertised tipoff by several minutes.
+                and abs((game_start - event_start).total_seconds()) <= 30 * 60
+                and str(game["home_team_name"]).strip().casefold() == home_team
+                and str(game["away_team_name"]).strip().casefold() == away_team
+                for event_start, home_team, away_team in event_starts
+            )
         ]
     return _coalesce_matchup_games(games)
 

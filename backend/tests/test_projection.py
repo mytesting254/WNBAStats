@@ -8996,6 +8996,42 @@ def test_settle_recent_completed_games_repairs_recent_final_props(monkeypatch) -
     assert settled_game == 1
 
 
+@pytest.mark.parametrize(
+    "event_start,matching_teams,expected_count",
+    [
+        ("2026-10-20T00:10:00Z", True, 1),
+        ("2026-10-19T20:00:00-04:00", True, 1),
+        ("2026-10-20T00:30:00Z", True, 1),
+        ("2026-10-20T00:31:00Z", True, 0),
+        ("2026-10-21T00:00:00Z", True, 0),
+        ("invalid", True, 0),
+        ("2026-10-20T00:10:00Z", False, 0),
+        (None, True, 0),
+    ],
+)
+def test_matchup_slate_tolerates_provider_tipoff_difference(
+    monkeypatch, event_start, matching_teams, expected_count,
+) -> None:
+    monkeypatch.setattr(main_module, "_local_today_iso", lambda: "2026-10-19")
+    with connect() as conn:
+        home = ensure_team(conn, "Golden State Valkyries")
+        away = ensure_team(conn, "Atlanta Dream")
+        conn.execute(
+            "INSERT INTO games (id, game_date, start_time, home_team_id, away_team_id, status) "
+            "VALUES (99001, '2026-10-20', '2026-10-20T00:00:00+00:00', ?, ?, 'scheduled')",
+            (home, away),
+        )
+        monkeypatch.setattr(main_module, "current_odds_api_events", lambda: [{
+            "commence_time": event_start,
+            "home_team": "Golden State Valkyries" if matching_teams else "Atlanta Dream",
+            "away_team": "Atlanta Dream" if matching_teams else "Golden State Valkyries",
+        }])
+        groups = main_module._scheduled_matchup_game_groups(conn)
+        assert len(groups) == expected_count
+        if groups:
+            assert groups[0][1] == [99001]
+
+
 def test_matchups_payload_survives_rotowire_failure(monkeypatch) -> None:
     load_test_history()
 

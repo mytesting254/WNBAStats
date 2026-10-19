@@ -21,6 +21,32 @@ For stale-frontend suspicion, also check:
 3. confirm both return `Cache-Control: no-store`
 4. confirm `/assets/*` responses come from the current frontend image/build
 
+## Scheduled Game Missing After Successful Nightly Import
+
+Check `/var/log/wnba-stocks-prep.log`, `/var/log/wnba-daily-props.log`,
+and the latest `prop_sync_jobs` row before treating an empty `/api/matchups`
+response as a missed cron run. The wrapper reports that an import was queued;
+the persisted job records its completion, errors, and published payload counts.
+
+On October 19, 2026, next-day prep created 26 Specials snapshots and the
+overnight odds job completed with 462 imported rows and 119 rebuilt predictions.
+The matchup cache was still empty: Covers stored an 8:00 PM Eastern start,
+while the Odds API event listed 8:10 PM. The dashboard's exact start-time
+comparison excluded the scheduled game.
+
+The matchup filter now accepts a start-time difference of up to 30 minutes,
+inclusive, while requiring matching home and away team names. Start times are
+compared as UTC instants; the game must still belong to today's Eastern slate.
+Missing or invalid provider start times and larger differences remain excluded.
+An unavailable provider event cache preserves the existing local-game fallback;
+an explicitly empty event list still excludes games.
+
+Deploy the updated backend for this fix to take effect. Regression coverage
+includes the ten-minute mismatch, equivalent timezone representations, the
+30-minute boundary, larger differences, another day's event, invalid or missing
+start times, and reversed teams. The targeted regression and existing matchup
+failure-handling tests passed (9 tests).
+
 ## Public Routing Problems
 
 ### Symptom

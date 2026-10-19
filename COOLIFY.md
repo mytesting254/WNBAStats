@@ -215,6 +215,14 @@ There is a second frontend-side visibility fix from July 16, 2026 as well:
 even when another sync job already owns the active queue. Without that build,
 those actions can finish work in the backend while the card appears blank.
 
+If an odds job completes but `/api/matchups` is empty, compare the stored game
+start time with the cached Odds API event. The October 19, 2026 fix allows up
+to 30 minutes of difference for matching home and away teams; an older backend
+can hide a game after Covers changes its advertised tipoff by ten minutes.
+See `TROUBLESHOOTING.md` under "Scheduled Game Missing After Successful Nightly
+Import" for the incident evidence and matching rules. Deploy the updated backend
+to apply this fix.
+
 A copy/paste template is also available at `deploy/wnba-daily-props.cron`.
 
 ### Specials Stocks Prep
