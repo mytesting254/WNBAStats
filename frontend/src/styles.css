@@ -2872,6 +2872,20 @@ tbody tr.selected {
     padding: 18px;
   }
 
+  .tabs {
+    display: flex;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .tabs button {
+    flex: 0 0 auto;
+  }
+
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
